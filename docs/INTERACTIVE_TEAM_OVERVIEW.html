@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agronomist - Interactive Team Overview</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            padding: 2rem;
+        }
+        
+        h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 2rem;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 2rem;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #666;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        
+        .tab:hover {
+            color: #333;
+        }
+        
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .agent-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+        }
+        
+        .agent-card {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 24px;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .agent-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        .agent-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 16px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .agent-icon {
+            font-size: 32px;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f0f0f0;
+            border-radius: 8px;
+        }
+        
+        .agent-info h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+        
+        .agent-info p {
+            font-size: 12px;
+            color: #999;
+        }
+        
+        .section {
+            margin-bottom: 16px;
+        }
+        
+        .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .section-content {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .skill-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        
+        .skill-tag {
+            background: #e3f2fd;
+            color: #1565c0;
+            font-size: 11px;
+            padding: 4px 12px;
+            border-radius: 16px;
+            font-weight: 500;
+        }
+        
+        .guardrail {
+            background: #fff3e0;
+            color: #e65100;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 12px;
+            border-left: 3px solid #e65100;
+            line-height: 1.5;
+        }
+        
+        .checklist {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.8;
+        }
+        
+        .checklist-item {
+            margin-bottom: 4px;
+        }
+        
+        .flow-diagram {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 1rem;
+        }
+        
+        .flow-step {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            align-items: flex-start;
+        }
+        
+        .flow-number {
+            min-width: 28px;
+            height: 28px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        
+        .flow-text {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .decision-box {
+            background: #f0f4ff;
+            border: 1px solid #d0deff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 1rem;
+        }
+        
+        .decision-box h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 12px;
+        }
+        
+        .pro-con {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-top: 1rem;
+        }
+        
+        .pro, .con {
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        
+        .pro {
+            background: #e8f5e9;
+            border-left: 3px solid #4caf50;
+        }
+        
+        .pro strong {
+            color: #2e7d32;
+        }
+        
+        .con {
+            background: #ffebee;
+            border-left: 3px solid #f44336;
+        }
+        
+        .con strong {
+            color: #c62828;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 AI Agronomist Phase 1 — Agent Team Overview</h1>
+        <p class="subtitle">4-member team with Solution Architect oversight | Interactive visualization</p>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab(event, 'overview')">Team Overview</button>
+            <button class="tab" onclick="switchTab(event, 'architect')">Architect Role</button>
+            <button class="tab" onclick="switchTab(event, 'workflows')">Decision Workflows</button>
+        </div>
+        
+        <!-- TAB 1: TEAM OVERVIEW -->
+        <div id="overview" class="tab-content active">
+            <div class="agent-grid">
+                <!-- ML Engineer -->
+                <div class="agent-card">
+                    <div class="agent-header">
+                        <div class="agent-icon">🧠</div>
+                        <div class="agent-info">
+                            <h3>ML Engineer</h3>
+                            <p>Model architecture & training</p>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Primary Responsibilities</div>
+                        <div class="section-content">
+                            • LSTM-VAE design & training<br>
+                            • Synthetic data generation<br>
+                            • Model validation & metrics<br>
+                            • Baseline transfer learning<br>
+                            • Model registry management
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Core Skills</div>
+                        <div class="skill-tags">
+                            <span class="skill-tag">PyTorch</span>
+                            <span class="skill-tag">Time Series</span>
+                            <span class="skill-tag">LSTM-VAE</span>
+                            <span class="skill-tag">Scikit-learn</span>
+                            <span class="skill-tag">Unsupervised ML</span>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Guardrails</div>
+                        <div class="guardrail">✓ No pre-trained models without validation. Show reconstruction error + ROC curves.</div>
+                        <div class="guardrail">✓ Synthetic data assumptions must be documented. No magic numbers.</div>
+                        <div class="guardrail">✓ Monthly model audit for data drift and performance degradation.</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Definition of Done</div>
+                        <div class="checklist">
+                            <div class="checklist-item">✓ Model checkpoint + metadata</div>
+                            <div class="checklist-item">✓ Test suite (>80% coverage)</div>
+                            <div class="checklist-item">✓ Training notebook with plots</div>
+                            <div class="checklist-item">✓ Performance metrics logged</div>
+                            <div class="checklist-item">✓ Reproducible (fixed seed)</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Backend Engineer -->
+                <div class="agent-card">
+                    <div class="agent-header">
+                        <div class="agent-icon">🔌</div>
+                        <div class="agent-info">
+                            <h3>Backend Engineer</h3>
+                            <p>Data pipeline & infrastructure</p>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Primary Responsibilities</div>
+                        <div class="section-content">
+                            • Data ingestion (CSV, MQTT)<br>
+                            • PostgreSQL + TimescaleDB schema<br>
+                            • FastAPI REST endpoints<br>
+                            • Sensor data validation<br>
+                            • Inference orchestration<br>
+                            • Monitoring & alerting
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Core Skills</div>
+                        <div class="skill-tags">
+                            <span class="skill-tag">FastAPI</span>
+                            <span class="skill-tag">PostgreSQL</span>
+                            <span class="skill-tag">TimescaleDB</span>
+                            <span class="skill-tag">MQTT/REST</span>
+                            <span class="skill-tag">Docker</span>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Guardrails</div>
+                        <div class="guardrail">✓ All endpoints validate input. No silent failures.</div>
+                        <div class="guardrail">✓ Database migrations versioned. No ad-hoc changes.</div>
+                        <div class="guardrail">✓ Every API call has timeout + retry logic + circuit breaker.</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Definition of Done</div>
+                        <div class="checklist">
+                            <div class="checklist-item">✓ Unit + integration tests</div>
+                            <div class="checklist-item">✓ Schema migrations tested</div>
+                            <div class="checklist-item">✓ Error handling logged</div>
+                            <div class="checklist-item">✓ API documented (OpenAPI)</div>
+                            <div class="checklist-item">✓ <200ms p99 latency</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- DevOps Lead -->
+                <div class="agent-card">
+                    <div class="agent-header">
+                        <div class="agent-icon">⚙️</div>
+                        <div class="agent-info">
+                            <h3>DevOps/CS Lead</h3>
+                            <p>Infrastructure & operations</p>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Primary Responsibilities</div>
+                        <div class="section-content">
+                            • Infrastructure as Code (Terraform)<br>
+                            • VPS setup & monitoring<br>
+                            • MQTT broker configuration<br>
+                            • Backup & disaster recovery<br>
+                            • Customer onboarding<br>
+                            • Performance tracking
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Core Skills</div>
+                        <div class="skill-tags">
+                            <span class="skill-tag">Terraform</span>
+                            <span class="skill-tag">Linux</span>
+                            <span class="skill-tag">Docker Compose</span>
+                            <span class="skill-tag">Prometheus</span>
+                            <span class="skill-tag">PostgreSQL Ops</span>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Guardrails</div>
+                        <div class="guardrail">✓ Everything in Terraform. No manual SSH changes.</div>
+                        <div class="guardrail">✓ Monitoring configured BEFORE customer deploy.</div>
+                        <div class="guardrail">✓ Daily backup verification. RTO 1h, RPO 15m.</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Definition of Done</div>
+                        <div class="checklist">
+                            <div class="checklist-item">✓ Terraform tested + reviewed</div>
+                            <div class="checklist-item">✓ Monitoring dashboards live</div>
+                            <div class="checklist-item">✓ Alerting rules configured</div>
+                            <div class="checklist-item">✓ Backup/restore tested</div>
+                            <div class="checklist-item">✓ Runbook documented</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Solution Architect -->
+                <div class="agent-card">
+                    <div class="agent-header">
+                        <div class="agent-icon">🏛️</div>
+                        <div class="agent-info">
+                            <h3>Solution Architect</h3>
+                            <p>Design oversight & decisions</p>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Primary Responsibilities</div>
+                        <div class="section-content">
+                            • Architecture pattern definition<br>
+                            • Code review for debt<br>
+                            • Challenge assumptions<br>
+                            • Scalability assessment<br>
+                            • ADR documentation<br>
+                            • Anti-pattern detection
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Core Skills</div>
+                        <div class="skill-tags">
+                            <span class="skill-tag">System Design</span>
+                            <span class="skill-tag">Patterns</span>
+                            <span class="skill-tag">Scalability</span>
+                            <span class="skill-tag">Technical Debt</span>
+                            <span class="skill-tag">Risk Assessment</span>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Guardrails</div>
+                        <div class="guardrail">✓ Every major decision → ADR (Architecture Decision Record).</div>
+                        <div class="guardrail">✓ Pre-implementation review of Phase 1.5 migration.</div>
+                        <div class="guardrail">✓ Weekly architecture sync to catch issues early.</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="section-title">Definition of Done</div>
+                        <div class="checklist">
+                            <div class="checklist-item">✓ ADRs filed & approved</div>
+                            <div class="checklist-item">✓ No architectural debt</div>
+                            <div class="checklist-item">✓ Phase 1.5 path validated</div>
+                            <div class="checklist-item">✓ Scalability documented</div>
+                            <div class="checklist-item">✓ Anti-patterns identified</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- TAB 2: ARCHITECT ROLE -->
+        <div id="architect" class="tab-content">
+            <div class="decision-box">
+                <h3>🏛️ What the Architect Actually Does</h3>
+                
+                <p style="font-size: 13px; color: #666; line-height: 1.7; margin-bottom: 1rem;">
+                    The Architect is technically deep but doesn't code features. Instead, they:
+                </p>
+                
+                <div style="font-size: 13px; color: #666; line-height: 1.8; margin-left: 12px;">
+                    ✓ Review code for architectural soundness (not just bugs)<br>
+                    ✓ Question assumptions: "Why LSTM-VAE over Isolation Forest?"<br>
+                    ✓ Assess scalability: "Will this work for 10+ customers?"<br>
+                    ✓ Catch technical debt early<br>
+                    ✓ Document decisions in ADRs (Architecture Decision Records)<br>
+                    ✓ Run weekly architecture sync<br>
+                    ✓ Identify anti-patterns before they become problems
+                </div>
+            </div>
+            
+            <div class="decision-box">
+                <h3>📋 Weekly Architect Checklist</h3>
+                <p style="font-size: 13px; color: #666; line-height: 1.8;">
+                    Every Friday (30 min sync):<br><br>
+                    ☐ Any new dependencies added? Justified?<br>
+                    ☐ Database schema changes? Migration tested?<br>
+                    ☐ API contract changes? Breaking changes?<br>
+                    ☐ New error modes identified? SLA impact?<br>
+                    ☐ Model accuracy trend? Regression detected?<br>
+                    ☐ Performance baseline hit? Optimization needed?<br>
+                    ☐ Phase 1.5 risk assessment (ongoing)
+                </p>
+            </div>
+            
+            <div class="decision-box">
+                <h3>🚨 Red Flags Architect Catches</h3>
+                
+                <div class="pro-con">
+                    <div class="pro">
+                        <strong>🛑 STOP WORK (P1)</strong><br><br>
+                        • Tight coupling (LSTM-VAE + Isolation Forest)<br>
+                        • Schema doesn't scale to 5+ customers<br>
+                        • No monitoring configured<br>
+                        • Model checkpoint without metadata<br>
+                        • Secrets in code
+                    </div>
+                    <div class="con">
+                        <strong>🟡 DISCUSS (P2)</strong><br><br>
+                        • Premature optimization<br>
+                        • Monolithic API endpoints<br>
+                        • Silent failures<br>
+                        • Hard-coded thresholds<br>
+                        • Code duplication
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- TAB 3: DECISION WORKFLOWS -->
+        <div id="workflows" class="tab-content">
+            <div class="decision-box">
+                <h3>⚡ Example: LSTM-VAE vs Isolation Forest Decision</h3>
+                
+                <div class="flow-diagram">
+                    <div class="flow-step">
+                        <div class="flow-number">1</div>
+                        <div class="flow-text">
+                            <strong>ML Engineer proposes:</strong> "LSTM-VAE because it learns latent representations of normal patterns"
+                        </div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">2</div>
+                        <div class="flow-text">
+                            <strong>Architect questions:</strong> "Why not Isolation Forest only? What's the inference latency impact?"
+                        </div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">3</div>
+                        <div class="flow-text">
+                            <strong>Team discusses:</strong> "LSTM has better pattern learning but slower. What about ensemble?"
+                        </div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">4</div>
+                        <div class="flow-text">
+                            <strong>Decision documented:</strong> ADR-001 filed: "LSTM-VAE + Isolation Forest ensemble"
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="decision-box">
+                <h3>📝 Code Review Workflow</h3>
+                
+                <p style="font-size: 13px; color: #666; margin-bottom: 1rem; font-weight: 500;">When engineer submits code for review:</p>
+                
+                <div class="flow-diagram">
+                    <div class="flow-step">
+                        <div class="flow-number">✓</div>
+                        <div class="flow-text"><strong>Canonical schema:</strong> Does it follow our data model?</div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">✓</div>
+                        <div class="flow-text"><strong>Phase 1.5 extensible:</strong> Can this be extended without refactor?</div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">✓</div>
+                        <div class="flow-text"><strong>Tight coupling:</strong> Are components independent or tangled?</div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">✓</div>
+                        <div class="flow-text"><strong>Tests:</strong> >80% coverage? Edge cases handled?</div>
+                    </div>
+                    
+                    <div class="flow-step">
+                        <div class="flow-number">✓</div>
+                        <div class="flow-text"><strong>Scalability:</strong> Will this work for 10+ customers?</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function switchTab(event, tabName) {
+            const contents = document.querySelectorAll('.tab-content');
+            contents.forEach(content => content.classList.remove('active'));
+            
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => tab.classList.remove('active'));
+            
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+    </script>
+</body>
+</html>
