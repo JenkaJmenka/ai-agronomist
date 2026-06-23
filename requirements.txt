@@ -1,0 +1,39 @@
+# Core ML
+torch==2.0.0
+numpy==1.24.3
+
+# Data processing
+pandas==2.0.0
+scikit-learn==1.2.2
+scipy==1.15.3
+
+# Database (for Phase 2)
+sqlalchemy==2.0.15
+psycopg2-binary==2.9.6
+alembic==1.10.4
+pgvector==0.2.5
+asyncpg==0.29.0
+
+# Logging & Monitoring
+tensorboard==2.12.0
+
+# Observability
+prometheus-client>=0.19
+
+# Testing
+pytest==7.3.1
+pytest-cov==4.1.0
+
+# Code quality
+black==23.3.0
+flake8==6.0.0
+isort==5.12.0
+
+# Development
+ipython==8.12.0
+ipdb==0.13.13
+
+# FastAPI API (Phase 2)
+fastapi==0.109.0
+pydantic==2.5.0
+uvicorn

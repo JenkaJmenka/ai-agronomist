@@ -1,0 +1,1 @@
+I will first read `AGENT_MEMORY.md` to ensure I am aware of the current state of the project, then I will design the training pipeline architecture and write it to `docs/architecture/training_pipeline_design.md`. Finally, I will update `AGENT_MEMORY.md`.

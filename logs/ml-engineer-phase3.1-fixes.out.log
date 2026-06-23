@@ -1,0 +1,21 @@
+All fixes are complete. Here's a summary of everything done:
+
+## Fix Cycle Summary — Phase 3.1 Active Learning
+
+### BLOCKING fix (BUG-2)
+- **`src/models/active_learner.py`**: `collect_operator_feedback()` now auto-calls `self.trigger_retraining()` when `_should_retrain_now()` returns True. The result dict includes a `"retraining"` key with the retraining outcome. Docstring updated to document this behavior.
+- **`src/models/retraining_orchestrator.py`**: Removed the now-redundant `trigger_retraining()` call in `observe()` (would have double-triggered).
+
+### Non-blocking fixes (all 6)
+1. **`src/config.py`**: Added `ACTIVE_LEARNING_FEEDBACK_WINDOW_DAYS = 30` and `ACTIVE_LEARNING_DEFAULT_OPERATOR_CONFIDENCE = 0.8`
+2. **`src/models/active_learner.py`**: Replaced hardcoded `days=30` (2 occurrences) and `0.8` default with config constants
+3. **`src/models/retraining_orchestrator.py`**: Replaced hardcoded `0.8` default with config constant
+4. **`src/models/retraining_orchestrator.py`**: Added `math.isfinite()` check in `validate_and_promote` to reject `float('inf')`/`float('nan')`
+5. **`src/api/routes/feedback.py`**: Fixed `learning_progress` to return `samples_needed=ACTIVE_LEARNING_MIN_QUALITY_LABELS` for unknown customers (was `0`)
+6. **`src/api/routes/feedback.py`**: Removed unused `db: AsyncSession = Depends(get_db)` from all 4 endpoints; added module-level `# TODO: add db persistence` comment
+7. **`tests/models/test_active_learner.py`**: Removed dead `import time`; updated trigger test to verify auto-retraining behavior
+
+### Test results
+- **109/109 passed** (active learning suite)
+- **405 passed, 1 xfailed** (full gate — attributor + pattern + confidence + root_cause + active_learning)
+- Zero regressions

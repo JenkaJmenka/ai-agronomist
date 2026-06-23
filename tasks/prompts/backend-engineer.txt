@@ -1,0 +1,185 @@
+You are implementing SCADA anomaly detection improvements for the AI Agronomist platform.
+Working directory: /Users/eugenesidorov/Projects/ai-agronomist/
+
+FIRST: read these files for context before writing anything:
+- AGENT_MEMORY.md
+- src/db/models.py (Incident model — you will add fault_type field)
+- src/db/incident_memory.py (store_incident — you will add fault_type kwarg)
+- src/api/schemas/incidents.py (add fault_type to response/request schemas)
+- src/api/main.py (router registration pattern — you will register gas route)
+- src/api/routes/upload.py (pattern reference for route structure)
+- /Users/eugenesidorov/.claude/plans/i-need-you-to-distributed-music.md (full plan reference)
+
+Your task covers Phase 1 DB changes + Phase 4 (gas sensor detection).
+
+=== PHASE 1 DB: Add fault_type to Incident ===
+
+1. src/db/models.py (MODIFY)
+   In the Incident class, add after the existing anomaly_score field area:
+   fault_type: Mapped[Optional[str]] = mapped_column(
+       String(32), nullable=True,
+       doc="Research fault taxonomy: calibration_drift, bias_offset, stuck_fault, accuracy_decline, spike_fault"
+   )
+
+2. alembic/versions/010_add_fault_type_to_incidents.py (NEW)
+   Content:
+   """Add fault_type column to incidents.
+
+   Revision ID: 010
+   Revises: 009
+   Create Date: 2026-06-20
+
+   """
+   from alembic import op
+   import sqlalchemy as sa
+
+   revision = "010"
+   down_revision = "009"
+   branch_labels = None
+   depends_on = None
+
+   def upgrade() -> None:
+       op.add_column("incidents", sa.Column("fault_type", sa.String(32), nullable=True))
+
+   def downgrade() -> None:
+       op.drop_column("incidents", "fault_type")
+
+3. src/api/schemas/incidents.py (MODIFY)
+   Add fault_type: Optional[str] = None to IncidentResponse and IncidentCreateRequest (or IncidentCreate).
+   Read the file first to see the exact class names and structure.
+
+4. src/db/incident_memory.py (MODIFY)
+   Read the file first. Find store_incident() method.
+   Add fault_type: Optional[str] = None as a parameter.
+   Set incident.fault_type = fault_type when creating the Incident object.
+   Make sure Optional is imported (from typing import Optional if not already).
+
+After writing the above, run the migration:
+cd /Users/eugenesidorov/Projects/ai-agronomist && ./venv/bin/alembic upgrade head
+
+=== PHASE 4: Gas Sensor Anomaly Detection ===
+
+5. src/models/gas_anomaly_detector.py (NEW)
+   Implement these classes:
+
+   from dataclasses import dataclass
+   from typing import Optional
+
+   GAS_COLUMNS = ["c2h4", "gas_co2", "no", "no2", "nox", "co"]
+
+   @dataclass
+   class GasBaseline:
+       column: str
+       mean: float
+       std: float
+       q25: float
+       q75: float
+       iqr: float
+       n: int
+
+   @dataclass
+   class GasAnomaly:
+       is_anomaly: bool
+       z_score: float
+       method: str   # "z_score", "iqr", or "none"
+       severity: str  # "normal" (|z|<2), "warning" (2<=|z|<3), "critical" (|z|>=3)
+
+   class GasAnomalyDetector:
+       GAS_COLUMNS = GAS_COLUMNS
+
+       def fit(self, readings: list[dict]) -> dict[str, GasBaseline]:
+           # readings: list of dicts like {"c2h4": 0.05, "no": 1.2, ...}
+           # For each column in GAS_COLUMNS:
+           #   collect all non-null, finite values
+           #   if < 5 values: skip (don't include in result)
+           #   compute mean, std, q25=np.percentile(vals,25), q75=np.percentile(vals,75), iqr=q75-q25
+           # Returns dict[column_name -> GasBaseline]
+
+       def detect(self, values: dict[str, float], baselines: dict[str, GasBaseline]) -> dict[str, GasAnomaly]:
+           # For each column in values that has a baseline:
+           #   if std == 0: return GasAnomaly(is_anomaly=False, z_score=0.0, method="none", severity="normal")
+           #   z_score = abs(value - mean) / std
+           #   z_anomaly = z_score > 3.0
+           #   iqr_anomaly = value < (q25 - 1.5*iqr) or value > (q75 + 1.5*iqr) (only if iqr > 0)
+           #   is_anomaly = z_anomaly or iqr_anomaly
+           #   method = "z_score" if z_anomaly else ("iqr" if iqr_anomaly else "none")
+           #   severity = "critical" if z_score >= 3 else ("warning" if z_score >= 2 else "normal")
+           # Returns dict[column_name -> GasAnomaly]
+
+6. src/api/routes/gas_anomalies.py (NEW)
+   Use FastAPI APIRouter with prefix="/api/gas". Read src/api/routes/upload.py as style reference.
+
+   from fastapi import APIRouter, Depends, Query
+   from sqlalchemy.ext.asyncio import AsyncSession
+   from src.db.database import get_db  # check actual import path in upload.py
+   from src.db.models import RawReading
+   from src.models.gas_anomaly_detector import GasAnomalyDetector, GAS_COLUMNS
+   from datetime import datetime, timezone, timedelta
+   from sqlalchemy import select, and_, not_
+
+   router = APIRouter(prefix="/api/gas", tags=["gas"])
+
+   GET /summary
+   @router.get("/summary")
+   async def gas_summary(
+       tenant_id: str = Query(...),
+       greenhouse_id: str = Query(...),
+       hours: int = Query(24, ge=1, le=168),
+       db: AsyncSession = Depends(get_db),
+   ):
+       # 1. Compute cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+       # 2. Query RawReading rows:
+       #    WHERE tenant_id = tenant_id AND greenhouse_id = greenhouse_id
+       #    AND timestamp >= cutoff
+       #    AND (source IS NULL OR source NOT LIKE 'synthetic:%')
+       #    ORDER BY timestamp ASC
+       # 3. Extract readings list: [row.data for row in rows] (row.data is JSON dict with sensor values)
+       # 4. detector = GasAnomalyDetector()
+       # 5. baselines = detector.fit(readings)
+       # 6. For each column in GAS_COLUMNS that has a baseline:
+       #    Build per-column result:
+       #    {
+       #      "column": col,
+       #      "mean": baseline.mean,
+       #      "std": baseline.std,
+       #      "anomaly_count": int,
+       #      "current_value": last non-null value or None,
+       #      "readings": [{
+       #        "timestamp": row.timestamp.isoformat(),
+       #        "value": float or null,
+       #        "is_anomaly": bool,
+       #        "z_score": float,
+       #        "severity": str
+       #      }]
+       #    }
+       # 7. Return {"gas_columns": [...list of per-column results...], "window_hours": hours}
+
+   GET /readings
+   @router.get("/readings")
+   async def gas_readings(
+       tenant_id: str = Query(...),
+       greenhouse_id: str = Query(...),
+       hours: int = Query(24, ge=1, le=168),
+       db: AsyncSession = Depends(get_db),
+   ):
+       # Same query as above
+       # Return raw time-series: {"readings": [{timestamp, data: {col: value, ...}}], "total": int}
+
+7. src/api/main.py (MODIFY)
+   Read the file. Find existing router registration pattern (e.g. app.include_router(...)).
+   Add: from src.api.routes import gas_anomalies (or from src.api.routes.gas_anomalies import router as gas_router)
+   Register: app.include_router(gas_anomalies.router) or however the pattern works.
+
+=== AFTER IMPLEMENTATION ===
+
+Run smoke tests:
+cd /Users/eugenesidorov/Projects/ai-agronomist && ./venv/bin/pytest tests/ -x -q --timeout=60 2>&1 | tail -40
+
+Fix any failures. Do not proceed until tests pass or failures are pre-existing (unrelated to your changes).
+
+When ALL work is complete and tests pass, write this exact signal:
+mkdir -p tasks/done
+echo '{"agent":"backend-engineer","status":"done","output":"src/db/models.py,src/api/schemas/incidents.py,src/db/incident_memory.py,alembic/versions/010_add_fault_type_to_incidents.py,src/models/gas_anomaly_detector.py,src/api/routes/gas_anomalies.py,src/api/main.py","tests_passed":true}' > tasks/done/backend-engineer.json
+
+If you cannot complete the task, write:
+echo '{"agent":"backend-engineer","status":"failed","reason":"brief description"}' > tasks/done/backend-engineer.json

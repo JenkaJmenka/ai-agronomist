@@ -1,0 +1,33 @@
+All tasks complete. Here's a summary of everything implemented:
+
+---
+
+## SCADA Priority A — Implementation Complete ✅
+
+**Gate: 1226 passed, 0 new failures** (2 pre-existing failures confirmed unchanged from baseline)
+
+### BE-A1 — `src/config.py`
+Added `VELOCITY_LIMITS` dict, `CUSUM_K=0.5`, `CUSUM_H=5.0`, and `DROPOUT_PERSISTENCE_THRESHOLD=0.25` in a new "SCADA Spike / CUSUM / Dropout Detection (Phase A)" section.
+
+### BE-A2 — `src/api/services/comprehensive_pipeline.py`
+- Imported `CUSUMDriftDetector`, `DropoutDetector`, and new config constants
+- Added `self._dropout_detector` and `self._cusum_cache` to `__init__`
+- Added `_dropout_result()` static method (returns `is_anomaly=True`, `fault_type="polling_dropout"`)
+- Wired **dropout check** at top of `_run_with_components` — converts sequence to dicts before `DropoutDetector.detect()`
+- Wired **CUSUM update** after LSTM-VAE pass — computes per-sensor baseline stats, updates cache
+- After ensemble classification: CUSUM alarm overrides `fault_type = "calibration_drift"` (physics-confirmed anomalies take precedence)
+- Updated `_load_trackers` / `_save_trackers` to also restore/persist `cusum_state` in `LearningState.state_json`
+
+### BE-A3 — `src/db/learning_state_store.py`
+Added `load_cusum_state()` and `save_cusum_state()` helper methods for targeted CUSUM state persistence.
+
+### BE-A4 — `alembic/versions/012_add_polling_dropout_fault_type.py`
+New migration (down_revision="011") using `op.batch_alter_table` to add `polling_dropout` to the CHECK constraint. Also **fixed migration 011** which had the same SQLite batch-mode bug.
+
+### BE-A5 — `src/api/schemas/incidents.py`
+Extended `_VALID_FAULT_TYPES` with `| {"polling_dropout"}` so the API accepts it now (before ml-engineer adds `POLLING_DROPOUT` to the `FaultType` enum).
+
+### Stub — `src/models/drift_detector.py`
+Added `CUSUMDriftDetector` class with the correct interface (`update`, `alarmed_sensors`, `reset`, `to_dict`, `from_dict`). The `update()` body is a stub that always returns `False` — TODO for ml-engineer.
+
+> **Note:** `dropout_detector.py` was already fully implemented by the ml-engineer. Migration 011's SQLite batch-mode bug was fixed as a side effect of applying the chain. The `FaultType` enum still needs `POLLING_DROPOUT` added by the ml-engineer — the schema accepts it immediately via explicit set union.

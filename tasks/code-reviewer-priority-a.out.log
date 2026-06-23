@@ -1,0 +1,28 @@
+## Review Complete: **NEEDS FIXES**
+
+The full report is at `docs/review/priority_a_algorithm_compliance_review.md`. Here's the summary:
+
+### Critical (must fix before merge)
+
+**C-1: Pipeline imports CUSUM stub, not the real implementation.**
+`comprehensive_pipeline.py` line 42 imports `CUSUMDriftDetector` from `src/models/drift_detector.py`, which is a **stub that always returns `False`**. The real, correct implementation exists in `src/models/cusum_drift_detector.py` but is unused by the pipeline. **CUSUM drift detection is completely non-functional in production.** Fix: change the import to `from src.models.cusum_drift_detector import CUSUMDriftDetector`.
+
+### High
+
+**H-1: Dropout detector is unreachable.** The pipeline converts `List[List[float]]` to dicts of floats before passing to `DropoutDetector.detect()`. Python `None` values are never present because the API contract only accepts floats and numpy conversion produces NaN, not None. The detector will never fire.
+
+### Medium (3 findings)
+
+- **M-1:** Two CUSUM implementations have incompatible `to_dict`/`from_dict` serialization formats — persisted state won't migrate when the stub is replaced
+- **M-2:** Velocity limits duplicated between `config.py` (`VELOCITY_LIMITS`) and `pattern_scores.py` (`_SPIKE_VELOCITY_LIMITS`) — can diverge silently
+- **M-3:** `DropoutDetector.PERSISTENCE_THRESHOLD` hardcoded at 0.25 instead of importing `DROPOUT_PERSISTENCE_THRESHOLD` from config
+
+### What's correct
+
+- CUSUM algorithm in `cusum_drift_detector.py` correctly implements two-sided CUSUM per Hawkins & Olwell
+- Spike velocity+reversal check in `pattern_scores.py` is correct with proper boundary guards
+- Dropout detector logic is sound with all edge cases handled
+- Migration 012 is correct (CHECK constraint includes all fault types + NULL)
+- FaultClassifier priority ordering is correct (polling_dropout at top)
+- Test quality is excellent across all four test files
+- No security issues found

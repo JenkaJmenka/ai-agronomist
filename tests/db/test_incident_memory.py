@@ -314,6 +314,45 @@ async def test_resolve_incident_writes_actions_and_time_to_resolve(
 
 
 @pytest.mark.asyncio
+async def test_resolve_incident_rejects_already_resolved(
+    memory: IncidentMemory, memory_session: AsyncSession
+) -> None:
+    from src.db.incident_memory import IncidentAlreadyResolvedError
+
+    incident_id = await memory.store_incident(
+        tenant_id="tenant_a",
+        embedding=unit_embedding(0),
+        anomaly_score=0.6,
+        sequence=sample_sequence(),
+        embedding_uncertainty=0.1,
+    )
+    await memory.resolve_incident(
+        incident_id=incident_id,
+        tenant_id="tenant_a",
+        root_cause="sensor_drift",
+        actions_taken=["recalibrate"],
+        actions_effective=True,
+    )
+
+    with pytest.raises(IncidentAlreadyResolvedError):
+        await memory.resolve_incident(
+            incident_id=incident_id,
+            tenant_id="tenant_a",
+            root_cause="other_cause",
+            actions_taken=["duplicate_action"],
+            actions_effective=False,
+        )
+
+    actions = (
+        await memory_session.scalars(
+            select(IncidentAction).where(IncidentAction.incident_id == incident_id)
+        )
+    ).all()
+    assert len(actions) == 1
+    assert actions[0].action == "recalibrate"
+
+
+@pytest.mark.asyncio
 async def test_mark_anomaly_idempotent(memory: IncidentMemory, memory_session: AsyncSession) -> None:
     incident_id = await memory.store_incident(
         tenant_id="tenant_a",

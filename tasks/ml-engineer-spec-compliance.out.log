@@ -1,0 +1,19 @@
+All four fixes are complete. Here's a summary:
+
+## Results
+
+**All 771 model tests pass** (zero failures, zero regressions).
+
+### Changes Made
+
+| Fix | File | What Changed |
+|-----|------|-------------|
+| **1 — Spike** | `src/models/pattern_scores.py` | `score_spike()` restructured: velocity+reversal is now the **primary** detection path (score=1.0 if any sensor exceeds Δ_max with sign reversal). Z-score is fallback only. Removed `_has_velocity_reversal()` and `_SPIKE_VELOCITY_BOOST`. |
+| **2 — Dropout** | `src/models/dropout_detector.py` | Complete rewrite: changed from "fraction of ALL-null rows ≥ 25%" to "**P consecutive** steps with **ANY** sensor null/NaN" (SCADA spec 1.5). Uses `DROPOUT_CONSECUTIVE_P=5`. |
+| **3 — Noise** | `src/models/noise_detector.py` | **New file**: 2nd-order Butterworth HP filter → rolling std → alarm if > σ_target × NOISE_ALPHA. Normalized cutoff (Wn=0.1), min 10 samples. |
+| **4 — Stuck** | `src/models/stuck_fault_detector.py` | Changed from full-sequence variance to **minimum rolling-window variance** (`STUCK_WINDOW_K=10`). Catches sensors stuck for part of the sequence. |
+| **Config** | `src/config.py` | Added `DROPOUT_CONSECUTIVE_P=5`, `STUCK_WINDOW_K=10`, `NOISE_ALPHA=3.0`, `SENSOR_NOISE_TARGETS` |
+
+### Tests: 29 new/rewritten tests across 3 files
+
+⚠️ **Migration note**: `comprehensive_pipeline.py` still reads `DropoutDetector.PERSISTENCE_THRESHOLD` — backward-compat alias is kept, but backend-engineer should update the log message to reflect consecutive-step semantics.

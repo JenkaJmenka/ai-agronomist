@@ -1,0 +1,75 @@
+version: '3.9'
+
+services:
+  # PostgreSQL database for storing sensor readings
+  # pgvector/pgvector:pg15 is a drop-in replacement for postgres:15 that
+  # bundles the vector extension (required for incident memory embeddings)
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: agronomist-postgres
+    environment:
+      POSTGRES_DB: greenhouse_monitoring
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agronomist-network
+
+  # Adminer for database management (optional, development only)
+  adminer:
+    image: adminer:latest
+    container_name: agronomist-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - agronomist-network
+
+  # Jupyter for interactive development
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    container_name: agronomist-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/workspace
+      - jupyter_data:/root/.jupyter
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser
+    depends_on:
+      - postgres
+    networks:
+      - agronomist-network
+
+  # TensorBoard for training visualization
+  tensorboard:
+    image: python:3.11-slim
+    container_name: agronomist-tensorboard
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./logs/tensorboard:/logs
+    command: sh -c "pip install --no-cache-dir tensorboard && tensorboard --logdir=/logs --host=0.0.0.0"
+    networks:
+      - agronomist-network
+
+volumes:
+  postgres_data:
+  jupyter_data:
+
+networks:
+  agronomist-network:
+    driver: bridge

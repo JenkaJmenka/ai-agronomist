@@ -1,0 +1,43 @@
+All work is complete. Here's the summary:
+
+---
+
+## QA Report — Confidence Scorer
+
+### Deliverables
+
+| File | Status |
+|------|--------|
+| `tests/models/test_confidence_scorer.py` | ✅ Created — 118 tests, all pass |
+| `docs/coverage/phase1.9.1-confidence-scorer-coverage.md` | ✅ Created |
+| `AGENT_MEMORY.md` | ✅ Updated |
+| `tasks/done/qa-engineer.json` | ✅ Written |
+
+### Coverage
+
+```
+src/models/confidence_scorer.py   76   0   28   0  100.00%
+```
+**100% coverage** — every statement and branch hit.
+
+### Test breakdown (118 tests, 9 classes)
+
+| Class | Tests | What it covers |
+|-------|-------|----------------|
+| `TestConstruction` | 4 | Default/custom weights, SIGNAL_NAMES, dict-copy isolation |
+| `TestWeightValidation` | 8 | Missing/extra/wrong keys, negative, NaN/Inf, bad sum |
+| `TestInputValidation` | 11 | All scalar rejections: NaN/Inf/negative recon_error, baseline_error, uncertainty; ensemble range + non-integer |
+| `TestPatternScoresValidation` | 6 | Empty dict, NaN/Inf/out-of-range scores, multi-entry with one bad |
+| `TestComputeSignals` | 20 | Each of 4 signal formulas: zero/full/capped/mid values; tie gap, single-entry pattern, many-pattern top-2 |
+| `TestScore` | 11 | Float return, [0,1] range, weighted-sum identity, monotonicity vs all 4 inputs, custom weights |
+| `TestAssess` | 9 | All 5 required keys, type checks, consistency with score()/compute_signals() |
+| `TestHighConfidence` / `TestLowConfidence` | 14 | Default & custom thresholds, exact boundary (≥/≤), input validation |
+| `TestConfidenceLevel` | 19 | All 5 labels, exact boundary values (0.0, 0.4, 0.6, 0.75, 0.85), input validation |
+| `TestEndToEnd` | 7 | Realistic agronomist scenarios, noise, single-entry pattern, uncertainty=1.0, all ensemble boundaries |
+
+### Regression check
+- `test_anomaly_attributor.py`: 46 passed ✅
+- `test_pattern_detector.py`: 83 passed + 1 xfailed (known tracked bug) ✅
+
+### Bugs found
+**None.** The implementation is clean and all contracts are met.

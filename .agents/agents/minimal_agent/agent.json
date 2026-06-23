@@ -1,0 +1,16 @@
+{
+  "name": "minimal_agent",
+  "description": "test",
+  "hidden": false,
+  "config": {
+    "customAgent": {
+      "systemPromptSections": [
+        {
+          "title": "Agent System Instructions",
+          "content": ""
+        }
+      ],
+      "toolNames": []
+    }
+  }
+}

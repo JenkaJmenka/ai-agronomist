@@ -1,0 +1,23 @@
+All three Sprint A fixes are complete. Here's a summary of everything done:
+
+---
+
+## Sprint A — Summary
+
+### A1 ✅ Gate incident storage on `is_anomaly`
+`src/api/services/comprehensive_pipeline.py` — `store_incident()` now only runs when `is_anomaly=True`. `incident_id = None` is initialised before the gate so the return dict always has the key.
+
+### A2 ✅ Replace `setattr`/`getattr` tracker cache with typed dict
+- Added `self._tracker_cache: dict[str, tuple[EWMATracker, POTThresholdFitter]] = {}` to `__init__`
+- `_load_trackers` and `_save_trackers` now use `self._tracker_cache.get(...)` / `self._tracker_cache[customer_id] = ...`
+- Removed the `cache_key` local variable entirely from both methods
+
+### A3 ✅ Upgraded four `logger.debug` calls to `logger.warning`
+All four tracker-failure sites now emit `logger.warning` so they appear in production logging configs.
+
+### Supporting fixes (required to keep tests green)
+- **Schema**: `incident_id: Optional[str] = None` in `ComprehensiveInferenceResponse` — necessary because non-anomalous requests now return `incident_id: null`
+- **Tests**: Added `patch_anomaly_score` fixture (forces `anomaly_score=1.0 > ANOMALY_THRESHOLD`) and applied it to 6 tests that drive a detect→feedback loop requiring a real incident ID
+
+### Gate: **1086 passed, 12 skipped, 1 xfailed**
+4 pre-existing failures unchanged (3 `test_upload.py`, 1 `test_error_recovery`) — confirmed via `git stash` verification that they existed before these changes.

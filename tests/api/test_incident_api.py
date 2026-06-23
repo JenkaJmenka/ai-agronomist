@@ -9,12 +9,13 @@ import pytest
 import pytest_asyncio
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.main import app
 from src.config import LATENT_DIM, SEQ_LEN
 from src.db.incident_memory import IncidentMemory
-from src.db.models import Base
+from src.db.models import Base, IncidentAction
 from src.db.session import get_db
 
 
@@ -186,6 +187,48 @@ async def test_resolve_cross_tenant_returns_404(
     )
     assert response.status_code == status.HTTP_404_NOT_FOUND
     assert "message" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_resolve_already_resolved_returns_409(
+    incident_client: TestClient, incident_db_session: AsyncSession
+) -> None:
+    memory = IncidentMemory(incident_db_session)
+    incident_id = await memory.store_incident(
+        tenant_id="tenant_a",
+        embedding=unit_embedding(0),
+        anomaly_score=0.5,
+        sequence=sample_sequence(),
+        embedding_uncertainty=0.1,
+    )
+    resolve_body = {
+        "tenant_id": "tenant_a",
+        "root_cause": "humidity_spike",
+        "actions_taken": ["vent"],
+        "actions_effective": True,
+    }
+    first = incident_client.post(
+        f"/api/incidents/resolve/{incident_id}", json=resolve_body
+    )
+    assert first.status_code == status.HTTP_200_OK
+
+    second = incident_client.post(
+        f"/api/incidents/resolve/{incident_id}",
+        json={
+            **resolve_body,
+            "root_cause": "overwritten",
+            "actions_taken": ["duplicate"],
+        },
+    )
+    assert second.status_code == status.HTTP_409_CONFLICT
+
+    actions = (
+        await incident_db_session.scalars(
+            select(IncidentAction).where(IncidentAction.incident_id == incident_id)
+        )
+    ).all()
+    assert len(actions) == 1
+    assert actions[0].action == "vent"
 
 
 @pytest.mark.asyncio

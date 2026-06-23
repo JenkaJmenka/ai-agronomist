@@ -1,0 +1,19 @@
+## Re-Review Complete
+
+**Verdict: PASS WITH NOTES** — written to `docs/review/active_learning_review_v2.md`.
+
+### Summary of verification
+
+| Fix | Status |
+|-----|--------|
+| **BUG-2 (BLOCKING)** — auto-trigger retraining | ✅ **CLOSED** — `collect_operator_feedback` calls `trigger_retraining()`, sets cooldown, returns outcome. Infinite loop eliminated. No double-trigger via orchestrator. Fully tested. |
+| Config constants (`FEEDBACK_WINDOW_DAYS`, `DEFAULT_OPERATOR_CONFIDENCE`) | ✅ **VERIFIED** — Added to config.py, used everywhere |
+| Hardcoded `days=30` and `0.8` replaced | ✅ **VERIFIED** — Zero remaining instances |
+| `math.isfinite()` guard in `validate_and_promote` | ✅ **VERIFIED** — Correct check order, rejects inf/nan |
+| `learning_progress` correct `samples_needed` | ✅ **VERIFIED** — Returns 20 (not 0) for unknown customers |
+| `db` parameter removed from routes | ✅ **VERIFIED** — All 4 endpoints clean, TODO added |
+| Dead `import time` removed | ✅ **VERIFIED** |
+
+**One new minor note (INFO):** No tests for the `math.isfinite()` guard — recommend adding parametrized tests for inf/nan.
+
+**109 tests pass, no regressions. Module approved for integration wiring.**

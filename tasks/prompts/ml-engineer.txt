@@ -1,0 +1,168 @@
+You are implementing SCADA anomaly detection improvements for the AI Agronomist platform.
+Working directory: /Users/eugenesidorov/Projects/ai-agronomist/
+
+FIRST: read these files for context before writing anything:
+- AGENT_MEMORY.md
+- src/config.py
+- src/models/ensemble_detector.py
+- src/api/services/comprehensive_pipeline.py
+- /Users/eugenesidorov/.claude/plans/i-need-you-to-distributed-music.md (full plan reference)
+
+Your task covers Phases 1-3 of the plan.
+
+=== PHASE 1: New detector files ===
+
+1. src/models/fault_classifier.py (NEW)
+   - Enum FaultType(str, Enum): CALIBRATION_DRIFT="calibration_drift", BIAS_OFFSET="bias_offset", STUCK_FAULT="stuck_fault", ACCURACY_DECLINE="accuracy_decline", SPIKE_FAULT="spike_fault"
+   - class FaultClassifier:
+       @staticmethod
+       classify(pattern_type: str, sensor_stats: dict, bias_flag: bool = False) -> str:
+         # pattern_type values come from PatternDetector output: "drift","spike","saturation","normal", etc.
+         # Returns FaultType value as string
+         # Rules (in priority order):
+         #   bias_flag=True -> "bias_offset"
+         #   pattern_type contains "stuck" or "saturation" -> "stuck_fault"
+         #   pattern_type contains "spike" -> "spike_fault"
+         #   pattern_type contains "drift" -> "calibration_drift"
+         #   high noise (check sensor_stats.get("noise_level","") == "high") without directional trend -> "accuracy_decline"
+         #   default -> "spike_fault"
+
+2. src/models/stuck_fault_detector.py (NEW)
+   - class StuckFaultDetector:
+       def __init__(self, window: int = 20, variance_threshold: float = 1e-4)
+       def detect(self, sequence: np.ndarray) -> dict[str, bool]:
+         # sequence shape: (seq_len, 4) for [temperature, humidity, co2, light]
+         # Returns {"temperature": bool, "humidity": bool, "co2": bool, "light": bool}
+         # True = sensor is stuck (variance < variance_threshold across all timesteps)
+         SENSOR_NAMES = ["temperature", "humidity", "co2", "light"]
+
+3. src/models/bias_detector.py (NEW)
+   - class BiasOffsetDetector:
+       def __init__(self, expected_ranges: dict)
+         # expected_ranges format: {"temperature": (min, max), ...}
+         # Use SENSOR_RANGES from src/config.py
+       def detect(self, sequence: np.ndarray) -> dict[str, float]:
+         # Returns per-sensor bias magnitude (0.0 = no bias)
+         # Compute sequence mean per sensor (axis=0)
+         # expected_mid = (range_min + range_max) / 2
+         # range_span = range_max - range_min
+         # If |mean - expected_mid| > 0.3 * range_span: return magnitude = |mean - expected_mid| / range_span
+         # Otherwise: return 0.0
+         SENSOR_NAMES = ["temperature", "humidity", "co2", "light"]
+
+4. src/models/ewma_tracker.py (NEW)
+   - class EWMATracker:
+       def __init__(self, alpha: float = 0.1, k: float = 3.0)
+       def update(self, score: float) -> float:
+         # Update EWMA mean and variance using Welford's online algorithm adapted for exponential weighting
+         # ewma_mean = alpha * score + (1 - alpha) * ewma_mean
+         # ewma_var = alpha * (score - ewma_mean)**2 + (1 - alpha) * ewma_var
+         # Returns current threshold
+       def get_threshold(self) -> float:
+         # Returns ewma_mean + k * sqrt(ewma_var)
+         # Returns float("inf") if fewer than 10 observations seen
+       def is_anomaly(self, score: float) -> bool
+       def to_dict(self) -> dict  # for JSON serialization
+       @classmethod
+       def from_dict(cls, d: dict) -> "EWMATracker"
+
+5. src/models/pot_threshold.py (NEW)
+   - class POTThresholdFitter:
+       def __init__(self, q: float = 0.90, fpr: float = 0.001, min_peaks: int = 10, buffer_size: int = 500)
+       def update(self, new_residual: float) -> None:
+         # Append to circular buffer; re-fit every 50 new observations
+         # _n_since_fit counter
+       def fit(self) -> float:
+         # 1. Extract peaks: values above q-quantile of buffer
+         # 2. If len(peaks) < min_peaks: return np.quantile(buffer, 1 - fpr)
+         # 3. Fit scipy.stats.genpareto to (peaks - threshold), return threshold + GPD ppf(1 - fpr)
+         # 4. If scipy fit fails: fall back to np.quantile
+       def get_threshold(self) -> float:
+         # Returns last fitted threshold; float("inf") if buffer has < 20 values
+       def to_dict(self) -> dict
+       @classmethod
+       def from_dict(cls, d: dict) -> "POTThresholdFitter"
+
+6. src/models/physics_validator.py (NEW)
+   - @dataclass ValidationResult: suppressed: bool, confirmed: bool, reason: str
+   - class PhysicsValidator:
+       @staticmethod
+       def validate(sequence: np.ndarray, timestamp: datetime) -> ValidationResult:
+         # sequence shape: (seq_len, 4), columns: [temperature, humidity, co2, light]
+         # Denormalized values (already in physical units)
+         # Rules (apply in order, first match wins):
+         # 1. Psychrometric impossibility:
+         #    temp_trend = mean of diff(sequence[:,0]) (deg C per step)
+         #    hum_trend = mean of diff(sequence[:,1]) (% per step)
+         #    If temp_trend > 0.5 AND hum_trend > 1.0 -> confirmed=True, reason="psychrometric_impossibility"
+         # 2. Nocturnal light:
+         #    hour_utc = timestamp.hour (or sequence timestamp)
+         #    If max(sequence[:,3]) > 50 and hour_utc in range(22,25) or range(0,5): confirmed=True, reason="nocturnal_light"
+         # 3. CO2 out of range:
+         #    If np.mean(sequence[:,2]) < 200 or np.mean(sequence[:,2]) > 2000: confirmed=True, reason="co2_out_of_range"
+         # 4. Temperature bounds:
+         #    If np.any(sequence[:,0] < 5) or np.any(sequence[:,0] > 45): confirmed=True, reason="temperature_out_of_range"
+         # Default: ValidationResult(suppressed=False, confirmed=False, reason="")
+
+=== PHASE 1: Modify existing files ===
+
+7. src/models/ensemble_detector.py (MODIFY)
+   Read the file first. In the detect() method:
+   - Import StuckFaultDetector and BiasOffsetDetector at the top of the file
+   - Initialize them once in __init__: use SENSOR_RANGES from config for BiasOffsetDetector
+   - In detect(), BEFORE the 4-detector vote:
+     a. Run stuck_detector.detect(sequence) -> if any sensor is stuck, immediately return the result dict
+        with extra keys: result["fault_type"] = "stuck_fault", result["anomaly"] = True (or however the
+        existing result dict is structured - match the existing return format)
+     b. Run bias_detector.detect(sequence) -> if any sensor magnitude > 0: set result["bias_flag"] = True
+        (this gets passed to FaultClassifier later)
+   - After the vote, add to the result dict: result["bias_flag"] = bias_flag (bool)
+
+8. src/api/services/comprehensive_pipeline.py (MODIFY)
+   Read the file carefully first to understand existing structure.
+
+   Changes needed:
+   a. Import: FaultClassifier, PhysicsValidator, EWMATracker, POTThresholdFitter
+   b. Import: LearningState from src/db/models (or wherever it's imported from)
+   c. After constructing the raw (denormalized) sequence, BEFORE calling ensemble_detector.detect():
+      - Call PhysicsValidator.validate(denormalized_sequence, current_timestamp)
+      - If result.suppressed: skip incident storage, log "physically suppressed", continue
+      - If result.confirmed: set anomaly=True, skip ensemble, set fault_type based on reason
+        (map reason strings to fault types: "psychrometric_impossibility"->"spike_fault", "nocturnal_light"->"spike_fault", "co2_out_of_range"->"calibration_drift", "temperature_out_of_range"->"spike_fault")
+   d. After ensemble_detector.detect() returns:
+      - Extract bias_flag from ensemble result (default False)
+      - Get pattern_type from existing pattern detection step
+      - Call FaultClassifier.classify(pattern_type, sensor_stats={}, bias_flag=bias_flag) -> fault_type string
+   e. Load/save EWMATracker and POTThresholdFitter from/to LearningState.state_json:
+      - Load once per request from DB
+      - After LSTM-VAE reconstruction error computed: ewma_tracker.update(score); pot_fitter.update(score)
+      - Get dynamic threshold: max(ewma_tracker.get_threshold(), pot_fitter.get_threshold())
+      - Use dynamic threshold if tenant has >= 50 stored incidents; else use config.ANOMALY_THRESHOLD
+      - Save updated state back to LearningState after each inference
+   f. Pass fault_type to IncidentMemory.store_incident() as kwarg: fault_type=fault_type
+      (The backend-engineer will add this kwarg to store_incident() in parallel)
+
+=== PHASE 2: Modify config ===
+
+9. src/config.py (MODIFY)
+   Add at the end (read the file first to see existing structure):
+   EWMA_ALPHA: float = 0.1
+   EWMA_K: float = 3.0
+   POT_Q: float = 0.90
+   POT_FPR: float = 0.001
+   POT_BUFFER_SIZE: int = 500
+   GAS_SENSOR_COLUMNS: list = ["c2h4", "gas_co2", "no", "no2", "nox", "co"]
+
+=== AFTER IMPLEMENTATION ===
+
+Run smoke tests:
+cd /Users/eugenesidorov/Projects/ai-agronomist && ./venv/bin/pytest tests/ -x -q --timeout=60 2>&1 | tail -40
+
+Fix any failures. Do not proceed until tests pass or failures are pre-existing (unrelated to your changes).
+
+When ALL work is complete and tests pass, write this exact signal:
+mkdir -p tasks/done
+echo '{"agent":"ml-engineer","status":"done","output":"src/models/fault_classifier.py,src/models/stuck_fault_detector.py,src/models/bias_detector.py,src/models/ewma_tracker.py,src/models/pot_threshold.py,src/models/physics_validator.py","tests_passed":true}' > tasks/done/ml-engineer.json
+
+If you cannot complete the task, write:
+echo '{"agent":"ml-engineer","status":"failed","reason":"brief description"}' > tasks/done/ml-engineer.json

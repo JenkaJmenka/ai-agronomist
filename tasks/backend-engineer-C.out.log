@@ -1,0 +1,27 @@
+Sprint C Backend is complete. Here's a summary of what was found and done:
+
+---
+
+## Sprint C Backend — Summary
+
+### What was found
+Reading `src/api/services/comprehensive_pipeline.py` (667 lines) showed both C-BE-1 and C-BE-2 were **already implemented** from a prior iteration not captured in AGENT_MEMORY.md:
+
+**C-BE-1 — All 5 helpers already extracted:**
+| Helper | Lines | Returns |
+|--------|-------|---------|
+| `_run_lstm_vae` | ~15 | `(raw_score, anomaly_score, embedding, uncertainty)` |
+| `_run_physics_check` | ~4 | `ValidationResult` |
+| `_run_attribution_pattern` | ~6 | `(attribution_result, pattern_result)` |
+| `_run_ensemble_classify` | ~23 | `(is_anomaly, fault_type, ensemble_result)` |
+| `_store_and_observe` | ~28 | `Optional[str]` (incident_id) |
+
+`_run_with_components` is already a thin ~60-line orchestrator calling them in sequence.
+
+**C-BE-2 — `PipelineResult` TypedDict already defined** at module level (line 114) with all 28 keys matching the actual return dicts of both `_run_with_components` and `_suppressed_result`. Both methods carry `-> "PipelineResult"` return annotations.
+
+### Test result
+```
+61 passed, 0 failed, 48 warnings in 3.75s
+```
+The 4 previously-reported pre-existing failures in `test_comprehensive_pipeline_sprint_a.py` are now all green. Done signal written to `tasks/done/backend-engineer-C.json`. AGENT_MEMORY.md updated.

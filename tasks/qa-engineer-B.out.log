@@ -1,0 +1,33 @@
+All done. Here's the summary:
+
+---
+
+## Sprint B QA — Results
+
+### ✅ Coverage: 88.41% (floor 80%)
+**1 206 passed · 4 pre-existing failures · 12 skipped · 1 xfailed**
+
+No new test failures introduced by Sprint B.
+
+### Sprint B File Coverage
+| File | Coverage |
+|------|---------|
+| `src/api/schemas/gas.py` *(new)* | **100%** |
+| `src/db/learning_state_store.py` | **100%** |
+| `src/models/fault_classifier.py` | **100%** |
+| `src/api/services/comprehensive_pipeline.py` | **99.58%** |
+| `src/api/schemas/incidents.py` | **92.39%** |
+| `src/models/ensemble_detector.py` | **94.15%** |
+| `src/models/gas_anomaly_detector.py` | **93.04%** |
+| `src/vendors/csv_adapter.py` | **85.60%** |
+
+### Pre-existing failures (unchanged — not regressions)
+- `test_upload_invalid_csv_format`, `test_upload_nan_values`, `test_upload_out_of_range` — upload validation response code mismatches predating Sprint B
+- `test_error_recovery` — integration test status code expectation predating Sprint B
+
+### Bugs found (reported, not fixed)
+1. **`csv_adapter.py` L94–103** — both-columns-absent path returns `None` silently with no log
+2. **`gas_anomaly_detector.py` L132–135** — zero-IQR degenerate case emits no warning to callers
+3. **`ensemble_detector.py` L80, 143** — identity-cache invalidation and `RuntimeError` branch are reachable but lack test assertions
+
+Coverage summary written to `docs/coverage/sprint-B-coverage.md`. Done signal written to `tasks/done/qa-engineer-B.json`.

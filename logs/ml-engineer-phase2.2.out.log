@@ -1,0 +1,20 @@
+All deliverables complete. Here's a summary:
+
+## Phase 2.2 — Root Cause Analyzer + Recommendation Engine ✅
+
+### Files created/modified:
+1. **`src/config.py`** — Added 8 constants across `ROOT_CAUSE_*` block (attribution threshold 0.15, unknown confidence 0.5, multi-sensor min 2, variance threshold 0.001) and `RECOMMENDATION_*` block (max actions by severity, urgent causes list, tech-required keywords, tech-not-required keywords).
+
+2. **`src/models/root_cause_analyzer.py`** (408 lines) — `RootCauseAnalyzer` class with 12 diagnosis rules covering dependency (3), drift (3), spike (3), saturation (1), cascade (2) patterns. Config-driven, all thresholds from `src.config`. ValueError validation on all inputs. Pure Python/numpy.
+
+3. **`src/models/recommendation_engine.py`** (292 lines) — `RecommendationEngine` class with 13 action sets. Severity-based action limits, technician requirement logic (with sensor exclusion to fix spec bug), downtime estimates, P1-P4 priority classification. ValueError validation.
+
+4. **`tests/models/test_root_cause_and_recommendations.py`** (665 lines) — 49 tests across 15 test classes covering all spec requirements.
+
+### Test results:
+- **Smoke tests**: 49/49 passed (0.04s)
+- **Week 2 gate**: 296 passed, 1 xfailed (0.38s) — zero regressions across attributor (46) + pattern detector (83+1xfail) + confidence scorer (118) + root cause/recommendations (49)
+
+### Spec deviations:
+- Added `RECOMMENDATION_TECH_NOT_REQUIRED_KEYWORDS = ['sensor']` — spec's substring check on "failure" incorrectly flags `sensor_failure` as requiring a technician
+- `_sensors_match("cooling_related", ...)` handled as special case (temp+humidity both present) since no sensor name is a substring of "cooling_related"

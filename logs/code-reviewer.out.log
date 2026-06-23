@@ -1,0 +1,30 @@
+## Review Complete
+
+**Verdict: PASS WITH NOTES**
+
+### STOP-WORK Guardrails — All Clear (7/7)
+- No tight coupling to LSTM-VAE/API/DB — pure Python/numpy, imports only `src.config`
+- No hardcoded secrets, API keys, or dangerous imports (`os.system`, `subprocess(shell=True)`, `eval()`)
+- Test file is read-only — single import, no modification of implementation
+- 100% coverage well above the 80% gate
+
+### Module-Specific Checks — All Clear (6/6)
+- All four signal weights sourced from `config.CONFIDENCE_SIGNAL_WEIGHTS`
+- Weights-sum-to-1.0 validated with `raise ValueError` (not `assert`)
+- Every threshold/constant comes from config — zero hardcoded magic numbers
+- Output confidence clipped to `[0, 1]` via `np.clip`
+- Input validation rejects non-finite and out-of-range values with descriptive `ValueError`
+- `CONFIDENCE_ENSEMBLE_SIZE` imported from config, not hardcoded `4`
+
+### Non-Blocking Notes (3 INFO)
+1. **N1**: `confidence_level()` relies on `CONFIDENCE_LEVEL_BOUNDS` being sorted descending but doesn't validate the ordering
+2. **N2**: Bare `dict` type annotations in config.py (pre-existing pattern, not introduced here)
+3. **N3**: `SIGNAL_NAMES: tuple` could use `Tuple[str, ...]` for precise typing
+
+### Test Quality — Excellent
+- 118 tests, 100% coverage, independently verified (118 passed in 0.05s)
+- All public methods covered with boundary, error-path, and edge-case tests
+- Config-derived expectations survive config value changes
+- No regressions in existing suites (247 passed, 1 xfailed)
+
+Output written to `docs/review/confidence_scorer_review.md`. Done signal written to `tasks/done/code-reviewer.json`. AGENT_MEMORY.md updated.

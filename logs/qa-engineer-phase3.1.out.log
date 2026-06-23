@@ -1,0 +1,32 @@
+QA pass complete. Here's the summary:
+
+---
+
+## Phase 3.1 Active Learning — QA Pass Complete ✅
+
+### Coverage Results (first iteration — all targets met immediately)
+
+| Module | Stmts | Branches | Coverage |
+|---|---|---|---|
+| `feedback_collector.py` | 36 | 10 | **100%** |
+| `feedback_validator.py` | 40 | 12 | **100%** |
+| `active_learner.py` | 71 | 16 | **100%** |
+| `retraining_orchestrator.py` | 38 | 8 | **100%** |
+
+### Tests: 64 → 109 (45 new, all passing, 0.77s)
+
+**Branches previously uncovered (now closed):**
+- `get_operator_feedback_count` return path (feedback_validator line 106) — method was never called
+- Duplicate operator in `validate_batch` (branch 137→128) — same operator_id appearing twice in one batch
+- Cooldown-expired path in `_should_retrain_now` (branch 255→258) — `_last_retrain` is set but has aged past the 4-hour window
+
+**Edge cases added:** float/string capacity rejection, confidence/severity exact boundaries (0.0, 1.0, 1, 10), whitespace operator_id, missing `quality_score` key defaults to 0.0, capacity overflow retains most-recent N items, time-window exclusion in `get_recent`, duplicate operator dedup in batch stats, None pattern_type exclusion from diversity count, exact 20-label boundary, samples capped at `MAX_TRAINING_SAMPLES`, all result dict fields validated.
+
+### Bugs Found (NOT fixed — reporting only)
+
+1. **BUG-1** `feedback_validator.py` — No "low-count dampening" (count < 5) implemented; EMA formula is identical regardless of sample count.
+2. **BUG-2** `active_learner.py:159-166` — `collect_operator_feedback` returns `learning_triggered=True` but never calls `trigger_retraining()` itself. Direct `ActiveLearner` callers who ignore the return value get no cooldown applied — every subsequent call will also trigger.
+3. **BUG-3** `active_learner.py:286-293` — `_get_operator_ids` reads from the feedback buffer, not `validator.operator_ids`. Operators evicted by buffer overflow silently disappear from `get_statistics()['operator_reliability']`.
+
+### Regression Gate
+296 passed, 1 xfailed — no regressions in attributor, pattern detector, confidence scorer, or root cause suites.

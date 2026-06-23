@@ -1,0 +1,3 @@
+Model Name: Claude Sonnet
+ANTHROPIC_BASE_URL: http://192.168.68.118:11434
+GEMMA_CONFIRMED

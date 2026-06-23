@@ -1,0 +1,54 @@
+The `AGENT_MEMORY.md` is already fully up to date with the confidence scorer QA entry (lines 6–26). Everything is complete. Here's the full summary:
+
+---
+
+## ✅ Phase 1.9.1 Week 2 — Confidence Scorer QA Complete
+
+### Results
+
+| Metric | Value |
+|--------|-------|
+| **Test file** | `tests/models/test_confidence_scorer.py` |
+| **Tests written** | 118 |
+| **Tests passed** | 118 ✅ |
+| **Tests failed** | 0 |
+| **Module coverage** | **100%** (76/76 statements, 28/28 branches) |
+| **Missing lines** | None |
+
+### Test classes (9 total)
+
+| Class | Tests | What it covers |
+|-------|-------|----------------|
+| `TestConstruction` | 4 | `__init__`, default weights, `SIGNAL_NAMES`, dict copy isolation |
+| `TestWeightValidation` | 8 | Missing/extra/wrong keys, negative weights, non-finite, wrong sum |
+| `TestInputValidation` | 11 | NaN/Inf/negative for `reconstruction_error`, `baseline_error`, `uncertainty`; ensemble range + non-integer |
+| `TestPatternScoresValidation` | 6 | Empty dict, NaN/Inf value, out-of-range, NaN in multi-entry |
+| `TestComputeSignals` | 20 | All 4 signal formulas; zero/full/capped/mid; single-entry pattern, tie gap, many-pattern |
+| `TestScore` | 11 | Return type, range, weighted sum identity, monotonicity, default baseline, custom weights |
+| `TestAssess` | 9 | All 5 required keys, types, consistency with `score()` and `compute_signals()` |
+| `TestHighConfidence` / `TestLowConfidence` | 14 | Boundaries, custom thresholds, validation |
+| `TestConfidenceLevel` | 19 | All 5 labels, all exact boundary values (0.0, 0.4, 0.6, 0.75, 0.85), validation |
+| `TestEndToEnd` | 7 | Realistic spike/noise scenarios, zero-recon anchor, single-entry pattern |
+
+### Edge cases verified
+- Single-entry `pattern_scores` → `second_score = 0.0` (no crash, correct formula)
+- `uncertainty >= 1.0` clamped → `uncertainty_signal = 0.0`
+- `ensemble_agreement = 0` and `= 4` both accepted
+- Pattern clarity tie → `gap = 0 → clarity = 0.0`
+- `recon_error` at 3× baseline → signal ≈ 1.0 (cap hit)
+- Non-integer `ensemble_agreement = 2.5` → `ValueError`
+- Custom weights (all-on-one-signal) → output equals that signal exactly
+
+### Regression check
+```
+tests/models/test_anomaly_attributor.py — 46 passed ✅
+tests/models/test_pattern_detector.py  — 83 passed + 1 xfailed (pre-existing single-sensor bug) ✅
+```
+
+### Bugs found
+**None.** All four signal formulas, all validation paths, and the `assess()` contract are correct.
+
+### Artifacts written
+- `tests/models/test_confidence_scorer.py` — 118 tests
+- `docs/coverage/phase1.9.1-confidence-scorer-coverage.md` — coverage summary
+- `tasks/done/qa-engineer.json` — done signal

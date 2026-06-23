@@ -1,0 +1,21 @@
+Done. Here's a summary of the code quality review:
+
+## Review Results
+
+**Prior findings (F1–F10):** All 8 issues are **still present**. F4 is worse — `_run_with_components` is actually 338 lines (not 221 as previously reported).
+
+**New findings (N1–N8):**
+| ID | Issue | Severity |
+|----|-------|----------|
+| N1 | `physics_result.suppressed` branch is dead code (no rule ever sets it) | Low |
+| N2 | `np.array_equal` on full baseline array every `detect()` call — O(n) waste | Medium |
+| N3 | Python nested loop in `CorrelationDetector.score()` — should be vectorized | Medium |
+| N4 | Cross-module import of private `_get_manager` from route into service | Low |
+| N5 | Unused `Optional` import in `gas_anomaly_detector.py` | Trivial |
+| N6 | Two manually-synced 30-key result dicts (normal vs suppressed path) | Medium |
+| N7 | `LearningStateStore.save()` shallow merge risks overwriting nested keys | Medium |
+| N8 | `anomaly_score` parameter in `_observe_online_learner` is never used | Trivial |
+
+**Prioritised plan:** 3 P1 (critical correctness: EWMA update bug, rollback scope, silent DB failures), 8 P2 (maintainability/performance), 5 P3 (style/polish), with a 10-step recommended execution order.
+
+Full plan written to `docs/refactor/full_improvement_plan.md`. `AGENT_MEMORY.md` updated.

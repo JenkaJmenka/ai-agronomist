@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "cleanupPeriodDays": 180,
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(*)",
+      "Write(**)",
+      "Bash(git *)",
+      "Bash(python3 *)",
+      "Bash(python -m pytest *)",
+      "Bash(python -m pip *)",
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(pytest *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(echo *)",
+      "Bash(diff *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(curl *)",
+      "Bash(claude *)",
+      "Bash(nohup *)",
+      "Bash(bash *)",
+      "Bash(chmod *)",
+      "Bash(awk *)",
+      "Bash(python3 -c *)",
+      "Bash(kill *)",
+      "Bash(ps *)",
+      "Bash(pkill *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(./secrets/**)",
+      "Read(./**/credentials*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Bash(rm -rf *)"
+    ]
+  },
+  "alwaysThinkingEnabled": true
+}

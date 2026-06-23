@@ -1,0 +1,24 @@
+The architecture review is complete. Here's a summary of what was produced:
+
+## Full SCADA Architecture Review — Complete
+
+**Output:** `docs/architecture/full_improvement_plan.md`
+
+### Key Findings
+
+**3 P1 Critical:**
+1. **LearningState contention** — GAR-3 merge hotfix is insufficient under concurrent Postgres writes. Need `SELECT FOR UPDATE` short-term, table split long-term.
+2. **Unbounded tracker cache** — `setattr(self, f"_trackers_{customer_id}", ...)` creates unbounded instance attribute growth (memory leak).
+3. **Incident storage not gated on `is_anomaly`** — every inference request stores an Incident row, polluting analytics and bloating the DB.
+
+**4 P2 High:**
+1. Gas vs main pipeline contract divergence — need shared `DetectionResult` type
+2. `fault_type` unconstrained string — add Pydantic validator + DB CHECK constraint
+3. Gas EWMA per-request only — remove EWMA from `GasAnomalyDetector`
+4. Pipeline returns untyped 30+ key dict — define `PipelineResult` model
+
+**6 P3 Medium:** Dead physics suppression branch, O(n) baseline comparison, config inconsistencies, UTC-only night detection, missing response models, silent spike_fault default.
+
+**7 P4 Low:** Code hygiene items (duplicated constants, assert usage, lazy imports, etc.)
+
+The document includes a 4-sprint implementation roadmap with effort estimates, a data flow assessment, persistence strategy analysis, and separation-of-concerns evaluation. AGENT_MEMORY.md has been updated.
