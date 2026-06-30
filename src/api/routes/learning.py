@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import MAX_HISTORY_LIMIT
 from src.api.routes.inference import get_cached_detector
 from src.api.schemas.learning import (
+    ActiveModelVersionResponse,
     DriftStateResponse,
     DriftStatus,
     LearnerStatisticsResponse,
@@ -26,6 +27,7 @@ from src.api.schemas.learning import (
     PredictRequest,
     PredictResponse,
 )
+from src.models.model_registry import ModelRegistry
 from src.db.learning_logs import (
     DEFAULT_HISTORY_LIMIT,
     DRIFT_CHECK_EVENT,
@@ -216,3 +218,42 @@ async def get_drift(
         ),
         detector=detector_state,
     )
+
+@router.get("/models/{tenant_id}/active-version", response_model=ActiveModelVersionResponse)
+async def get_active_model_version(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ActiveModelVersionResponse:
+    """Return the currently deployed model version for a tenant.
+
+    Returns 404 when no ModelDeployment with is_current=True exists for the tenant.
+    """
+    registry = ModelRegistry(db)
+    active = await registry.get_active_model(tenant_id)
+    if active is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No active model deployment for tenant '{tenant_id}'",
+        )
+    return ActiveModelVersionResponse(
+        model_id=active["model_id"],
+        checkpoint_path=active["checkpoint_path"],
+    )
+
+
+@router.delete("/models")
+async def clear_models(
+    tenant_id: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clears all trained models for a tenant, resetting them to the base model."""
+    from src.models.model_registry import ModelRegistry
+    registry = ModelRegistry(db)
+    count = await registry.clear_models(tenant_id)
+    
+    # Also clear the online learner from memory so it gets recreated from baseline
+    global _manager
+    if _manager is not None and tenant_id in _manager.learners:
+        del _manager.learners[tenant_id]
+        
+    return {"status": "success", "deleted_versions": count, "message": f"Successfully cleared {count} model(s) for tenant {tenant_id}"}

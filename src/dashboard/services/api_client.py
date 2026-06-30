@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from src.dashboard.services.http_utils import raise_for_status_with_detail
+
 DEFAULT_API_URL = "http://localhost:8000"
 
 
@@ -38,7 +40,7 @@ class DashboardApiClient:
             headers=self._headers(),
             timeout=30,
         )
-        resp.raise_for_status()
+        raise_for_status_with_detail(resp)
         return resp.json()
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Any:
@@ -46,9 +48,9 @@ class DashboardApiClient:
             f"{self.base_url}{path}",
             json=payload,
             headers=self._headers(),
-            timeout=30,
+            timeout=60,
         )
-        resp.raise_for_status()
+        raise_for_status_with_detail(resp)
         return resp.json()
 
     def mark_anomaly(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,3 +81,11 @@ class DashboardApiClient:
 
     def get_monitoring_metrics(self, hours: int = 24) -> Dict[str, Any]:
         return self._get("/api/monitoring/metrics", params={"hours": hours})
+
+    def get_active_model_version(self, tenant_id: str) -> str:
+        """Return active model_id for tenant, or 'baseline' if none deployed."""
+        try:
+            r = self._get(f"/api/learning/models/{tenant_id}/active-version")
+            return r.get("model_id", "baseline")
+        except Exception:
+            return "baseline"

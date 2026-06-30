@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import logging
+from sklearn.ensemble import IsolationForest
 from torch.utils.data import DataLoader, TensorDataset
 
 from src import config
@@ -22,6 +24,39 @@ SENSOR_RANGES: List[Tuple[float, float]] = [
     CO2_RANGE,
     LIGHT_RANGE,
 ]
+
+def compute_adaptive_sensor_ranges(
+    data: np.ndarray,
+    default_ranges: Optional[List[Tuple[float, float]]] = None,
+) -> List[Tuple[float, float]]:
+    """Derive per-column (min, max) from observed data with 5% padding.
+
+    Falls back to *default_ranges* when a column is flat or empty so cold-run
+    inference on real greenhouse CSVs is not clipped to the synthetic training
+    bounds (e.g. TEMP_RANGE 20–30 °C).
+    """
+    if default_ranges is None:
+        default_ranges = SENSOR_RANGES
+    if data.ndim == 3:
+        flat = data.reshape(-1, data.shape[-1])
+    else:
+        flat = data
+    ranges: List[Tuple[float, float]] = []
+    n_cols = flat.shape[1] if flat.ndim == 2 else len(default_ranges)
+    for i in range(n_cols):
+        col = flat[:, i]
+        valid = col[np.isfinite(col)]
+        if valid.size == 0:
+            ranges.append(default_ranges[i])
+            continue
+        vmin, vmax = float(valid.min()), float(valid.max())
+        if vmax - vmin < 1e-6:
+            ranges.append(default_ranges[i])
+            continue
+        pad = max((vmax - vmin) * 0.05, 1e-3)
+        ranges.append((vmin - pad, vmax + pad))
+    return ranges
+
 
 def normalize_data(data: np.ndarray, ranges: List[Tuple[float, float]]) -> np.ndarray:
     """
@@ -238,3 +273,33 @@ def create_data_loaders(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader
+
+def sanitize_training_data(data: np.ndarray, contamination: float = 0.05) -> np.ndarray:
+    """
+    Robust data sanitization using Isolation Forest to remove the most extreme
+    multivariate anomalies (e.g. from a dirty dataset) before model training.
+    This prevents Cold Start Contamination where the model learns anomalies as 'normal'.
+
+    Args:
+        data: The continuous raw sensor data of shape (T, input_dim).
+        contamination: The proportion of data to drop (0.0 to 0.5).
+                       Set to 0.05 to drop the worst 5%.
+
+    Returns:
+        np.ndarray: The sanitized data array.
+    """
+    if contamination <= 0.0 or data.shape[0] < 50:
+        return data
+
+    # Fit an isolation forest to find multivariate outliers
+    iso = IsolationForest(contamination=contamination, random_state=42)
+    # The predict method returns 1 for inliers and -1 for outliers
+    preds = iso.fit_predict(data)
+    
+    # Keep only the inliers
+    sanitized_data = data[preds == 1]
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"Sanitized training data. Dropped {data.shape[0] - sanitized_data.shape[0]} highly anomalous rows (contamination={contamination}).")
+    
+    return sanitized_data

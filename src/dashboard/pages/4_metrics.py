@@ -1,13 +1,20 @@
 import streamlit as st
-from src.dashboard.components.charts import apply_date_filter, query_sensor_readings
+from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
+from src.dashboard.components.global_sidebar import render_global_sidebar
+from src.dashboard.components.timeline import (
+    get_timeline_bounds,
+    init_monitoring_session_state,
+    render_date_range_filters,
+)
 from src.dashboard.services.api_client import DashboardApiClient
 import pandas as pd
 
 st.set_page_config(page_title="System Metrics", layout="wide")
+render_global_sidebar()
 st.title("System Metrics & Model Performance")
 
 if "selected_tenant" not in st.session_state:
-    st.warning("Please configure global settings in the sidebar of the main app.")
+    st.warning("Please configure global settings in the sidebar.")
     st.stop()
 
 tenant = st.session_state["selected_tenant"]
@@ -72,11 +79,11 @@ with st.spinner("Compiling sensor coverage..."):
 if df.empty:
     st.info("No sensor data available to calculate coverage metrics.")
 else:
-    df = apply_date_filter(
-        df,
-        st.session_state.get("start_date"),
-        st.session_state.get("end_date"),
-    )
+    _ts = pd.to_datetime(df["timestamp"])
+    init_monitoring_session_state(tenant, greenhouse, _ts.min(), _ts.max())
+    render_date_range_filters(_ts.min(), _ts.max(), key_prefix="metrics")
+    window_start, window_end = get_timeline_bounds()
+    df = apply_datetime_filter(df, window_start, window_end)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Data Points", f"{len(df):,}")

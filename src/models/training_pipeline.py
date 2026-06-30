@@ -1,16 +1,24 @@
 import asyncio
-import numpy as np
+import glob
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
+
+import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-import glob
 
-from src.models.transfer_learner import TransferLearner
+from src.config import (
+    ACTIVE_LEARNING_IMPROVEMENT_THRESHOLD,
+    ACTIVE_LEARNING_MIN_TRAINING_SAMPLES,
+    PATHS,
+    TRAINING_IF_CONTAMINATION,
+)
+from src.db.models import SensorReading
+from src.models.data_utils import sanitize_training_data
+from src.models.lstm_vae import LSTMVAE
 from src.models.model_evaluator import ModelEvaluator
 from src.models.model_registry import ModelRegistry
-from src.models.lstm_vae import LSTMVAE
-from src.db.models import SensorReading
+from src.models.transfer_learner import TransferLearner
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +33,7 @@ class PerCustomerTrainingPipeline:
         
         if not baseline_checkpoint_path:
             # Fallback to the latest checkpoint
-            checkpoints = sorted(glob.glob("models/checkpoints/epoch_*.pt"))
+            checkpoints = sorted(glob.glob(f"{PATHS['checkpoint_dir']}epoch_*.pt"))
             self.baseline_checkpoint_path = checkpoints[-1] if checkpoints else "models/baseline.pt"
         else:
             self.baseline_checkpoint_path = baseline_checkpoint_path
@@ -54,14 +62,17 @@ class PerCustomerTrainingPipeline:
         
         # 1. Load Data
         customer_data = await self._load_customer_data(customer_id)
-        if len(customer_data) < 100:
+        if len(customer_data) < ACTIVE_LEARNING_MIN_TRAINING_SAMPLES:
             logger.warning(f"Not enough data to train model for {customer_id}")
             return None
+            
+        # 1.5 Sanitize data to prevent Cold Start Contamination
+        sanitized_data = sanitize_training_data(customer_data, contamination=TRAINING_IF_CONTAMINATION)
             
         # 2. Transfer Learning
         learner = TransferLearner(checkpoint_path=self.baseline_checkpoint_path)
         try:
-            new_checkpoint = await learner.fine_tune(customer_id, customer_data, epochs=5)
+            new_checkpoint = await learner.fine_tune(customer_id, sanitized_data, epochs=5)
         except Exception as e:
             logger.error(f"Transfer learning failed: {e}")
             return None
@@ -86,7 +97,7 @@ class PerCustomerTrainingPipeline:
         # 4. Register if better (or if there's no active model)
         active_model = await self.registry.get_active_model(customer_id)
         
-        if not active_model or comp['improvement_percent'] > 0:
+        if not active_model or comp['improvement_percent'] > ACTIVE_LEARNING_IMPROVEMENT_THRESHOLD * 100:
             # Register it
             model_id = await self.registry.register_model(
                 customer_id=customer_id,

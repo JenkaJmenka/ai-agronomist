@@ -1,28 +1,18 @@
 {
-  "phase": 6,
+  "phase": 1,
   "status": "waiting",
-  "waiting_for": [
-    "qa-spec-compliance",
-    "code-reviewer-spec-compliance"
-  ],
-  "dispatched_at": "2026-06-23T00:37:16Z",
+  "waiting_for": ["backend-engineer"],
+  "dispatched_at": "2026-06-30T00:00:00Z",
   "next_phase": {
-    "phase": "priority-a-qa",
+    "phase": 2,
     "agents": [
       {
         "agent": "qa-engineer",
-        "task": "Run full test suite, verify new detectors"
-      },
-      {
-        "agent": "code-reviewer",
-        "task": "Review dropout_detector, drift_detector, pattern_detector changes"
+        "task": "Write tests/dashboard/test_inference_cache.py with 4 test scenarios",
+        "output_file": "tests/dashboard/test_inference_cache.py"
       }
     ]
   },
-  "completed_phases": [
-    "sprint-a",
-    "sprint-b",
-    "sprint-c"
-  ],
-  "session_id": "unknown"
+  "completed_phases": [],
+  "session_id": "0aff6ac0-b580-494e-95d4-39c134a8d02e"
 }

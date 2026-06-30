@@ -93,19 +93,20 @@ class TestFlushMetricsSnapshotException:
 
 class TestLoadLatestSnapshotException:
     @pytest.mark.asyncio
-    async def test_db_exception_returns_none(self) -> None:
-        """load_latest_snapshot returns None when DB raises."""
+    async def test_db_exception_propagates(self) -> None:
+        """load_latest_snapshot re-raises DB errors so callers can distinguish
+        a genuine error from a legitimate empty-snapshot result (None)."""
         from src.monitoring.metrics_persistence import load_latest_snapshot
 
         mock_db = AsyncMock(spec=AsyncSession)
         mock_db.execute.side_effect = RuntimeError("query failed")
 
-        result = await load_latest_snapshot(mock_db)
-        assert result is None
+        with pytest.raises(RuntimeError, match="query failed"):
+            await load_latest_snapshot(mock_db)
 
     @pytest.mark.asyncio
     async def test_db_exception_logged(self, caplog) -> None:
-        """load_latest_snapshot logs the exception when DB fails."""
+        """load_latest_snapshot logs the exception before re-raising."""
         import logging
         from src.monitoring.metrics_persistence import load_latest_snapshot
 
@@ -113,18 +114,19 @@ class TestLoadLatestSnapshotException:
         mock_db.execute.side_effect = RuntimeError("read error")
 
         with caplog.at_level(logging.ERROR):
-            await load_latest_snapshot(mock_db)
+            with pytest.raises(RuntimeError):
+                await load_latest_snapshot(mock_db)
 
         error_msgs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
         assert any("load metrics snapshot" in msg.lower() for msg in error_msgs)
 
     @pytest.mark.asyncio
-    async def test_db_exception_does_not_raise(self) -> None:
-        """load_latest_snapshot must never propagate DB exceptions to caller."""
+    async def test_db_exception_type_preserved(self) -> None:
+        """The original exception type is preserved when re-raised."""
         from src.monitoring.metrics_persistence import load_latest_snapshot
 
         mock_db = AsyncMock(spec=AsyncSession)
-        mock_db.execute.side_effect = Exception("unexpected")
+        mock_db.execute.side_effect = ValueError("unexpected")
 
-        result = await load_latest_snapshot(mock_db)  # must not raise
-        assert result is None
+        with pytest.raises(ValueError, match="unexpected"):
+            await load_latest_snapshot(mock_db)

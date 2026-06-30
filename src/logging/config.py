@@ -3,7 +3,6 @@ import logging
 import logging.config
 import os
 import sys
-from logging.handlers import TimedRotatingFileHandler
 
 # Define sensitive fields to be redacted
 SENSITIVE_FIELDS = {"password", "api_key", "token"}

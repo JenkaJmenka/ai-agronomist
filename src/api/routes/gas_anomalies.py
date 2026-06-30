@@ -78,7 +78,7 @@ async def _fetch_real_readings(
 async def gas_summary(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(..., min_length=1),
-    hours: int = Query(24, ge=1, le=168),
+    hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """
@@ -171,7 +171,7 @@ async def gas_summary(
 async def gas_readings(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(..., min_length=1),
-    hours: int = Query(24, ge=1, le=168),
+    hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """

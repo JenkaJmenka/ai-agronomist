@@ -80,7 +80,6 @@ def test_priva_client_normalize_and_validate():
     assert client.validate(normalized_df) is True
 
 
-@pytest.mark.async_io
 @pytest.mark.asyncio
 async def test_priva_client_fetch_data_integration():
     """Verify high level async fetch_data lifecycle orchestration."""

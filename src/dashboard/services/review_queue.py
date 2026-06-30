@@ -15,6 +15,7 @@ import pandas as pd
 from src.config import INPUT_DIM, SEQ_LEN
 from src.dashboard.components.charts import apply_date_filter, query_sensor_readings
 from src.dashboard.services.api_client import DashboardApiClient
+from src.dashboard.services.diagnosis_enricher import resolve_canonical_sensor_values
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
 
 SENSOR_VALUE_COLS = ["temperature", "humidity", "co2", "light"]
@@ -22,6 +23,16 @@ SENSOR_VALUE_COLS = ["temperature", "humidity", "co2", "light"]
 
 def _default_row() -> List[float]:
     return [25.0, 65.0, 400.0, 500.0]
+
+
+def _row_to_sensor_vector(row: pd.Series) -> List[float]:
+    """Map a reading row to the 4 canonical LSTM inputs."""
+    resolved = resolve_canonical_sensor_values(row)
+    defaults = {"temperature": 25.0, "humidity": 65.0, "co2": 400.0, "light": 500.0}
+    return [
+        float(resolved.get(col) if resolved.get(col) is not None else defaults[col])
+        for col in SENSOR_VALUE_COLS
+    ]
 
 
 def build_sequence_from_readings(
@@ -40,7 +51,7 @@ def build_sequence_from_readings(
 
     rows: List[List[float]] = []
     for _, row in window.iterrows():
-        rows.append([float(row[c]) for c in SENSOR_VALUE_COLS])
+        rows.append(_row_to_sensor_vector(row))
 
     if not rows:
         rows = [_default_row()]
@@ -121,14 +132,15 @@ def list_pending_anomalies(
     for _, row in anomalies.iterrows():
         if _has_nearby_incident(row["timestamp"], existing_incidents):
             continue
+        vector = _row_to_sensor_vector(row)
         pending.append(
             {
                 "timestamp": row["timestamp"],
                 "anomaly_score": float(row["anomaly_score"]),
-                "temperature": float(row["temperature"]),
-                "humidity": float(row["humidity"]),
-                "co2": float(row["co2"]),
-                "light": float(row["light"]),
+                "temperature": vector[0],
+                "humidity": vector[1],
+                "co2": vector[2],
+                "light": vector[3],
                 "sequence": build_sequence_from_readings(
                     all_readings, row["timestamp"]
                 ),

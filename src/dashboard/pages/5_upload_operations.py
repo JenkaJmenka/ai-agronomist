@@ -1,17 +1,17 @@
-import time
 import os
+import time
 
-import pandas as pd
-import plotly.express as px
-import requests
 import streamlit as st
 
-from src.config import ANOMALY_THRESHOLD
 from src.dashboard.components.charts import get_available_greenhouses
+from src.dashboard.components.global_sidebar import render_global_sidebar
+from src.dashboard.services.api_client import DEFAULT_API_URL
+from src.dashboard.services.http_utils import api_delete, api_get, api_post
 
-API_URL = os.environ.get("API_URL", "http://localhost:8000")
+API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
 
 st.set_page_config(page_title="Upload & Operations", page_icon="📤", layout="wide")
+render_global_sidebar()
 
 st.title("Data Upload & Model Operations")
 st.markdown("Upload raw sensor data for training or find anomalies instantly using the active model.")
@@ -39,8 +39,9 @@ with tab1:
     if job and job.get("status") == "running":
         _status_placeholder = st.empty()
         try:
-            res_status = requests.get(
-                f"{API_URL}/api/models/{job['customer_id']}/training-status", timeout=5
+            res_status = api_get(
+                f"{API_URL}/api/models/{job['customer_id']}/training-status",
+                timeout=5,
             )
             current = res_status.json() if res_status.ok else {"status": "running"}
         except Exception:
@@ -72,18 +73,20 @@ with tab1:
                 files = {"file": (uploaded_file_train.name, uploaded_file_train.getvalue(), "text/csv")}
                 data = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
                 try:
-                    res_upload = requests.post(f"{API_URL}/api/upload", files=files, data=data)
-                    res_upload.raise_for_status()
+                    res_upload = api_post(
+                        f"{API_URL}/api/upload",
+                        files=files,
+                        data=data,
+                    )
                     st.success(f"Uploaded {res_upload.json().get('uploaded', 0)} rows successfully.")
 
-                    res_train = requests.post(f"{API_URL}/api/models/{tenant_id_train}/train")
-                    res_train.raise_for_status()
+                    res_train = api_post(f"{API_URL}/api/models/{tenant_id_train}/train")
                     st.session_state["training_job"] = {
                         "status": "running",
                         "customer_id": tenant_id_train,
                     }
                     st.rerun()
-                except requests.exceptions.RequestException as e:
+                except Exception as e:
                     st.error(f"Operation failed: {e}")
                     if hasattr(e, "response") and e.response is not None:
                         try:
@@ -160,11 +163,10 @@ with tab1:
             if _window_start:
                 _post_data["window_start"] = _window_start
                 _post_data["window_end"] = _window_end
-            res_ia = requests.post(
+            res_ia = api_post(
                 f"{API_URL}/api/upload/inject-test-anomalies",
                 data=_post_data,
             )
-            res_ia.raise_for_status()
             d = res_ia.json()
             from src.dashboard.components.charts import clear_sensor_cache  # noqa: PLC0415
             clear_sensor_cache()
@@ -201,13 +203,17 @@ with tab1:
             _params = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
             if _rm_type:
                 _params["anomaly_type"] = _rm_type
-            res_rm = requests.delete(
+            res_rm = api_delete(
                 f"{API_URL}/api/upload/inject-test-anomalies", params=_params
             )
-            res_rm.raise_for_status()
             d_rm = res_rm.json()
             from src.dashboard.components.charts import clear_sensor_cache  # noqa: PLC0415
+            from src.dashboard.components.inference_results import (  # noqa: PLC0415
+                clear_inference_results_for,
+            )
+
             clear_sensor_cache()
+            clear_inference_results_for(tenant_id_train, greenhouse_id_train)
             st.success(
                 f"Removed {d_rm['deleted_sensor']} sensor readings "
                 f"and {d_rm['deleted_raw']} raw readings "
@@ -222,13 +228,17 @@ with tab1:
     st.warning("This permanently deletes all sensor readings for the selected tenant and greenhouse.")
     if st.button("Clear all data", type="secondary"):
         try:
-            res = requests.delete(
+            api_delete(
                 f"{API_URL}/api/upload/data",
                 params={"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train},
             )
-            res.raise_for_status()
             from src.dashboard.components.charts import clear_sensor_cache  # noqa: PLC0415
+            from src.dashboard.components.inference_results import (  # noqa: PLC0415
+                clear_inference_results_for,
+            )
+
             clear_sensor_cache()
+            clear_inference_results_for(tenant_id_train, greenhouse_id_train)
             get_available_greenhouses.clear()
             st.success(
                 f"All data cleared for tenant `{tenant_id_train}` / greenhouse `{greenhouse_id_train}`."
@@ -238,62 +248,9 @@ with tab1:
 
 with tab2:
     st.header("Upload & Find Anomalies")
-    st.write("Instantly evaluate a dataset for anomalies without persisting it to the training database.")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        tenant_id_inf = st.text_input("Tenant ID", "tenant_1", key="tenant_inf")
-        _gh_opts_inf = get_available_greenhouses(tenant_id_inf)
-        _gh_default_inf = st.session_state.get("selected_greenhouse", _gh_opts_inf[0])
-        _gh_idx_inf = _gh_opts_inf.index(_gh_default_inf) if _gh_default_inf in _gh_opts_inf else 0
-        greenhouse_id_inf = st.selectbox(
-            "Greenhouse ID", _gh_opts_inf, index=_gh_idx_inf, key="greenhouse_inf"
-        )
-
-    uploaded_file_inf = st.file_uploader("Choose a CSV file for anomaly detection", type="csv", key="file_inf")
-
-    if st.button("Find Anomalies", type="primary"):
-        if not tenant_id_inf or not greenhouse_id_inf:
-            st.warning("Tenant ID and Greenhouse ID cannot be empty.")
-        elif uploaded_file_inf is not None:
-            with st.spinner("Running inference pipeline..."):
-                files = {"file": (uploaded_file_inf.name, uploaded_file_inf.getvalue(), "text/csv")}
-                data = {"tenant_id": tenant_id_inf, "greenhouse_id": greenhouse_id_inf}
-
-                try:
-                    res_inf = requests.post(f"{API_URL}/api/inference/upload", files=files, data=data)
-                    res_inf.raise_for_status()
-                    results = res_inf.json()
-
-                    st.success(f"Processed {results.get('sequences_processed', 0)} sequences. Detected {results.get('anomalies_detected', 0)} anomalies.")
-
-                    # Visualization
-                    scores = results.get("anomaly_scores", [])
-                    if scores:
-                        df_scores = pd.DataFrame({
-                            "Sequence Index": range(len(scores)),
-                            "Anomaly Score": scores
-                        })
-
-                        fig = px.line(df_scores, x="Sequence Index", y="Anomaly Score", title="Anomaly Scores over Time")
-                        fig.add_hline(y=ANOMALY_THRESHOLD, line_dash="dash", line_color="red", annotation_text="Anomaly Threshold")
-
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    high_anomalies = results.get("high_anomalies", [])
-                    if high_anomalies:
-                        st.subheader("High Anomalies Detected")
-                        df_high = pd.DataFrame(high_anomalies)
-                        st.dataframe(df_high)
-                    else:
-                        st.info("No high anomalies detected in this dataset.")
-
-                except requests.exceptions.RequestException as e:
-                    st.error(f"Inference failed: {e}")
-                    if hasattr(e, 'response') and e.response is not None:
-                        try:
-                            st.json(e.response.json())
-                        except Exception:
-                            st.write(e.response.text)
-        else:
-            st.warning("Please upload a CSV file first.")
+    st.info(
+        "CSV anomaly detection has moved to the **Anomaly Detection** page. "
+        "Upload there to analyze data, view combined charts, and browse all anomaly tables."
+    )
+    if st.button("Go to Anomaly Detection", type="primary", key="goto_anomalies"):
+        st.switch_page("pages/2_anomalies.py")

@@ -260,3 +260,8 @@ def test_inference_upload_csv(test_client, patch_detector):
     # 50 rows, seq_len 20 -> 50 - 20 + 1 = 31 sequences processed
     assert data["sequences_processed"] == 31
     assert len(data["anomaly_scores"]) == 31
+    assert "threshold_used" in data
+    assert data["threshold_used"] < 0.8
+    assert data["threshold_method"] in ("pot", "percentile")
+    assert isinstance(data["imputed_channels"], list)
+    assert data["statistical_summary"] is not None

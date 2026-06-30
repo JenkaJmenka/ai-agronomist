@@ -3,7 +3,268 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-SCADA Spec-Compliance Code Review (5 fault detection algorithms) — **COMPLETE** (2026-06-23).
+**Two-Layer Dashboard Caching System — COMPLETE (2026-06-30)**
+Content-addressed Layer 1 inference cache, active-model-version API endpoint, and dashboard double-caching fix implemented.
+Agent: backend-engineer. Done signal: tasks/done/backend-engineer.json.
+
+### Dashboard Caching System (2026-06-30)
+
+**New files created:**
+
+- **`src/dashboard/services/inference_cache.py`**: Content-addressed disk cache for upload inference results. Functions: `compute_file_hash(file_bytes)` (sha256 hex digest), `_cache_root()` (honours `DASHBOARD_DATA_DIR`), `_safe_segment(value)` (mirrors upload_results_store.py pattern), `layer1_cache_path(file_hash, model_version)` (returns `{hash}__{safe(version)}.json` path), `read_layer1` (logs HIT/MISS at INFO, returns None on corrupt/missing), `write_layer1` (calls `slim_results_for_cache` before writing — strips embeddings/uncertainties), `delete_layer1` (swallows OSError).
+
+**Files modified:**
+
+- **`src/api/schemas/learning.py`**: Added `ActiveModelVersionResponse(model_id: str, checkpoint_path: str)` Pydantic v2 model.
+- **`src/api/routes/learning.py`**: Added `ModelRegistry` top-level import; added `GET /models/{tenant_id}/active-version` endpoint returning `ActiveModelVersionResponse` (404 when no `is_current=True` deployment exists for tenant).
+- **`src/dashboard/services/api_client.py`**: Added `get_active_model_version(tenant_id)` method — calls `self._get(...)` (which already returns parsed JSON) so uses `.get("model_id", "baseline")` directly; returns `"baseline"` on any exception.
+- **`src/dashboard/pages/2_anomalies.py`**: Added `inference_cache` import at top. Refactored `_render_upload_section` upload button handler: computes `file_hash`, fetches `model_version` via `DashboardApiClient`, checks `read_layer1` before showing spinner. HIT path skips API call entirely; MISS path calls API then `write_layer1`. Both paths update `_cache_stats` in session state. Added debug cache stats expander (gated on `st.session_state.get("debug_cache")`).
+- **`src/dashboard/services/anomalies_page_data.py`**: Removed `@st.cache_data` decorator from `load_readings_window` and `load_timestamp_bounds` (underlying chart functions already cached). Updated `clear_anomaly_page_cache` to not call `.clear()` on now-uncached wrappers. `load_upload_score_frame` and `enrich_anomalies_table` keep their `@st.cache_data` decorators.
+- **`src/dashboard/constants.py`**: Added `import os` and `LAYER1_CACHE_DIR: str = os.path.join(os.environ.get("DASHBOARD_DATA_DIR", "data"), "inference_result_cache")`.
+
+**Design decisions:**
+- `_get` in `DashboardApiClient` already returns parsed JSON (not response object), so `get_active_model_version` uses `.get()` not `.json().get()`.
+- `write_layer1` accepts full payload dict and slims internally (caller provides full results, cache stores slimmed).
+- HIT path calls `save_inference_results` with slimmed results (embeddings/uncertainties dropped) — acceptable since dashboard only needs scores/anomalies for display.
+- `clear_anomaly_page_cache` updated to skip `.clear()` on bare (non-cached) wrapper functions to prevent `AttributeError`.
+
+**Smoke tests:** All 5 passed — module import, hash stability (sha256/64 chars), round-trip write/read, version invalidation (different model_version → None), test collection (1547 tests, no new errors).
+
+Previous phase: **Two-Pass Cold-Start Bootstrap Pipeline — FULLY COMPLETE (2026-06-25)**
+Investigated all 5 suspected root causes for "0 anomalies on contaminated data" bug.
+**Finding: No mechanical bug in current code.** Reproduction test passes (34 anomalies detected on 500-row dataset with 10-row temperature=999°C spike). All 5 root causes verified correct: shapes match (batch & recon both `(B, SEQ_LEN, INPUT_DIM)`), norm_params API compatible (`List[Tuple[float, float]]`), create_sequences produces correct shape, threshold P99=2.69 (not near-zero), inference normalization correctly maps 999°C to 89.6 in normalized space.
+Agent: ml-engineer-p2-fix. Done signal: tasks/done/ml-engineer-p2-fix.json
+
+### Improvements added (2026-06-25)
+- **`engines/pass2_bootstrap_detect.py`**: Added `torch.manual_seed(RANDOM_SEED)` before model instantiation for reproducible training. Added diagnostic `logger.info` for train loss stats (min/mean/max/P99) after threshold computation. Added `logger.debug` for batch/recon shape verification in `_compute_per_sequence_loss` (first batch only).
+- **`tests/engines/test_pass2_bootstrap_detect.py`**: Added `test_detects_anomalies_on_contaminated_data` regression test — injects 999°C temperature spike into rows 50-59 and asserts `anomaly_count > 0`. All 26 tests pass.
+
+Previous phase: **Two-Pass Cold-Start Anomaly Detection Pipeline — COMPLETE (2026-06-25)**
+Full 4-phase orchestration finished. All blocking code review issues resolved.
+Endpoint live: `POST /api/v1/bootstrap/run`.
+
+### Pipeline Summary
+
+| Phase | Agent | Output | Status |
+|-------|-------|--------|--------|
+| 1a | architect | `docs/architecture/cold_start_bootstrap.md` | DONE |
+| 1b | ml-engineer | `src/models/psychrometric_validator.py`, `engines/cold_start_bootstrap.py`, `src/config.py` (bootstrap constants) | DONE |
+| 2 | ml-engineer | `engines/pass2_bootstrap_detect.py` | DONE |
+| 3 | backend-engineer | `src/api/routes/bootstrap.py`, `src/api/schemas/bootstrap.py`, `src/api/main.py` (registered) | DONE |
+| 4 | code-reviewer | `docs/review/cold_start_bootstrap_review.md` — verdict: NEEDS FIXES (resolved) | DONE |
+| fixes | backend-engineer + ml-engineer | COR-1, COR-2, SEC-1/2, CQ-5, HC-1/HC-4 all resolved | DONE |
+
+### New Files Created
+
+- `src/models/psychrometric_validator.py` — Tetens equation, HD validation, pure functions
+- `engines/cold_start_bootstrap.py` — Pass 1: CSV ingest → psychrometrics → IsolationForest(contamination=0.04) → `bootstrapped_clean_{tenant_id}.csv`
+- `engines/pass2_bootstrap_detect.py` — Pass 2: LSTM-VAE train on clean data → full inference → 5 univariate classifiers (spike/stuck/drift/noise/dropout)
+- `src/api/routes/bootstrap.py` — `POST /api/v1/bootstrap/run` multipart endpoint
+- `src/api/schemas/bootstrap.py` — `BootstrapRowResult`, `BootstrapRunResponse` Pydantic models
+
+### New Config Constants (src/config.py)
+`BOOTSTRAP_GAS_NULL_THRESHOLD=0.95`, `BOOTSTRAP_IF_CONTAMINATION=0.04`, `BOOTSTRAP_RESAMPLE_INTERVAL="5min"`, `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE=99.0`, `BOOTSTRAP_MIN_CLEAN_ROWS=100`, `BOOTSTRAP_MIN_IF_ROWS=10`, `PSYCHROMETRIC_HD_TOLERANCE=0.05`, `SPIKE_DELTA_MAX` (per-sensor dict)
+
+### Key Design Decisions
+- LSTM-VAE reused (not a new deterministic AE) — VAE's KL regularisation avoids overfitting to noise in the clean baseline
+- Inference runs on Pass 1 resampled/interpolated DataFrame (not raw CSV) — ensures train/infer data alignment
+- Output files are tenant-scoped (`data/bootstrapped_clean_{tenant_id}.csv`) — eliminates concurrent-request races
+- `InsufficientDataError(ValueError)` custom exception — clean 400 vs 500 discrimination in API route
+- CUSUM is stateful across all rows in `infer()` — one instance preserves drift accumulator state
+
+### Remaining Non-Blocking Notes (from review)
+- SCADA-2: CUSUM never reset after alarm — cascading drift tags (intentional non-resetting variant)
+- PERF-1: `iterrows()` psychrometric validation vectorizable for >100K row datasets
+- HC-3: NaT ratio 0.5 threshold not in config (LOW)
+- No QA test suite (skipped by user)
+
+Previous phase: Bootstrap Code Review Fixes (Backend Engineer) — **COMPLETE** (2026-06-25).
+All 4 blocking/medium issues from the code review fixed and smoke-tested.
+Done signal: `tasks/done/backend-engineer-fixes.json`.
+
+### Bootstrap Code Review Fixes (2026-06-25)
+
+**Files modified:**
+
+- **`engines/cold_start_bootstrap.py`**:
+  - Added `InsufficientDataError(ValueError)` custom exception class (Fix CQ-5).
+  - Added `__init__(self, clean_path, anomaly_path)` with optional path overrides defaulting to config constants (Fix COR-2 — tenant isolation).
+  - Updated `_save_outputs` to use `self._clean_path` / `self._anomaly_path` (Fix COR-2).
+  - Replaced `raise ValueError("Insufficient clean rows: ...")` with `raise InsufficientDataError(...)` (Fix CQ-5).
+
+- **`src/api/routes/bootstrap.py`**:
+  - **COR-1 (HIGH):** Replaced `pd.read_csv(tmp_path, ...)` with `pd.concat([pass1_result.clean_df, pass1_result.anomaly_df]).sort_index()` — inference now runs on the same 5-min resampled/interpolated data the model was trained on, not the raw vendor CSV.
+  - **CQ-5:** Imported `InsufficientDataError`; replaced fragile `except ValueError + msg.startswith("Insufficient clean rows")` with `except InsufficientDataError as exc`.
+  - **SEC-1:** `detail=f"Failed to write uploaded file: {exc}"` → `detail="Failed to process uploaded file"` + `logger.error(...)` server-side.
+  - **SEC-2:** `detail=f"Model training failed: {exc}"` → `detail="Model training failed"` + `logger.error(...)` server-side.
+  - **COR-2:** Built tenant-scoped paths (`BOOTSTRAP_CLEAN_PATH.replace(".csv", f"_{tenant_id}.csv")`) and passed them to `ColdStartBootstrap(clean_path=..., anomaly_path=...)` — each tenant writes to isolated files, eliminating concurrent-request data races.
+  - Imported `BOOTSTRAP_ANOMALY_PATH` from config (was missing).
+
+**Smoke test:** All 4 fixes verified via import + source inspection. `python3 -c "from src.api.routes.bootstrap import router; from engines.cold_start_bootstrap import ColdStartBootstrap, InsufficientDataError; print('All fixes OK')"` → **PASS**.
+
+Previous phase: Hardcoded-Value Fixes HC-1/HC-2/HC-4 (ML Engineer) — **COMPLETE** (2026-06-25).
+Fixed 3 hardcoded values flagged in code review (HC-1, HC-2, HC-4).
+Done signal: `tasks/done/ml-engineer-fixes.json`.
+
+### Hardcoded-Value Fixes (2026-06-25)
+
+**Files modified:**
+
+- **`src/config.py`**: Added `BOOTSTRAP_MIN_CLEAN_ROWS: int = 100` and `BOOTSTRAP_MIN_IF_ROWS: int = 10` to the "Two-Pass Cold-Start Bootstrap" section (before `BOOTSTRAP_GAS_NULL_THRESHOLD`).
+
+- **`engines/cold_start_bootstrap.py`**:
+  - Added `BOOTSTRAP_MIN_CLEAN_ROWS`, `BOOTSTRAP_MIN_IF_ROWS`, and `RANDOM_SEED` to imports from `src.config`.
+  - **HC-1**: Replaced hardcoded `100` in min-clean-rows guard with `BOOTSTRAP_MIN_CLEAN_ROWS`. Updated error message to use f-string interpolation. Updated docstring.
+  - **HC-2**: Replaced hardcoded `10` in IF minimum-rows guard with `BOOTSTRAP_MIN_IF_ROWS`. Updated warning message to use `%d` format with the constant.
+  - **HC-4**: Replaced `random_state=42` in `IsolationForest(...)` with `random_state=RANDOM_SEED`.
+
+**Smoke test:** `from engines.cold_start_bootstrap import ColdStartBootstrap; from src.config import BOOTSTRAP_MIN_CLEAN_ROWS, BOOTSTRAP_MIN_IF_ROWS, RANDOM_SEED` — PASS.
+
+**Remaining review findings (not addressed in this fix):**
+- HC-3 (LOW): NaT ratio 0.5 threshold — not requested.
+- COR-1 (HIGH): Inference on raw CSV instead of resampled data.
+- COR-2 (MEDIUM-HIGH): tenant_id unused.
+- COR-3 (MEDIUM-HIGH): Zero test coverage for bootstrap pipeline.
+- SEC-1/SEC-2 (MEDIUM): Exception message leakage.
+
+Previous phase: Two-Pass Cold-Start Bootstrap Code Review (Code Reviewer) — **COMPLETE** (2026-06-25).
+Verdict: **NEEDS FIXES** — [docs/review/cold_start_bootstrap_review.md](docs/review/cold_start_bootstrap_review.md).
+1 HIGH (inference on raw CSV instead of Pass 1 resampled data — model/data mismatch).
+2 MEDIUM-HIGH (tenant_id unused with data race risk; zero test coverage for bootstrap pipeline).
+4 MEDIUM (hardcoded thresholds, exception message leakage).
+5 LOW/NOTE (duplicated helper, inconsistent Optional syntax, fragile string error matching, no upload size limit, mutable dataclass).
+All guardrail checks PASS. All SCADA classifiers correctly implement their specs.
+Psychrometric math exactly matches Tetens equation spec.
+Done signal: `tasks/done/code-reviewer-p4.json`.
+
+### Two-Pass Cold-Start Bootstrap Code Review (2026-06-25)
+
+**Files reviewed (10):** `psychrometric_validator.py`, `cold_start_bootstrap.py`, `pass2_bootstrap_detect.py`, `bootstrap.py` (route), `bootstrap.py` (schemas), `config.py`, `cusum_drift_detector.py`, `stuck_fault_detector.py`, `noise_detector.py`, `dropout_detector.py`.
+
+**Blocking issues:**
+- **COR-1 (HIGH):** `bootstrap.py` L126-128 re-reads the raw uploaded CSV for Pass 2 inference via `pd.read_csv(tmp_path, index_col=0, parse_dates=True)`. Model was trained on 5-min resampled, interpolated data from Pass 1. Raw CSV has irregular timestamps, no interpolation, and possibly vendor-specific column names that won't match `_CLIMATE_COLS`. Fix: use `pd.concat([pass1_result.clean_df, pass1_result.anomaly_df]).sort_index()` for inference.
+- **COR-3 (MEDIUM-HIGH):** Zero test files found in `tests/` for any bootstrap component (psychrometric, cold_start, pass2_bootstrap, bootstrap route). Prior agent reports mention inline tests during implementation but they were not persisted.
+
+**Should-fix issues:**
+- **COR-2:** `tenant_id` param accepted but unused — all tenants share `BOOTSTRAP_CLEAN_PATH`/`BOOTSTRAP_ANOMALY_PATH`, concurrent requests create data races.
+- **HC-1/HC-2:** Hardcoded `100` (min clean rows) and `10` (min IF rows) not in config.
+- **SEC-1/SEC-2:** Two HTTPException responses include raw `exc` messages — could leak filesystem paths or PyTorch internals to clients.
+- **CQ-5:** Error classification uses `msg.startswith("Insufficient clean rows")` — fragile string matching instead of custom exception class.
+
+**Non-blocking observations:**
+- CUSUM never reset after drift alarm — cascading tags (design choice but should be documented).
+- `iterrows()` psychrometric validation — vectorizable for large datasets.
+- `_timestamp_to_iso` duplicated between engine and route.
+- `RANDOM_SEED=42` in config not used by IsolationForest (hardcoded `42`).
+
+Previous phase: Two-Pass Bootstrap API Wiring (Backend Engineer) — **COMPLETE** (2026-06-25).
+Bootstrap route, schemas, and main.py registration implemented.
+Both smoke imports pass. 10 existing inference tests still green. No regressions.
+Done signal: `tasks/done/backend-engineer-p3.json`.
+
+### Two-Pass Bootstrap API Wiring (2026-06-25)
+
+**Files created:**
+
+- **`src/api/schemas/bootstrap.py`**: Two Pydantic v2 models matching the task-spec JSON shape.
+  `BootstrapRowResult` mirrors the engine dataclass field-for-field (timestamp, is_anomaly, reconstruction_loss, pass1_filtered, root_cause_tags, contributing_sensors, physics_validation_status) so `dataclasses.asdict()` unpacks into it cleanly.
+  `BootstrapRunResponse` wraps the row-level list with ingestion counters (rows_ingested, pass1_clean_rows, pass1_anomaly_rows, results).
+
+- **`src/api/routes/bootstrap.py`**: `APIRouter(prefix="/api/v1/bootstrap", tags=["bootstrap"])`.
+  `POST /run` endpoint accepts `UploadFile + tenant_id Form field`.
+  Pipeline: (1) stream upload to `NamedTemporaryFile(delete=False)`, (2) `asyncio.to_thread(ColdStartBootstrap().run, tmp_path)` with typed error mapping (FileNotFoundError→422, ValueError "Insufficient clean rows"→400, all others→500), (3) `asyncio.to_thread(Pass2BootstrapDetector().train, BOOTSTRAP_CLEAN_PATH)` (→500 on failure), (4) `pd.read_csv(tmp_path, index_col=0, parse_dates=True)` for full DataFrame, (5) `asyncio.to_thread(detector.infer, full_df)`, (6) overlay pass1_filtered from `anomaly_df.index`, (7) overlay physics_validation_status="FAILED_PSYCHROMETRIC_LIMIT" from `physics_flags`, (8) `dataclasses.asdict()` → Pydantic conversion, (9) return BootstrapRunResponse. `try/finally` ensures tempfile cleanup.
+  `_ts_to_iso()` helper: tz-naive pandas Timestamps are localized to UTC before calling `.isoformat()` — matches `_timestamp_to_iso` logic in `pass2_bootstrap_detect.py`.
+
+**Files modified:**
+
+- **`src/api/main.py`**: Added `bootstrap` to the route import block and `app.include_router(bootstrap.router)` after `health.router`.
+
+**Design decisions:**
+- All heavy sync calls (sklearn IsolationForest, PyTorch training, PyTorch inference) wrapped in `asyncio.to_thread()` — event loop never blocked.
+- Engine's `BootstrapRowResult` imported under alias `EngineBootstrapRowResult` to avoid name collision with the Pydantic schema of the same name.
+- `pass1_filtered` and `physics_validation_status` overlays done by mutating the engine dataclass in-place (not frozen) before the `asdict()` conversion pass — single loop over `raw_results` for each overlay.
+- `BOOTSTRAP_CLEAN_PATH` sourced from `src.config` (not hardcoded).
+
+Previous phase: Pass 1 — Physics-Informed Cold-Start Bootstrapping (ML Engineer) — **COMPLETE** (2026-06-25).
+Psychrometric validator, cold-start bootstrap pipeline, and config constants implemented.
+All smoke imports pass. 16 functional tests pass (9 psychrometric + 7 pipeline).
+Done signal: `tasks/done/ml-engineer-p1.json`.
+
+### Pass 1 — Physics-Informed Cold-Start Bootstrapping (2026-06-25)
+
+**Files created:**
+
+- **`src/models/psychrometric_validator.py`**: Pure-function module implementing Tetens equation for psychrometric validation. Functions: `calculate_saturation_vapor_pressure(t_air)` → e_s in kPa, `calculate_humidity_deficit(t_air, rh)` → HD in g/m³, `validate_row(t_air, rh, hd_measured)` → Literal["OK", "FAILED_PSYCHROMETRIC_LIMIT"]. Edge cases: ValueError for T ≤ -273.15°C, RH ∉ [0, 100]. All thresholds from `src.config.PSYCHROMETRIC_HD_TOLERANCE`.
+
+- **`engines/cold_start_bootstrap.py`**: `ColdStartBootstrap` class with `run(csv_path)` → `BootstrapPass1Result`. Pipeline: (1) Parse CSV via CSVAdapter, (2) auto-detect ISO vs European timestamps (try without dayfirst first, fallback to dayfirst=True if >50% NaT), (3) resample to `BOOTSTRAP_RESAMPLE_INTERVAL` (5min), (4) linear-interpolate climate cols, (5) mask gas columns with null ratio > `BOOTSTRAP_GAS_NULL_THRESHOLD` (0.95), (6) psychrometric validation if temperature + humidity + humidity_deficit columns present (case-insensitive matching of 'humidity_deficit', 'measured_hd', 'hd', 'humidity deficit'), (7) IsolationForest on climate features (contamination=`BOOTSTRAP_IF_CONTAMINATION`=0.04), (8) combine physics + IF flags, (9) split clean/anomaly, (10) save to `BOOTSTRAP_CLEAN_PATH` / `BOOTSTRAP_ANOMALY_PATH`. Guards: raises ValueError if <100 clean rows; raises FileNotFoundError if CSV missing; skips psychrometric validation with warning if HD column absent. `BootstrapPass1Result` frozen dataclass: clean_df, anomaly_df, physics_flags (Series[bool]), if_flags (Series[bool]), gas_mask_cols (frozenset[str]).
+
+**Files modified:**
+
+- **`src/config.py`**: Added "Two-Pass Cold-Start Bootstrap" section with 8 constants: `BOOTSTRAP_GAS_NULL_THRESHOLD` (0.95), `BOOTSTRAP_IF_CONTAMINATION` (0.04), `BOOTSTRAP_RESAMPLE_INTERVAL` ("5min"), `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE` (99.0), `PSYCHROMETRIC_HD_TOLERANCE` (0.05 g/m³), `SPIKE_DELTA_MAX` (per-sensor velocity limits).
+
+**Design decisions:**
+- Timestamp parsing uses auto-detection: tries ISO/standard first, falls back to `dayfirst=True` for European SCADA exports — prevents month/day swap on ISO timestamps.
+- CSVAdapter.read() used for raw parsing (not normalize()) — the bootstrap pipeline handles its own resampling and interpolation since it needs to preserve non-standard columns (gas sensors, humidity deficit).
+- Gas mask is a frozenset for immutability and hashability in downstream caching.
+- Psychrometric validation iterates rows (not vectorized) to handle per-row ValueError from unphysical inputs gracefully.
+
+Previous phase: Cold-Start Bootstrap Pipeline Architecture (Architect) — **COMPLETE** (2026-06-25).
+Architecture doc for Two-Pass Cold-Start Anomaly Detection pipeline written.
+Done signal: `tasks/done/architect-p1.json`.
+
+### Cold-Start Bootstrap Pipeline Architecture (2026-06-25)
+
+**Output:** [docs/architecture/cold_start_bootstrap.md](docs/architecture/cold_start_bootstrap.md)
+
+**Design:** Two-Pass Cold-Start Bootstrap pipeline for new greenhouse tenant onboarding:
+- **Pass 1** — Physics-aware cleaning: gas column null audit (drop >95% null), psychrometric humidity deficit check (Magnus formula, HD_TOLERANCE=0.05), spike-delta pre-filter (per-sensor SPIKE_DELTA_MAX), Isolation Forest (contamination=0.04). Outputs `bootstrapped_clean.csv` + `pass1_suspected_anomalies.csv`.
+- **Pass 2** — LSTM-VAE training on clean subset → full-file inference → percentile-99 threshold calibration → univariate fault classifiers (spike, stuck, dropout, CUSUM, noise) → JSON response.
+
+**New files designed (6):**
+- `src/api/routes/bootstrap.py` — `POST /api/v1/bootstrap/run` (UploadFile + tenant_id + greenhouse_id)
+- `src/api/services/bootstrap_pipeline.py` — orchestrates Pass 1 → Pass 2 → response assembly
+- `src/api/schemas/bootstrap.py` — Pydantic models (BootstrapResponse, Pass1Summary, Pass2Summary, AnomalyDetail)
+- `src/models/psychrometric_validator.py` — humidity deficit calculator (Magnus formula)
+- `src/models/bootstrap_cleaner.py` — Pass 1 logic: physics + IF → clean/suspect split
+- `src/models/bootstrap_trainer.py` — Pass 2 logic: LSTM-VAE train + inference + classify
+
+**Config additions (8 constants):** BOOTSTRAP_GAS_NULL_THRESHOLD, BOOTSTRAP_IF_CONTAMINATION, BOOTSTRAP_RESAMPLE_INTERVAL, BOOTSTRAP_CLEAN_PATH, BOOTSTRAP_ANOMALY_PATH, BOOTSTRAP_THRESHOLD_PERCENTILE, PSYCHROMETRIC_HD_TOLERANCE, SPIKE_DELTA_MAX.
+
+**Error contract:** 422 (bad CSV), 400 (insufficient clean rows <100), 200 (success), 500 (training failure).
+
+**Reuse:** CSVAdapter, data_utils (normalize/preprocess), LSTMVAE, training loop, AnomalyDetector, calibrate_threshold, FaultClassifier, all 5 SCADA detectors. No circular deps — strict route→service→models→config flow.
+
+Previous phase: Phase 4 — Pass 2 Detection Pipeline (Backend Engineer) — **COMPLETE** (2026-06-24).
+All smoke imports pass. End-to-end functional test passed.
+Done signal: `tasks/done/backend-engineer-p4.json`.
+
+### Phase 4 — Pass 2 Detection Pipeline (2026-06-24)
+
+**Files created (root-level Phase 2.0 codebase):**
+
+- **`models/anomaly.py`**: `Anomaly` dataclass — fields: timestamp, sensor, fault_type, confidence, physics_valid, detector_agreement, season, details, explanation, cluster_id, cluster_severity. Has `to_dict()` method.
+- **`models/explainability.py`**: `SHAPExplainer` (rule-based, not real SHAP) + `Explanation` dataclass. Derives `primary_cause` from dominant fault_type in triggered detectors, maps to human `recommendation` via lookup table. `contributing_features` is `List[Tuple[sensor, confidence]]` sorted desc. `Explanation.to_dict()` returns JSON-serializable dict.
+- **`engines/pass2_detect.py`**: `Pass2Detector` — non-seasonal, single pattern, all 5 detectors + `MultivariateStat.check_mahalanobis`. Detector instances are shared across rows to preserve rolling state (spike, stuck, drift, precision, polling). Does **NOT** cluster — caller's responsibility.
+- **`engines/pass2_detect_seasonal.py`**: `Pass2DetectorSeasonal` — splits DataFrame by calendar season (`_split_by_season`), creates fresh detector instances per season group to preserve intra-season state, runs detection per row per sensor, calls `AnomalyClustering.cluster()` on `[a.to_dict() for a in anomalies]` after all rows, assigns `cluster_id`/`cluster_severity` back to each `Anomaly` via `(timestamp, sensor)` lookup. Returns `(anomalies, stats)`.
+- **`engines/pass2_result_aggregator.py`**: `ResultAggregator` with two static methods: `to_csv(anomalies, output_path)` → writes CSV (12 columns incl. cluster metadata + explanation fields), returns output_path; `to_dict(anomalies, include_details=False)` → summary dict with total_anomalies, anomalies list, by_fault_type, by_severity.
+- **`api/routes/patterns.py`**: Router `prefix='/api/anomaly/patterns'`, tag='patterns'. Endpoints: `GET /list?customer_id=X` → PatternProfile metadata list; `GET /{pattern_id}` → full pattern JSON via ModelStore.load; `DELETE /reset?customer_id=X&confirm=true` → deletes all patterns from DB. Note: `/list` defined before `/{pattern_id}` to avoid FastAPI route conflict.
+- **`storage/result_store.py`**: `ResultStore` class with `save(customer_id, csv_path, stats) → result_id` (appends to `results_index.json`) and `list(customer_id) → List[Dict]`.
+
+**Files updated:**
+- **`api/routes/anomaly.py`**: Added `import uuid`, plus imports for `Pass2DetectorSeasonal`, `ResultAggregator`, `PatternProfile`, `RESULTS_DIR`, `ResultStore`. Added `POST /detect` (loads seasonal patterns from DB, runs Pass2DetectorSeasonal, exports CSV) and `POST /analyze` (runs Pass 1 + Pass 2 in one step).
+- **`api/main.py`**: Added `from api.routes import patterns` and `app.include_router(patterns.router)`.
+
+**Dependencies installed:**
+- `scikit-learn` (required by `engines/anomaly_clustering.py` for DBSCAN)
+- `python-multipart` (required by FastAPI for UploadFile)
+- `sqlalchemy` (already in requirements, installed to system Python)
+
+**Design decisions:**
+- Detectors are instantiated once per season group (not per row) so rolling-window state (spike history, CUSUM accumulator, stuck variance buffer, precision noise buffer) is preserved across consecutive rows within a season.
+- `Pass2DetectorSeasonal._split_by_season()` drops `_month` and `_season` helper columns before yielding DataFrames to `_detect_season`.
+- Fall-back pattern: if a season in the data has no matching learned pattern, the first available pattern is used as fallback (logged as WARNING).
+
+Previous phase: SCADA Spec-Compliance Code Review (5 fault detection algorithms) — **COMPLETE** (2026-06-23).
 Verdict: **PASS WITH NOTES** — [docs/review/spec_compliance_review.md](docs/review/spec_compliance_review.md).
 7 WARN, 8 NOTE findings. Zero blocking issues. All 5 algorithms correctly implement their SCADA specs.
 Done signal: `tasks/done/code-reviewer-spec-compliance.json`.

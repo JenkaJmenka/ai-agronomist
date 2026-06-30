@@ -5,7 +5,7 @@ SQLAlchemy database models for the AI Agronomist platform.
 import datetime
 import uuid
 from typing import Any, Dict, List, Optional
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.config import LATENT_DIM
@@ -92,6 +92,15 @@ class SensorReading(Base):
         default=func.now(),
         server_default=func.now(),
         doc="Audit field capturing database record instantiation timestamp"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "greenhouse_id",
+            "timestamp",
+            name="uq_sensor_readings_tenant_greenhouse_timestamp",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -397,6 +406,12 @@ class RawReading(Base):
 
     __table_args__ = (
         Index("ix_raw_readings_tenant_timestamp", "tenant_id", "timestamp"),
+        UniqueConstraint(
+            "tenant_id",
+            "greenhouse_id",
+            "timestamp",
+            name="uq_raw_readings_tenant_greenhouse_timestamp",
+        ),
     )
 
     def __repr__(self) -> str:

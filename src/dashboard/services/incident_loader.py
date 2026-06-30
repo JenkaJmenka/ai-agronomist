@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from sqlalchemy import select
 
+from src.dashboard.constants import CACHE_TTL_SHORT
+
 from src.db.models import Incident
 from src.db.session import AsyncSessionLocal
 
@@ -25,7 +27,7 @@ def _run_async(coro):
     return loop.run_until_complete(coro)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=CACHE_TTL_SHORT)
 def fetch_incidents_in_range(
     tenant_id: str,
     greenhouse_id: str,

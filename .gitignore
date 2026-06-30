@@ -1,11 +1,37 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Runtime / local artifacts
+*.db
+*.db.bak
+.coverage
+htmlcov/
+logs/
+results/
+*.log
+!docs/**/*.log
+.pytest_cache/
+
+# Data caches (keep data/bootstrap/ seed fixtures)
 data/raw/*
 data/processed/*
+data/upload_inference_cache/
+
+# Model artifacts (keep canonical checkpoints at models/*.pt if needed)
 models/*.pth
-*.db
-.pytest_cache/
-.venv/
+models/detect_cust_*/
+models/patterns_cust_*/
+models/test_customer/
+
+# Agent orchestration (local only)
+.agents/
+tasks/watcher.log
+tasks/*.out.log
+tasks/done/
+
+# Claude Code worktrees (nested repos)
+.claude/worktrees/

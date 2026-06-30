@@ -55,11 +55,12 @@ def test_build_html_table_includes_red_background():
             "hints": {"temperature": "temperature outside normal range"},
             "attribution": {},
             "affected_sensors": ["temperature"],
+            "fault_type": "spike_fault",
+            "reasoning": "temperature outside normal range",
         }
     ]
     html_out = build_html_table(display, enrichments)
     assert "rgba(239, 68, 68" in html_out
-    # ℹ info column has been replaced by hover tooltip — verify tooltip is present instead
-    assert "ag-tip" in html_out
+    assert "Spike" in html_out
     assert "temperature outside normal range" in html_out
     assert "45.0" in html_out

@@ -300,3 +300,66 @@ class InferenceResponse(BaseModel):
         ge=1,
         description="Dimensionality of each embedding vector (LATENT_DIM from model config)"
     )
+
+
+class UploadHighAnomalyDetail(BaseModel):
+    """Anomaly event from cold-run CSV upload (LSTM or statistical)."""
+
+    score: float = Field(..., ge=0.0, le=1.0)
+    timestamp: str
+    detector: str = Field(default="lstm", description="lstm, statistical, or lstm+statistical")
+    sequence_index: Optional[int] = Field(default=None, ge=0)
+    column: Optional[str] = None
+    z_score: Optional[float] = None
+    severity: Optional[str] = None
+    method: Optional[str] = None
+    value: Optional[float] = None
+    agreement: bool = Field(
+        default=False,
+        description="True when both LSTM and statistical detectors flagged this timestamp",
+    )
+
+
+class StatisticalAnomalyDetail(BaseModel):
+    """Single per-column statistical anomaly from cold-run detection."""
+
+    timestamp: str
+    column: str
+    value: float
+    z_score: float
+    severity: str
+    method: str
+
+
+class StatisticalColdRunSummary(BaseModel):
+    """Aggregate statistical cold-run results."""
+
+    anomalies: List[StatisticalAnomalyDetail] = Field(default_factory=list)
+    baseline_columns: List[str] = Field(default_factory=list)
+    total_scored: int = 0
+
+
+class UploadInferenceResponse(BaseModel):
+    """Response from POST /api/inference/upload (cold-run CSV scoring)."""
+
+    tenant_id: str
+    greenhouse_id: str
+    sequences_processed: int = Field(..., ge=0)
+    anomalies_detected: int = Field(..., ge=0)
+    anomaly_scores: List[float]
+    high_anomalies: List[UploadHighAnomalyDetail] = Field(default_factory=list)
+    threshold_used: float = Field(..., ge=0.0, le=1.0)
+    threshold_method: str
+    imputed_channels: List[str] = Field(default_factory=list)
+    statistical_summary: Optional[StatisticalColdRunSummary] = None
+    embeddings: List[List[float]] = Field(default_factory=list)
+    uncertainties: List[float] = Field(default_factory=list)
+    embedding_dim: int = Field(..., ge=1)
+    sequence_timestamps: List[str] = Field(
+        default_factory=list,
+        description="ISO timestamp per sequence (aligned with anomaly_scores)",
+    )
+    data_persisted: bool = False
+    rows_uploaded: int = Field(default=0, ge=0)
+    sensor_rows_uploaded: int = Field(default=0, ge=0)
+    raw_rows_uploaded: int = Field(default=0, ge=0)

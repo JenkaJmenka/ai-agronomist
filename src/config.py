@@ -190,6 +190,17 @@ DATA_CONFIG: dict = {
 ANOMALY_THRESHOLD: float = 0.8
 ANOMALY_SCALING_FACTOR: float = 2.0
 
+# Cold-run CSV upload inference (/api/inference/upload)
+COLD_RUN_THRESHOLD_METHOD: str = "percentile"
+COLD_RUN_PERCENTILE: float = 99.9
+COLD_RUN_MIN_ANOMALIES: int = 1
+COLD_RUN_BASELINE_FRACTION: float = 0.2
+# Rolling-window statistical detection (5-min data → 288 = 24 h).
+COLD_RUN_STAT_ROLLING_WINDOW: int = 288
+COLD_RUN_STAT_Z_MIN: float = 5.5
+COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
+COLD_RUN_STAT_USE_IQR: bool = False
+
 # Maximum number of pipeline instances kept in the LRU cache.
 MAX_PIPELINE_CACHE_SIZE: int = 10
 
@@ -510,6 +521,9 @@ ACTIVE_LEARNING_MIN_TRAINING_SAMPLES: int = 10
 # Model improvement (fraction) required to promote a retrained model.
 ACTIVE_LEARNING_IMPROVEMENT_THRESHOLD: float = 0.05
 
+# IsolationForest contamination applied when sanitizing training data.
+TRAINING_IF_CONTAMINATION: float = 0.05
+
 # Lookback window (days) for recent feedback in retraining decisions.
 ACTIVE_LEARNING_FEEDBACK_WINDOW_DAYS: int = 30
 
@@ -594,6 +608,8 @@ DROPOUT_CONSECUTIVE_P: int = 5
 # Stuck-fault rolling window size (SCADA spec section 1.3).
 STUCK_WINDOW_K: int = 10
 STUCK_VARIANCE_THRESHOLD: float = 1e-4
+# Normalized-space range below which a window is treated as truly flat (stuck).
+STUCK_FLAT_RANGE_THRESHOLD: float = 1e-4
 
 # =============================================================================
 # Noise / Precision Degradation Detection (SCADA spec section 1.4)
@@ -609,6 +625,43 @@ SENSOR_NOISE_TARGETS: Dict[str, float] = {
     "humidity": 0.1,       # % RMS
     "co2": 5.0,            # ppm RMS
     "light": 2.0,          # lux RMS
+}
+
+# =============================================================================
+# Two-Pass Cold-Start Bootstrap (Pass 1 — Physics-Informed Bootstrapping)
+# =============================================================================
+# Minimum rows required after Pass 1 filtering to proceed with Pass 2.
+BOOTSTRAP_MIN_CLEAN_ROWS: int = 100
+
+# Minimum valid (non-NaN) rows required for IsolationForest fitting.
+BOOTSTRAP_MIN_IF_ROWS: int = 10
+
+# Drop a gas sensor column from IF input if more than this fraction is null.
+BOOTSTRAP_GAS_NULL_THRESHOLD: float = 0.95
+
+# IsolationForest contamination parameter for Pass 1 outlier removal.
+BOOTSTRAP_IF_CONTAMINATION: float = 0.04
+
+# Resampling cadence applied to raw SCADA data before bootstrap processing.
+BOOTSTRAP_RESAMPLE_INTERVAL: str = "5min"
+
+# Output paths for the bootstrap pipeline.
+BOOTSTRAP_CLEAN_PATH: str = "data/bootstrapped_clean.csv"
+BOOTSTRAP_ANOMALY_PATH: str = "data/pass1_suspected_anomalies.csv"
+
+# Percentile used to derive the dynamic detection threshold (tau) for Pass 2.
+BOOTSTRAP_THRESHOLD_PERCENTILE: float = 99.0
+
+# Psychrometric validation (Tetens equation): max allowable absolute error
+# between measured humidity deficit and the value computed from T_air + RH.
+PSYCHROMETRIC_HD_TOLERANCE: float = 0.05  # g/m³
+
+# Spike detector velocity limits per sensor (physical units per 5-min step).
+SPIKE_DELTA_MAX: Dict[str, float] = {
+    "temperature": 5.0,   # °C
+    "humidity": 10.0,     # %
+    "co2": 50.0,          # ppm
+    "light": 200.0,       # lux
 }
 
 AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (

@@ -236,3 +236,5 @@ class TestCsvInferenceEmbeddings:
         assert payload["tenant_id"] == "tenant_1"
         assert payload["greenhouse_id"] == "house_alpha"
         assert len(payload["anomaly_scores"]) == 31
+        assert "threshold_used" in payload
+        assert payload["threshold_method"] in ("pot", "percentile")

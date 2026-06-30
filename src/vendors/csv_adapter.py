@@ -24,8 +24,8 @@ REQUIRED_SENSOR_COLS: Tuple[str, ...] = ("temperature", "humidity")
 # Sensors that may be absent or NaN; filled with SENSOR_DEFAULTS when missing.
 # Derived from SENSOR_DEFAULTS so the two are always in sync.
 SENSOR_DEFAULTS: Dict[str, float] = {
-    "co2": 400.0,   # typical greenhouse CO2 (ppm)
-    "light": 0.0,   # unknown → assume dark
+    "co2": 400.0,   # midpoint of typical CO2 range when sensor absent
+    "light": 500.0,  # midpoint of light range when sensor absent (not 0)
 }
 OPTIONAL_SENSOR_COLS: Tuple[str, ...] = tuple(SENSOR_DEFAULTS)
 
@@ -129,6 +129,15 @@ def _smart_column_map(columns: List[str]) -> Dict[str, str]:
                     best[canonical] = (score, col)
 
     return {orig_col: canonical for canonical, (_, orig_col) in best.items()}
+
+
+def detect_optional_sensor_presence(columns: List[str]) -> tuple[frozenset[str], frozenset[str]]:
+    """Return which optional sensors are present in CSV headers vs imputed at normalize."""
+    mapped_targets = set(_smart_column_map(columns).values())
+    mapped_targets.update(col for col in columns if col in OPTIONAL_SENSOR_COLS)
+    present = frozenset(col for col in OPTIONAL_SENSOR_COLS if col in mapped_targets)
+    imputed = frozenset(col for col in OPTIONAL_SENSOR_COLS if col not in present)
+    return present, imputed
 
 
 def _remap_columns(data: pd.DataFrame, explicit: Dict[str, str]) -> pd.DataFrame:

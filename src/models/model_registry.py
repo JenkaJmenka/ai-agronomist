@@ -161,3 +161,25 @@ class ModelRegistry:
         version.status = "archived"
         await self.db.commit()
         return True
+
+    async def clear_models(self, customer_id: str) -> int:
+        """
+        Deletes all model deployments and versions for a specific customer.
+        Returns the number of model versions deleted.
+        """
+        # Delete deployments
+        stmt_deps = select(ModelDeployment).where(ModelDeployment.customer_id == customer_id)
+        res_deps = await self.db.execute(stmt_deps)
+        for d in res_deps.scalars().all():
+            await self.db.delete(d)
+            
+        # Delete versions
+        stmt_vers = select(ModelVersion).where(ModelVersion.customer_id == customer_id)
+        res_vers = await self.db.execute(stmt_vers)
+        versions = res_vers.scalars().all()
+        count = len(versions)
+        for v in versions:
+            await self.db.delete(v)
+            
+        await self.db.commit()
+        return count

@@ -1,5 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends
-from src.api.schemas.sensor_data import InferenceRequest, InferenceResponse
+from src.api.schemas.sensor_data import (
+    InferenceRequest,
+    InferenceResponse,
+    UploadInferenceResponse,
+)
+from src.api.services.cold_run_upload import (
+    build_anomaly_metadata_by_timestamp,
+    build_anomaly_scores_by_timestamp,
+    run_cold_run_upload,
+)
+from src.api.services.csv_persist import persist_csv_file
 from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -12,22 +22,18 @@ import numpy as np
 from fastapi import UploadFile, File, Form
 import tempfile
 import os
-import pandas as pd
+import logging
 from functools import lru_cache
 
 from src.vendors.csv_adapter import CSVAdapter
-from src.models.data_utils import preprocess_sequences, normalize_data, SENSOR_RANGES
-from src.models.postprocessing import (
-    map_timestamp_to_anomaly,
-    clip_and_scale_anomalies,
-    get_high_anomaly_timestamps,
-)
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM
+from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, MAX_PIPELINE_CACHE_SIZE
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=MAX_PIPELINE_CACHE_SIZE)
 def get_cached_detector(checkpoint_path: Optional[str]) -> AnomalyDetector:
     """
     LRU cached AnomalyDetector factory to prevent unbounded model memory leaks and reuse instances.
@@ -84,8 +90,11 @@ async def run_inference(
         for ts_str in request.timestamps:
             try:
                 dt_timestamps.append(datetime.fromisoformat(ts_str.replace('Z', '+00:00')))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not parse timestamp %r for anomaly score persistence: %s",
+                    ts_str, exc,
+                )
                 
         if dt_timestamps:
             stmt = select(SensorReading).where(
@@ -137,38 +146,35 @@ async def run_inference(
     )
 
 
-@router.post("/inference/upload")
+@router.post("/inference/upload", response_model=UploadInferenceResponse)
 async def run_inference_from_csv(
     tenant_id: str = Form(...),
     greenhouse_id: str = Form(default="default"),
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db)
+    persist_data: bool = Form(default=False),
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Directly runs inference on an uploaded CSV file without persisting the raw data,
-    processing via chunked DataFrames to prevent memory exhaustion, and utilizing
-    robust timestamp mapping.
+    Run cold-run inference on an uploaded CSV.
+
+    When persist_data is true, also loads rows into the database with
+    anomaly scores attached so Monitoring and Anomaly pages work immediately.
     """
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 
-    # Write file asynchronously using chunk reads to prevent memory exhaustion
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-            while chunk := await file.read(1024 * 1024):  # 1MB buffer chunk
+            while chunk := await file.read(1024 * 1024):
                 tmp.write(chunk)
             tmp_path = tmp.name
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write uploaded file: {e}")
 
-    # Retrieve customer's active model
     registry = ModelRegistry(db)
     active_model_info = await registry.get_active_model(tenant_id)
-    
-    checkpoint_path = None
-    if active_model_info:
-        checkpoint_path = active_model_info["checkpoint_path"]
-        
+    checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
+
     try:
         detector = get_cached_detector(checkpoint_path)
     except Exception as e:
@@ -179,119 +185,39 @@ async def run_inference_from_csv(
     adapter = CSVAdapter({"filepath": tmp_path})
     try:
         adapter.connect()
+        response, sequence_timestamps = run_cold_run_upload(
+            tmp_path=tmp_path,
+            adapter=adapter,
+            detector=detector,
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+        )
+        if persist_data:
+            score_map = build_anomaly_scores_by_timestamp(response.high_anomalies)
+            metadata_map = build_anomaly_metadata_by_timestamp(response.high_anomalies)
+            persist_result = await persist_csv_file(
+                tmp_path=tmp_path,
+                tenant_id=tenant_id,
+                greenhouse_id=greenhouse_id,
+                db=db,
+                adapter=adapter,
+                anomaly_scores_by_timestamp=score_map,
+                anomaly_metadata_by_timestamp=metadata_map,
+            )
+            response = response.model_copy(
+                update={
+                    "data_persisted": True,
+                    "rows_uploaded": persist_result.sensor_rows or persist_result.raw_rows,
+                    "sensor_rows_uploaded": persist_result.sensor_rows,
+                    "raw_rows_uploaded": persist_result.raw_rows,
+                }
+            )
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise HTTPException(status_code=422, detail=f"Invalid CSV format: {e}")
-
-    seq_len = 20
-    chunk_size = 5000
-
-    anomaly_scores: List[float] = []
-    embeddings: List[List[float]] = []
-    uncertainties: List[float] = []
-    high_anomalies: List[Dict[str, Any]] = []
-    sequences_processed = 0
-    anomalies_detected = 0
-
-    prev_overlap_df = pd.DataFrame()
-    global_seq_index = 0
-    has_valid_data = False
-
-    try:
-        for raw_chunk in pd.read_csv(tmp_path, chunksize=chunk_size):
-            if raw_chunk.empty:
-                continue
-
-            try:
-                normalized_chunk = adapter.normalize(raw_chunk)
-                adapter.validate(normalized_chunk)
-            except Exception as e:
-                # Distinguish from other validation failures
-                raise HTTPException(status_code=422, detail=f"Data validation failed: {str(e)}")
-
-            has_valid_data = True
-
-            if not prev_overlap_df.empty:
-                combined_df = pd.concat([prev_overlap_df, normalized_chunk], ignore_index=True)
-            else:
-                combined_df = normalized_chunk
-
-            # Update the overlap (last seq_len - 1 elements) for the next iteration
-            if len(normalized_chunk) >= seq_len - 1:
-                prev_overlap_df = normalized_chunk.iloc[-(seq_len - 1):].copy()
-            else:
-                if len(combined_df) >= seq_len - 1:
-                    prev_overlap_df = combined_df.iloc[-(seq_len - 1):].copy()
-                else:
-                    prev_overlap_df = combined_df.copy()
-
-            if len(combined_df) < seq_len:
-                continue
-
-            try:
-                raw_data = combined_df[["temperature", "humidity", "co2", "light"]].to_numpy()
-            except KeyError as e:
-                raise HTTPException(status_code=422, detail=f"Missing required columns in chunk: {e}")
-
-            norm_data = normalize_data(raw_data, SENSOR_RANGES)
-
-            try:
-                sequences = preprocess_sequences(norm_data, seq_len=seq_len)
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e))
-
-            try:
-                # Single enriched forward pass per chunk: scores + embeddings + uncertainties
-                raw_scores, chunk_embeddings, chunk_uncertainties = detector.predict_batch_enriched(sequences)
-                batch_scores = np.clip(raw_scores / ANOMALY_SCALING_FACTOR, 0.0, 1.0)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Inference failed during chunk processing: {str(e)}")
-
-            anomalies_detected += int((batch_scores > ANOMALY_THRESHOLD).sum())
-            sequences_processed += len(sequences)
-            anomaly_scores.extend(batch_scores.tolist())
-            embeddings.extend(np.asarray(chunk_embeddings).tolist())
-            uncertainties.extend(np.asarray(chunk_uncertainties).tolist())
-
-            # Perform robust timestamp mapping using sequence indices
-            timestamps = combined_df["timestamp"].tolist()
-            for idx, score in enumerate(batch_scores):
-                row_idx = idx + seq_len - 1
-                if row_idx < len(timestamps):
-                    ts_val = timestamps[row_idx]
-                    if pd.isnull(ts_val):
-                        ts = "unknown"
-                    else:
-                        ts = ts_val.isoformat() if hasattr(ts_val, "isoformat") else str(ts_val)
-                else:
-                    ts = "unknown"
-
-                if score > ANOMALY_THRESHOLD:
-                    high_anomalies.append({
-                        "sequence_index": global_seq_index + idx,
-                        "score": float(score),
-                        "timestamp": ts
-                    })
-
-            global_seq_index += len(sequences)
-
+        raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
     finally:
         adapter.disconnect()
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-
-    if not has_valid_data:
-        raise HTTPException(status_code=400, detail="Uploaded CSV contains no valid data.")
-
-    return {
-        "tenant_id": tenant_id,
-        "greenhouse_id": greenhouse_id,
-        "sequences_processed": sequences_processed,
-        "anomalies_detected": anomalies_detected,
-        "anomaly_scores": anomaly_scores,
-        "high_anomalies": high_anomalies,
-        "embeddings": embeddings,
-        "uncertainties": uncertainties,
-        "embedding_dim": LATENT_DIM
-    }

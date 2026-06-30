@@ -25,11 +25,12 @@ from sqlalchemy import text
 try:
     from src.logging.config import setup_logging
     setup_logging()
-except ImportError:
+except (ImportError, ValueError):
     logging.basicConfig(level=logging.INFO)
 
 from src.db.session import engine, get_db, init_db
 from src.api.routes import (
+    bootstrap,
     feedback,
     feedback_integrated,
     gas_anomalies,
@@ -218,6 +219,7 @@ async def default_unhandled_exception_handler(request: Request, exc: Exception) 
 # =============================================================================
 
 app.include_router(health.router)
+app.include_router(bootstrap.router)
 app.include_router(upload.router, prefix="/api")
 app.include_router(inference.router, prefix="/api")
 app.include_router(inference_integrated.router)

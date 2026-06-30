@@ -66,4 +66,4 @@ async def load_latest_snapshot(
         }
     except Exception:
         logger.exception("Failed to load metrics snapshot")
-        return None
+        raise

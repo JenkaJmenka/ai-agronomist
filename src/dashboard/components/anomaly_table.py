@@ -3,6 +3,7 @@ Styled anomaly table with per-sensor highlighting, hover tooltips, and confirm/r
 
 Rows are rendered as Streamlit columns so native st.button widgets can appear in the
 Actions column. Sensor cells retain coloured backgrounds via inline HTML spans.
+The Monitor action queues a jump to the Monitoring page (date + sensor pre-selection).
 The ``build_html_table`` helper is kept for unit-test coverage.
 """
 
@@ -13,6 +14,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
+
+from src.dashboard.components import sticky_table as _sticky_table
+from src.dashboard.components.monitoring_jump import queue_monitoring_jump
+from src.dashboard.services.diagnosis_enricher import format_sensor_label
 
 SENSOR_COLUMNS = ["temperature", "humidity", "co2", "light"]
 
@@ -31,14 +36,15 @@ HEADER_STYLE = (
 )
 
 # Injected once per render into the Streamlit page.
-_TOOLTIP_CSS = """
+def _table_css(table_key: str) -> str:
+    safe_key = html.escape(table_key.replace("_", "-"))
+    return f"""
 <style>
 /* ── Sensor-cell tooltip ─────────────────────────────────────────── */
-.ag-cell { position: relative; cursor: default; }
-.ag-tip {
+.ag-cell {{ position: relative; cursor: default; }}
+.ag-tip {{
   visibility: hidden;
   opacity: 0;
-  /* Appear after a short 80 ms pause; disappear instantly */
   transition: opacity 0.12s ease 0.08s, visibility 0s linear 0.20s;
   position: absolute;
   bottom: calc(100% + 6px);
@@ -58,43 +64,57 @@ _TOOLTIP_CSS = """
   white-space: normal;
   pointer-events: none;
   text-align: left;
-}
-.ag-cell:hover .ag-tip {
+}}
+.ag-cell:hover .ag-tip {{
   visibility: visible;
   opacity: 1;
   transition: opacity 0.12s ease 0.08s, visibility 0s linear 0s;
-}
-.ag-tip-hint { margin-bottom: 6px; }
-.ag-tip-meta { color: #94a3b8; font-size: 12px; }
+}}
+.ag-tip-hint {{ margin-bottom: 6px; }}
+.ag-tip-meta {{ color: #94a3b8; font-size: 12px; }}
 
-/* ── Action column buttons ───────────────────────────────────────── */
-/* Target the nested stHorizontalBlock that row_cols[9].columns(2) creates.
-   First sub-column = Confirm (green), last sub-column = Reject (red). */
-[data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"]:first-child button {
+/* ── Row action buttons (accept · reject · monitor) ─────────────── */
+div[data-testid="column"]:has(.ag-actions-{safe_key}) [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(1) button {{
   color: rgb(34, 197, 94) !important;
   border-color: rgba(34, 197, 94, 0.55) !important;
   background-color: rgba(34, 197, 94, 0.10) !important;
-}
-[data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"]:first-child button:hover {
-  background-color: rgba(34, 197, 94, 0.20) !important;
-}
-[data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"]:last-child button {
+  min-width: 2rem !important;
+  padding: 0.1rem 0.35rem !important;
+}}
+div[data-testid="column"]:has(.ag-actions-{safe_key}) [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(2) button {{
   color: rgb(239, 68, 68) !important;
   border-color: rgba(239, 68, 68, 0.55) !important;
   background-color: rgba(239, 68, 68, 0.10) !important;
-}
-[data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"]:last-child button:hover {
-  background-color: rgba(239, 68, 68, 0.20) !important;
-}
+  min-width: 2rem !important;
+  padding: 0.1rem 0.35rem !important;
+}}
+div[data-testid="column"]:has(.ag-actions-{safe_key}) [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(3) button,
+div[data-testid="column"]:has(.ag-actions-{safe_key}) [data-testid="stHorizontalBlock"] [data-testid="column"]:only-child button {{
+  color: rgb(96, 165, 250) !important;
+  border-color: rgba(96, 165, 250, 0.55) !important;
+  background-color: rgba(96, 165, 250, 0.10) !important;
+  min-width: 2rem !important;
+  padding: 0.1rem 0.35rem !important;
+}}
 </style>
 """
 
-# Column layout for the Streamlit-columns-based render.
-_COL_WIDTHS = [2.2, 0.9, 1.0, 1.1, 1.8, 0.9, 0.9, 0.9, 0.9, 1.4]
+_ACTIONS_COL_INDEX = 8
+
+# Column layout shared by all anomaly tables.
+_COL_WIDTHS = [1.4, 1.0, 2.5, 1.2, 0.72, 0.72, 0.78, 0.78, 1.15]
 _COL_HEADERS = [
-    "Timestamp", "Score", "Pattern", "Fault Type", "Sensors",
-    "Temp (°C)", "Hum (%)", "CO₂ (ppm)", "Light (lux)", "Action",
+    "Timestamp",
+    "Fault Type",
+    "Reasoning",
+    "Sensors",
+    "Temp (°C)",
+    "Hum (%)",
+    "CO₂ (ppm)",
+    "Light (lux)",
+    "Actions",
 ]
+_TOP_TABLE_KEY = "top_anomalies"
 
 # Badge colors per fault type (CSS rgba values).
 _FAULT_BADGE_COLORS: dict[str, str] = {
@@ -117,6 +137,8 @@ _FAULT_LABELS: dict[str, str] = {
     "stuck_fault": "Stuck",
     "bias_offset": "Bias",
     "accuracy_decline": "Noise",
+    "unknown": "Unknown",
+    "polling_dropout": "Dropout",
 }
 
 
@@ -133,7 +155,7 @@ def _fault_badge_html(fault_type: Optional[str]) -> str:
         f'white-space:nowrap;">{html.escape(label)}</span>'
     )
 
-# Session-state key where a pending button click is stored during render.
+# Session-state key where a pending button click is stored during render (legacy).
 PENDING_FEEDBACK_KEY = "pending_anomaly_feedback"
 
 
@@ -200,8 +222,8 @@ def build_html_table(
 ) -> str:
     """Build an HTML table with per-cell background colors and hover tooltips."""
     cols = list(display.columns)
-    all_headers = cols + ["Fault Type"]
-    parts = [_TOOLTIP_CSS, '<div style="overflow-x: auto;">', "<table>", "<thead><tr>"]
+    all_headers = cols + ["Fault Type", "Reasoning"]
+    parts = [_table_css("html-table"), '<div style="overflow-x: auto;">', "<table>", "<thead><tr>"]
 
     for col in all_headers:
         parts.append(f'<th style="{HEADER_STYLE}">{html.escape(str(col))}</th>')
@@ -222,6 +244,9 @@ def build_html_table(
             f'<td style="{cell_style}">'
             f'{_fault_badge_html(enrichment.get("fault_type"))}'
             f"</td>"
+        )
+        parts.append(
+            f'<td style="{cell_style}">{html.escape(str(enrichment.get("reasoning", "")))}</td>'
         )
         parts.append("</tr>")
 
@@ -277,100 +302,262 @@ def _sensor_col_html(
     )
 
 
+def _affected_sensors_label(row: Any, enrichment: Dict[str, Any]) -> str:
+    affected = enrichment.get("affected_sensors", [])
+    if not affected and hasattr(row, "get") and row.get("affected_sensors"):
+        raw_affected = row.get("affected_sensors")
+        affected = (
+            raw_affected.split(", ")
+            if isinstance(raw_affected, str)
+            else raw_affected
+        )
+    if not isinstance(affected, list) or not affected:
+        return "—"
+    return ", ".join(format_sensor_label(str(sensor)) for sensor in affected)
+
+
+def _monitor_jump(
+    payload: dict[str, Any],
+    tenant: str,
+    greenhouse: str,
+    *,
+    source_df: pd.DataFrame | None,
+    available_columns: list[str] | None,
+) -> None:
+    try:
+        queue_monitoring_jump(
+            payload["monitor_row"],
+            tenant,
+            greenhouse,
+            available_columns=available_columns,
+            source_df=source_df,
+        )
+        st.switch_page("pages/1_Active_Monitoring/1_Monitoring.py")
+    except ValueError as exc:
+        st.error(str(exc))
+
+
+def _render_row_action_buttons(
+    action_cell: Any,
+    *,
+    table_key: str,
+    row_index: int,
+    payload: dict[str, Any],
+    incident_id: Optional[str],
+    ts_iso: str,
+    state_key: str,
+    feedback_state_key: str,
+    on_feedback: Optional[Callable[..., None]],
+    pending_action: list[Optional[Dict[str, Any]]],
+    tenant: str,
+    greenhouse: str,
+    source_df: pd.DataFrame | None,
+    available_columns: list[str] | None,
+) -> None:
+    safe_key = table_key.replace("_", "-")
+    action_cell.markdown(
+        f'<span class="ag-actions-{safe_key}" style="display:none"></span>',
+        unsafe_allow_html=True,
+    )
+
+    buttons: list[dict[str, Any]] = []
+
+    if on_feedback is not None:
+
+        def _accept() -> None:
+            pending_action[0] = {
+                "incident_id": incident_id,
+                "is_true_anomaly": True,
+                "timestamp": ts_iso,
+                "state_key": state_key,
+            }
+
+        def _reject() -> None:
+            pending_action[0] = {
+                "incident_id": incident_id,
+                "is_true_anomaly": False,
+                "timestamp": ts_iso,
+                "state_key": state_key,
+            }
+
+        buttons.extend(
+            [
+                {"label": "✓", "suffix": "accept", "help": "Accept anomaly", "on_click": _accept},
+                {"label": "✗", "suffix": "reject", "help": "Reject anomaly", "on_click": _reject},
+            ]
+        )
+
+    def _monitor() -> None:
+        _monitor_jump(
+            payload,
+            tenant,
+            greenhouse,
+            source_df=source_df,
+            available_columns=available_columns,
+        )
+
+    buttons.append(
+        {
+            "label": "📈",
+            "suffix": "monitor",
+            "help": "Open Monitoring for this anomaly's date and sensors",
+            "on_click": _monitor,
+        }
+    )
+
+    _sticky_table.render_compact_buttons(action_cell, table_key, row_index, buttons)
+
+
+def _row_score(row: Any) -> float:
+    for key in ("anomaly_score", "score"):
+        if hasattr(row, "get"):
+            val = row.get(key)
+            if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue
+    return 0.0
+
+
+def _monitor_row_from_payload(row: Any, ts_iso: str, enrichment: Dict[str, Any]) -> dict[str, Any]:
+    cold = row.get("_cold_run") if hasattr(row, "get") else None
+    if isinstance(cold, dict):
+        jump = {k: v for k, v in cold.items() if not str(k).startswith("_")}
+        jump.setdefault("timestamp", ts_iso)
+        return jump
+
+    affected = enrichment.get("affected_sensors", [])
+    if not affected and hasattr(row, "get") and row.get("affected_sensors"):
+        raw_affected = row.get("affected_sensors")
+        affected = (
+            raw_affected.split(", ")
+            if isinstance(raw_affected, str)
+            else raw_affected
+        )
+    monitor_col = affected[0] if isinstance(affected, list) and affected else None
+    return {
+        "timestamp": ts_iso,
+        "detector": row.get("detector", "lstm") if hasattr(row, "get") else "lstm",
+        "score": _row_score(row),
+        "column": monitor_col,
+    }
+
+
 def render(
     enriched_df: pd.DataFrame,
     *,
     on_feedback: Optional[Callable[..., None]] = None,
     feedback_state_key: str = "feedback_results",
+    table_title: str = "Top Anomalies",
+    table_key: str = _TOP_TABLE_KEY,
+    tenant_id: str = "",
+    greenhouse_id: str = "",
+    source_df: pd.DataFrame | None = None,
+    available_columns: list[str] | None = None,
+    empty_message: Optional[str] = None,
+    max_height: int = 420,
+    show_legend: bool = True,
 ) -> None:
-    """Render the anomaly table as Streamlit columns with coloured cells and action buttons.
-
-    Args:
-        enriched_df: Output of ``enrich_dataframe()``.
-        on_feedback: Called with ``(incident_id_or_none, is_true_anomaly, timestamp_str)``
-            when a button is clicked. ``incident_id`` is None when no incident is matched
-            yet; the caller is responsible for registering the anomaly first.
-        feedback_state_key: Session-state key used to track already-submitted feedback.
-    """
+    """Render anomalies in a sticky scrollable table with Streamlit actions."""
     if enriched_df.empty:
-        st.info("No anomalies to display.")
+        if empty_message is not None:
+            def _empty_row(_index: int, _row: Any, _cells: list[Any]) -> None:
+                return
+
+            _sticky_table.render_streamlit_sticky_table(
+                table_title,
+                _COL_HEADERS,
+                _COL_WIDTHS,
+                table_key,
+                [],
+                _empty_row,
+                empty_message=empty_message,
+                max_height=max_height,
+            )
+        else:
+            st.info("No anomalies to display.")
         return
 
     if feedback_state_key not in st.session_state:
         st.session_state[feedback_state_key] = {}
 
-    # Inject tooltip CSS once into the page so ag-cell/ag-tip works inside st.columns cells.
-    st.markdown(_TOOLTIP_CSS, unsafe_allow_html=True)
+    st.markdown(_table_css(table_key), unsafe_allow_html=True)
 
-    # --- Header row ---
-    hcols = st.columns(_COL_WIDTHS)
-    for hcol, label in zip(hcols, _COL_HEADERS):
-        hcol.markdown(f"**{label}**")
-    st.markdown(
-        '<hr style="margin:2px 0;border-color:rgba(128,128,128,0.4)">',
-        unsafe_allow_html=True,
-    )
+    tenant = tenant_id or st.session_state.get("selected_tenant", "")
+    greenhouse = greenhouse_id or st.session_state.get("selected_greenhouse", "")
 
-    pending_action: Optional[Dict[str, Any]] = None
+    monitor_columns = available_columns
+    if monitor_columns is None and source_df is not None and not source_df.empty:
+        from src.dashboard.components.sensor_columns import get_all_sensor_columns
 
+        monitor_columns = get_all_sensor_columns(source_df)
+
+    row_payloads: list[dict[str, Any]] = []
     for i, (_, row) in enumerate(enriched_df.iterrows()):
-        enrichment = (
-            enriched_df["_enrichment"].iloc[i]
-            if "_enrichment" in enriched_df.columns
-            else {}
-        )
-        incident_id = enrichment.get("incident_id")
-
-        row_cols = st.columns(_COL_WIDTHS)
-
-        # Timestamp — compact "08 Jun 12:00" format
+        enrichment = row.get("_enrichment")
+        if not isinstance(enrichment, dict):
+            enrichment = (
+                enriched_df["_enrichment"].iloc[i]
+                if "_enrichment" in enriched_df.columns
+                and isinstance(enriched_df["_enrichment"].iloc[i], dict)
+                else {}
+            )
         ts = row.get("timestamp")
         try:
             ts_parsed = pd.to_datetime(ts)
-            ts_str = ts_parsed.strftime("%d %b %H:%M")
             ts_iso = ts_parsed.isoformat()
         except Exception:
-            ts_str = str(ts)
             ts_iso = str(ts)
-        row_cols[0].write(ts_str)
 
-        # Anomaly score
-        score = row.get("anomaly_score", 0)
-        row_cols[1].write(f"{float(score):.3f}")
+        row_payloads.append({
+            "row": row,
+            "enrichment": enrichment,
+            "incident_id": enrichment.get("incident_id"),
+            "timestamp": ts_iso,
+            "state_key": enrichment.get("incident_id") or ts_iso,
+            "monitor_row": _monitor_row_from_payload(row, ts_iso, enrichment),
+        })
 
-        # Pattern type
-        pattern = enrichment.get("pattern_type") or "—"
-        row_cols[2].write(pattern)
+    pending_action_box: list[Optional[Dict[str, Any]]] = [None]
 
-        # Fault type badge
-        fault_type = enrichment.get("fault_type")
-        row_cols[3].markdown(_fault_badge_html(fault_type), unsafe_allow_html=True)
+    def _render_row(row_index: int, payload: dict[str, Any], cells: list[Any]) -> None:
+        row = payload["row"]
+        enrichment = payload["enrichment"]
+        incident_id = payload["incident_id"]
+        ts_iso = payload["timestamp"]
+        state_key = payload["state_key"]
 
-        # Affected sensors
-        affected = enrichment.get("affected_sensors", [])
-        if isinstance(affected, list):
-            affected_str = ", ".join(affected) if affected else "—"
-        else:
-            affected_str = str(affected) if affected else "—"
-        row_cols[4].write(affected_str)
+        ts = row.get("timestamp")
+        try:
+            ts_str = pd.to_datetime(ts).strftime("%d %b %H:%M")
+        except Exception:
+            ts_str = str(ts)
 
-        # Sensor value cells with colour highlights and hover tooltip card
+        cells[0].markdown(ts_str)
+        cells[1].markdown(
+            _fault_badge_html(enrichment.get("fault_type") or row.get("fault_type")),
+            unsafe_allow_html=True,
+        )
+        cells[2].markdown(str(enrichment.get("reasoning") or row.get("reasoning") or "—"))
+        cells[3].markdown(_affected_sensors_label(row, enrichment))
+
         flags = enrichment.get("flags", {})
         attribution = enrichment.get("attribution", {})
         hints = enrichment.get("hints", {})
         pattern_str = enrichment.get("pattern_type", "")
         affected_list = enrichment.get("affected_sensors", [])
 
-        for col_idx, sensor in enumerate(SENSOR_COLUMNS, start=5):
+        for col_idx, sensor in enumerate(SENSOR_COLUMNS, start=4):
             raw = row.get(sensor)
-            if raw is None:
-                row_cols[col_idx].write("—")
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                cells[col_idx].markdown("—")
                 continue
             val = float(raw)
             flag = flags.get(sensor, False)
             attr_val = float(attribution.get(sensor, 0)) if flag else 0.0
             hint = hints.get(sensor, "") if flag else ""
-            row_cols[col_idx].markdown(
+            cells[col_idx].markdown(
                 _sensor_col_html(
                     val, flag, attr_val, hint,
                     pattern=pattern_str,
@@ -379,36 +566,35 @@ def render(
                 unsafe_allow_html=True,
             )
 
-        # Action column — always show ✓/✗ buttons; use incident_id or ts_iso as state key
-        state_key = incident_id or ts_iso
-        prior = st.session_state[feedback_state_key].get(state_key)
-        if prior:
-            icon = "✓" if prior["is_true_anomaly"] else "✗"
-            row_cols[9].markdown(f"**{icon}**")
-        else:
-            btn_c1, btn_c2 = row_cols[9].columns(2)
-            btn_suffix = incident_id if incident_id else f"row_{i}"
-            if btn_c1.button("✓", key=f"conf_{btn_suffix}", help="Confirm anomaly"):
-                pending_action = {
-                    "incident_id": incident_id,
-                    "is_true_anomaly": True,
-                    "timestamp": ts_iso,
-                    "state_key": state_key,
-                }
-            if btn_c2.button("✗", key=f"rej_{btn_suffix}", help="Mark as false positive"):
-                pending_action = {
-                    "incident_id": incident_id,
-                    "is_true_anomaly": False,
-                    "timestamp": ts_iso,
-                    "state_key": state_key,
-                }
-
-        st.markdown(
-            '<hr style="margin:2px 0;border-color:rgba(128,128,128,0.15)">',
-            unsafe_allow_html=True,
+        _render_row_action_buttons(
+            cells[_ACTIONS_COL_INDEX],
+            table_key=table_key,
+            row_index=row_index,
+            payload=payload,
+            incident_id=incident_id,
+            ts_iso=ts_iso,
+            state_key=state_key,
+            feedback_state_key=feedback_state_key,
+            on_feedback=on_feedback,
+            pending_action=pending_action_box,
+            tenant=tenant,
+            greenhouse=greenhouse,
+            source_df=source_df,
+            available_columns=monitor_columns,
         )
 
-    # Fire callback after the loop so st.rerun() (if called inside on_feedback) restarts cleanly.
+    _sticky_table.render_streamlit_sticky_table(
+        table_title,
+        _COL_HEADERS,
+        _COL_WIDTHS,
+        table_key,
+        row_payloads,
+        _render_row,
+        row_records=row_payloads,
+        max_height=max_height,
+    )
+
+    pending_action = pending_action_box[0]
     if pending_action is not None and on_feedback is not None:
         on_feedback(
             pending_action["incident_id"],
@@ -417,7 +603,9 @@ def render(
             pending_action["state_key"],
         )
 
-    # Coloured legend
+    if not show_legend:
+        return
+
     st.markdown(
         '<div style="display:flex;gap:16px;font-size:12px;margin-top:8px;flex-wrap:wrap;">'
         '<span><span style="display:inline-block;width:12px;height:12px;vertical-align:middle;'

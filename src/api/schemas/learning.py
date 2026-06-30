@@ -174,3 +174,9 @@ class DriftStateResponse(BaseModel):
         None, description="Most recent persisted drift_check event")
     detector: Optional[Dict[str, Any]] = Field(
         None, description="Live DriftDetector state, when a learner exists")
+
+
+class ActiveModelVersionResponse(BaseModel):
+    """Active model deployment for a tenant."""
+    model_id: str = Field(..., description="Identifier of the active model version")
+    checkpoint_path: str = Field(..., description="Path to the model checkpoint file")
