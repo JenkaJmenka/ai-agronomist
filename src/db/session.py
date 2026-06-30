@@ -12,7 +12,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase
 
 # Database URL configuration, defaulting to local SQLite using async aiosqlite
-DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./greenhouse.db")
+def _normalize_database_url(url: str) -> str:
+    """Convert Render/Heroku-style URLs to SQLAlchemy async drivers."""
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://") and "+" not in url.split("://", 1)[0]:
+        return "postgresql+asyncpg://" + url[len("postgresql://") :]
+    return url
+
+
+DATABASE_URL: str = _normalize_database_url(
+    os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./greenhouse.db")
+)
 
 # Connection arguments for SQLite to handle multi-threaded dev environments
 connect_args = {}

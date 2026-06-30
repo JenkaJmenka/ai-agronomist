@@ -12,7 +12,7 @@ python-multipart>=0.0.6
 sqlalchemy>=2.0
 alembic>=1.13
 aiosqlite>=0.19          # async SQLite (dev/test)
-# psycopg2-binary>=2.9  # PostgreSQL (production — uncomment when needed)
+asyncpg>=0.29            # PostgreSQL async (production Docker/Render)
 
 # Validation
 pydantic>=2.5
