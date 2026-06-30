@@ -13,8 +13,12 @@ htmlcov/
 logs/
 results/
 *.log
-!docs/**/*.log
 .pytest_cache/
+
+# Project docs & planning (local only)
+docs/
+implementation plan/
+tasks/
 
 # Data caches (keep data/bootstrap/ seed fixtures)
 data/raw/*
@@ -29,9 +33,6 @@ models/test_customer/
 
 # Agent orchestration (local only)
 .agents/
-tasks/watcher.log
-tasks/*.out.log
-tasks/done/
 
 # Claude Code worktrees (nested repos)
 .claude/worktrees/

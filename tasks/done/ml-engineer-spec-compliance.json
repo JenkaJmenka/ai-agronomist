@@ -1,1 +1,0 @@
-{"agent":"ml-engineer-spec-compliance","status":"done","files":["src/models/pattern_scores.py","src/models/dropout_detector.py","src/models/noise_detector.py","src/models/stuck_fault_detector.py","src/config.py"],"tests_passed":true}
