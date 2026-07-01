@@ -14,7 +14,6 @@ print(url)
 PY
 )"
 
-echo "DATABASE_URL scheme: $(echo "$DATABASE_URL" | cut -d: -f1)"
 echo "Running database migrations..."
 alembic upgrade head
 
