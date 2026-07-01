@@ -1,6 +1,7 @@
 # AI Agronomist — canonical dependency specification
 # Install: pip install -r requirements.txt
 # PostgreSQL support (optional): also install psycopg2-binary
+# cache-bust: 2026-07-01
 
 # Web framework
 fastapi>=0.104
