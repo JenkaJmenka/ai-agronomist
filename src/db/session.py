@@ -8,28 +8,48 @@ for session routing and database initialization hooks on startup.
 
 import os
 from typing import AsyncGenerator
+from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
-# Database URL configuration, defaulting to local SQLite using async aiosqlite
-def _normalize_database_url(url: str) -> str:
-    """Convert Render/Heroku-style URLs to SQLAlchemy async drivers."""
+
+def _normalize_database_url(url: str) -> tuple[str, dict]:
+    """Convert provider URLs to SQLAlchemy async drivers.
+
+    Returns (normalized_url, extra_connect_args).
+    Strips sslmode from the query string and returns ssl="require" in
+    connect_args instead — asyncpg does not accept sslmode as a URL param.
+    """
+    extra: dict = {}
+
     if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://") :]
-    if url.startswith("postgresql://") and "+" not in url.split("://", 1)[0]:
-        return "postgresql+asyncpg://" + url[len("postgresql://") :]
-    return url
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://") and "+" not in url.split("://", 1)[0]:
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+
+    if "+asyncpg" in url and "sslmode=" in url:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        sslmode = params.pop("sslmode", [""])[0]
+        if sslmode in ("require", "verify-ca", "verify-full"):
+            extra["ssl"] = "require"
+        url = urlunparse(parsed._replace(query=urlencode({k: v[0] for k, v in params.items()})))
+
+    return url, extra
 
 
-DATABASE_URL: str = _normalize_database_url(
+DATABASE_URL: str
+_extra_connect_args: dict
+DATABASE_URL, _extra_connect_args = _normalize_database_url(
     os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./greenhouse.db")
 )
 
-# Connection arguments for SQLite to handle multi-threaded dev environments
-connect_args = {}
+connect_args: dict = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
+elif "+asyncpg" in DATABASE_URL:
+    connect_args.update(_extra_connect_args)
 
 # asyncpg connections are bound to the event loop they are created on.
 # Streamlit runs script threads with different loops than the module-import loop,
