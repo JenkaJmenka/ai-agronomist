@@ -42,14 +42,13 @@ def validate_csv_upload(file_bytes: bytes, filename: str = "") -> ValidationResu
         )
 
     try:
-        df = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
+        df = pd.read_csv(io.BytesIO(file_bytes), nrows=5, on_bad_lines="skip")
     except Exception as exc:
         return ValidationResult(
             is_valid=False,
             errors=[
-                f"Could not parse the file as CSV. "
-                f"Check that it uses comma delimiters and has a header row. "
-                f"Parser error: {exc}"
+                "Could not parse the file as CSV. "
+                "Check that it uses comma delimiters and has a header row."
             ],
         )
 
