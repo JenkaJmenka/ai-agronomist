@@ -12,8 +12,8 @@ Continuously adapts a pretrained LSTM-VAE to a tenant's real sensor stream:
 
 import copy
 import logging
-from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from collections import defaultdict, deque
+from typing import Any, Deque, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -101,8 +101,8 @@ class OnlineLearner:
 
         self.step_count = 0
         self.update_count = 0
-        self.losses: List[float] = []
-        self.update_history: Dict[str, List[float]] = defaultdict(list)
+        self.losses: Deque[float] = deque(maxlen=2000)
+        self.update_history: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=500))
 
     def _to_batch_tensor(self, sequence: np.ndarray) -> torch.Tensor:
         """Convert a (seq_len, input_dim) array to a (1, seq_len, input_dim) tensor."""
