@@ -14,6 +14,7 @@ sqlalchemy>=2.0
 alembic>=1.13
 aiosqlite>=0.19          # async SQLite (dev/test)
 asyncpg>=0.29            # PostgreSQL async (production Docker/Render)
+pgvector>=0.3.0          # native vector column type for incident embeddings (PostgreSQL)
 
 # Validation
 pydantic>=2.5
