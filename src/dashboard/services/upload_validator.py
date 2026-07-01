@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-_REQUIRED_COLUMNS = frozenset({"temperature", "humidity", "co2", "light"})
 _MAX_FILE_SIZE_MB = 50
 _MAX_FILE_SIZE_BYTES = _MAX_FILE_SIZE_MB * 1024 * 1024
 
@@ -19,41 +18,23 @@ class ValidationResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _detect_csv_props(file_bytes: bytes) -> tuple[str, str, str]:
-    """Detect delimiter, encoding, and decimal separator from raw bytes.
-
-    Mirrors the logic in CSVAdapter._detect_csv_properties so the validator
-    accepts the same files the API accepts.
-    """
+def _detect_sep(file_bytes: bytes) -> tuple[str, str]:
+    """Detect delimiter and encoding from the first 4 KB."""
     raw = file_bytes[:4096]
     encoding = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
     text = raw.decode(encoding, errors="replace")
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    header = lines[0] if lines else ""
+    header = next((ln for ln in text.splitlines() if ln.strip()), "")
     sep = ";" if header.count(";") > header.count(",") else ","
-    decimal = "."
-    if len(lines) > 1 and sep == ";":
-        for field_val in lines[1].split(sep)[1:]:
-            stripped = field_val.strip().replace("-", "")
-            if "," in stripped:
-                try:
-                    float(stripped.replace(",", "."))
-                    decimal = ","
-                    break
-                except ValueError:
-                    pass
-    return sep, encoding, decimal
+    return sep, encoding
 
 
 def validate_csv_upload(file_bytes: bytes, filename: str = "") -> ValidationResult:
     """Validate CSV bytes before sending to the inference API.
 
-    Checks: non-empty, size limit, parseable, required columns present.
-    Returns a ValidationResult with human-readable errors/warnings.
+    Only checks what the client can definitively judge: empty file, size limit,
+    and basic parseability. Column validation is delegated to the API which uses
+    fuzzy keyword matching and handles semicolon/comma delimiters automatically.
     """
-    errors: list[str] = []
-    warnings: list[str] = []
-
     if len(file_bytes) == 0:
         return ValidationResult(is_valid=False, errors=["The file is empty."])
 
@@ -67,14 +48,13 @@ def validate_csv_upload(file_bytes: bytes, filename: str = "") -> ValidationResu
             ],
         )
 
-    sep, encoding, decimal = _detect_csv_props(file_bytes)
+    sep, encoding = _detect_sep(file_bytes)
     try:
         df = pd.read_csv(
             io.BytesIO(file_bytes),
             nrows=5,
             sep=sep,
             encoding=encoding,
-            decimal=decimal,
             on_bad_lines="skip",
         )
     except Exception:
@@ -92,15 +72,4 @@ def validate_csv_upload(file_bytes: bytes, filename: str = "") -> ValidationResu
             errors=["The CSV has no data rows (only a header or is completely empty)."],
         )
 
-    actual_cols = {str(c).strip().lower() for c in df.columns}
-    missing = _REQUIRED_COLUMNS - actual_cols
-    if missing:
-        errors.append(
-            f"Missing required columns: {', '.join(sorted(missing))}. "
-            f"Required: {', '.join(sorted(_REQUIRED_COLUMNS))}."
-        )
-
-    if errors:
-        return ValidationResult(is_valid=False, errors=errors, warnings=warnings)
-
-    return ValidationResult(is_valid=True, errors=errors, warnings=warnings)
+    return ValidationResult(is_valid=True)
