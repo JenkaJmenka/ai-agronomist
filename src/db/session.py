@@ -10,6 +10,7 @@ import os
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 # Database URL configuration, defaulting to local SQLite using async aiosqlite
 def _normalize_database_url(url: str) -> str:
@@ -30,11 +31,18 @@ connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
 
+# asyncpg connections are bound to the event loop they are created on.
+# Streamlit runs script threads with different loops than the module-import loop,
+# so pooled asyncpg connections cannot be reused across calls. NullPool forces a
+# fresh connection per call, eliminating the "Future attached to a different loop" error.
+_pool_kwargs = {"poolclass": NullPool} if "+asyncpg" in DATABASE_URL else {}
+
 # Create AsyncEngine
 engine = create_async_engine(
     DATABASE_URL,
     connect_args=connect_args,
     echo=False,  # Set to True for verbose SQL query logging
+    **_pool_kwargs,
 )
 
 # Async session factory
