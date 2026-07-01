@@ -22,15 +22,7 @@ from src.db.session import AsyncSessionLocal
 def _run_async(coro):
     """Run an async coroutine from Streamlit's sync context."""
     import asyncio
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("closed")
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def merge_anomaly_scores_into_readings(
