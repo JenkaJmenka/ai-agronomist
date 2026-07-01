@@ -1,8 +1,10 @@
+import asyncio
 import os
 import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
@@ -39,11 +41,33 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _do_run_migrations(connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def _run_async_migrations(url: str) -> None:
+    engine = create_async_engine(url, poolclass=pool.NullPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(_do_run_migrations)
+    await engine.dispose()
+
+
 def run_migrations_online() -> None:
     url = config.get_main_option("sqlalchemy.url")
     if url and "sqlite+aiosqlite" in url:
         url = url.replace("sqlite+aiosqlite", "sqlite")
         config.set_main_option("sqlalchemy.url", url)
+
+    if url and "+asyncpg" in url:
+        # asyncpg is an async-only driver; use async engine for migrations
+        asyncio.run(_run_async_migrations(url))
+        return
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -52,14 +76,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            render_as_batch=True,
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+        _do_run_migrations(connection)
 
 
 if context.is_offline_mode():
