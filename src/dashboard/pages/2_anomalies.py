@@ -241,7 +241,7 @@ def _render_upload_section(
                             if "connection" in exc_str.lower() or "refused" in exc_str.lower() or "timeout" in exc_str.lower():
                                 st.error(
                                     "Could not reach the API server. "
-                                    "Start it with: `venv/bin/python -m uvicorn src.api.main:app --reload`"
+                                    "Check that the API service is running and that API_URL is set correctly."
                                 )
                             elif "422" in exc_str or "400" in exc_str:
                                 detail = exc_str.split(":", 1)[-1].strip()[:300]

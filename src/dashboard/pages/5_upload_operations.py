@@ -129,7 +129,7 @@ with tab1:
                         if "connection" in exc_str.lower() or "refused" in exc_str.lower():
                             st.error(
                                 "Could not reach the API server. "
-                                "Start it with: `venv/bin/python -m uvicorn src.api.main:app --reload`"
+                                "Check that the API service is running and that API_URL is set correctly."
                             )
                         else:
                             st.error(f"Upload or training failed: {exc_str[:300]}")
