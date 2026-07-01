@@ -202,7 +202,7 @@ COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
 COLD_RUN_STAT_USE_IQR: bool = False
 
 # Maximum number of pipeline instances kept in the LRU cache.
-MAX_PIPELINE_CACHE_SIZE: int = 10
+MAX_PIPELINE_CACHE_SIZE: int = 3
 
 # Maximum number of AnomalyMetrics detection events held in the bounded deque.
 # Older events are automatically evicted when the cap is reached.
