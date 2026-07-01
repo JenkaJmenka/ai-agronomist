@@ -13,6 +13,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.db.models import Base
+from src.db.session import _normalize_database_url
 
 config = context.config
 
@@ -52,7 +53,8 @@ def _do_run_migrations(connection) -> None:
 
 
 async def _run_async_migrations(url: str) -> None:
-    engine = create_async_engine(url, poolclass=pool.NullPool)
+    clean_url, connect_args = _normalize_database_url(url)
+    engine = create_async_engine(clean_url, connect_args=connect_args, poolclass=pool.NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(_do_run_migrations)
     await engine.dispose()
