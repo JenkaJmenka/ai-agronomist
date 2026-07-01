@@ -7,6 +7,7 @@ from src.dashboard.components.charts import get_available_greenhouses
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.services.api_client import DEFAULT_API_URL
 from src.dashboard.services.http_utils import api_delete, api_get, api_post
+from src.dashboard.services.upload_validator import validate_csv_upload
 
 API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
 
@@ -38,61 +39,100 @@ with tab1:
     job = st.session_state.get("training_job")
     if job and job.get("status") == "running":
         _status_placeholder = st.empty()
-        try:
-            res_status = api_get(
-                f"{API_URL}/api/models/{job['customer_id']}/training-status",
-                timeout=5,
-            )
-            current = res_status.json() if res_status.ok else {"status": "running"}
-        except Exception:
-            current = {"status": "running"}
+        _MAX_POLL_ERRORS = 5
+        _MAX_POLL_ATTEMPTS = 120  # 120 × 5 s = 10 min ceiling
+        _poll_errors = job.get("poll_errors", 0)
+        _poll_attempts = job.get("poll_attempts", 0)
 
-        if current["status"] == "running":
-            _status_placeholder.info("Training in progress — checking again in 5 seconds…")
-            time.sleep(5)
-            st.rerun()
-        elif current["status"] == "completed":
-            model_id = current.get("model_id")
-            if model_id:
-                _status_placeholder.success(f"Training complete. New model registered: `{model_id}`")
-            else:
-                _status_placeholder.warning(
-                    "Training finished but no model was registered "
-                    "(new model did not outperform the baseline)."
+        if _poll_attempts >= _MAX_POLL_ATTEMPTS:
+            _status_placeholder.warning(
+                "Training job status is unknown — it has been polling for over 10 minutes. "
+                "Check the API server logs to see if training completed."
+            )
+            st.session_state["training_job"] = None
+        else:
+            _current: dict | None = None
+            try:
+                res_status = api_get(
+                    f"{API_URL}/api/models/{job['customer_id']}/training-status",
+                    timeout=5,
                 )
-            st.session_state["training_job"] = None
-        elif current["status"] == "failed":
-            _status_placeholder.error(f"Training failed: {current.get('error', 'unknown error')}")
-            st.session_state["training_job"] = None
+                _current = res_status.json() if res_status.ok else {"status": "running"}
+                _poll_errors = 0
+            except Exception as _poll_exc:
+                _poll_errors += 1
+                if _poll_errors >= _MAX_POLL_ERRORS:
+                    _status_placeholder.warning(
+                        f"Training status API is not responding ({_poll_errors} consecutive failures). "
+                        f"Last error: {_poll_exc}"
+                    )
+                    st.session_state["training_job"] = None
+                else:
+                    _current = {"status": "running"}
+
+            if _current is not None:
+                job["poll_errors"] = _poll_errors
+                job["poll_attempts"] = _poll_attempts + 1
+                st.session_state["training_job"] = job
+
+                if _current["status"] == "running":
+                    _status_placeholder.info("Training in progress — checking again in 5 seconds…")
+                    time.sleep(5)
+                    st.rerun()
+                elif _current["status"] == "completed":
+                    model_id = _current.get("model_id")
+                    if model_id:
+                        _status_placeholder.success(f"Training complete. New model registered: `{model_id}`")
+                    else:
+                        _status_placeholder.warning(
+                            "Training finished but no model was registered "
+                            "(new model did not outperform the baseline)."
+                        )
+                    st.session_state["training_job"] = None
+                elif _current["status"] == "failed":
+                    _status_placeholder.error(
+                        f"Training failed: {_current.get('error', 'unknown error')}"
+                    )
+                    st.session_state["training_job"] = None
 
     if st.button("Upload & Train", type="primary"):
         if not tenant_id_train or not greenhouse_id_train:
             st.warning("Tenant ID and Greenhouse ID cannot be empty.")
         elif uploaded_file_train is not None:
-            with st.spinner("Uploading data…"):
-                files = {"file": (uploaded_file_train.name, uploaded_file_train.getvalue(), "text/csv")}
-                data = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
-                try:
-                    res_upload = api_post(
-                        f"{API_URL}/api/upload",
-                        files=files,
-                        data=data,
-                    )
-                    st.success(f"Uploaded {res_upload.json().get('uploaded', 0)} rows successfully.")
+            _file_bytes_train = uploaded_file_train.getvalue()
+            _validation = validate_csv_upload(_file_bytes_train, uploaded_file_train.name)
+            if not _validation.is_valid:
+                for _err in _validation.errors:
+                    st.error(_err)
+            else:
+                for _warn in _validation.warnings:
+                    st.warning(_warn)
+                with st.spinner("Uploading data…"):
+                    files = {"file": (uploaded_file_train.name, _file_bytes_train, "text/csv")}
+                    data = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
+                    try:
+                        res_upload = api_post(
+                            f"{API_URL}/api/upload",
+                            files=files,
+                            data=data,
+                        )
+                        st.success(f"Uploaded {res_upload.json().get('uploaded', 0)} rows successfully.")
 
-                    res_train = api_post(f"{API_URL}/api/models/{tenant_id_train}/train")
-                    st.session_state["training_job"] = {
-                        "status": "running",
-                        "customer_id": tenant_id_train,
-                    }
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Operation failed: {e}")
-                    if hasattr(e, "response") and e.response is not None:
-                        try:
-                            st.json(e.response.json())
-                        except Exception:
-                            st.write(e.response.text)
+                        res_train = api_post(f"{API_URL}/api/models/{tenant_id_train}/train")
+                        st.session_state["training_job"] = {
+                            "status": "running",
+                            "customer_id": tenant_id_train,
+                        }
+                        st.rerun()
+                    except Exception as e:
+                        exc_str = str(e)
+                        if "connection" in exc_str.lower() or "refused" in exc_str.lower():
+                            st.error(
+                                "Could not reach the API server. "
+                                "Start it with: `venv/bin/python -m uvicorn src.api.main:app --reload`"
+                            )
+                        else:
+                            st.error(f"Upload or training failed: {exc_str[:300]}")
         else:
             st.warning("Please upload a CSV file first.")
 
@@ -226,25 +266,41 @@ with tab1:
     st.markdown("---")
     st.subheader("Clear stored data")
     st.warning("This permanently deletes all sensor readings for the selected tenant and greenhouse.")
-    if st.button("Clear all data", type="secondary"):
-        try:
-            api_delete(
-                f"{API_URL}/api/upload/data",
-                params={"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train},
-            )
-            from src.dashboard.components.charts import clear_sensor_cache  # noqa: PLC0415
-            from src.dashboard.components.inference_results import (  # noqa: PLC0415
-                clear_inference_results_for,
-            )
 
-            clear_sensor_cache()
-            clear_inference_results_for(tenant_id_train, greenhouse_id_train)
-            get_available_greenhouses.clear()
-            st.success(
-                f"All data cleared for tenant `{tenant_id_train}` / greenhouse `{greenhouse_id_train}`."
-            )
-        except Exception as e:
-            st.error(f"Clear failed: {e}")
+    _confirm_key = f"_confirm_clear_{tenant_id_train}_{greenhouse_id_train}"
+    if not st.session_state.get(_confirm_key):
+        if st.button("Clear all data", type="secondary", key="clear_data_btn_1"):
+            st.session_state[_confirm_key] = True
+            st.rerun()
+    else:
+        st.error(
+            f"Are you sure? This will permanently delete ALL data for "
+            f"`{tenant_id_train}` / `{greenhouse_id_train}`. This cannot be undone."
+        )
+        _col_yes, _col_no, _ = st.columns([1, 1, 4])
+        if _col_yes.button("Yes, delete everything", type="primary", key="clear_data_confirm"):
+            try:
+                api_delete(
+                    f"{API_URL}/api/upload/data",
+                    params={"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train},
+                )
+                from src.dashboard.components.charts import clear_sensor_cache  # noqa: PLC0415
+                from src.dashboard.components.inference_results import (  # noqa: PLC0415
+                    clear_inference_results_for,
+                )
+                clear_sensor_cache()
+                clear_inference_results_for(tenant_id_train, greenhouse_id_train)
+                get_available_greenhouses.clear()
+                st.success(
+                    f"All data cleared for tenant `{tenant_id_train}` / greenhouse `{greenhouse_id_train}`."
+                )
+            except Exception as e:
+                st.error(f"Clear failed: {e}")
+            finally:
+                st.session_state.pop(_confirm_key, None)
+        if _col_no.button("Cancel", type="secondary", key="clear_data_cancel"):
+            st.session_state.pop(_confirm_key, None)
+            st.rerun()
 
 with tab2:
     st.header("Upload & Find Anomalies")

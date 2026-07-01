@@ -43,6 +43,7 @@ from src.dashboard.components.timeline import (
 from src.dashboard.services.api_client import DashboardApiClient
 from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
+from src.dashboard.services.upload_validator import validate_csv_upload
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
 from src.dashboard.services.review_queue import (
     build_sequence_from_readings,
@@ -81,12 +82,13 @@ def _submit_feedback(
     feedback_state_key: str,
 ) -> None:
     try:
-        result = api.mark_anomaly({
-            "incident_id": incident_id,
-            "is_true_anomaly": is_true_anomaly,
-            "customer_id": customer_id,
-            "operator_id": "dashboard_user",
-        })
+        with st.spinner("Submitting feedback…"):
+            result = api.mark_anomaly({
+                "incident_id": incident_id,
+                "is_true_anomaly": is_true_anomaly,
+                "customer_id": customer_id,
+                "operator_id": "dashboard_user",
+            })
         st.session_state[feedback_state_key][state_key] = {
             "is_true_anomaly": is_true_anomaly,
             "result": result,
@@ -161,6 +163,13 @@ def _render_upload_section(
                 st.warning("Please upload a CSV file first.")
             else:
                 file_bytes = uploaded_file.getvalue()
+                validation = validate_csv_upload(file_bytes, uploaded_file.name)
+                if not validation.is_valid:
+                    for _err in validation.errors:
+                        st.error(_err)
+                    return
+                for _warn in validation.warnings:
+                    st.warning(_warn)
                 file_hash = compute_file_hash(file_bytes)
                 _client = DashboardApiClient(api_key=st.session_state.get("api_key"))
                 model_version = _client.get_active_model_version(tenant_id_inf)
@@ -172,6 +181,7 @@ def _render_upload_section(
                     # Layer 1 HIT — skip API call
                     results = cached["results"]
                     _stats["l1_hits"] += 1
+                    st.toast("Loaded from cache", icon="⚡")
                     save_inference_results(
                         results,
                         tenant_id_inf,
@@ -227,7 +237,22 @@ def _render_upload_section(
                             )
                             st.rerun()
                         except Exception as exc:
-                            st.error(f"Inference failed: {exc}")
+                            exc_str = str(exc)
+                            if "connection" in exc_str.lower() or "refused" in exc_str.lower() or "timeout" in exc_str.lower():
+                                st.error(
+                                    "Could not reach the API server. "
+                                    "Start it with: `venv/bin/python -m uvicorn src.api.main:app --reload`"
+                                )
+                            elif "422" in exc_str or "400" in exc_str:
+                                detail = exc_str.split(":", 1)[-1].strip()[:300]
+                                st.error(f"The file was rejected by the server: {detail}")
+                            elif "500" in exc_str or "503" in exc_str:
+                                st.error(
+                                    "The inference server encountered an internal error. "
+                                    "Check the API server logs for details."
+                                )
+                            else:
+                                st.error(f"Inference failed: {exc}")
 
         if st.session_state.get("debug_cache"):
             with st.expander("Cache stats", expanded=False):
@@ -320,13 +345,17 @@ def _render_top_anomalies_section(
     start_iso = ts_col.min().isoformat()
     end_iso = (ts_col.max() + pd.Timedelta(days=1)).isoformat()
 
-    enriched = enrich_anomalies_table(
-        top_anomalies,
-        tenant,
-        greenhouse,
-        start_iso,
-        end_iso,
-    )
+    try:
+        enriched = enrich_anomalies_table(
+            top_anomalies,
+            tenant,
+            greenhouse,
+            start_iso,
+            end_iso,
+        )
+    except Exception as exc:
+        st.warning(f"Could not enrich anomaly table: {exc}")
+        enriched = top_anomalies
 
     if selected_fault_types:
         def _ft_match(ft: Optional[str]) -> bool:
@@ -460,13 +489,18 @@ def _render_anomaly_dashboard(
         )
         selected_fault_types = st.session_state.get("fault_type_filter", [])
 
-        df_window, using_upload_fallback = _load_window_dataframe(
-            tenant=tenant,
-            greenhouse=greenhouse,
-            window_start=window_start,
-            window_end=window_end,
-            inf_results=inf_results,
-        )
+        try:
+            df_window, using_upload_fallback = _load_window_dataframe(
+                tenant=tenant,
+                greenhouse=greenhouse,
+                window_start=window_start,
+                window_end=window_end,
+                inf_results=inf_results,
+            )
+        except Exception as exc:
+            st.error(f"Could not load sensor readings: {exc}")
+            df_window = pd.DataFrame()
+            using_upload_fallback = False
 
         if using_upload_fallback:
             score_threshold = float(inf_results.get("threshold_used", threshold)) if inf_results else threshold
@@ -480,6 +514,12 @@ def _render_anomaly_dashboard(
                     "Showing filters from your last CSV upload. "
                     "Enable **Load data into platform** on upload to persist readings in the database."
                 )
+
+        if df_window.empty and has_sensor_data:
+            st.info(
+                "No sensor readings in the selected date window. "
+                "Try expanding the date range or choose a different preset."
+            )
 
         df = df_window
         range_label = (

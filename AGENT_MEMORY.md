@@ -3,7 +3,174 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-**Two-Layer Dashboard Caching System — COMPLETE (2026-06-30)**
+**UI Robustness Pass — P1–P7 COMPLETE + CODE REVIEW DONE (2026-07-01)**
+P1–P7 all done. Code review completed: **PASS WITH NOTES**.
+Review: [docs/review/ui_robustness_review.md](docs/review/ui_robustness_review.md).
+Agent: code-reviewer-ui. Done signal: tasks/done/code-reviewer-ui.json.
+
+### UI Robustness Code Review (2026-07-01)
+
+**Files reviewed (8):** `upload_validator.py` (NEW), `test_upload_validator.py` (NEW), `2_anomalies.py`, `5_upload_operations.py`, `99_Operator_Feedback.py`, `4_metrics.py`, `3_thresholds.py`, `anomalies_page_data.py`. 1,866 lines total.
+
+**Key findings (0 blocking, 7 non-blocking, 14 notes):**
+- **SEC-1/SEC-2 (NON-BLOCKING):** Raw exception text exposed to users in 4 error-fallback branches and the CSV parser error message. Should show generic messages and log details server-side.
+- **COR-1 (NON-BLOCKING):** `_submit_feedback` renders st.success/info then `st.rerun()` discards them before user can see.
+- **COR-2 (NON-BLOCKING):** Two-step confirm key scoped to text-input values — changing tenant between clicks silently cancels (safe failure mode, but confusing UX).
+- **RES-1 (NON-BLOCKING):** `statistics()` + `learning_progress()` API failures silently swallowed in Operator Feedback with no user indication.
+- **TEST-2/TEST-3 (NON-BLOCKING):** Missing boundary test (exactly 50 MB file) and no test exercising the `warnings` field.
+
+**All guardrail checks PASS.** No hardcoded secrets, no eval/subprocess, no SQL concatenation, no circular imports, all DELETE operations have tenant_id filters.
+
+Previous phase: **UI Robustness Pass — P1–P7 COMPLETE (2026-06-30)**
+
+### UI Robustness Improvements P5–P7 (2026-06-30)
+
+**P5a — Cache HIT toast (`2_anomalies.py` line 184):**
+Added `st.toast("Loaded from cache", icon="⚡")` immediately before `save_inference_results(` in the
+`if cached is not None:` branch of `_render_upload_section`. Shows a transient notification when
+Layer 1 cache is hit and the API call is skipped.
+
+**P5b — Feedback spinner (`2_anomalies.py` line 85):**
+Wrapped `result = api.mark_anomaly({...})` in `_submit_feedback` with
+`with st.spinner("Submitting feedback…"):` so the user sees a spinner while the API request is in flight.
+
+**P5c — Pipeline metrics spinner (`4_metrics.py` line 27):**
+Wrapped the entire `try/except` block that calls `client.get_monitoring_metrics(hours=hours)` in
+`with st.spinner("Loading pipeline metrics…"):`. All metric columns, dataframes, and except-branch
+captions are indented inside the spinner context.
+
+**P5d — Label submit spinner (`99_Operator_Feedback.py` line 280):**
+Wrapped `result = client.mark_anomaly(payload)` inside `if submitted:` with
+`with st.spinner("Submitting label…"):`. The `st.success` / `st.rerun` calls remain outside the
+spinner (execute after it closes).
+
+**P6 — Empty date-window state (`2_anomalies.py` lines 518–522):**
+Added `if df_window.empty and has_sensor_data:` block between the upload-fallback messages and
+`df = df_window`. Shows `st.info("No sensor readings in the selected date window. Try expanding
+the date range or choose a different preset.")` when data exists for the greenhouse but none falls
+in the chosen window.
+
+**P7 — Two-step confirm for Clear all data (`5_upload_operations.py` lines 270–305):**
+Replaced single-click `st.button("Clear all data")` with a two-step flow:
+- Step 1: "Clear all data" (secondary) → sets `_confirm_key` in session_state and reruns.
+- Step 2: Shows `st.error(...)` warning message + two columns: "Yes, delete everything" (primary)
+  and "Cancel" (secondary). Confirm triggers the `api_delete` call (same as before); `finally` block
+  always pops `_confirm_key` from session_state. Cancel clears the key and reruns.
+  Key is scoped to `f"_confirm_clear_{tenant_id_train}_{greenhouse_id_train}"` for isolation.
+
+### UI Robustness Improvements P3+P4 (2026-06-30)
+
+**P3 — Specific error messages (2 files):**
+
+- **`2_anomalies.py` (line ~238)**: Replaced generic `st.error(f"Inference failed: {exc}")` in the upload
+  spinner's except block with a 4-branch classifier:
+  - "connection"/"refused"/"timeout" in exc_str → "Could not reach the API server. Start it with: `venv/bin/python -m uvicorn …`"
+  - "422" or "400" in exc_str → "The file was rejected by the server: {detail[:300]}"
+  - "500" or "503" in exc_str → "The inference server encountered an internal error. Check API logs."
+  - else → fallback `f"Inference failed: {exc}"`
+
+- **`5_upload_operations.py` (line ~128)**: Replaced 6-line `except Exception as e:` block (which did
+  `st.error(f"Operation failed: {e}")` plus a `hasattr(e, "response")` JSON dump) with a 2-branch
+  classifier: "connection"/"refused" → API-server-down hint; else → `f"Upload or training failed: {exc_str[:300]}"`.
+
+**P4 — Training job poller hardening (`5_upload_operations.py` lines 39–91):**
+
+Replaced the silent-swallow poller (`except Exception: current = {"status": "running"}` that looped forever)
+with a bounded poller:
+- `_MAX_POLL_ATTEMPTS = 120` (10-minute ceiling at 5 s per poll) — when exceeded, shows `st.warning` and
+  clears `training_job` from session state (no infinite loop).
+- `_MAX_POLL_ERRORS = 5` — consecutive API errors counted in `job["poll_errors"]`; at threshold shows
+  `st.warning` with error count and last exception; clears job.
+- `job["poll_attempts"]` tracked in session state and incremented each rerun.
+- On successful poll, `_poll_errors` resets to 0.
+- Completed/failed branches unchanged in behaviour; only variable names prefixed with `_` to avoid
+  shadowing.
+- Bug fix: `job[customer_id]` (undefined variable) in original prompt corrected to `job["customer_id"]`.
+
+### UI Robustness Improvements P1+P2 (2026-06-30)
+
+**New file created:**
+
+- **`src/dashboard/services/upload_validator.py`**: Client-side CSV validation before upload.
+  `validate_csv_upload(file_bytes, filename)` → `ValidationResult(is_valid, errors, warnings)`.
+  Checks: non-empty, ≤50 MB size limit, parseable as CSV (pandas nrows=5), required columns present
+  (`temperature`, `humidity`, `co2`, `light`). Returns structured errors/warnings; caller renders them.
+
+**Files modified (P1 — crash prevention):**
+
+- **`1_Active_Monitoring/1_Monitoring.py` (line ~177)**: Wrapped `load_monitoring_readings` in
+  `try/except → st.error + st.stop()`. Page no longer crashes if API is down.
+- **`1_Active_Monitoring/2_Climate_Data.py` (line ~55)**: Wrapped `query_sensor_readings` in
+  `try/except → st.error + st.stop()`.
+- **`3_thresholds.py` (line ~33)**: Wrapped `query_sensor_readings` in `try/except → st.error + st.stop()`.
+- **`2_anomalies.py` (two locations)**:
+  - `_load_window_dataframe` call (~line 463): `try/except → st.error + df_window=pd.DataFrame()`.
+  - `enrich_anomalies_table` call (~line 323): `try/except → st.warning + enriched=top_anomalies` (degrades gracefully, does not stop).
+- **`4_metrics.py` (line ~76)**: Wrapped `query_sensor_readings` in `try/except → st.warning + df=pd.DataFrame()`.
+  Uses `st.warning` (not `st.error`) and no `st.stop()` — pipeline metrics section already rendered above; coverage section degrades gracefully.
+
+**Files modified (P2 — upload validation):**
+
+- **`2_anomalies.py`**: Added `from src.dashboard.services.upload_validator import validate_csv_upload`.
+  In `_render_upload_section`, validates `file_bytes` before computing hash/calling API. Invalid CSVs
+  show `st.error` per error and `return` early (no API call made).
+- **`5_upload_operations.py`**: Added `validate_csv_upload` import. In "Upload & Train" button handler,
+  reads bytes once into `_file_bytes_train`, validates; on failure shows `st.error` per error; on success
+  passes bytes to the spinner + `api_post` block (spinner still wraps the full API operation).
+
+**Design decisions:**
+- `st.stop()` used for P1a/P1b/P1c/P1d-window: unrecoverable — nothing useful to show without data.
+- `st.warning` + `pd.DataFrame()` used for P1d-enrich and P1e: partial degradation acceptable.
+- `validate_csv_upload` reads only `nrows=5` to keep validation fast on large files.
+- Column matching is case-insensitive + strip-whitespace (`str(c).strip().lower()`).
+
+Previous phase: **Two-Layer Dashboard Caching Code Review — COMPLETE (2026-06-30)**
+Verdict: **PASS WITH NOTES** — [docs/review/caching-review.md](docs/review/caching-review.md).
+0 blocking issues, 10 non-blocking findings. Cache module is correct, well-separated, and properly tested.
+Agent: code-reviewer-caching. Done signal: tasks/done/code-reviewer-caching.json.
+
+### Caching Code Review (2026-06-30)
+
+**Files reviewed (6):** `inference_cache.py` (NEW), `learning.py` (MODIFIED), `api_client.py` (MODIFIED), `2_anomalies.py` (MODIFIED), `anomalies_page_data.py` (MODIFIED), `test_inference_cache.py` (NEW).
+
+**Key findings:**
+- **SEC-1 (NON-BLOCKING):** `file_hash` parameter not sanitized in `layer1_cache_path` — path traversal possible if public API called with crafted input. Current call sites safe (always use `compute_file_hash` hex output).
+- **SEC-2 (NON-BLOCKING):** `checkpoint_path` (filesystem path) exposed in `ActiveModelVersionResponse` API response.
+- **WARN-1 (NON-BLOCKING):** Silent `except Exception` in `api_client.get_active_model_version` — no logging on failure, returns `"baseline"` invisibly.
+- **COR-1 (NON-BLOCKING):** `tenant_id`/`customer_id` naming mismatch between API endpoint and `ModelRegistry`.
+- **COR-4/TEST-1 (NON-BLOCKING):** No tests for new `GET /models/{tenant_id}/active-version` endpoint or `api_client.get_active_model_version` error fallback.
+- **CQ-1 (NON-BLOCKING):** No cache eviction or size limit — cache grows without bound.
+
+**All guardrail checks PASS.** No hardcoded secrets, no circular imports, no eval/subprocess, no SQL concatenation. Cache module has zero FastAPI/Streamlit imports (pure utility). Double-cache fix is surgical — only removed decorators from pass-through wrappers. All 4 test scenarios verified (round-trip, content-addressed, version invalidation, filter isolation).
+
+Previous phase: **Layer 1 Inference Cache QA — COMPLETE (2026-06-30)**
+Comprehensive pytest suite for `src/dashboard/services/inference_cache.py` written and all 29 tests passing.
+Agent: qa-engineer-caching. Done signal: tasks/done/qa-engineer-caching.json.
+
+### Layer 1 Inference Cache Tests (2026-06-30)
+
+**File created:** `tests/dashboard/test_inference_cache.py` — 29 tests, 0 failures.
+
+**Coverage groups:**
+- `compute_file_hash` — 5 tests: 64-char hex, stdlib sha256 match, determinism, empty bytes, distinct hashes for distinct content.
+- **(a) Round-trip** — 4 tests: anomaly_scores survive write/read, top-level metadata keys preserved, `slim_results_for_cache` strips embeddings/uncertainties, file materialised on disk.
+- **(b) Content-addressed** — 3 tests: same bytes under different variable names → HIT, hash independent of variable name, different bytes never collide.
+- **(c) Model-version invalidation** — 4 tests: different version → None, correct version still hits, two versions coexist as separate entries, model version embedded in filename.
+- **(d) Filter changes don't touch Layer 1** — 2 tests: `rows_in_window` (date window) and `filter_anomalies` (threshold filter) both mock-patched to assert `read_layer1`/`write_layer1` are never called.
+- `read_layer1` edge cases — 4 tests: missing file → None, corrupt JSON → None, missing `results` key → None, JSON root is list → None.
+- `delete_layer1` — 3 tests: removes file, idempotent when absent, only removes targeted version.
+- Path/directory creation — 4 tests: respects `DASHBOARD_DATA_DIR`, sanitises special chars in model version, `write_layer1` creates intermediate dirs, env isolation per test.
+
+**Test patterns:**
+- `monkeypatch.setenv("DASHBOARD_DATA_DIR", str(tmp_path))` for complete isolation.
+- `unittest.mock.patch` on `src.dashboard.services.inference_cache.read_layer1`/`write_layer1` for test (d).
+- No shared state — each test independent and idempotent.
+
+**Bugs found (not fixed):** None. All functions behave as documented.
+
+**Note:** `pytest.ini` sets `--cov=src --cov-fail-under=90` globally. Running this file alone triggers a coverage failure (only 6.85% of full `src/` is covered by this subset). Run with `--no-cov` when testing in isolation, or run the full suite for the 90% threshold check.
+
+Previous phase: **Two-Layer Dashboard Caching System — COMPLETE (2026-06-30)**
 Content-addressed Layer 1 inference cache, active-model-version API endpoint, and dashboard double-caching fix implemented.
 Agent: backend-engineer. Done signal: tasks/done/backend-engineer.json.
 

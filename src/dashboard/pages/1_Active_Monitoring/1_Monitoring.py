@@ -175,7 +175,14 @@ greenhouse = st.session_state["selected_greenhouse"]
 st.markdown(f"**{tenant}** · Greenhouse **{greenhouse}**")
 
 with st.spinner("Loading sensor data…"):
-    df, _data_min_ts, _data_max_ts = load_monitoring_readings(tenant, greenhouse)
+    try:
+        df, _data_min_ts, _data_max_ts = load_monitoring_readings(tenant, greenhouse)
+    except Exception as exc:
+        st.error(
+            f"Could not load sensor data — is the API server running? "
+            f"Details: {exc}"
+        )
+        st.stop()
 
 if df.empty:
     st.info("No data found. Upload a CSV with sensor readings via the Upload page.")

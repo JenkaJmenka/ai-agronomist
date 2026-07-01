@@ -53,7 +53,14 @@ if "sdetail_filter_col" not in st.session_state:
     st.session_state["sdetail_filter_col"] = None
 
 with st.spinner("Loading climate data…"):
-    df = query_sensor_readings(tenant, greenhouse)
+    try:
+        df = query_sensor_readings(tenant, greenhouse)
+    except Exception as exc:
+        st.error(
+            f"Could not load climate data — is the API server running? "
+            f"Details: {exc}"
+        )
+        st.stop()
 
 if df.empty:
     st.info("No data found. Upload a CSV with sensor readings via the Upload page.")

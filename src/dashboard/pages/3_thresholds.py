@@ -31,7 +31,14 @@ greenhouse = st.session_state['selected_greenhouse']
 saved_threshold = float(st.session_state.get('anomaly_threshold', DEFAULT_ANOMALY_THRESHOLD))
 
 with st.spinner("Loading sensor data…"):
-    df = query_sensor_readings(tenant, greenhouse)
+    try:
+        df = query_sensor_readings(tenant, greenhouse)
+    except Exception as exc:
+        st.error(
+            f"Could not load sensor data — is the API server running? "
+            f"Details: {exc}"
+        )
+        st.stop()
 
 if df.empty:
     st.info("No sensor data available.")

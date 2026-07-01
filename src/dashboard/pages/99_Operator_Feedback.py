@@ -277,7 +277,8 @@ else:
                 "operator_confidence": confidence,
             }
             try:
-                result = client.mark_anomaly(payload)
+                with st.spinner("Submitting label…"):
+                    result = client.mark_anomaly(payload)
                 st.success(result.get("status", "Submitted"))
                 if result.get("retraining"):
                     render_learning_progress(retraining=result["retraining"])

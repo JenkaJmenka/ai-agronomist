@@ -24,57 +24,62 @@ client = DashboardApiClient(api_key=api_key)
 
 st.markdown("### Pipeline Metrics")
 hours = st.slider("Lookback (hours)", min_value=1, max_value=8760, value=24, step=24)
-try:
-    pipeline_metrics = client.get_monitoring_metrics(hours=hours)
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Total detections", pipeline_metrics.get("total_detections", 0))
-    p2.metric(
-        "False positive rate",
-        f"{pipeline_metrics.get('false_positive_rate', 0.0):.1%}",
-    )
-    p3.metric("Avg confidence", f"{pipeline_metrics.get('avg_confidence', 0.0):.2f}")
-    p4.metric(
-        "Operator labels",
-        pipeline_metrics.get("true_positives", 0)
-        + pipeline_metrics.get("false_positives", 0),
-    )
-
-    col_tp, col_fp = st.columns(2)
-    col_tp.metric("True positives", pipeline_metrics.get("true_positives", 0))
-    col_fp.metric("False positives", pipeline_metrics.get("false_positives", 0))
-
-    patterns = pipeline_metrics.get("pattern_distribution") or {}
-    if patterns:
-        st.markdown("**Pattern distribution**")
-        st.dataframe(
-            pd.DataFrame(
-                [{"pattern": k, "count": v} for k, v in patterns.items()]
-            ),
-            use_container_width=True,
+with st.spinner("Loading pipeline metrics…"):
+    try:
+        pipeline_metrics = client.get_monitoring_metrics(hours=hours)
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Total detections", pipeline_metrics.get("total_detections", 0))
+        p2.metric(
+            "False positive rate",
+            f"{pipeline_metrics.get('false_positive_rate', 0.0):.1%}",
+        )
+        p3.metric("Avg confidence", f"{pipeline_metrics.get('avg_confidence', 0.0):.2f}")
+        p4.metric(
+            "Operator labels",
+            pipeline_metrics.get("true_positives", 0)
+            + pipeline_metrics.get("false_positives", 0),
         )
 
-    conf_dist = pipeline_metrics.get("confidence_distribution") or {}
-    if conf_dist:
-        st.markdown("**Confidence distribution**")
-        st.dataframe(
-            pd.DataFrame(
-                [{"bucket": k, "count": v} for k, v in conf_dist.items()]
-            ),
-            use_container_width=True,
+        col_tp, col_fp = st.columns(2)
+        col_tp.metric("True positives", pipeline_metrics.get("true_positives", 0))
+        col_fp.metric("False positives", pipeline_metrics.get("false_positives", 0))
+
+        patterns = pipeline_metrics.get("pattern_distribution") or {}
+        if patterns:
+            st.markdown("**Pattern distribution**")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"pattern": k, "count": v} for k, v in patterns.items()]
+                ),
+                use_container_width=True,
+            )
+
+        conf_dist = pipeline_metrics.get("confidence_distribution") or {}
+        if conf_dist:
+            st.markdown("**Confidence distribution**")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"bucket": k, "count": v} for k, v in conf_dist.items()]
+                ),
+                use_container_width=True,
+            )
+    except Exception as exc:
+        st.warning(
+            "Could not load pipeline metrics from the API. "
+            "Start the FastAPI server and ensure it is reachable."
         )
-except Exception as exc:
-    st.warning(
-        "Could not load pipeline metrics from the API. "
-        "Start the FastAPI server and ensure it is reachable."
-    )
-    st.caption(f"Details: {exc}")
-    st.caption("See docs/deployment/ops-runbook.md for startup steps.")
+        st.caption(f"Details: {exc}")
+        st.caption("See docs/deployment/ops-runbook.md for startup steps.")
 
 st.markdown("---")
 st.markdown("### Sensor Coverage")
 
 with st.spinner("Compiling sensor coverage..."):
-    df = query_sensor_readings(tenant, greenhouse)
+    try:
+        df = query_sensor_readings(tenant, greenhouse)
+    except Exception as exc:
+        st.warning(f"Could not load sensor data for coverage metrics: {exc}")
+        df = pd.DataFrame()
 
 if df.empty:
     st.info("No sensor data available to calculate coverage metrics.")
