@@ -10,6 +10,7 @@ All values are designed to be used by:
 - src/models/lstm_vae.py
 """
 
+import os
 import torch
 from typing import Dict, List, Tuple
 
@@ -202,7 +203,8 @@ COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
 COLD_RUN_STAT_USE_IQR: bool = False
 
 # Maximum number of pipeline instances kept in the LRU cache.
-MAX_PIPELINE_CACHE_SIZE: int = 3
+# Override via MAX_PIPELINE_CACHE_SIZE env var (e.g. set to 1 on memory-constrained hosts).
+MAX_PIPELINE_CACHE_SIZE: int = int(os.environ.get("MAX_PIPELINE_CACHE_SIZE", "1"))
 
 # Maximum number of AnomalyMetrics detection events held in the bounded deque.
 # Older events are automatically evicted when the cap is reached.
