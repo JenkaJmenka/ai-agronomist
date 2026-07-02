@@ -65,6 +65,16 @@ def build_anomaly_metadata_by_timestamp(
     return metadata
 
 
+def _read_chunks(tmp_path: str, chunk_size: int, csv_props: dict[str, Any]):
+    return pd.read_csv(
+        tmp_path,
+        chunksize=chunk_size,
+        sep=csv_props.get("sep", ","),
+        encoding=csv_props.get("encoding", "utf-8"),
+        decimal=csv_props.get("decimal", "."),
+    )
+
+
 def run_cold_run_upload(
     *,
     tmp_path: str,
@@ -79,22 +89,16 @@ def run_cold_run_upload(
     csv_props = adapter._csv_props
     sensor_cols = ["temperature", "humidity", "co2", "light"]
 
-    def _read_chunks():
-        return pd.read_csv(
-            tmp_path,
-            chunksize=chunk_size,
-            sep=csv_props.get("sep", ","),
-            encoding=csv_props.get("encoding", "utf-8"),
-            decimal=csv_props.get("decimal", "."),
-        )
-
     header_cols: list[str] | None = None
     imputed_channels: list[str] = []
     adaptive_ranges = list(SENSOR_RANGES)
     stats_parts: list[pd.DataFrame] = []
     raw_readings: list[dict[str, Any]] = []
 
-    for raw_chunk in _read_chunks():
+    # Cache for successfully normalized and validated chunks
+    cached_normalized_chunks: list[pd.DataFrame] = []
+
+    for raw_chunk in _read_chunks(tmp_path, chunk_size, csv_props):
         if raw_chunk.empty:
             continue
         if header_cols is None:
@@ -104,30 +108,39 @@ def run_cold_run_upload(
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
             adapter.validate(normalized_chunk)
-            stats_parts.append(normalized_chunk[sensor_cols])
         except Exception:
             continue
+
+        cached_normalized_chunks.append(normalized_chunk)
+        stats_parts.append(normalized_chunk[sensor_cols])
+
         raw_df, _ = parse_raw_rows(raw_chunk)
         if raw_df.empty:
             continue
-        for _, row in raw_df.iterrows():
-            entry: dict[str, Any] = {
-                "timestamp": row["timestamp"].isoformat()
-                if hasattr(row["timestamp"], "isoformat")
-                else str(row["timestamp"]),
+
+        # Vectorize timestamp conversion
+        raw_df["timestamp"] = raw_df["timestamp"].map(
+            lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
+        )
+
+        # Fast record-oriented NaN stripping
+        for row in raw_df.to_dict(orient="records"):
+            entry = {
+                "timestamp": row["timestamp"],
+                **{
+                    col: val for col, val in row.items()
+                    if col not in ("timestamp", "source")
+                    and val is not None and not (isinstance(val, float) and pd.isna(val))
+                }
             }
-            for col in raw_df.columns:
-                if col in ("timestamp", "source"):
-                    continue
-                val = row[col]
-                if val is not None and not (isinstance(val, float) and pd.isna(val)):
-                    entry[col] = val
             raw_readings.append(entry)
 
     if not stats_parts:
         raise ValueError("Uploaded CSV contains no valid data.")
 
-    stats_df = pd.concat(stats_parts, ignore_index=True)
+    # Compute adaptive_ranges by concatenating the cached normalized chunks in memory.
+    normalized_df = pd.concat(cached_normalized_chunks, ignore_index=True)
+    stats_df = normalized_df[sensor_cols]
     adaptive_ranges = compute_adaptive_sensor_ranges(
         stats_df.to_numpy(dtype=np.float32),
         SENSOR_RANGES,
@@ -140,11 +153,10 @@ def run_cold_run_upload(
     sequences_processed = 0
     prev_overlap_df = pd.DataFrame()
 
-    for raw_chunk in _read_chunks():
-        if raw_chunk.empty:
+    # Iterate over cached normalized chunks list in memory instead of calling _read_chunks() a second time.
+    for normalized_chunk in cached_normalized_chunks:
+        if normalized_chunk.empty:
             continue
-        normalized_chunk = adapter.normalize(raw_chunk)
-        adapter.validate(normalized_chunk)
         if not prev_overlap_df.empty:
             combined_df = pd.concat([prev_overlap_df, normalized_chunk], ignore_index=True)
         else:
