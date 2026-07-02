@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Optional, Set
 
 import numpy as np
-import pandas as pd
 
 from src.config import SENSOR_NAMES, STUCK_FLAT_RANGE_THRESHOLD
 
@@ -53,25 +52,27 @@ class StuckFaultDetector:
         num_sensors = min(sequence.shape[1], len(_SENSOR_NAMES))
         results: dict[str, bool] = {}
 
+        seq_active = sequence[:, :num_sensors]
+        if sequence.shape[0] >= self._window_k:
+            windows = np.lib.stride_tricks.sliding_window_view(seq_active, self._window_k, axis=0)
+            variances = np.var(windows, axis=-1, ddof=1)
+            min_variances = np.min(variances, axis=0)
+        else:
+            min_variances = np.var(seq_active, axis=0)
+
+        # Standardize NaNs to 1.0
+        min_variances = np.where(np.isnan(min_variances), 1.0, min_variances)
+
+        value_ranges = np.max(seq_active, axis=0) - np.min(seq_active, axis=0)
+        is_flats = value_ranges < self._flat_range_threshold
+
         for idx in range(num_sensors):
             name = _SENSOR_NAMES[idx]
             if name in skip:
                 results[name] = False
                 continue
-            channel = sequence[:, idx]
-            value_range = float(np.max(channel) - np.min(channel))
-            if sequence.shape[0] >= self._window_k:
-                variance = float(
-                    pd.Series(channel)
-                    .rolling(window=self._window_k, min_periods=self._window_k)
-                    .var()
-                    .min()
-                )
-            else:
-                variance = float(np.var(channel))
-            if np.isnan(variance):
-                variance = 1.0
-            is_flat = value_range < self._flat_range_threshold
+            is_flat = bool(is_flats[idx])
+            variance = float(min_variances[idx])
             results[name] = bool(
                 is_flat and variance < self._variance_threshold
             )

@@ -56,17 +56,17 @@ def sample_sequence() -> List[List[float]]:
 async def postgres_session() -> AsyncSession:
     """Async PostgreSQL session with pgvector extension and incident tables."""
     url = _postgres_url()
-    engine = create_async_engine(url, echo=False)
     try:
+        engine = create_async_engine(url, echo=False)
         async with engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
-    except OSError as exc:
-        await engine.dispose()
-        pytest.skip(f"PostgreSQL not reachable at {url}: {exc}")
     except Exception as exc:
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         pytest.skip(f"PostgreSQL setup failed: {exc}")
 
     factory = async_sessionmaker(

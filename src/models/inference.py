@@ -4,13 +4,14 @@ from typing import Optional, List, Dict, Tuple, Union
 from src.models.lstm_vae import LSTMVAE
 from src.config import DEVICE
 import glob
+from src.utils.lru import LRUDict
 
 class AnomalyDetector:
     """
     Anomaly detector using trained LSTM-VAE models.
     Supports caching multiple customer-specific models in memory.
     """
-    _model_cache: Dict[str, LSTMVAE] = {}
+    _model_cache = LRUDict(max_size=10)
 
     def __init__(self, checkpoint_path: Optional[str] = None):
         """

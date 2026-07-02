@@ -78,6 +78,7 @@ class AnomalyAttributor:
             list(sensor_names) if sensor_names is not None else list(SENSOR_NAMES)
         )
         self.baseline_sequences: Optional[np.ndarray] = None
+        self.baseline_means: Optional[np.ndarray] = None
         self.baseline_error: Optional[float] = None
 
     def set_baseline(self, sequences: np.ndarray) -> None:
@@ -113,6 +114,7 @@ class AnomalyAttributor:
             torch.from_numpy(baseline).to(self.device)
         )
         self.baseline_sequences = baseline
+        self.baseline_means = baseline.mean(axis=(0, 1))
         self.baseline_error = baseline_error
         logger.info(
             "Attribution baseline set: %d sequences, baseline error %.6f",
@@ -120,7 +122,9 @@ class AnomalyAttributor:
             self.baseline_error,
         )
 
-    def attribute_sequence(self, sequence: np.ndarray) -> Dict[str, Any]:
+    def attribute_sequence(
+        self, sequence: np.ndarray, anomaly_error: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
         Compute per-sensor attribution for one anomalous sequence.
 
@@ -130,6 +134,8 @@ class AnomalyAttributor:
 
         Args:
             sequence: Array of shape (seq_len, input_dim).
+            anomaly_error: Optional precomputed anomaly reconstruction error.
+                If provided, uses it directly.
 
         Returns:
             Dict with keys: ``attribution`` (name -> normalized contribution,
@@ -152,18 +158,34 @@ class AnomalyAttributor:
         """
         sequence = self._validate_sequence(sequence)
         assert self.baseline_sequences is not None  # narrowed by validation
+        assert self.baseline_means is not None
 
-        anomaly_error = self._reconstruction_error(self._to_batch_tensor(sequence))
+        if anomaly_error is None:
+            anomaly_error = self._reconstruction_error(self._to_batch_tensor(sequence))
+
+        num_sensors = sequence.shape[1]
+        # Batch all masked sequences into shape (num_sensors, seq_len, input_dim)
+        masked_batch = np.repeat(sequence[np.newaxis, :, :], num_sensors, axis=0)
+        for i in range(num_sensors):
+            masked_batch[i, :, i] = self.baseline_means[i]
+
+        x = torch.from_numpy(masked_batch).to(self.device)
+        if self.model.training:
+            self.model.eval()
+        with torch.no_grad():
+            mu, _ = self.model.encode(x)
+            reconstruction = self.model.decode(mu)
+            mse_elements = (reconstruction - x) ** 2
+            masked_errors = mse_elements.mean(dim=(1, 2)).cpu().numpy()
 
         raw_contributions: List[float] = []
-        for sensor_idx in range(sequence.shape[1]):
-            masked_sequence = sequence.copy()
-            masked_sequence[:, sensor_idx] = self.baseline_sequences[
-                :, :, sensor_idx
-            ].mean()
-            masked_error = self._reconstruction_error(
-                self._to_batch_tensor(masked_sequence)
-            )
+        for sensor_idx in range(num_sensors):
+            masked_error = float(masked_errors[sensor_idx])
+            if not math.isfinite(masked_error):
+                raise ValueError(
+                    f"Non-finite reconstruction error ({masked_error}): model weights "
+                    f"or input data are corrupted; attribution aborted"
+                )
             # Contribution = how much masking this sensor reduces the error.
             raw_contributions.append(max(0.0, anomaly_error - masked_error))
 
@@ -222,7 +244,7 @@ class AnomalyAttributor:
             return "No significant sensor deviation detected"
 
         # Mean per-sensor deviation from the baseline mean, shape (input_dim,).
-        baseline_sensor_means = self.baseline_sequences.mean(axis=(0, 1))
+        baseline_sensor_means = self.baseline_means
         deviations = np.asarray(sequence, dtype=np.float32).mean(axis=0) - (
             baseline_sensor_means
         )

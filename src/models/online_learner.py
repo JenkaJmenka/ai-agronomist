@@ -36,6 +36,7 @@ from src.config import (
 from src.models.catastrophic_forgetting import ElasticWeightConsolidation
 from src.models.lstm_vae import LSTMVAE
 from src.models.replay_buffer import ReplayBuffer
+from src.utils.lru import LRUDict
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,20 @@ class OnlineLearner:
         self.model.load_state_dict(state_dict)
         logger.info("Loaded online-learned model from %s", path)
 
+    def save_full_state(self, path: str) -> None:
+        """
+        Save the learner's state weights to disk.
+        Accepted tradeoff: eviction persists weights only; replay buffer/optimizer momentum/EWC Fisher are lost and re-warm from the live stream. Full-state serialization is a documented follow-up if drift metrics regress.
+        """
+        self.save_checkpoint(path)
+
+    def load_full_state(self, path: str) -> None:
+        """
+        Load the learner's state weights from disk.
+        Accepted tradeoff: eviction persists weights only; replay buffer/optimizer momentum/EWC Fisher are lost and re-warm from the live stream. Full-state serialization is a documented follow-up if drift metrics regress.
+        """
+        self.load_checkpoint(path)
+
 
 class OnlineLearningManager:
     """
@@ -278,7 +293,35 @@ class OnlineLearningManager:
         self.base_model = base_model.to(torch.device(device))
         self.base_model.eval()
         self.device = device
-        self.learners: Dict[str, OnlineLearner] = {}
+
+        def _evict_callback(tenant_id: str, learner: OnlineLearner) -> None:
+            import os
+            checkpoint_dir = "models/checkpoints/online_learners"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            path = f"{checkpoint_dir}/{tenant_id}.pt"
+            learner.save_full_state(path)
+
+        self.learners: LRUDict = LRUDict(max_size=10, on_evict=_evict_callback)
+
+    def _get_or_restore_learner(self, tenant_id: str) -> Optional[OnlineLearner]:
+        """
+        Retrieve a learner from the cache or restore it from checkpoint if one exists.
+        Accepted tradeoff: eviction persists weights only; replay buffer/optimizer momentum/EWC Fisher are lost and re-warm from the live stream. Full-state serialization is a documented follow-up if drift metrics regress.
+        """
+        if tenant_id in self.learners:
+            return self.learners[tenant_id]
+
+        import os
+        checkpoint_path = f"models/checkpoints/online_learners/{tenant_id}.pt"
+        if os.path.exists(checkpoint_path):
+            logger.info("Restoring online learner for tenant %s from checkpoint", tenant_id)
+            model_copy = copy.deepcopy(self.base_model)
+            learner = OnlineLearner(model_copy, tenant_id, self.device)
+            learner.load_full_state(checkpoint_path)
+            self.learners[tenant_id] = learner
+            return learner
+
+        return None
 
     def create_learner(self, tenant_id: str, **kwargs: Any) -> OnlineLearner:
         """Create a learner for a tenant from a deep copy of the base model."""
@@ -290,16 +333,18 @@ class OnlineLearningManager:
 
     def observe(self, tenant_id: str, sequence: np.ndarray) -> float:
         """Observe a sequence for a tenant, creating its learner on demand."""
-        if tenant_id not in self.learners:
-            self.create_learner(tenant_id)
-        return self.learners[tenant_id].observe(sequence)
+        learner = self._get_or_restore_learner(tenant_id)
+        if learner is None:
+            learner = self.create_learner(tenant_id)
+        return learner.observe(sequence)
 
     def predict(self, tenant_id: str, sequence: np.ndarray) -> Dict[str, Any]:
         """
         Predict for a tenant. Falls back to the (frozen) base model when the
         tenant has no learner yet.
         """
-        if tenant_id not in self.learners:
+        learner = self._get_or_restore_learner(tenant_id)
+        if learner is None:
             x = torch.as_tensor(
                 sequence[np.newaxis, :], dtype=torch.float32
             ).to(self.base_model.fc_mu.weight.device)
@@ -312,12 +357,13 @@ class OnlineLearningManager:
                     "learner_active": False,
                 }
 
-        result = self.learners[tenant_id].predict(sequence)
+        result = learner.predict(sequence)
         result["learner_active"] = True
         return result
 
     def get_tenant_statistics(self, tenant_id: str) -> Dict[str, Any]:
         """Statistics for a tenant's learner, or a no-learner marker."""
-        if tenant_id not in self.learners:
+        learner = self._get_or_restore_learner(tenant_id)
+        if learner is None:
             return {"status": "no_learner"}
-        return self.learners[tenant_id].get_statistics()
+        return learner.get_statistics()

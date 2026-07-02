@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 import pytest_asyncio
+from src.utils.lru import LRUDict
 import torch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -208,7 +209,7 @@ class TestA2TrackerCacheDict:
     """A2: _tracker_cache must be a regular dict, no setattr/getattr with cache_key."""
 
     def test_tracker_cache_is_dict(self, pipeline):
-        assert isinstance(pipeline._tracker_cache, dict)
+        assert isinstance(pipeline._tracker_cache, (dict, LRUDict))
 
     def test_tracker_cache_starts_empty(self, pipeline):
         assert len(pipeline._tracker_cache) == 0

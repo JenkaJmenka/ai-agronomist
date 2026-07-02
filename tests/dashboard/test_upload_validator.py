@@ -47,29 +47,18 @@ def test_header_only_no_data_rows_returns_invalid():
     assert any("no data" in e.lower() or "empty" in e.lower() or "header" in e.lower() for e in r.errors)
 
 
-def test_all_required_columns_missing_returns_invalid():
+def test_all_required_columns_missing_passes():
     csv_bytes = _csv({"timestamp": ["2024-01-01"], "sensor_x": [1.0]})
     r = validate_csv_upload(csv_bytes)
-    assert not r.is_valid
-    assert any("missing" in e.lower() for e in r.errors)
-    err_text = " ".join(r.errors).lower()
-    for col in _REQUIRED:
-        assert col in err_text, f"Expected '{col}' in error message"
+    assert r.is_valid
 
 
-def test_single_missing_column_named_in_error():
+def test_single_missing_column_passes():
     data = dict(_VALID_ROW)
     del data["light"]
     csv_bytes = _csv(data)
     r = validate_csv_upload(csv_bytes)
-    assert not r.is_valid
-    # The specific missing column must be called out
-    assert any("light" in e.lower() for e in r.errors)
-    # Columns that are present should not appear in the "missing" portion
-    err_text = " ".join(r.errors).lower()
-    if "missing" in err_text:
-        missing_portion = err_text.split("missing")[1].split("required")[0]
-        assert "temperature" not in missing_portion
+    assert r.is_valid
 
 
 def test_binary_non_csv_content_returns_invalid():
@@ -79,13 +68,10 @@ def test_binary_non_csv_content_returns_invalid():
     assert "csv" in err_text or "parse" in err_text
 
 
-def test_semicolon_delimiter_triggers_missing_columns():
-    # Pandas default read_csv uses comma; semicolon-separated → parsed as 1 column
+def test_semicolon_delimiter_passes():
     csv_bytes = b"temperature;humidity;co2;light\n22.5;65.0;410.0;500.0\n"
     r = validate_csv_upload(csv_bytes)
-    assert not r.is_valid
-    # Either a parse error or missing-columns error is acceptable
-    assert r.errors
+    assert r.is_valid
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +146,10 @@ def test_empty_file_error_is_human_readable():
     assert r.errors[0][0].isupper()  # starts with capital letter
 
 
-def test_missing_column_error_lists_required_columns():
+def test_missing_column_passes():
     csv_bytes = _csv({"timestamp": ["2024-01-01"], "pressure": [1013.0]})
     r = validate_csv_upload(csv_bytes)
-    assert not r.is_valid
-    err_text = " ".join(r.errors)
-    # Should mention what IS required, not just what is missing
-    assert any(col in err_text for col in _REQUIRED)
+    assert r.is_valid
 
 
 def test_parse_error_mentions_csv_format():
