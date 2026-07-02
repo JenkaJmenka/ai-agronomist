@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Optional, List, Dict, Tuple, Union
 from src.models.lstm_vae import LSTMVAE
-from src.config import DEVICE
+from src.config import DEVICE, MAX_OBSERVE_BATCH
 import glob
 from src.utils.lru import LRUDict
 
@@ -69,10 +69,19 @@ class AnomalyDetector:
             return reconstruction_error.numpy()
 
     def predict_batch(self, sequences: List[np.ndarray]) -> np.ndarray:
-        # Convert list of sequence chunks into proper batched tensor array
-        # assuming each seq is (seq_len, input_dim) -> stack into (batch, seq_len, input_dim)
         stacked = np.stack(sequences)
-        return self.predict(stacked)
+        self._validate_batch(stacked)
+        
+        all_scores = []
+        with torch.no_grad():
+            for i in range(0, len(stacked), MAX_OBSERVE_BATCH):
+                batch = stacked[i:i + MAX_OBSERVE_BATCH]
+                batch_tensor = torch.from_numpy(batch).float()
+                reconstructed, _, _, _ = self.model(batch_tensor)
+                scores = torch.mean((batch_tensor - reconstructed) ** 2, dim=[1, 2])
+                all_scores.append(scores.numpy())
+                
+        return np.concatenate(all_scores) if all_scores else np.array([])
 
     def predict_batch_enriched(
         self, sequences: Union[List[np.ndarray], np.ndarray]
@@ -102,12 +111,28 @@ class AnomalyDetector:
         stacked = np.stack(sequences) if isinstance(sequences, list) else sequences
         self._validate_batch(stacked)
 
+        all_scores = []
+        all_mu = []
+        all_uncertainties = []
+        
         with torch.no_grad():
-            sequences_tensor = torch.from_numpy(stacked).float()
-            reconstructed_sequences, mu, logvar, _ = self.model(sequences_tensor)
-            # MSE across feature & seq dimensions (same scoring contract as predict)
-            scores = torch.mean((sequences_tensor - reconstructed_sequences) ** 2, dim=[1, 2])
-            # std = exp(0.5*logvar) — unified uncertainty convention (see docstring)
-            uncertainties = torch.exp(0.5 * logvar).mean(dim=1)
+            for i in range(0, len(stacked), MAX_OBSERVE_BATCH):
+                batch = stacked[i:i + MAX_OBSERVE_BATCH]
+                batch_tensor = torch.from_numpy(batch).float()
+                reconstructed, mu, logvar, _ = self.model(batch_tensor)
+                
+                scores = torch.mean((batch_tensor - reconstructed) ** 2, dim=[1, 2])
+                uncertainties = torch.exp(0.5 * logvar).mean(dim=1)
+                
+                all_scores.append(scores.numpy())
+                all_mu.append(mu.numpy())
+                all_uncertainties.append(uncertainties.numpy())
 
-        return scores.numpy(), mu.numpy(), uncertainties.numpy()
+        if not all_scores:
+            return np.array([]), np.array([]), np.array([])
+            
+        return (
+            np.concatenate(all_scores),
+            np.concatenate(all_mu),
+            np.concatenate(all_uncertainties)
+        )

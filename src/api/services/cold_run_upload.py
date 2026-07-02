@@ -95,9 +95,6 @@ def run_cold_run_upload(
     stats_parts: list[pd.DataFrame] = []
     raw_readings: list[dict[str, Any]] = []
 
-    # Cache for successfully normalized and validated chunks
-    cached_normalized_chunks: list[pd.DataFrame] = []
-
     for raw_chunk in _read_chunks(tmp_path, chunk_size, csv_props):
         if raw_chunk.empty:
             continue
@@ -108,11 +105,9 @@ def run_cold_run_upload(
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
             adapter.validate(normalized_chunk)
+            stats_parts.append(normalized_chunk[sensor_cols])
         except Exception:
-            continue
-
-        cached_normalized_chunks.append(normalized_chunk)
-        stats_parts.append(normalized_chunk[sensor_cols])
+            pass
 
         raw_df, _ = parse_raw_rows(raw_chunk)
         if raw_df.empty:
@@ -138,9 +133,7 @@ def run_cold_run_upload(
     if not stats_parts:
         raise ValueError("Uploaded CSV contains no valid data.")
 
-    # Compute adaptive_ranges by concatenating the cached normalized chunks in memory.
-    normalized_df = pd.concat(cached_normalized_chunks, ignore_index=True)
-    stats_df = normalized_df[sensor_cols]
+    stats_df = pd.concat(stats_parts, ignore_index=True)
     adaptive_ranges = compute_adaptive_sensor_ranges(
         stats_df.to_numpy(dtype=np.float32),
         SENSOR_RANGES,
@@ -153,10 +146,15 @@ def run_cold_run_upload(
     sequences_processed = 0
     prev_overlap_df = pd.DataFrame()
 
-    # Iterate over cached normalized chunks list in memory instead of calling _read_chunks() a second time.
-    for normalized_chunk in cached_normalized_chunks:
-        if normalized_chunk.empty:
+    for raw_chunk in _read_chunks(tmp_path, chunk_size, csv_props):
+        if raw_chunk.empty:
             continue
+        try:
+            normalized_chunk = adapter.normalize(raw_chunk)
+            adapter.validate(normalized_chunk)
+        except Exception:
+            continue
+
         if not prev_overlap_df.empty:
             combined_df = pd.concat([prev_overlap_df, normalized_chunk], ignore_index=True)
         else:
