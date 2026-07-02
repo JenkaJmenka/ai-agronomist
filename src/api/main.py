@@ -7,6 +7,7 @@ configures lifecycle startup/shutdown hooks (database table creation and engine 
 wires up custom Request ID middleware for end-to-end logging traceability.
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -56,9 +57,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     logger.info("Starting up FastAPI application...")
     try:
-        # Initialize database tables on startup
-        await init_db()
+        # Alembic migrations run before uvicorn starts, so init_db() is a
+        # safety-net create_all only. Cap it at 10 s so a slow/unreachable DB
+        # never blocks startup and prevents the API from serving requests.
+        await asyncio.wait_for(init_db(), timeout=10.0)
         logger.info("Database schema initialized successfully.")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Database connection timed out during startup (>10 s). "
+            "Schema init skipped — Alembic migrations already applied."
+        )
     except Exception as e:
         logger.critical(f"Failed to initialize database: {e}", exc_info=True)
         raise e
