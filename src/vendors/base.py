@@ -193,7 +193,7 @@ class DataSourceAdapter(ABC):
 
         # 2. Check for empty dataframe
         if data.empty:
-            raise DataValidationError("DataFrame is empty and contains no sensor readings")
+            raise DataValidationError("DataFrame is empty and contains no sensor readings (possibly due to NaN values being dropped from required columns)")
 
         # 3. Check and validate timestamp column
         if not pd.api.types.is_datetime64_any_dtype(data["timestamp"]):

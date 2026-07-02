@@ -53,6 +53,7 @@ from src.models.recommendation_engine import RecommendationEngine
 from src.models.retraining_orchestrator import RetrainingOrchestrator
 from src.models.root_cause_analyzer import RootCauseAnalyzer
 from src.monitoring.anomaly_metrics import AnomalyMetrics
+from src.utils.lru import LRUDict
 
 logger = logging.getLogger(__name__)
 
@@ -171,13 +172,22 @@ class ComprehensiveInferencePipeline:
         self.metrics = metrics
         self._orchestrators = orchestrators if orchestrators is not None else {}
         self._ensemble: Optional[EnsembleAnomalyDetector] = None
-        self._tracker_cache: dict[str, tuple[EWMATracker, POTThresholdFitter]] = {}
+        self._tracker_cache = LRUDict(
+            max_size=100,
+            on_evict=lambda customer_id, _: self._cusum_cache.pop(customer_id, None),
+        )
         # Polling dropout detector (shared across tenants — stateless).
         self._dropout_detector = DropoutDetector()
         # Noise / precision degradation detector (stateless, shared).
         self._noise_detector = NoiseDetector()
         # Per-tenant CUSUM drift detectors (stateful, persisted in LearningState).
         self._cusum_cache: dict[str, CUSUMDriftDetector] = {}
+        # Component caching
+        self._default_baseline: Optional[np.ndarray] = None
+        self._cached_baseline: Optional[np.ndarray] = None
+        self._cached_baseline_hash: Optional[str] = None
+        self._cached_attributor: Optional[AnomalyAttributor] = None
+        self._cached_pattern_detector: Optional[PatternDetector] = None
 
     def _get_ensemble(self) -> EnsembleAnomalyDetector:
         if self._ensemble is None:
@@ -199,7 +209,36 @@ class ComprehensiveInferencePipeline:
     ) -> np.ndarray:
         if baseline_sequences:
             return np.asarray(baseline_sequences, dtype=np.float32)
-        return build_default_baseline()
+        if self._default_baseline is None:
+            self._default_baseline = build_default_baseline()
+        return self._default_baseline
+
+    def _get_cached_components(
+        self, baseline: np.ndarray
+    ) -> tuple[np.ndarray, AnomalyAttributor, PatternDetector]:
+        import hashlib
+        baseline_hash = hashlib.sha256(np.ascontiguousarray(baseline)).hexdigest()
+
+        if (
+            self._cached_baseline is not None
+            and (baseline is self._cached_baseline or self._cached_baseline_hash == baseline_hash)
+            and self._cached_attributor is not None
+            and self._cached_pattern_detector is not None
+        ):
+            return self._cached_baseline, self._cached_attributor, self._cached_pattern_detector
+
+        attributor = AnomalyAttributor(self.detector.model)
+        attributor.set_baseline(baseline)
+
+        pattern_detector = PatternDetector()
+        pattern_detector.set_baseline(baseline)
+
+        self._cached_baseline = baseline
+        self._cached_baseline_hash = baseline_hash
+        self._cached_attributor = attributor
+        self._cached_pattern_detector = pattern_detector
+
+        return baseline, attributor, pattern_detector
 
     async def run(
         self,
@@ -218,12 +257,7 @@ class ComprehensiveInferencePipeline:
             )
 
         baseline = self._prepare_baseline(baseline_sequences)
-
-        attributor = AnomalyAttributor(self.detector.model)
-        attributor.set_baseline(baseline)
-
-        pattern_detector = PatternDetector()
-        pattern_detector.set_baseline(baseline)
+        baseline, attributor, pattern_detector = self._get_cached_components(baseline)
 
         return await self._run_with_components(
             customer_id=customer_id,
@@ -245,17 +279,12 @@ class ComprehensiveInferencePipeline:
     ) -> List[Dict[str, Any]]:
         """Execute the full pipeline for multiple sequences.
 
-        Creates one ``AnomalyAttributor`` and one ``PatternDetector``,
+        Creates or retrieves cached ``AnomalyAttributor`` and ``PatternDetector``,
         calls ``set_baseline`` once, then reuses them across all sequences
         in the batch.
         """
         baseline = self._prepare_baseline(None)
-
-        attributor = AnomalyAttributor(self.detector.model)
-        attributor.set_baseline(baseline)
-
-        pattern_detector = PatternDetector()
-        pattern_detector.set_baseline(baseline)
+        baseline, attributor, pattern_detector = self._get_cached_components(baseline)
 
         results: List[Dict[str, Any]] = []
         for seq_array in sequences:

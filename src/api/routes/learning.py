@@ -37,6 +37,7 @@ from src.db.session import get_db
 from src.models.drift_detector import DriftDetector
 from src.models.lstm_vae import LSTMVAE
 from src.models.online_learner import OnlineLearningManager
+from src.utils.lru import LRUDict
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ OBSERVE_BATCH_EVENT: str = "observe_batch"
 # Lazily-initialized singleton manager (one OnlineLearner per tenant) and the
 # per-tenant drift detectors that track each tenant's loss stream.
 _manager: Optional[OnlineLearningManager] = None
-_drift_detectors: Dict[str, DriftDetector] = {}
+_drift_detectors: LRUDict = LRUDict(max_size=100)
 
 
 def _load_base_model() -> LSTMVAE:
@@ -247,6 +248,7 @@ async def clear_models(
     db: AsyncSession = Depends(get_db),
 ):
     """Clears all trained models for a tenant, resetting them to the base model."""
+    import os
     from src.models.model_registry import ModelRegistry
     registry = ModelRegistry(db)
     count = await registry.clear_models(tenant_id)
@@ -255,5 +257,17 @@ async def clear_models(
     global _manager
     if _manager is not None and tenant_id in _manager.learners:
         del _manager.learners[tenant_id]
+
+    # Delete online learner checkpoint from disk if exists
+    checkpoint_path = f"models/checkpoints/online_learners/{tenant_id}.pt"
+    if os.path.exists(checkpoint_path):
+        try:
+            os.remove(checkpoint_path)
+        except OSError as e:
+            logger.warning("Failed to delete checkpoint file %s: %s", checkpoint_path, e)
+
+    # Clear drift detector from memory cache
+    if tenant_id in _drift_detectors:
+        del _drift_detectors[tenant_id]
         
     return {"status": "success", "deleted_versions": count, "message": f"Successfully cleared {count} model(s) for tenant {tenant_id}"}

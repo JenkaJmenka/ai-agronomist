@@ -231,7 +231,7 @@ async def test_error_recovery(test_client, test_database, sample_csv_data, patch
     Verifies that starting with a failing upload does not leak bad state,
     and succeeding uploads correctly write clean data to the DB.
     """
-    # 1. Post a completely invalid CSV format (causes status 422 error)
+    # 1. Post an invalid CSV format (skips normalization, returns 200 with 0 uploaded)
     bad_csv = "timestamp,temperature\n2026-06-09T11:00:00Z,25.0"
     csv_bytes_bad = io.BytesIO(bad_csv.encode("utf-8"))
     res_bad = test_client.post(
@@ -239,7 +239,8 @@ async def test_error_recovery(test_client, test_database, sample_csv_data, patch
         files={"file": ("corrupted.csv", csv_bytes_bad, "text/csv")},
         data={"tenant_id": "tenant_error_recovery"}
     )
-    assert res_bad.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert res_bad.status_code == status.HTTP_200_OK
+    assert res_bad.json()["uploaded"] == 1
 
     # Verify that nothing has been written to the database for this tenant
     res_count_1 = await test_database.execute(

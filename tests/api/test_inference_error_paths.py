@@ -29,7 +29,7 @@ from src.db.session import get_db
 BATCH_SIZE = 4
 RAW_SCORE = 0.3  # route divides by ANOMALY_SCALING_FACTOR=2.0 -> 0.15
 HIGH_RAW_SCORE = 1.9  # -> 0.95 after scaling, above the 0.8 threshold
-SEED_BASE_TIME = datetime.datetime(2026, 6, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
+SEED_BASE_TIME = datetime.datetime(2026, 6, 6, 12, 0, 0, tzinfo=datetime.timezone.utc)
 ROUTE_PATCH_PREFIX = "src.api.routes.inference"
 
 
@@ -44,7 +44,7 @@ def make_csv_bytes(row_count: int) -> io.BytesIO:
     """Valid sensor CSV with `row_count` data rows, one per minute."""
     header = "timestamp,temperature,humidity,co2,light"
     rows = "\n".join(
-        f"2026-06-09T11:{i // 60:02d}:{i % 60:02d}Z,25.0,50.0,400.0,1200.0"
+        f"2026-06-06T11:{i // 60:02d}:{i % 60:02d}Z,25.0,50.0,400.0,1200.0"
         for i in range(row_count)
     )
     return io.BytesIO(f"{header}\n{rows}".encode())
@@ -256,17 +256,24 @@ class TestCsvUploadErrorPaths:
     def test_high_anomalies_reported_with_mapped_timestamps(
         self, patch_detector, test_client
     ):
-        patch_detector.side_effect = lambda seqs: make_enriched_return(
-            len(seqs), raw_score=HIGH_RAW_SCORE
-        )
+        def _side_effect(seqs):
+            n = len(seqs)
+            scores = np.full(n, 0.2, dtype=np.float32)
+            if n > 0:
+                scores[-1] = HIGH_RAW_SCORE
+            embeddings = np.zeros((n, 8), dtype=np.float32)
+            uncertainties = np.full(n, 0.1, dtype=np.float32)
+            return scores, embeddings, uncertainties
+
+        patch_detector.side_effect = _side_effect
         response = post_csv(test_client, make_csv_bytes(25))
         assert response.status_code == status.HTTP_200_OK
         payload = response.json()
-        # 25 rows, seq_len 20 -> 6 sliding-window sequences, all high
+        # 25 rows, seq_len 20 -> 6 sliding-window sequences, 1 high anomaly
         assert payload["sequences_processed"] == 6
-        assert payload["anomalies_detected"] == 6
-        assert len(payload["high_anomalies"]) == 6
-        for index, entry in enumerate(payload["high_anomalies"]):
-            assert entry["sequence_index"] == index
-            assert entry["score"] == pytest.approx(0.95)
-            assert entry["timestamp"].startswith("2026-06-09T11:")
+        assert payload["anomalies_detected"] == 1
+        assert len(payload["high_anomalies"]) == 1
+        entry = payload["high_anomalies"][0]
+        assert entry["sequence_index"] == 5
+        assert entry["score"] == pytest.approx(0.95)
+        assert entry["timestamp"].startswith("2026-06-06T11:")
