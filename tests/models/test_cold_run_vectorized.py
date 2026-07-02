@@ -150,8 +150,8 @@ def test_detect_rolling_streaks_and_severities():
         assert pytest.approx(ref.z_score, abs=1e-7) == vec.z_score
 
 
-def test_single_pass_io_mocking():
-    """Mock _read_chunks in src/api/services/cold_run_upload.py to verify single-pass I/O."""
+def test_two_pass_io_mocking():
+    """Mock _read_chunks in src/api/services/cold_run_upload.py to verify two-pass I/O for memory safety."""
     from src.api.services.cold_run_upload import run_cold_run_upload, _read_chunks
     from src.vendors.csv_adapter import CSVAdapter
     from unittest.mock import MagicMock
@@ -208,8 +208,8 @@ def test_single_pass_io_mocking():
                 seq_len=20,
                 chunk_size=1000,
             )
-            # Verify that _read_chunks was called exactly once!
-            assert call_count == 1
+            # Verify that _read_chunks was called exactly twice!
+            assert call_count == 2
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)

@@ -120,12 +120,11 @@ async def _load_sensor_by_key(
 ) -> dict[str, SensorReading]:
     if not timestamps:
         return {}
-    norm_ts = [normalize_persist_timestamp(ts) for ts in timestamps]
+    norm_ts = list(set([normalize_persist_timestamp(ts) for ts in timestamps]))
     stmt = select(SensorReading).where(
         SensorReading.tenant_id == tenant_id,
         SensorReading.greenhouse_id == greenhouse_id,
-        SensorReading.timestamp >= min(norm_ts),
-        SensorReading.timestamp <= max(norm_ts),
+        SensorReading.timestamp.in_(norm_ts),
     )
     result = await db.execute(stmt)
     mapping: dict[str, SensorReading] = {}
@@ -143,12 +142,11 @@ async def _load_raw_by_key(
 ) -> dict[str, RawReading]:
     if not timestamps:
         return {}
-    norm_ts = [normalize_persist_timestamp(ts) for ts in timestamps]
+    norm_ts = list(set([normalize_persist_timestamp(ts) for ts in timestamps]))
     stmt = select(RawReading).where(
         RawReading.tenant_id == tenant_id,
         RawReading.greenhouse_id == greenhouse_id,
-        RawReading.timestamp >= min(norm_ts),
-        RawReading.timestamp <= max(norm_ts),
+        RawReading.timestamp.in_(norm_ts),
     )
     result = await db.execute(stmt)
     mapping: dict[str, RawReading] = {}
