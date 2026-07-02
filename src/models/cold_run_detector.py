@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from src.config import (
     COLD_RUN_BASELINE_FRACTION,
@@ -169,55 +170,73 @@ class ColdRunStatisticalDetector:
         readings: list[dict[str, Any]],
         *,
         window: int = COLD_RUN_STAT_ROLLING_WINDOW,
+        columns: list[str] | None = None,
     ) -> list[RollingAnomaly]:
         """Flag sudden deviations vs a recent rolling baseline (not seasonal drift)."""
         effective_window = _effective_rolling_window(len(readings), window)
         if effective_window <= 0 or len(readings) <= effective_window:
             return []
 
-        columns = self._discover_columns(readings)
+        df = pd.DataFrame(readings)
+        if columns is None:
+            columns = self._discover_columns(readings)
         anomalies: list[RollingAnomaly] = []
         min_window_points = max(5, effective_window // 4)
 
+        if "timestamp" in df.columns:
+            timestamps = df["timestamp"].fillna("unknown").astype(str).tolist()
+        else:
+            timestamps = ["unknown"] * len(df)
+
         for col in columns:
-            values, timestamps = self._column_series(readings, col)
-            streak = 0
-            for idx in range(effective_window, len(values)):
-                current = values[idx]
-                if not math.isfinite(current):
-                    streak = 0
-                    continue
-                history = values[idx - effective_window : idx]
-                history = history[np.isfinite(history)]
-                if history.size < min_window_points:
-                    streak = 0
-                    continue
-                std = float(np.std(history))
-                if std < 1e-9:
-                    streak = 0
-                    continue
-                z_score = abs(current - float(np.mean(history))) / std
-                if z_score < self._z_min:
-                    streak = 0
-                    continue
-                streak += 1
-                if streak < self._min_consecutive:
-                    continue
+            if col not in df.columns:
+                continue
+            series = pd.to_numeric(df[col], errors='coerce')
+            series = series.where(np.isfinite(series), np.nan)
+
+            shifted = series.shift(1)
+            rolling = shifted.rolling(window=effective_window, min_periods=min_window_points)
+            rolling_mean = rolling.mean()
+            rolling_std = rolling.std(ddof=0)
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                z_score_series = (series - rolling_mean).abs() / rolling_std
+
+            is_anomaly_candidate = (
+                series.notna() &
+                rolling_mean.notna() &
+                rolling_std.notna() &
+                (rolling_std >= 1e-9) &
+                (z_score_series >= self._z_min)
+            )
+
+            is_anomaly_candidate.iloc[:effective_window] = False
+
+            streak_series = is_anomaly_candidate.groupby((~is_anomaly_candidate).cumsum()).cumsum()
+
+            anomaly_indices = streak_series[streak_series >= self._min_consecutive].index
+
+            for idx in anomaly_indices:
+                val = series.iloc[idx]
+                z_score = float(z_score_series.iloc[idx])
+
                 if z_score >= _Z_CRITICAL:
                     severity = "critical"
                 elif z_score >= _Z_WARNING:
                     severity = "warning"
                 else:
                     severity = "normal"
+
                 anomalies.append(
                     RollingAnomaly(
                         timestamp=timestamps[idx],
                         column=col,
-                        value=float(current),
+                        value=float(val),
                         z_score=z_score,
                         severity=severity,
                     )
                 )
+
         return anomalies
 
     def _discover_columns(self, readings: list[dict[str, Any]]) -> list[str]:
