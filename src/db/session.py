@@ -50,6 +50,7 @@ if DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
 elif "+asyncpg" in DATABASE_URL:
     connect_args.update(_extra_connect_args)
+    connect_args["timeout"] = float(os.environ.get("DB_CONNECT_TIMEOUT", "15"))
 
 # asyncpg connections are bound to the event loop they are created on.
 # Streamlit runs script threads with different loops than the module-import loop,
