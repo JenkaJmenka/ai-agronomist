@@ -3,7 +3,19 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-**Railway IPv6 Dual-Stack Bind Fix — COMPLETE (2026-07-03)**
+**Performance Plan Revised for Railway Topology — COMPLETE (2026-07-03)**
+Architect rewrote docs/architecture/performance-refactoring-plan.md for Railway + Supabase
+(supersedes Vercel-based draft). Findings F1-F6 with file:line cites. Phases: 0 = deploy/verify
+IPv6 fix + baseline metrics (BLOCKING, needs human: Railway branch check + smoke test);
+1 = upload path (A1: bound O(rows) accumulation in cold_run_upload.py); 2 = inference
+(B1: raise MAX_PIPELINE_CACHE_SIZE>1 Railway env var — cheapest/biggest win; B4 correctness
+flag: fallback ORDER BY timestamp DESC blind index matching in inference.py:115-118 can
+mis-attribute scores); 3 = dashboard load (C3: NullPool + direct asyncio.run DB reads in
+charts.py -> fresh Supabase TLS handshake per query; route via API or dedicated loop thread).
+RabbitMQ still NO (Railway-cost grounds); Redis staged for multi-instance only.
+Vercel artifacts removed from repo (commit 463183b, pushed).
+
+Previous phase: **Railway IPv6 Dual-Stack Bind Fix — COMPLETE (2026-07-03)**
 
 **File modified:** `docker/start-api.sh`
 
