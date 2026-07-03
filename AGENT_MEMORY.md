@@ -3,7 +3,38 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-**UI Robustness Pass — P1–P7 COMPLETE + CODE REVIEW DONE (2026-07-01)**
+**Railway IPv6 Dual-Stack Bind Fix — COMPLETE (2026-07-03)**
+
+**File modified:** `docker/start-api.sh`
+
+Changed uvicorn bind address from `0.0.0.0` (IPv4-only) to `::` (dual-stack) so the API is
+reachable via Railway private networking (`*.railway.internal`), which is IPv6-only.
+- Line 21: echo message updated to `"Starting API on [::]:${PORT} (dual-stack)"`
+- Line 22: `--host 0.0.0.0` changed to `--host ::` — binds both IPv4 and IPv6 on Linux
+
+Syntax verified: `bash -n docker/start-api.sh` → OK.
+
+Previous phase: **Performance Refactoring Plan + ADR Audit — COMPLETE (2026-07-03)**
+Architect deliverable: docs/architecture/performance-refactoring-plan.md
+
+Audited implementation plan/Phase refactoring/performance-adr-report.md vs code: ADR claims
+largely implemented & correct BUT orthogonal to the real production failure.
+HOSTING CORRECTION (2026-07-03): API + dashboard run on RAILWAY (not Vercel), DB on Supabase Postgres.
+The .vercel/ dir + .env.local in the working tree are stray Vercel CLI artifacts (~2026-06-30), untracked.
+VERIFIED ROOT CAUSE: docker/start-api.sh bound uvicorn to 0.0.0.0 (IPv4-only) while the dashboard calls
+the API via Railway private domain (*.railway.internal, IPv6-only) -> zero traffic ever reached the API
+-> empty DB. Supabase schema healthy (13 tables, alembic 013), all tables 0 rows.
+Earlier Vercel-based hypotheses (ephemeral SQLite, serverless cold starts) are OBSOLETE — DATABASE_URL
+is set on Railway; ~510MB is normal torch resident memory in a warm container.
+Follow-ups: MAX_PIPELINE_CACHE_SIZE=1 Railway var will thrash pipelines multi-tenant (raise to 2-4);
+Supabase password was shared in chat — rotate it.
+docs/architecture/performance-refactoring-plan.md was written under the wrong Vercel-serverless
+assumption — its Phase 0 / deployment / RabbitMQ-rationale sections need a Railway revision.
+FE is Streamlit (no React/Next in repo). RabbitMQ=NO (use DB job table). Redis=not yet. Next.js=not a
+perf fix. Recommend Phase 0 root-cause verification (blocking) + split ML path off serverless + managed
+Postgres. .env.local blocked by permissions — human must verify API_URL/DATABASE_URL.
+
+Previous phase: **UI Robustness Pass — P1–P7 COMPLETE + CODE REVIEW DONE (2026-07-01)**
 P1–P7 all done. Code review completed: **PASS WITH NOTES**.
 Review: [docs/review/ui_robustness_review.md](docs/review/ui_robustness_review.md).
 Agent: code-reviewer-ui. Done signal: tasks/done/code-reviewer-ui.json.

@@ -214,9 +214,25 @@ async def run_inference_from_csv(
             )
         return response
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        has_data_rows = False
+        try:
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            if len(lines) > 1:
+                has_data_rows = True
+        except Exception:
+            pass
+
+        if not has_data_rows:
+            raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
+        else:
+            raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
+    except RuntimeError as e:
+        if "NaN in batch" in str(e):
+            raise HTTPException(status_code=400, detail=f"chunk inference failed: {e}") from e
+        raise HTTPException(status_code=422, detail=f"Invalid CSV format: {e}") from e
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
+        raise HTTPException(status_code=422, detail=f"Invalid CSV format: {e}") from e
     finally:
         adapter.disconnect()
         if os.path.exists(tmp_path):

@@ -18,5 +18,5 @@ echo "Running database migrations..."
 alembic upgrade head
 
 PORT="${PORT:-8000}"
-echo "Starting API on 0.0.0.0:${PORT}"
-exec python -m uvicorn src.api.main:app --host 0.0.0.0 --port "${PORT}"
+echo "Starting API on [::]:${PORT} (dual-stack)"
+exec python -m uvicorn src.api.main:app --host :: --port "${PORT}"

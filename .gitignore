@@ -3,7 +3,9 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.local
 .DS_Store
+.vercel
 
 # Runtime / local artifacts
 *.db
