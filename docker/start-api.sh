@@ -18,5 +18,5 @@ echo "Running database migrations..."
 alembic upgrade head
 
 PORT="${PORT:-8000}"
-echo "Starting API on [::]:${PORT} (dual-stack)"
-exec python -m uvicorn src.api.main:app --host :: --port "${PORT}"
+echo "Starting API on dual-stack fd bind, port ${PORT}"
+exec python docker/serve.py
