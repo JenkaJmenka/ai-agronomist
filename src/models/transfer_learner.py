@@ -110,3 +110,77 @@ class TransferLearner:
                 self.model.save_checkpoint(save_path, epoch, test_loss, 0.0)
                 
         return save_path
+
+    async def fine_tune_portions(
+        self,
+        customer_id: str,
+        portion_factory,
+        *,
+        epochs: int = 5,
+        learning_rate: float = 0.0001,
+        batch_size: int = 32,
+        progress_cb=None,
+    ) -> str:
+        """Fine-tune from a stream of data portions instead of one big array.
+
+        `portion_factory` returns a fresh async iterator of (N, 4) arrays per
+        epoch (e.g. a DB keyset pager), so peak memory is one portion. A
+        SEQ_LEN-row carry between portions keeps boundary sequences intact.
+        `progress_cb(epoch, portion_idx, avg_loss)` (async) reports progress.
+        """
+        self._freeze_encoder()
+        self._unfreeze_decoder()
+
+        optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=learning_rate,
+        )
+
+        best_loss = float("inf")
+        save_path = f"models/{customer_id}_model.pt"
+
+        for epoch in range(epochs):
+            self.model.train()
+            epoch_loss = 0.0
+            batch_count = 0
+            carry: Optional[np.ndarray] = None
+            portion_idx = 0
+
+            async for portion in portion_factory():
+                data = portion if carry is None else np.concatenate([carry, portion])
+                if len(data) > SEQ_LEN:
+                    windows = np.stack(
+                        [data[i : i + SEQ_LEN] for i in range(len(data) - SEQ_LEN)]
+                    )
+                    tensor = torch.tensor(windows, dtype=torch.float32)
+                    loader = torch.utils.data.DataLoader(
+                        torch.utils.data.TensorDataset(tensor),
+                        batch_size=batch_size,
+                        shuffle=True,
+                    )
+                    for batch in loader:
+                        x = batch[0].to(self.device)
+                        optimizer.zero_grad()
+                        recon_x, mu, logvar, _ = self.model(x)
+                        loss = self.model.loss_function(recon_x, x, mu, logvar)
+                        loss.backward()
+                        optimizer.step()
+                        epoch_loss += loss.item()
+                        batch_count += 1
+                carry = data[-SEQ_LEN:] if len(data) >= SEQ_LEN else data
+                portion_idx += 1
+                if progress_cb is not None:
+                    await progress_cb(
+                        epoch, portion_idx, epoch_loss / max(batch_count, 1)
+                    )
+
+            if batch_count == 0:
+                raise ValueError("Not enough customer data to create sequences")
+
+            avg_loss = epoch_loss / batch_count
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                # accuracy=0.0 — unsupervised objective
+                self.model.save_checkpoint(save_path, epoch, avg_loss, 0.0)
+
+        return save_path

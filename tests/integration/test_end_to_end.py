@@ -128,14 +128,32 @@ async def test_csv_upload_to_inference_to_dashboard(
     # Step 3 & 4: Run model inference and check anomaly scores backpersistence
     # -------------------------------------------------------------------------
     sequences = np.random.rand(10, 20, 4).tolist()
+
+    # Score persistence is opt-in and timestamp-addressed (the blind
+    # latest-N fallback was removed) — target the 10 most recent readings.
+    stmt_latest = (
+        select(SensorReading.timestamp)
+        .where(SensorReading.tenant_id == tenant_id)
+        .order_by(SensorReading.timestamp.desc())
+        .limit(10)
+    )
+    latest_ts_res = await test_database.execute(stmt_latest)
+    target_timestamps = [ts.isoformat() for (ts,) in latest_ts_res.all()]
+
     res_inference = test_client.post(
         "/api/inference",
-        json={"sequences": sequences, "tenant_id": tenant_id, "greenhouse_id": "main_zone"}
+        json={
+            "sequences": sequences,
+            "tenant_id": tenant_id,
+            "greenhouse_id": "main_zone",
+            "timestamps": target_timestamps,
+            "persist_scores": True,
+        },
     )
     assert res_inference.status_code == status.HTTP_200_OK
     assert len(res_inference.json()["anomaly_scores"]) == 10
 
-    # Query the database to verify the latest 10 records received the anomaly scores
+    # Query the database to verify the targeted 10 records received the anomaly scores
     stmt_scores = (
         select(SensorReading)
         .where(SensorReading.tenant_id == tenant_id, SensorReading.anomaly_score != None)

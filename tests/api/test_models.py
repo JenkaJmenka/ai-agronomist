@@ -61,9 +61,24 @@ async def test_list_model_versions(test_db, client):
     assert active_count == 1
 
 def test_train_customer_model_endpoint(client):
-    response = client.post("/api/models/test_cust/train")
+    # Training now queues a retrain job on RabbitMQ; capture the publish
+    # instead of requiring a live broker.
+    from unittest.mock import AsyncMock, patch
+
+    # The route imports publish_json at call time, so patching the source
+    # module is sufficient.
+    with patch("src.mq.publisher.publish_json", new_callable=AsyncMock):
+        response = client.post("/api/models/test_cust/train")
     assert response.status_code == 200
-    assert response.json()["status"] == "started"
+    payload = response.json()
+    assert payload["status"] == "started"
+    assert payload["job_id"]
+    assert payload["poll_url"] == "/api/models/test_cust/training-status"
+
+    # And the durable status endpoint reflects the queued job.
+    status_response = client.get("/api/models/test_cust/training-status")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "pending"
 
 @pytest.mark.asyncio
 async def test_rollback_model(test_db, client):

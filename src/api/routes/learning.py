@@ -137,6 +137,53 @@ async def observe_sequences(
     )
 
 
+@router.post("/jobs/observe", status_code=202)
+async def observe_sequences_async(
+    request: ObserveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue observations for portion-wise online learning on the worker.
+
+    Once observations flow through the queue, the worker owns learner state
+    (single writer); the sync /observe endpoint remains for small interactive
+    batches and tests. Poll /api/jobs/{job_id} for progress.
+    """
+    from src.api.schemas.jobs import JobAcceptedResponse
+    from src.config import ONLINE_PORTION_SEQUENCES
+    from src.db.jobs import create_job
+    from src.mq.publisher import publish_json
+    from src.mq.schemas import OnlineTrainingPortionMessage
+    from src.mq.topology import TRAINING_ONLINE_QUEUE
+
+    sequences = request.sequences
+    portion_count = max(1, -(-len(sequences) // ONLINE_PORTION_SEQUENCES))
+
+    job = await create_job(
+        db,
+        tenant_id=request.tenant_id,
+        job_type="training_online",
+        greenhouse_id=request.greenhouse_id,
+        total_portions=portion_count,
+        payload={"sequences_total": len(sequences)},
+    )
+    for idx in range(portion_count):
+        start = idx * ONLINE_PORTION_SEQUENCES
+        await publish_json(
+            TRAINING_ONLINE_QUEUE,
+            OnlineTrainingPortionMessage(
+                job_id=job.id,
+                tenant_id=request.tenant_id,
+                greenhouse_id=request.greenhouse_id,
+                portion_idx=idx,
+                portion_count=portion_count,
+                sequences=sequences[start : start + ONLINE_PORTION_SEQUENCES],
+            ),
+        )
+    return JobAcceptedResponse(
+        job_id=job.id, portion_count=portion_count, poll_url=f"/api/jobs/{job.id}"
+    )
+
+
 @router.post("/predict", response_model=PredictResponse)
 async def predict_sequence(request: PredictRequest) -> PredictResponse:
     """Score one sequence with the tenant's adapted model (or the base model)."""

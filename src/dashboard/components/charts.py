@@ -13,118 +13,29 @@ from src.dashboard.constants import (
     CACHE_TTL_SHORT,
     DEFAULT_ANOMALY_THRESHOLD,
 )
-from sqlalchemy import select
+from src.api.services.readings_service import merge_anomaly_scores_into_readings
+from src.dashboard.services.api_client import DashboardApiClient
 
-from src.db.models import RawReading, SensorReading, Incident
-from src.db.session import AsyncSessionLocal
+# All dashboard reads go through the API (which holds warm DB connections)
+# instead of opening a fresh Supabase connection per query.
+_client = DashboardApiClient()
 
-
-def _run_async(coro):
-    """Run an async coroutine from Streamlit's sync context."""
-    import asyncio
-    return asyncio.run(coro)
+__all__ = ["merge_anomaly_scores_into_readings"]  # re-exported for consumers/tests
 
 
-def merge_anomaly_scores_into_readings(
-    readings_df: pd.DataFrame,
-    scores_df: pd.DataFrame,
-    tenant_id: str,
-    greenhouse_id: str,
-) -> pd.DataFrame:
-    """Attach canonical anomaly scores; dedupe duplicate upload rows."""
-    if readings_df.empty or scores_df.empty or "anomaly_score" not in scores_df.columns:
-        return readings_df
-    merged = readings_df.copy()
-    scores = scores_df.copy()
-    if "tenant_id" in scores.columns:
-        scores = scores[scores["tenant_id"] == tenant_id]
-    if "greenhouse_id" in scores.columns:
-        scores = scores[scores["greenhouse_id"] == greenhouse_id]
-    if scores.empty:
-        if "anomaly_score" not in merged.columns:
-            merged["anomaly_score"] = pd.NA
-        return merged
-
-    merged["timestamp"] = pd.to_datetime(merged["timestamp"])
-    scores["timestamp"] = pd.to_datetime(scores["timestamp"])
-    merged["_ts_key"] = merged["timestamp"].dt.floor("s")
-    scores["_ts_key"] = scores["timestamp"].dt.floor("s")
-    scores = scores.groupby("_ts_key", as_index=False)["anomaly_score"].max()
-    merged = merged.drop_duplicates(subset=["_ts_key"], keep="first")
-    merged = merged.merge(
-        scores[["_ts_key", "anomaly_score"]],
-        on="_ts_key",
-        how="left",
-        suffixes=("", "_sensor"),
-    )
-    if "anomaly_score_sensor" in merged.columns:
-        merged["anomaly_score"] = merged["anomaly_score_sensor"].combine_first(
-            merged.get("anomaly_score")
-        )
-        merged = merged.drop(columns=["anomaly_score_sensor"])
-    return merged.drop(columns=["_ts_key"])
+def _rows_to_frame(rows: list) -> pd.DataFrame:
+    """Rows from the readings API → DataFrame with parsed timestamps."""
+    df = pd.DataFrame(rows)
+    if not df.empty and "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT)
 def query_sensor_readings(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
-    """Load sensor time-series, preferring full-fidelity RawReading rows when present."""
-
-    async def fetch_raw() -> pd.DataFrame:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(RawReading)
-                .where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                )
-                .order_by(RawReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            if not records:
-                return pd.DataFrame()
-            rows = []
-            for r in records:
-                row = {"timestamp": r.timestamp, "source": r.source}
-                row.update(r.data or {})
-                rows.append(row)
-            return pd.DataFrame(rows)
-
-    async def fetch_canonical() -> pd.DataFrame:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(SensorReading)
-                .where(
-                    SensorReading.tenant_id == tenant_id,
-                    SensorReading.greenhouse_id == greenhouse_id,
-                )
-                .order_by(SensorReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            data = [
-                {
-                    "timestamp": r.timestamp,
-                    "temperature": r.temperature,
-                    "humidity": r.humidity,
-                    "co2": r.co2,
-                    "light": r.light,
-                    "anomaly_score": r.anomaly_score,
-                }
-                for r in records
-            ]
-            return pd.DataFrame(data)
-
-    async def fetch():
-        raw_df = await fetch_raw()
-        scores_df = await fetch_canonical()
-        if not raw_df.empty:
-            return merge_anomaly_scores_into_readings(
-                raw_df, scores_df, tenant_id, greenhouse_id
-            )
-        return scores_df
-
-    return _run_async(fetch())
+    """Load the recent bounded window of sensor time-series (C2: no full-history load)."""
+    payload = _client.get_readings_recent(tenant_id, greenhouse_id)
+    return _rows_to_frame(payload["rows"])
 
 
 @st.cache_data(ttl=CACHE_TTL_MEDIUM)
@@ -135,69 +46,8 @@ def query_sensor_readings_window(
     end_iso: str,
 ) -> pd.DataFrame:
     """Load sensor readings for an inclusive datetime window (Monitoring jump path)."""
-    start_dt = pd.Timestamp(start_iso)
-    end_dt = pd.Timestamp(end_iso)
-
-    async def fetch_raw() -> pd.DataFrame:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(RawReading)
-                .where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                    RawReading.timestamp >= start_dt,
-                    RawReading.timestamp <= end_dt,
-                )
-                .order_by(RawReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            if not records:
-                return pd.DataFrame()
-            rows = []
-            for r in records:
-                row = {"timestamp": r.timestamp, "source": r.source}
-                row.update(r.data or {})
-                rows.append(row)
-            return pd.DataFrame(rows)
-
-    async def fetch_canonical() -> pd.DataFrame:
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(SensorReading)
-                .where(
-                    SensorReading.tenant_id == tenant_id,
-                    SensorReading.greenhouse_id == greenhouse_id,
-                    SensorReading.timestamp >= start_dt,
-                    SensorReading.timestamp <= end_dt,
-                )
-                .order_by(SensorReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            data = [
-                {
-                    "timestamp": r.timestamp,
-                    "temperature": r.temperature,
-                    "humidity": r.humidity,
-                    "co2": r.co2,
-                    "light": r.light,
-                    "anomaly_score": r.anomaly_score,
-                }
-                for r in records
-            ]
-            return pd.DataFrame(data)
-
-    async def fetch():
-        raw_df = await fetch_raw()
-        scores_df = await fetch_canonical()
-        if not raw_df.empty:
-            return merge_anomaly_scores_into_readings(
-                raw_df, scores_df, tenant_id, greenhouse_id
-            )
-        return scores_df
-
-    return _run_async(fetch())
+    rows = _client.get_readings_window(tenant_id, greenhouse_id, start_iso, end_iso)
+    return _rows_to_frame(rows)
 
 
 @st.cache_data(ttl=CACHE_TTL_MEDIUM)
@@ -206,86 +56,26 @@ def query_sensor_timestamp_bounds(
     greenhouse_id: str,
 ) -> tuple[str | None, str | None]:
     """Return ISO min/max timestamps without loading full reading rows."""
-    async def fetch():
-        from sqlalchemy import func as sqlfunc
-
-        async with AsyncSessionLocal() as session:
-            raw_bounds = await session.execute(
-                select(
-                    sqlfunc.min(RawReading.timestamp),
-                    sqlfunc.max(RawReading.timestamp),
-                ).where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                )
-            )
-            raw_min, raw_max = raw_bounds.one()
-            if raw_min is not None and raw_max is not None:
-                return (
-                    pd.Timestamp(raw_min).isoformat(),
-                    pd.Timestamp(raw_max).isoformat(),
-                )
-
-            sensor_bounds = await session.execute(
-                select(
-                    sqlfunc.min(SensorReading.timestamp),
-                    sqlfunc.max(SensorReading.timestamp),
-                ).where(
-                    SensorReading.tenant_id == tenant_id,
-                    SensorReading.greenhouse_id == greenhouse_id,
-                )
-            )
-            sensor_min, sensor_max = sensor_bounds.one()
-            if sensor_min is not None and sensor_max is not None:
-                return (
-                    pd.Timestamp(sensor_min).isoformat(),
-                    pd.Timestamp(sensor_max).isoformat(),
-                )
-            return None, None
-
-    return _run_async(fetch())
+    bounds = _client.get_readings_bounds(tenant_id, greenhouse_id)
+    return bounds.get("min_timestamp"), bounds.get("max_timestamp")
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT)
 def query_incidents(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
-    async def fetch():
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(Incident)
-                .where(
-                    Incident.tenant_id == tenant_id,
-                    Incident.greenhouse_id == greenhouse_id,
-                )
-                .order_by(Incident.detected_at.desc())
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-
-            data = []
-            for r in records:
-                data.append({
-                    "id": r.id,
-                    "detected_at": r.detected_at,
-                    "anomaly_score": r.anomaly_score,
-                    "fault_type": r.fault_type,
-                    "root_cause": r.root_cause,
-                    "root_cause_details": r.root_cause_details,
-                    "actions_taken": r.actions_taken,
-                    "resolved": r.resolved,
-                })
-            return pd.DataFrame(data)
-
-    return _run_async(fetch())
+    rows = _client.get_incidents(tenant_id, greenhouse_id)
+    df = pd.DataFrame(rows)
+    if not df.empty and "detected_at" in df.columns:
+        df["detected_at"] = pd.to_datetime(df["detected_at"])
+    return df
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT)
 def get_data_date_bounds(tenant_id: str, greenhouse_id: str):
     """Return (min_date, max_date) for available readings, or (None, None)."""
-    df = query_sensor_readings(tenant_id, greenhouse_id)
-    if df.empty:
+    min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
+    if not min_iso or not max_iso:
         return None, None
-    ts = pd.to_datetime(df["timestamp"])
-    return ts.min().date(), ts.max().date()
+    return pd.Timestamp(min_iso).date(), pd.Timestamp(max_iso).date()
 
 
 def apply_date_filter(
@@ -387,36 +177,8 @@ def query_anomaly_readings(
     The cache key is (tenant_id, greenhouse_id, hours_back) — stable across
     reruns — so the 2-minute TTL is the only thing that forces a refresh.
     """
-    async def fetch():
-        end_dt = pd.Timestamp.utcnow()
-        start_dt = end_dt - pd.Timedelta(hours=hours_back)
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(SensorReading)
-                .where(
-                    SensorReading.tenant_id == tenant_id,
-                    SensorReading.greenhouse_id == greenhouse_id,
-                    SensorReading.timestamp >= start_dt,
-                    SensorReading.timestamp <= end_dt,
-                )
-                .order_by(SensorReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            data = [
-                {
-                    "timestamp": r.timestamp,
-                    "temperature": r.temperature,
-                    "humidity": r.humidity,
-                    "co2": r.co2,
-                    "light": r.light,
-                    "anomaly_score": r.anomaly_score,
-                }
-                for r in records
-            ]
-            return pd.DataFrame(data)
-
-    return _run_async(fetch())
+    rows = _client.get_anomaly_readings(tenant_id, greenhouse_id, hours_back)
+    return _rows_to_frame(rows)
 
 
 def clear_anomaly_cache() -> None:
@@ -436,92 +198,27 @@ def query_raw_readings(
     hours_back: int,
 ) -> pd.DataFrame:
     """Fetch RawReading rows for the given time window, flatten JSON data into columns."""
-    async def fetch():
-        end_dt = pd.Timestamp.utcnow()
-        start_dt = end_dt - pd.Timedelta(hours=hours_back)
-        async with AsyncSessionLocal() as session:
-            stmt = (
-                select(RawReading)
-                .where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                    RawReading.timestamp >= start_dt,
-                    RawReading.timestamp <= end_dt,
-                )
-                .order_by(RawReading.timestamp)
-            )
-            result = await session.execute(stmt)
-            records = result.scalars().all()
-            if not records:
-                return pd.DataFrame()
-            rows = []
-            for r in records:
-                row = {"timestamp": r.timestamp, "source": r.source}
-                row.update(r.data or {})
-                rows.append(row)
-            return pd.DataFrame(rows)
-
-    return _run_async(fetch())
+    rows = _client.get_raw_readings(tenant_id, greenhouse_id, hours_back)
+    return _rows_to_frame(rows)
 
 
 def has_raw_readings(tenant_id: str, greenhouse_id: str) -> bool:
     """Return True if any RawReading exists for this tenant/greenhouse (any time)."""
-    async def check():
-        from sqlalchemy import func as sqlfunc
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(sqlfunc.count()).select_from(RawReading).where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                )
-            )
-            count = result.scalar()
-            return (count if count is not None else 0) > 0
-
-    return _run_async(check())
+    return _client.raw_readings_exist(tenant_id, greenhouse_id)
 
 
 def has_raw_readings_in_window(
     tenant_id: str, greenhouse_id: str, hours_back: int
 ) -> bool:
     """Return True if RawReadings exist within the last hours_back hours."""
-    async def check():
-        from sqlalchemy import func as sqlfunc
-        end_dt = pd.Timestamp.utcnow()
-        start_dt = end_dt - pd.Timedelta(hours=hours_back)
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(sqlfunc.count()).select_from(RawReading).where(
-                    RawReading.tenant_id == tenant_id,
-                    RawReading.greenhouse_id == greenhouse_id,
-                    RawReading.timestamp >= start_dt,
-                    RawReading.timestamp <= end_dt,
-                )
-            )
-            count = result.scalar()
-            return (count if count is not None else 0) > 0
-
-    return _run_async(check())
+    return _client.raw_readings_exist(tenant_id, greenhouse_id, hours_back=hours_back)
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT)
 def get_available_greenhouses(tenant_id: str) -> List[str]:
     """Return distinct greenhouse IDs that have any data for this tenant."""
-    async def fetch():
-        from sqlalchemy import distinct
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(
-                select(distinct(RawReading.greenhouse_id))
-                .where(RawReading.tenant_id == tenant_id)
-            )).scalars().all()
-            if not rows:
-                rows = (await session.execute(
-                    select(distinct(SensorReading.greenhouse_id))
-                    .where(SensorReading.tenant_id == tenant_id)
-                )).scalars().all()
-            return sorted(rows) if rows else ["gh_A", "gh_B", "gh_C", "default"]
-
-    return _run_async(fetch())
+    greenhouses = _client.get_greenhouses(tenant_id)
+    return greenhouses if greenhouses else ["gh_A", "gh_B", "gh_C", "default"]
 
 
 _SENSOR_COLORS = {

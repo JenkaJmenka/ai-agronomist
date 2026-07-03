@@ -1,23 +1,23 @@
 import torch
 import numpy as np
-from typing import Optional, List, Dict, Tuple, Union
+from typing import Optional, List, Tuple, Union
 from src.models.lstm_vae import LSTMVAE
 from src.config import DEVICE, MAX_OBSERVE_BATCH
 import glob
-from src.utils.lru import LRUDict
 
 class AnomalyDetector:
     """
     Anomaly detector using trained LSTM-VAE models.
-    Supports caching multiple customer-specific models in memory.
+    Instance reuse is handled by the route-level LRUDict in
+    src/api/routes/inference.py (get_cached_detector).  There is no
+    class-level cache here — one eviction policy governs all callers.
     """
-    _model_cache = LRUDict(max_size=10)
 
     def __init__(self, checkpoint_path: Optional[str] = None):
         """
         Initializes the AnomalyDetector.
         Args:
-            checkpoint_path: Path to the specific model weights to load. 
+            checkpoint_path: Path to the specific model weights to load.
                              If None, loads the latest baseline.
         """
         if checkpoint_path is None:
@@ -26,25 +26,21 @@ class AnomalyDetector:
             self.checkpoint_path = checkpoints[-1] if checkpoints else "models/baseline.pt"
         else:
             self.checkpoint_path = checkpoint_path
-            
+
         self.model = self._load_model()
 
     def _load_model(self) -> LSTMVAE:
         """
         Loads a trained LSTM-VAE model from a checkpoint.
-        Uses in-memory cache keyed by checkpoint_path to avoid reloading.
+        Caching is the caller's responsibility (get_cached_detector at the route
+        level).  Each direct instantiation loads from disk.
         """
-        if self.checkpoint_path in self._model_cache:
-            return self._model_cache[self.checkpoint_path]
-
         try:
             checkpoint = torch.load(self.checkpoint_path, map_location=DEVICE, weights_only=False)
             model_config = checkpoint.get("model_config", checkpoint.get("config", {}))
             model = LSTMVAE(**model_config)
             model.load_state_dict(checkpoint["model_state_dict"])
             model.eval()
-
-            self._model_cache[self.checkpoint_path] = model
             return model
         except Exception as e:
             raise RuntimeError(f"Failed to load model from {self.checkpoint_path}: {e}")
@@ -71,7 +67,7 @@ class AnomalyDetector:
     def predict_batch(self, sequences: List[np.ndarray]) -> np.ndarray:
         stacked = np.stack(sequences)
         self._validate_batch(stacked)
-        
+
         all_scores = []
         with torch.no_grad():
             for i in range(0, len(stacked), MAX_OBSERVE_BATCH):
@@ -80,7 +76,7 @@ class AnomalyDetector:
                 reconstructed, _, _, _ = self.model(batch_tensor)
                 scores = torch.mean((batch_tensor - reconstructed) ** 2, dim=[1, 2])
                 all_scores.append(scores.numpy())
-                
+
         return np.concatenate(all_scores) if all_scores else np.array([])
 
     def predict_batch_enriched(
@@ -114,23 +110,23 @@ class AnomalyDetector:
         all_scores = []
         all_mu = []
         all_uncertainties = []
-        
+
         with torch.no_grad():
             for i in range(0, len(stacked), MAX_OBSERVE_BATCH):
                 batch = stacked[i:i + MAX_OBSERVE_BATCH]
                 batch_tensor = torch.from_numpy(batch).float()
                 reconstructed, mu, logvar, _ = self.model(batch_tensor)
-                
+
                 scores = torch.mean((batch_tensor - reconstructed) ** 2, dim=[1, 2])
                 uncertainties = torch.exp(0.5 * logvar).mean(dim=1)
-                
+
                 all_scores.append(scores.numpy())
                 all_mu.append(mu.numpy())
                 all_uncertainties.append(uncertainties.numpy())
 
         if not all_scores:
             return np.array([]), np.array([]), np.array([])
-            
+
         return (
             np.concatenate(all_scores),
             np.concatenate(all_mu),

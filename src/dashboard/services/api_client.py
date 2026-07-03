@@ -53,6 +53,127 @@ class DashboardApiClient:
         raise_for_status_with_detail(resp)
         return resp.json()
 
+    def get_readings_window(
+        self,
+        tenant_id: str,
+        greenhouse_id: str,
+        start_iso: str,
+        end_iso: str,
+    ) -> List[Dict[str, Any]]:
+        payload = self._get(
+            "/api/readings/window",
+            params={
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+                "start": start_iso,
+                "end": end_iso,
+            },
+        )
+        return payload["rows"]
+
+    def get_readings_recent(
+        self,
+        tenant_id: str,
+        greenhouse_id: str,
+        hours: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+        if hours is not None:
+            params["hours"] = hours
+        return self._get("/api/readings/recent", params=params)
+
+    def get_readings_bounds(
+        self, tenant_id: str, greenhouse_id: str
+    ) -> Dict[str, Any]:
+        return self._get(
+            "/api/readings/bounds",
+            params={"tenant_id": tenant_id, "greenhouse_id": greenhouse_id},
+        )
+
+    def get_anomaly_readings(
+        self, tenant_id: str, greenhouse_id: str, hours_back: int
+    ) -> List[Dict[str, Any]]:
+        payload = self._get(
+            "/api/readings/anomalies",
+            params={
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+                "hours_back": hours_back,
+            },
+        )
+        return payload["rows"]
+
+    def get_raw_readings(
+        self, tenant_id: str, greenhouse_id: str, hours_back: int
+    ) -> List[Dict[str, Any]]:
+        payload = self._get(
+            "/api/readings/raw",
+            params={
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+                "hours_back": hours_back,
+            },
+        )
+        return payload["rows"]
+
+    def raw_readings_exist(
+        self,
+        tenant_id: str,
+        greenhouse_id: str,
+        hours_back: Optional[int] = None,
+    ) -> bool:
+        params: Dict[str, Any] = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+        if hours_back is not None:
+            params["hours_back"] = hours_back
+        return self._get("/api/readings/raw/exists", params=params)["exists"]
+
+    def get_greenhouses(self, tenant_id: str) -> List[str]:
+        return self._get(
+            "/api/readings/greenhouses", params={"tenant_id": tenant_id}
+        )["greenhouses"]
+
+    def get_incidents(
+        self,
+        tenant_id: str,
+        greenhouse_id: str,
+        start_iso: Optional[str] = None,
+        end_iso: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+        if start_iso:
+            params["start"] = start_iso
+        if end_iso:
+            params["end"] = end_iso
+        return self._get("/api/readings/incidents", params=params)["rows"]
+
+    def upload_csv_async(
+        self,
+        *,
+        tenant_id: str,
+        greenhouse_id: str,
+        file_name: str,
+        file_bytes: bytes,
+        persist_data: bool = True,
+    ) -> Dict[str, Any]:
+        """Queue a CSV for portioned processing; returns {job_id, portion_count, poll_url}."""
+        resp = requests.post(
+            f"{self.base_url}/api/inference/upload-async",
+            files={"file": (file_name, file_bytes, "text/csv")},
+            data={
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+                "persist_data": str(persist_data).lower(),
+            },
+            headers={k: v for k, v in self._headers().items() if k != "Content-Type"},
+            timeout=120,
+        )
+        raise_for_status_with_detail(resp)
+        return resp.json()
+
+    def get_job(self, job_id: str) -> Dict[str, Any]:
+        """Poll async job status/progress/result."""
+        return self._get(f"/api/jobs/{job_id}")
+
     def mark_anomaly(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post("/api/feedback/mark-anomaly", payload)
 

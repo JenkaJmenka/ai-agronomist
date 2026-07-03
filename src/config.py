@@ -201,6 +201,10 @@ COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
 COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
 COLD_RUN_STAT_USE_IQR: bool = False
+# Rows sampled from the head of an uploaded CSV to calibrate adaptive sensor
+# ranges before the single scoring pass (bounds upload memory on large files).
+# Override via ADAPTIVE_RANGE_SAMPLE_ROWS env var.
+ADAPTIVE_RANGE_SAMPLE_ROWS: int = int(os.environ.get("ADAPTIVE_RANGE_SAMPLE_ROWS", "20000"))
 
 # Maximum number of pipeline instances kept in the LRU cache.
 # Override via MAX_PIPELINE_CACHE_SIZE env var (e.g. set to 1 on memory-constrained hosts).
@@ -294,6 +298,29 @@ MAX_OBSERVE_BATCH: int = 256
 # rows; this caps each micro-batch to bound peak memory on large batches.
 # Override via ATTRIBUTION_MAX_BATCH env var.
 ATTRIBUTION_MAX_BATCH: int = int(os.environ.get("ATTRIBUTION_MAX_BATCH", "256"))
+
+# --- Message queue (RabbitMQ) ---------------------------------------------
+# Broker URL; on Railway reference the RabbitMQ service's private domain.
+RABBITMQ_URL: str = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+# Unacked messages a worker consumes at once (torch inference is heavy; keep low).
+MQ_PREFETCH_COUNT: int = int(os.environ.get("MQ_PREFETCH_COUNT", "2"))
+# Delivery attempts before a message is parked in the dead-letter queue.
+MQ_MAX_RETRIES: int = int(os.environ.get("MQ_MAX_RETRIES", "3"))
+# Delay between retries, applied via TTL-backed retry queues.
+MQ_RETRY_DELAY_MS: int = int(os.environ.get("MQ_RETRY_DELAY_MS", "30000"))
+# Rows per upload portion message (~1 MB JSON for typical sensor CSVs).
+UPLOAD_PORTION_ROWS: int = int(os.environ.get("UPLOAD_PORTION_ROWS", "5000"))
+# Sequences per online-learning portion message.
+ONLINE_PORTION_SEQUENCES: int = int(os.environ.get("ONLINE_PORTION_SEQUENCES", "64"))
+# Rows per DB page when a retrain job streams training data.
+RETRAIN_PORTION_ROWS: int = int(os.environ.get("RETRAIN_PORTION_ROWS", "10000"))
+# Files at or below this row count keep the synchronous upload path.
+UPLOAD_SYNC_MAX_ROWS: int = int(os.environ.get("UPLOAD_SYNC_MAX_ROWS", "20000"))
+
+# Hard cap on rows returned by any /api/readings list endpoint.
+READINGS_MAX_ROWS: int = int(os.environ.get("READINGS_MAX_ROWS", "50000"))
+# Default landing-page window for the Monitoring dashboard (item C2).
+READINGS_RECENT_HOURS: int = int(os.environ.get("READINGS_RECENT_HOURS", "24"))
 
 # =============================================================================
 # Anomaly Attribution (Phase 1.9.1 Week 1 — Anomaly Attributor)

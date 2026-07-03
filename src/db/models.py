@@ -5,7 +5,7 @@ SQLAlchemy database models for the AI Agronomist platform.
 import datetime
 import uuid
 from typing import Any, Dict, List, Optional
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.config import LATENT_DIM
@@ -419,3 +419,103 @@ class RawReading(Base):
             f"<RawReading(id={self.id}, tenant_id={self.tenant_id!r}, "
             f"greenhouse_id={self.greenhouse_id!r}, timestamp={self.timestamp})>"
         )
+
+
+class Job(Base):
+    """Async job record for queue-processed work (uploads, training).
+
+    RabbitMQ is not queryable, so job status/progress/results live here; the
+    dashboard polls GET /api/jobs/{job_id}.
+    """
+
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generate_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    greenhouse_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # upload_csv | training_online | training_retrain
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # pending | running | finalizing | completed | failed | partially_failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    total_portions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completed_portions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_portions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    result: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    finished_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (Index("ix_jobs_tenant_created", "tenant_id", "created_at"),)
+
+    def __repr__(self) -> str:
+        return f"<Job(id={self.id!r}, type={self.job_type!r}, status={self.status!r})>"
+
+
+class JobPortion(Base):
+    """Per-portion record: idempotency gate for redeliveries + finalize input."""
+
+    __tablename__ = "job_portions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    portion_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    # completed | failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "portion_idx", name="uq_job_portions_job_idx"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<JobPortion(job_id={self.job_id!r}, idx={self.portion_idx}, status={self.status!r})>"
+
+
+class ModelArtifact(Base):
+    """Binary model checkpoints shared across services via the DB.
+
+    Railway containers share no filesystem, so checkpoints produced by the
+    worker (retraining, online-learner state) travel as bytea rows addressed
+    by a stable key ("db://model_artifacts/<key>").
+    """
+
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generate_uuid)
+    key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True, index=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ModelArtifact(key={self.key!r}, size={self.size_bytes})>"

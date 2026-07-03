@@ -186,15 +186,28 @@ def test_inference_nan_in_input(test_client, test_sequences):
 
 @pytest.mark.asyncio
 async def test_inference_saves_to_database(patch_detector, test_client, test_database, test_sequences):
-    """Checks that running inference successfully writes computed anomaly scores to respective database records."""
+    """Scores are persisted to the rows matching the supplied timestamps when persist_scores=True."""
     # Predict exactly 1.44 for all items (divided by 2.0 gives 0.72)
     patch_detector.side_effect = make_enriched_side_effect(
         lambda seqs: np.array([1.44] * len(seqs), dtype=np.float32)
     )
 
+    result = await test_database.execute(
+        select(SensorReading)
+        .where(SensorReading.tenant_id == "tenant_1")
+        .order_by(SensorReading.timestamp)
+    )
+    seeded_timestamps = [r.timestamp.isoformat() for r in result.scalars().all()]
+
     response = test_client.post(
         "/api/inference",
-        json={"sequences": test_sequences, "tenant_id": "tenant_1", "greenhouse_id": "default"}
+        json={
+            "sequences": test_sequences,
+            "tenant_id": "tenant_1",
+            "greenhouse_id": "default",
+            "timestamps": seeded_timestamps,
+            "persist_scores": True,
+        },
     )
     assert response.status_code == status.HTTP_200_OK
 
@@ -202,7 +215,47 @@ async def test_inference_saves_to_database(patch_detector, test_client, test_dat
     result = await test_database.execute(select(SensorReading).where(SensorReading.tenant_id == "tenant_1"))
     readings = result.scalars().all()
     assert len(readings) == 150
-    assert any(r.anomaly_score == pytest.approx(0.72) for r in readings)
+    assert all(r.anomaly_score == pytest.approx(0.72) for r in readings)
+
+
+def test_inference_persist_without_timestamps_returns_400(test_client, test_sequences):
+    """persist_scores=True without timestamps must be rejected (blind fallback was removed)."""
+    response = test_client.post(
+        "/api/inference",
+        json={
+            "sequences": test_sequences,
+            "tenant_id": "tenant_1",
+            "greenhouse_id": "default",
+            "persist_scores": True,
+        },
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "timestamps required" in response.text
+
+
+def test_inference_persist_with_mismatched_timestamps_returns_400(test_client, test_sequences):
+    """persist_scores=True with a timestamp count != sequence count must be rejected."""
+    response = test_client.post(
+        "/api/inference",
+        json={
+            "sequences": test_sequences,
+            "tenant_id": "tenant_1",
+            "greenhouse_id": "default",
+            "timestamps": ["2026-07-03T10:00:00+00:00"],
+            "persist_scores": True,
+        },
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "timestamps required" in response.text
+
+
+def test_inference_without_persist_does_not_require_timestamps(patch_detector, test_client, test_sequences):
+    """Pure inference (persist_scores omitted/false) keeps working without timestamps."""
+    response = test_client.post(
+        "/api/inference",
+        json={"sequences": test_sequences, "tenant_id": "tenant_1", "greenhouse_id": "default"},
+    )
+    assert response.status_code == status.HTTP_200_OK
 
 
 def test_inference_model_not_found(test_client, test_sequences):

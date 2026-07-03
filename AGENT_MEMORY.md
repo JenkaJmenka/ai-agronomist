@@ -3,6 +3,50 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Perf Refactor + RabbitMQ Implementation — ALL CODE WORKSTREAMS COMPLETE (2026-07-04)**
+Plan: ~/.claude/plans/build-implementation-plan-based-elegant-pudding.md. All on perf/upload-path,
+7 unpushed commits (56de59c..35e779c): WS1/2 LRUDict detector cache + strict persist_scores (B2/B4);
+WS3 single-pass upload, bulk_upsert_rows, upload_portions.py core (A1/A2/A5); WS4 batched attribution;
+WS5 /api/readings endpoints + dashboard reads via API + bounded landing window + NullPool off by
+default (DB_USE_NULLPOOL escape hatch) (C1-C3,C5); WS6 src/mq/ + Job/JobPortion (migration 014) +
+/api/jobs; WS7 upload-async producer + worker consumers (sync-vs-portioned equivalence-tested);
+WS8 ModelArtifact store db:// paths (migration 015) + online/retrain consumers (worker owns learner
+state); WS9 src/workers/main.py + start-worker.sh + compose rabbitmq/worker. Suite: 1658 passed.
+Migrations 014+015 run on next API deploy. USER ACTIONS PENDING: push branch/merge to Railway branch,
+deploy RabbitMQ template + worker service on Railway (env: DATABASE_URL, RABBITMQ_URL ref vars,
+MAX_PIPELINE_CACHE_SIZE=4), smoke test, capture Phase-0 baseline. QA/code-review pass pending.
+
+Previous phase: **WS4 — B3 Batched Attribution — COMPLETE (2026-07-03)**
+Agent: ml-ws4. Files: `src/models/anomaly_attributor.py`, `src/config.py`, `tests/models/test_attributor_batched.py`.
+
+Reworked `AnomalyAttributor` so attribution runs in ONE forward pass for a whole batch.
+- New batched core `_attribute_core(sequences, anomaly_errors)`: builds one tensor of
+  `B*(num_sensors+1)` rows laid out contiguously per sequence (num_sensors masked variants +
+  1 unmasked copy; the unmasked row supplies each sequence's `anomaly_error`, so the separate
+  `_reconstruction_error` pass is gone). Masking via `stacked[i::variants_per_seq,:,i] =
+  baseline_means[i]`. Single micro-batched forward -> per-row MSE -> reshape `(B, variants)` ->
+  vectorized NumPy post-processing. Per-sequence dict assembly extracted to `_build_result`
+  (reuses `_normalize_contributions`) so the 7-key contract is byte-identical.
+- `attribute_sequence` now delegates to the core with B=1; when `anomaly_error` is passed the
+  unmasked row is omitted and the provided value used -> single & batch paths can't diverge.
+- `attribute_batch` validates via new `_validate_batch`, short-circuits empty batch to `[]`,
+  else one core call (was an N-forward Python list comprehension).
+- New helper `_batched_row_errors` micro-batches the forward by `ATTRIBUTION_MAX_BATCH`
+  (deterministic: `model.eval()` + `no_grad`, encode->decode(mu)). `_reconstruction_error` and
+  `_to_batch_tensor` kept (set_baseline + tests use them).
+- Config: added `ATTRIBUTION_MAX_BATCH: int = int(os.environ.get("ATTRIBUTION_MAX_BATCH","256"))`
+  near `MAX_OBSERVE_BATCH` (src/config.py) — only constant added.
+- Tests: extended `test_attributor_batched.py` with `attribute_batch` vs per-sequence-loop
+  equivalence (`np.allclose`, identical `affected_sensors`/`is_fallback`) for B in {1,3,17},
+  a near-zero-error fallback case (identity-model stub), and a micro-batch chunking test
+  (monkeypatch `ATTRIBUTION_MAX_BATCH=3`). Updated the encode-count test: batched path is now
+  1 encode call whether or not `anomaly_error` is precomputed (was 2 without).
+- Result: `venv/bin/python -m pytest tests/models/test_anomaly_attributor.py tests/models/test_attributor_batched.py -x -q` -> 55 passed. External caller
+  `comprehensive_pipeline.py:708` (`attribute_sequence(seq_array)`) unaffected — contract intact.
+
+---
+
+## Current Phase
 **Performance Plan Revised for Railway Topology — COMPLETE (2026-07-03)**
 Architect rewrote docs/architecture/performance-refactoring-plan.md for Railway + Supabase
 (supersedes Vercel-based draft). Findings F1-F6 with file:line cites. Phases: 0 = deploy/verify

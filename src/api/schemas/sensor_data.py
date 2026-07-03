@@ -23,31 +23,31 @@ class SensorReadingCreate(BaseModel):
     Used for bulk sensor data uploads or real-time measurements streaming.
     """
     timestamp: datetime = Field(
-        ..., 
+        ...,
         description="Timestamp of the sensor reading in ISO 8601 format"
     )
     temperature: float = Field(
-        ..., 
-        ge=0.0, 
-        le=50.0, 
+        ...,
+        ge=0.0,
+        le=50.0,
         description="Greenhouse ambient temperature in degrees Celsius (Allowed range: 0.0 to 50.0)"
     )
     humidity: float = Field(
-        ..., 
-        ge=0.0, 
-        le=100.0, 
+        ...,
+        ge=0.0,
+        le=100.0,
         description="Relative humidity percentage (Allowed range: 0.0 to 100.0)"
     )
     co2: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1000.0, 
+        ...,
+        ge=0.0,
+        le=1000.0,
         description="Carbon dioxide concentration in parts per million (ppm) (Allowed range: 0.0 to 1000.0)"
     )
     light: float = Field(
-        ..., 
-        ge=0.0, 
-        le=2000.0, 
+        ...,
+        ge=0.0,
+        le=2000.0,
         description="Light intensity/level in lux (Allowed range: 0.0 to 2000.0)"
     )
 
@@ -60,43 +60,43 @@ class SensorReadingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(
-        ..., 
+        ...,
         description="Unique database identifier for python-generated record"
     )
     tenant_id: str = Field(
-        ..., 
+        ...,
         description="Customer/Tenant identifier for multi-tenant isolation"
     )
     greenhouse_id: str = Field(
-        ..., 
+        ...,
         description="Greenhouse/Zone identifier within the customer facility"
     )
     timestamp: datetime = Field(
-        ..., 
+        ...,
         description="Timestamp of the sensor reading"
     )
     temperature: float = Field(
-        ..., 
+        ...,
         description="Ambient temperature in degrees Celsius"
     )
     humidity: float = Field(
-        ..., 
+        ...,
         description="Relative humidity percentage"
     )
     co2: float = Field(
-        ..., 
+        ...,
         description="Carbon dioxide level in ppm"
     )
     light: float = Field(
-        ..., 
+        ...,
         description="Light intensity in lux"
     )
     anomaly_score: Optional[float] = Field(
-        None, 
+        None,
         description="Calculated model anomaly reconstruction score or probability"
     )
     created_at: datetime = Field(
-        ..., 
+        ...,
         description="Timestamp indicating when the record was persisted in the database"
     )
 
@@ -111,16 +111,16 @@ class UploadRequest(BaseModel):
     Can be used for bulk JSON ingestion or as a descriptor for file uploads.
     """
     tenant_id: str = Field(
-        ..., 
-        min_length=1, 
+        ...,
+        min_length=1,
         description="Identifier of the tenant (owner of the data)"
     )
     greenhouse_id: str = Field(
-        "default", 
+        "default",
         description="Identifier of the greenhouse facility"
     )
     readings: Optional[List[SensorReadingCreate]] = Field(
-        None, 
+        None,
         description="Optional list of sensor readings for direct bulk JSON ingestion"
     )
 
@@ -131,11 +131,11 @@ class SensorRange(BaseModel):
     observed for a specific sensor variable within an uploaded dataset.
     """
     min: float = Field(
-        ..., 
+        ...,
         description="Minimum value seen in the dataset slice"
     )
     max: float = Field(
-        ..., 
+        ...,
         description="Maximum value seen in the dataset slice"
     )
 
@@ -146,34 +146,34 @@ class UploadResponse(BaseModel):
     regarding ingestion performance, parsed ranges, and target identification.
     """
     uploaded: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Number of sensor records successfully inserted into the database"
     )
     errors: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Number of records that failed validation or processing constraints"
     )
     skipped: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Number of records skipped during insertion (e.g. duplicate rows)"
     )
     ranges: Dict[str, SensorRange] = Field(
-        ..., 
+        ...,
         description="Dictionary mapping each sensor key (temperature, humidity, co2, light) to its observed range"
     )
     tenant_id: str = Field(
-        ..., 
+        ...,
         description="Identifier of the tenant associated with the upload"
     )
     greenhouse_id: str = Field(
-        ..., 
+        ...,
         description="Identifier of the greenhouse associated with the upload"
     )
     message: Optional[str] = Field(
-        None, 
+        None,
         description="Optional detailed informational or warning status message from the upload processing"
     )
 
@@ -188,30 +188,39 @@ class InferenceRequest(BaseModel):
     Ensures input matrices meet physical and shape constraints for the VAE model.
     """
     tenant_id: str = Field(
-        ..., 
-        min_length=1, 
+        ...,
+        min_length=1,
         description="Identifier of the tenant requesting model predictions"
     )
     greenhouse_id: str = Field(
-        "default", 
+        "default",
         description="Identifier of the greenhouse"
     )
     sequences: List[List[List[float]]] = Field(
-        ..., 
+        ...,
         description="Batch of temporal sequences of shape (batch, seq_len=20, input_dim=4). "
                     "Features must be ordered exactly as: [temperature, humidity, CO2, light]"
     )
     timestamps: Optional[List[str]] = Field(
         None,
-        description="Optional list of exact timestamps corresponding to the last element of each sequence in the batch. "
-                    "Used to prevent race conditions during score back-persistence."
+        description="One ISO-8601 timestamp per sequence (optional for pure inference). "
+                    "Required when persist_scores=True — must align 1:1 with sequences. "
+                    "The field stays Optional for wire compatibility; the route enforces "
+                    "presence when persistence is requested.",
+    )
+    persist_scores: bool = Field(
+        default=False,
+        description="When True, anomaly scores are written back to the matching SensorReading "
+                    "rows in the database.  Requires timestamps to be provided with one entry "
+                    "per sequence; the route returns HTTP 400 if timestamps are absent or the "
+                    "count does not match len(sequences).",
     )
 
     @field_validator("sequences")
     @classmethod
     def validate_tensor_dimensions(cls, val: List[List[List[float]]]) -> List[List[List[float]]]:
         """
-        Validates that the input sequences match the expected shape constraints 
+        Validates that the input sequences match the expected shape constraints
         defined in the model configuration.
         """
         # Dynamic import to avoid circular dependencies and ensure config-driven constraints
@@ -234,22 +243,22 @@ class InferenceRequest(BaseModel):
 
 class HighAnomalyDetail(BaseModel):
     """
-    Structure detailing specific sequence events that exhibit severe 
+    Structure detailing specific sequence events that exhibit severe
     anomaly levels above configured threshold boundaries.
     """
     sequence_index: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Index placement of the sequence in the sent batch list"
     )
     score: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1.0, 
+        ...,
+        ge=0.0,
+        le=1.0,
         description="High anomaly representation reconstruction error score [0, 1]"
     )
     timestamp: datetime = Field(
-        ..., 
+        ...,
         description="Timestamp coordinate associated with the anomalous incident"
     )
 
@@ -260,25 +269,25 @@ class InferenceResponse(BaseModel):
     Contains overall performance counters, a continuous array of scores, and high anomalies indicators.
     """
     tenant_id: str = Field(
-        ..., 
+        ...,
         description="Tenant/Owner identification tag linked to inference session"
     )
     greenhouse_id: str = Field(
-        ..., 
+        ...,
         description="Greenhouse identification tag linked to inference session"
     )
     sequences_processed: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Number of sequences successfully analyzed by the LSTM-VAE"
     )
     anomalies_detected: int = Field(
-        ..., 
-        ge=0, 
+        ...,
+        ge=0,
         description="Total counts of critical sequences classified as anomalous"
     )
     anomaly_scores: List[float] = Field(
-        ..., 
+        ...,
         description="Ordered list of computed reconstruction error ratios for each sequence in input batch"
     )
     high_anomalies: List[HighAnomalyDetail] = Field(

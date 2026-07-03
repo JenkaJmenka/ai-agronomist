@@ -52,11 +52,15 @@ elif "+asyncpg" in DATABASE_URL:
     connect_args.update(_extra_connect_args)
     connect_args["timeout"] = float(os.environ.get("DB_CONNECT_TIMEOUT", "15"))
 
-# asyncpg connections are bound to the event loop they are created on.
-# Streamlit runs script threads with different loops than the module-import loop,
-# so pooled asyncpg connections cannot be reused across calls. NullPool forces a
-# fresh connection per call, eliminating the "Future attached to a different loop" error.
-_pool_kwargs = {"poolclass": NullPool} if "+asyncpg" in DATABASE_URL else {}
+# The dashboard no longer opens DB sessions directly (reads go through the
+# API), so the Streamlit per-call-event-loop constraint that once forced
+# NullPool is gone — real pooling is the default, sparing a fresh TLS+connect
+# handshake to the Supabase pooler on every query. DB_USE_NULLPOOL=true is the
+# escape hatch if pooled asyncpg misbehaves behind Supavisor.
+_use_nullpool = os.environ.get("DB_USE_NULLPOOL", "false").lower() in ("1", "true", "yes")
+_pool_kwargs = (
+    {"poolclass": NullPool} if ("+asyncpg" in DATABASE_URL and _use_nullpool) else {}
+)
 
 # Create AsyncEngine
 engine = create_async_engine(

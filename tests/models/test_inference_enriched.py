@@ -35,8 +35,6 @@ def checkpoint_path(tmp_path) -> str:
 def detector(checkpoint_path) -> AnomalyDetector:
     instance = AnomalyDetector(checkpoint_path=checkpoint_path)
     yield instance
-    # Class-level cache is keyed by path; drop the temp entry for isolation.
-    AnomalyDetector._model_cache.pop(checkpoint_path, None)
 
 
 @pytest.fixture
@@ -124,10 +122,15 @@ class TestExistingContractsUnchanged:
         with pytest.raises(RuntimeError, match="Failed to load model"):
             AnomalyDetector(checkpoint_path=str(tmp_path / "missing.pt"))
 
-    def test_model_cache_reuses_loaded_model(self, checkpoint_path):
-        first = AnomalyDetector(checkpoint_path=checkpoint_path)
-        second = AnomalyDetector(checkpoint_path=checkpoint_path)
+    def test_route_cache_reuses_detector_instance(self, checkpoint_path):
+        # Instance reuse moved to the route-level LRUDict (single eviction policy).
+        from src.api.routes.inference import clear_detector_cache, get_cached_detector
+
+        clear_detector_cache()
         try:
+            first = get_cached_detector(checkpoint_path)
+            second = get_cached_detector(checkpoint_path)
+            assert first is second
             assert first.model is second.model
         finally:
-            AnomalyDetector._model_cache.pop(checkpoint_path, None)
+            clear_detector_cache()

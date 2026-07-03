@@ -9,10 +9,12 @@ from typing import Any
 
 import pandas as pd
 from fastapi import HTTPException
+from sqlalchemy import bindparam, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.db.models import RawReading, SensorReading
+from src.db.upsert import bulk_upsert_rows
 from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
 
 logger = logging.getLogger(__name__)
@@ -112,82 +114,204 @@ def lookup_anomaly_metadata(
     return metadata_by_timestamp.get(key)
 
 
-async def _load_sensor_by_key(
+async def _existing_timestamp_keys(
     db: AsyncSession,
+    model: type,
     tenant_id: str,
     greenhouse_id: str,
     timestamps: list[datetime],
-) -> dict[str, SensorReading]:
+) -> set[str]:
+    """Keys of rows that already exist — only used to split inserted/updated counts."""
     if not timestamps:
-        return {}
-    norm_ts = list(set([normalize_persist_timestamp(ts) for ts in timestamps]))
-    stmt = select(SensorReading).where(
-        SensorReading.tenant_id == tenant_id,
-        SensorReading.greenhouse_id == greenhouse_id,
-        SensorReading.timestamp.in_(norm_ts),
+        return set()
+    stmt = select(model.timestamp).where(
+        model.tenant_id == tenant_id,
+        model.greenhouse_id == greenhouse_id,
+        model.timestamp.in_(list(set(timestamps))),
     )
     result = await db.execute(stmt)
-    mapping: dict[str, SensorReading] = {}
-    for row in result.scalars().all():
-        key = persist_timestamp_key(row.timestamp)
-        mapping.setdefault(key, row)
-    return mapping
-
-
-async def _load_raw_by_key(
-    db: AsyncSession,
-    tenant_id: str,
-    greenhouse_id: str,
-    timestamps: list[datetime],
-) -> dict[str, RawReading]:
-    if not timestamps:
-        return {}
-    norm_ts = list(set([normalize_persist_timestamp(ts) for ts in timestamps]))
-    stmt = select(RawReading).where(
-        RawReading.tenant_id == tenant_id,
-        RawReading.greenhouse_id == greenhouse_id,
-        RawReading.timestamp.in_(norm_ts),
-    )
-    result = await db.execute(stmt)
-    mapping: dict[str, RawReading] = {}
-    for row in result.scalars().all():
-        key = persist_timestamp_key(row.timestamp)
-        mapping.setdefault(key, row)
-    return mapping
-
-
-def _apply_sensor_update(
-    existing: SensorReading,
-    row: pd.Series,
-    anomaly_score: float | None,
-) -> None:
-    existing.timestamp = normalize_persist_timestamp(row["timestamp"])
-    existing.temperature = float(row["temperature"])
-    existing.humidity = float(row["humidity"])
-    existing.co2 = float(row["co2"])
-    existing.light = float(row["light"])
-    if anomaly_score is not None:
-        existing.anomaly_score = anomaly_score
+    return {persist_timestamp_key(ts) for (ts,) in result.all()}
 
 
 def _build_raw_data_dict(
-    row: pd.Series,
+    record: dict[str, Any],
     sensor_cols: list[str],
     metadata_by_timestamp: dict[str, dict[str, list[str]]] | None,
 ) -> dict[str, Any]:
     data_dict = {
-        col: row[col]
+        col: record[col]
         for col in sensor_cols
-        if row[col] is not None
-        and not (isinstance(row[col], float) and pd.isna(row[col]))
+        if record.get(col) is not None
+        and not (isinstance(record[col], float) and pd.isna(record[col]))
     }
-    meta = lookup_anomaly_metadata(row["timestamp"], metadata_by_timestamp)
+    meta = lookup_anomaly_metadata(record["timestamp"], metadata_by_timestamp)
     if meta:
         if meta.get("columns"):
             data_dict["anomaly_columns"] = meta["columns"]
         if meta.get("detectors"):
             data_dict["anomaly_detectors"] = meta["detectors"]
     return data_dict
+
+
+async def persist_readings_chunk(
+    *,
+    db: AsyncSession,
+    tenant_id: str,
+    greenhouse_id: str,
+    df: pd.DataFrame | None,
+    raw_df: pd.DataFrame | None,
+    anomaly_scores_by_timestamp: dict[str, float] | None = None,
+    anomaly_metadata_by_timestamp: dict[str, dict[str, list[str]]] | None = None,
+) -> tuple[int, int, int, int]:
+    """Upsert one normalized chunk (SensorReading) and raw chunk (RawReading).
+
+    Returns (sensor_inserted, sensor_updated, raw_inserted, raw_updated).
+    Redelivery/re-upload safe: conflicts on (tenant_id, greenhouse_id,
+    timestamp) update in place, and a NULL incoming anomaly_score never
+    overwrites a previously stored one.
+    """
+    sensor_inserted = sensor_updated = raw_inserted = raw_updated = 0
+
+    if df is not None and not df.empty:
+        ts_norm = [normalize_persist_timestamp(v) for v in df["timestamp"]]
+        existing_keys = await _existing_timestamp_keys(
+            db, SensorReading, tenant_id, greenhouse_id, ts_norm
+        )
+        rows: list[dict[str, Any]] = []
+        for ts, temp, hum, co2, light in zip(
+            ts_norm, df["temperature"], df["humidity"], df["co2"], df["light"]
+        ):
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "greenhouse_id": greenhouse_id,
+                    "timestamp": ts,
+                    "temperature": float(temp),
+                    "humidity": float(hum),
+                    "co2": float(co2),
+                    "light": float(light),
+                    "anomaly_score": lookup_anomaly_score(ts, anomaly_scores_by_timestamp),
+                }
+            )
+        written = await bulk_upsert_rows(
+            db,
+            SensorReading,
+            rows,
+            update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
+            preserve_when_null=("anomaly_score",),
+        )
+        sensor_updated = len(
+            {persist_timestamp_key(ts) for ts in ts_norm} & existing_keys
+        )
+        sensor_inserted = written - sensor_updated
+
+    if raw_df is not None and not raw_df.empty:
+        sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
+        raw_rows: list[dict[str, Any]] = []
+        raw_ts_norm: list[datetime] = []
+        for record in raw_df.to_dict(orient="records"):
+            data_dict = _build_raw_data_dict(
+                record, sensor_cols, anomaly_metadata_by_timestamp
+            )
+            if not data_dict:
+                continue
+            ts = normalize_persist_timestamp(record["timestamp"])
+            raw_ts_norm.append(ts)
+            raw_rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "greenhouse_id": greenhouse_id,
+                    "timestamp": ts,
+                    "source": record.get("source") or None,
+                    "data": data_dict,
+                }
+            )
+        existing_raw_keys = await _existing_timestamp_keys(
+            db, RawReading, tenant_id, greenhouse_id, raw_ts_norm
+        )
+        written = await bulk_upsert_rows(
+            db,
+            RawReading,
+            raw_rows,
+            update_cols=("source", "data"),
+        )
+        raw_updated = len(
+            {persist_timestamp_key(ts) for ts in raw_ts_norm} & existing_raw_keys
+        )
+        raw_inserted = written - raw_updated
+
+    return sensor_inserted, sensor_updated, raw_inserted, raw_updated
+
+
+async def apply_anomaly_scores(
+    *,
+    db: AsyncSession,
+    tenant_id: str,
+    greenhouse_id: str,
+    anomaly_scores_by_timestamp: dict[str, float] | None,
+    anomaly_metadata_by_timestamp: dict[str, dict[str, list[str]]] | None = None,
+) -> None:
+    """Sparse post-pass: attach calibrated scores/metadata to already-persisted rows.
+
+    Used when rows are persisted chunk-by-chunk before the file-level threshold
+    is known (single-pass upload and the portioned upload finalize step).
+    """
+    if anomaly_scores_by_timestamp:
+        params = []
+        for key, score in anomaly_scores_by_timestamp.items():
+            try:
+                ts = normalize_persist_timestamp(
+                    datetime.fromisoformat(key.replace("Z", "+00:00"))
+                )
+            except (ValueError, TypeError):
+                continue
+            params.append({"ts": ts, "score": float(score)})
+        if params:
+            # Core-level table update: executemany with WHERE bindparams is not
+            # available through the ORM-enabled UPDATE path.
+            table = SensorReading.__table__
+            stmt = (
+                update(table)
+                .where(
+                    table.c.tenant_id == tenant_id,
+                    table.c.greenhouse_id == greenhouse_id,
+                    table.c.timestamp == bindparam("ts"),
+                )
+                .values(anomaly_score=bindparam("score"))
+            )
+            await db.execute(stmt, params)
+
+    if anomaly_metadata_by_timestamp:
+        meta_ts: list[datetime] = []
+        for key in anomaly_metadata_by_timestamp:
+            try:
+                meta_ts.append(
+                    normalize_persist_timestamp(
+                        datetime.fromisoformat(key.replace("Z", "+00:00"))
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        if meta_ts:
+            result = await db.execute(
+                select(RawReading).where(
+                    RawReading.tenant_id == tenant_id,
+                    RawReading.greenhouse_id == greenhouse_id,
+                    RawReading.timestamp.in_(meta_ts),
+                )
+            )
+            for row in result.scalars().all():
+                meta = lookup_anomaly_metadata(row.timestamp, anomaly_metadata_by_timestamp)
+                if not meta:
+                    continue
+                merged = dict(row.data or {})
+                if meta.get("columns"):
+                    merged["anomaly_columns"] = meta["columns"]
+                if meta.get("detectors"):
+                    merged["anomaly_detectors"] = meta["detectors"]
+                row.data = merged
+
+    await db.commit()
 
 
 async def persist_csv_file(
@@ -236,38 +360,17 @@ async def persist_csv_file(
                 ranges[col]["min"] = min(ranges[col]["min"], float(df[col].min()))
                 ranges[col]["max"] = max(ranges[col]["max"], float(df[col].max()))
 
-            chunk_timestamps = [row["timestamp"].to_pydatetime() for _, row in df.iterrows()]
-            existing_sensor = await _load_sensor_by_key(
-                db, tenant_id, greenhouse_id, chunk_timestamps
+            s_ins, s_upd, _, _ = await persist_readings_chunk(
+                db=db,
+                tenant_id=tenant_id,
+                greenhouse_id=greenhouse_id,
+                df=df,
+                raw_df=None,
+                anomaly_scores_by_timestamp=anomaly_scores_by_timestamp,
             )
-            new_records: list[SensorReading] = []
-            for _, row in df.iterrows():
-                ts = normalize_persist_timestamp(row["timestamp"])
-                key = persist_timestamp_key(ts)
-                score = lookup_anomaly_score(ts, anomaly_scores_by_timestamp)
-                existing = existing_sensor.get(key)
-                if existing is not None:
-                    _apply_sensor_update(existing, row, score)
-                    sensor_updated += 1
-                else:
-                    new_records.append(
-                        SensorReading(
-                            tenant_id=tenant_id,
-                            greenhouse_id=greenhouse_id,
-                            timestamp=ts,
-                            temperature=float(row["temperature"]),
-                            humidity=float(row["humidity"]),
-                            co2=float(row["co2"]),
-                            light=float(row["light"]),
-                            anomaly_score=score,
-                        )
-                    )
-                    sensor_inserted += 1
-
-            if new_records:
-                db.add_all(new_records)
-            if new_records or sensor_updated:
-                await db.commit()
+            sensor_inserted += s_ins
+            sensor_updated += s_upd
+            await db.commit()
         except HTTPException:
             raise
         except Exception as exc:
@@ -282,43 +385,17 @@ async def persist_csv_file(
         try:
             raw_df, _ = parse_raw_rows(raw_chunk)
             if not raw_df.empty:
-                sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
-                chunk_timestamps = [
-                    row["timestamp"].to_pydatetime() for _, row in raw_df.iterrows()
-                ]
-                existing_raw = await _load_raw_by_key(
-                    db, tenant_id, greenhouse_id, chunk_timestamps
+                _, _, r_ins, r_upd = await persist_readings_chunk(
+                    db=db,
+                    tenant_id=tenant_id,
+                    greenhouse_id=greenhouse_id,
+                    df=None,
+                    raw_df=raw_df,
+                    anomaly_metadata_by_timestamp=anomaly_metadata_by_timestamp,
                 )
-                new_raw_records: list[RawReading] = []
-                for _, row in raw_df.iterrows():
-                    ts = normalize_persist_timestamp(row["timestamp"])
-                    key = persist_timestamp_key(ts)
-                    data_dict = _build_raw_data_dict(
-                        row, sensor_cols, anomaly_metadata_by_timestamp
-                    )
-                    if not data_dict:
-                        continue
-                    existing = existing_raw.get(key)
-                    if existing is not None:
-                        existing.timestamp = ts
-                        existing.source = row["source"] or None
-                        existing.data = data_dict
-                        raw_updated += 1
-                    else:
-                        new_raw_records.append(
-                            RawReading(
-                                tenant_id=tenant_id,
-                                greenhouse_id=greenhouse_id,
-                                timestamp=ts,
-                                source=row["source"] or None,
-                                data=data_dict,
-                            )
-                        )
-                        raw_inserted += 1
-                if new_raw_records:
-                    db.add_all(new_raw_records)
-                if new_raw_records or raw_updated:
-                    await db.commit()
+                raw_inserted += r_ins
+                raw_updated += r_upd
+                await db.commit()
         except Exception as exc:
             logger.warning(
                 "RawReading insert failed for tenant=%s greenhouse=%s: %s",

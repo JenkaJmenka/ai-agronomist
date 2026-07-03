@@ -151,7 +151,9 @@ def test_detect_rolling_streaks_and_severities():
 
 
 def test_two_pass_io_mocking():
-    """Mock _read_chunks in src/api/services/cold_run_upload.py to verify two-pass I/O for memory safety."""
+    """Verify bounded I/O: one head-sample pass + one scoring pass (memory safety)."""
+    import asyncio
+
     from src.api.services.cold_run_upload import run_cold_run_upload, _read_chunks
     from src.vendors.csv_adapter import CSVAdapter
     from unittest.mock import MagicMock
@@ -199,16 +201,18 @@ def test_two_pass_io_mocking():
 
     try:
         with patch("src.api.services.cold_run_upload._read_chunks", side_effect=spy_read_chunks):
-            response, seq_ts = run_cold_run_upload(
-                tmp_path=tmp_name,
-                adapter=adapter,
-                detector=detector,
-                tenant_id="tenant_test",
-                greenhouse_id="gh_test",
-                seq_len=20,
-                chunk_size=1000,
+            response, seq_ts = asyncio.run(
+                run_cold_run_upload(
+                    tmp_path=tmp_name,
+                    adapter=adapter,
+                    detector=detector,
+                    tenant_id="tenant_test",
+                    greenhouse_id="gh_test",
+                    seq_len=20,
+                    chunk_size=1000,
+                )
             )
-            # Verify that _read_chunks was called exactly twice!
+            # Head-sample pass + single scoring pass — never more.
             assert call_count == 2
     finally:
         if os.path.exists(tmp_name):
