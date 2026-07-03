@@ -58,6 +58,53 @@ def compute_adaptive_sensor_ranges(
     return ranges
 
 
+class AdaptiveRangeAccumulator:
+    """Streaming per-column min/max matching compute_adaptive_sensor_ranges.
+
+    Lets adaptive ranges be derived chunk-by-chunk without holding the whole
+    file in memory; `ranges()` applies the same 5% padding and flat/empty
+    fallback as the batch function.
+    """
+
+    def __init__(self, n_cols: int) -> None:
+        self._min = np.full(n_cols, np.inf, dtype=np.float64)
+        self._max = np.full(n_cols, -np.inf, dtype=np.float64)
+        self._seen = np.zeros(n_cols, dtype=bool)
+
+    def update(self, data: np.ndarray) -> None:
+        if data.size == 0:
+            return
+        flat = data.reshape(-1, data.shape[-1]) if data.ndim == 3 else data
+        finite = np.isfinite(flat)
+        masked = np.where(finite, flat, np.nan)
+        with np.errstate(all="ignore"):
+            col_min = np.nanmin(masked, axis=0)
+            col_max = np.nanmax(masked, axis=0)
+        has_valid = finite.any(axis=0)
+        self._min = np.where(has_valid, np.fmin(self._min, col_min), self._min)
+        self._max = np.where(has_valid, np.fmax(self._max, col_max), self._max)
+        self._seen |= has_valid
+
+    def ranges(
+        self,
+        default_ranges: Optional[List[Tuple[float, float]]] = None,
+    ) -> List[Tuple[float, float]]:
+        if default_ranges is None:
+            default_ranges = SENSOR_RANGES
+        result: List[Tuple[float, float]] = []
+        for i in range(len(self._min)):
+            if not self._seen[i]:
+                result.append(default_ranges[i])
+                continue
+            vmin, vmax = float(self._min[i]), float(self._max[i])
+            if vmax - vmin < 1e-6:
+                result.append(default_ranges[i])
+                continue
+            pad = max((vmax - vmin) * 0.05, 1e-3)
+            result.append((vmin - pad, vmax + pad))
+        return result
+
+
 def normalize_data(data: np.ndarray, ranges: List[Tuple[float, float]]) -> np.ndarray:
     """
     Normalizes input sensor data to the [0, 1] range based on provided sensor ranges.

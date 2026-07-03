@@ -214,15 +214,23 @@ class TestBackwardCompatibility:
 
 
 class TestCsvInferenceEmbeddings:
-    def test_upload_route_returns_enriched_fields(self, test_client):
+    @staticmethod
+    def _csv_bytes() -> io.BytesIO:
         csv_content = "timestamp,temperature,humidity,co2,light\n" + "\n".join(
             f"2026-06-09T11:00:{i % 60:02d}Z,25.0,50.0,400.0,1200.0"
             for i in range(50)
         )
+        return io.BytesIO(csv_content.encode())
+
+    def test_upload_route_returns_enriched_fields_when_opted_in(self, test_client):
         response = test_client.post(
             "/api/inference/upload",
-            files={"file": ("seq.csv", io.BytesIO(csv_content.encode()), "text/csv")},
-            data={"tenant_id": "tenant_1", "greenhouse_id": "house_alpha"},
+            files={"file": ("seq.csv", self._csv_bytes(), "text/csv")},
+            data={
+                "tenant_id": "tenant_1",
+                "greenhouse_id": "house_alpha",
+                "include_embeddings": "true",
+            },
         )
         assert response.status_code == status.HTTP_200_OK
         payload = response.json()
@@ -238,3 +246,18 @@ class TestCsvInferenceEmbeddings:
         assert len(payload["anomaly_scores"]) == 31
         assert "threshold_used" in payload
         assert payload["threshold_method"] in ("pot", "percentile")
+
+    def test_upload_route_omits_embeddings_by_default(self, test_client):
+        # Embeddings are opt-in on the upload route: retaining them for the
+        # whole file is O(rows) memory and they were unused by any consumer.
+        response = test_client.post(
+            "/api/inference/upload",
+            files={"file": ("seq.csv", self._csv_bytes(), "text/csv")},
+            data={"tenant_id": "tenant_1", "greenhouse_id": "house_alpha"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()
+        assert payload["sequences_processed"] == 31
+        assert payload["embeddings"] == []
+        assert payload["uncertainties"] == []
+        assert len(payload["anomaly_scores"]) == 31

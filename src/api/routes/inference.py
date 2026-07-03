@@ -5,11 +5,9 @@ from src.api.schemas.sensor_data import (
     UploadInferenceResponse,
 )
 from src.api.services.cold_run_upload import (
-    build_anomaly_metadata_by_timestamp,
-    build_anomaly_scores_by_timestamp,
+    EmptyCsvError,
     run_cold_run_upload,
 )
-from src.api.services.csv_persist import persist_csv_file
 from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -169,6 +167,7 @@ async def run_inference_from_csv(
     greenhouse_id: str = Form(default="default"),
     file: UploadFile = File(...),
     persist_data: bool = Form(default=False),
+    include_embeddings: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -202,48 +201,20 @@ async def run_inference_from_csv(
     adapter = CSVAdapter({"filepath": tmp_path})
     try:
         adapter.connect()
-        response, sequence_timestamps = run_cold_run_upload(
+        response, sequence_timestamps = await run_cold_run_upload(
             tmp_path=tmp_path,
             adapter=adapter,
             detector=detector,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
+            include_embeddings=include_embeddings,
+            persist_db=db if persist_data else None,
         )
-        if persist_data:
-            score_map = build_anomaly_scores_by_timestamp(response.high_anomalies)
-            metadata_map = build_anomaly_metadata_by_timestamp(response.high_anomalies)
-            persist_result = await persist_csv_file(
-                tmp_path=tmp_path,
-                tenant_id=tenant_id,
-                greenhouse_id=greenhouse_id,
-                db=db,
-                adapter=adapter,
-                anomaly_scores_by_timestamp=score_map,
-                anomaly_metadata_by_timestamp=metadata_map,
-            )
-            response = response.model_copy(
-                update={
-                    "data_persisted": True,
-                    "rows_uploaded": persist_result.sensor_rows or persist_result.raw_rows,
-                    "sensor_rows_uploaded": persist_result.sensor_rows,
-                    "raw_rows_uploaded": persist_result.raw_rows,
-                }
-            )
         return response
+    except EmptyCsvError as e:
+        raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
     except ValueError as e:
-        has_data_rows = False
-        try:
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            if len(lines) > 1:
-                has_data_rows = True
-        except Exception:
-            pass
-
-        if not has_data_rows:
-            raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
-        else:
-            raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
+        raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
     except RuntimeError as e:
         if "NaN in batch" in str(e):
             raise HTTPException(status_code=400, detail=f"chunk inference failed: {e}") from e

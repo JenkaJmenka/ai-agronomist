@@ -201,6 +201,10 @@ COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
 COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
 COLD_RUN_STAT_USE_IQR: bool = False
+# Rows sampled from the head of an uploaded CSV to calibrate adaptive sensor
+# ranges before the single scoring pass (bounds upload memory on large files).
+# Override via ADAPTIVE_RANGE_SAMPLE_ROWS env var.
+ADAPTIVE_RANGE_SAMPLE_ROWS: int = int(os.environ.get("ADAPTIVE_RANGE_SAMPLE_ROWS", "20000"))
 
 # Maximum number of pipeline instances kept in the LRU cache.
 # Override via MAX_PIPELINE_CACHE_SIZE env var (e.g. set to 1 on memory-constrained hosts).

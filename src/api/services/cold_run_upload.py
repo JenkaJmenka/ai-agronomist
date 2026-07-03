@@ -7,27 +7,33 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.api.schemas.sensor_data import (
-    StatisticalAnomalyDetail,
-    StatisticalColdRunSummary,
     UploadHighAnomalyDetail,
     UploadInferenceResponse,
 )
-from src.config import ANOMALY_SCALING_FACTOR, COLD_RUN_STAT_ROLLING_WINDOW, LATENT_DIM
-from src.models.cold_run_detector import (
-    ColdRunStatisticalDetector,
-    _effective_rolling_window,
-)
-from src.models.cold_run_threshold import calibrate_threshold
-from src.models.data_utils import (
-    SENSOR_RANGES,
-    compute_adaptive_sensor_ranges,
-    normalize_data,
-    preprocess_sequences,
-)
+from src.config import ADAPTIVE_RANGE_SAMPLE_ROWS
+from src.models.data_utils import SENSOR_RANGES, AdaptiveRangeAccumulator
 from src.models.inference import AnomalyDetector
 from src.vendors.csv_adapter import CSVAdapter, detect_optional_sensor_presence, parse_raw_rows
-from src.api.services.csv_persist import normalize_timestamp_key
+from src.api.services.csv_persist import (
+    apply_anomaly_scores,
+    normalize_timestamp_key,
+    persist_readings_chunk,
+)
+from src.api.services.upload_portions import (
+    SENSOR_COLS,
+    PortionScores,
+    StatCarry,
+    finalize_scores,
+    score_portion,
+)
+
+
+class EmptyCsvError(ValueError):
+    """Raised when the uploaded CSV contains no data rows at all (HTTP 400)."""
 
 
 def build_anomaly_scores_by_timestamp(
@@ -75,7 +81,76 @@ def _read_chunks(tmp_path: str, chunk_size: int, csv_props: dict[str, Any]):
     )
 
 
-def run_cold_run_upload(
+def _strip_raw_records(raw_df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Record-oriented NaN stripping with ISO timestamps (statistical detector input)."""
+    ts_iso = raw_df["timestamp"].map(
+        lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
+    )
+    records: list[dict[str, Any]] = []
+    for ts, row in zip(ts_iso, raw_df.to_dict(orient="records")):
+        records.append(
+            {
+                "timestamp": ts,
+                **{
+                    col: val
+                    for col, val in row.items()
+                    if col not in ("timestamp", "source")
+                    and val is not None
+                    and not (isinstance(val, float) and pd.isna(val))
+                },
+            }
+        )
+    return records
+
+
+def _calibrate_ranges_from_head(
+    tmp_path: str,
+    chunk_size: int,
+    csv_props: dict[str, Any],
+    adapter: CSVAdapter,
+) -> tuple[list[tuple[float, float]], list[str]]:
+    """Head-sample pass: adaptive ranges + imputed-channel detection.
+
+    Reads until ADAPTIVE_RANGE_SAMPLE_ROWS valid rows are seen (whole file for
+    smaller uploads), so scoring never has to hold the full file in memory.
+    """
+    header_cols: list[str] | None = None
+    imputed_channels: list[str] = []
+    range_acc = AdaptiveRangeAccumulator(len(SENSOR_COLS))
+    valid_rows = 0
+    total_rows = 0
+
+    try:
+        chunks = _read_chunks(tmp_path, chunk_size, csv_props)
+        for raw_chunk in chunks:
+            if raw_chunk.empty:
+                continue
+            total_rows += len(raw_chunk)
+            if header_cols is None:
+                header_cols = list(raw_chunk.columns)
+                _, imputed = detect_optional_sensor_presence(header_cols)
+                imputed_channels = sorted(imputed)
+            try:
+                normalized_chunk = adapter.normalize(raw_chunk)
+                adapter.validate(normalized_chunk)
+                range_acc.update(normalized_chunk[SENSOR_COLS].to_numpy(dtype=np.float32))
+                valid_rows += len(normalized_chunk)
+            except Exception:
+                pass
+            if valid_rows >= ADAPTIVE_RANGE_SAMPLE_ROWS:
+                break
+    except pd.errors.EmptyDataError as exc:
+        raise EmptyCsvError("Uploaded CSV contains no valid data.") from exc
+
+    if valid_rows == 0:
+        if total_rows == 0:
+            raise EmptyCsvError("Uploaded CSV contains no valid data.")
+        raise ValueError("Uploaded CSV contains no valid data.")
+
+    return range_acc.ranges(SENSOR_RANGES), imputed_channels
+
+
+async def run_cold_run_upload(
     *,
     tmp_path: str,
     adapter: CSVAdapter,
@@ -84,175 +159,104 @@ def run_cold_run_upload(
     greenhouse_id: str,
     seq_len: int = 20,
     chunk_size: int = 5000,
+    include_embeddings: bool = False,
+    persist_db: AsyncSession | None = None,
 ) -> tuple[UploadInferenceResponse, list[str]]:
-    """Score an uploaded CSV with file-calibrated LSTM + statistical detectors."""
-    csv_props = adapter._csv_props
-    sensor_cols = ["temperature", "humidity", "co2", "light"]
+    """Score an uploaded CSV with file-calibrated LSTM + statistical detectors.
 
-    header_cols: list[str] | None = None
-    imputed_channels: list[str] = []
-    adaptive_ranges = list(SENSOR_RANGES)
-    stats_parts: list[pd.DataFrame] = []
-    raw_readings: list[dict[str, Any]] = []
+    Single scoring pass with bounded memory: adaptive ranges come from a head
+    sample, statistical detection streams with a rolling carry, and rows are
+    persisted chunk-by-chunk when `persist_db` is provided (scores for
+    above-threshold hits are attached in a sparse post-pass once the
+    file-level threshold is calibrated).
+    """
+    csv_props = adapter._csv_props
+
+    adaptive_ranges, imputed_channels = _calibrate_ranges_from_head(
+        tmp_path, chunk_size, csv_props, adapter
+    )
+
+    portions: list[PortionScores] = []
+    stat_carry = StatCarry()
+    prev_overlap_df = pd.DataFrame()
+    sensor_rows_persisted = 0
+    raw_rows_persisted = 0
 
     for raw_chunk in _read_chunks(tmp_path, chunk_size, csv_props):
         if raw_chunk.empty:
             continue
-        if header_cols is None:
-            header_cols = list(raw_chunk.columns)
-            _, imputed = detect_optional_sensor_presence(header_cols)
-            imputed_channels = sorted(imputed)
+
+        normalized_chunk: pd.DataFrame | None
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
             adapter.validate(normalized_chunk)
-            stats_parts.append(normalized_chunk[sensor_cols])
         except Exception:
-            pass
+            normalized_chunk = None
 
         raw_df, _ = parse_raw_rows(raw_chunk)
-        if raw_df.empty:
-            continue
+        raw_rows = _strip_raw_records(raw_df) if not raw_df.empty else []
 
-        # Vectorize timestamp conversion
-        raw_df["timestamp"] = raw_df["timestamp"].map(
-            lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
+        portion, prev_overlap_df = score_portion(
+            normalized_df=normalized_chunk,
+            prev_overlap_df=prev_overlap_df,
+            raw_rows=raw_rows,
+            stat_carry=stat_carry,
+            adaptive_ranges=adaptive_ranges,
+            detector=detector,
+            seq_len=seq_len,
+            include_embeddings=include_embeddings,
         )
+        portions.append(portion)
 
-        # Fast record-oriented NaN stripping
-        for row in raw_df.to_dict(orient="records"):
-            entry = {
-                "timestamp": row["timestamp"],
-                **{
-                    col: val for col, val in row.items()
-                    if col not in ("timestamp", "source")
-                    and val is not None and not (isinstance(val, float) and pd.isna(val))
-                }
-            }
-            raw_readings.append(entry)
+        if persist_db is not None:
+            s_ins, s_upd, r_ins, r_upd = await persist_readings_chunk(
+                db=persist_db,
+                tenant_id=tenant_id,
+                greenhouse_id=greenhouse_id,
+                df=normalized_chunk,
+                raw_df=raw_df if not raw_df.empty else None,
+            )
+            await persist_db.commit()
+            sensor_rows_persisted += s_ins + s_upd
+            raw_rows_persisted += r_ins + r_upd
 
-    if not stats_parts:
-        raise ValueError("Uploaded CSV contains no valid data.")
-
-    stats_df = pd.concat(stats_parts, ignore_index=True)
-    adaptive_ranges = compute_adaptive_sensor_ranges(
-        stats_df.to_numpy(dtype=np.float32),
-        SENSOR_RANGES,
+    response, sequence_timestamps = finalize_scores(
+        portions,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        imputed_channels=imputed_channels,
+        stat_carry=stat_carry,
+        include_embeddings=include_embeddings,
     )
 
-    anomaly_scores: list[float] = []
-    embeddings: list[list[float]] = []
-    uncertainties: list[float] = []
-    sequence_timestamps: list[str] = []
-    sequences_processed = 0
-    prev_overlap_df = pd.DataFrame()
-
-    for raw_chunk in _read_chunks(tmp_path, chunk_size, csv_props):
-        if raw_chunk.empty:
-            continue
-        try:
-            normalized_chunk = adapter.normalize(raw_chunk)
-            adapter.validate(normalized_chunk)
-        except Exception:
-            continue
-
-        if not prev_overlap_df.empty:
-            combined_df = pd.concat([prev_overlap_df, normalized_chunk], ignore_index=True)
-        else:
-            combined_df = normalized_chunk
-
-        if len(normalized_chunk) >= seq_len - 1:
-            prev_overlap_df = normalized_chunk.iloc[-(seq_len - 1) :].copy()
-        elif len(combined_df) >= seq_len - 1:
-            prev_overlap_df = combined_df.iloc[-(seq_len - 1) :].copy()
-        else:
-            prev_overlap_df = combined_df.copy()
-
-        if len(combined_df) < seq_len:
-            continue
-
-        raw_data = combined_df[sensor_cols].to_numpy(dtype=np.float32)
-        norm_data = normalize_data(raw_data, adaptive_ranges)
-        sequences = preprocess_sequences(norm_data, seq_len=seq_len)
-        raw_scores, chunk_embeddings, chunk_uncertainties = detector.predict_batch_enriched(
-            sequences
-        )
-        batch_scores = np.clip(raw_scores / ANOMALY_SCALING_FACTOR, 0.0, 1.0)
-        sequences_processed += len(sequences)
-        anomaly_scores.extend(batch_scores.tolist())
-        embeddings.extend(np.asarray(chunk_embeddings).tolist())
-        uncertainties.extend(np.asarray(chunk_uncertainties).tolist())
-
-        timestamps = combined_df["timestamp"].tolist()
-        for idx in range(len(batch_scores)):
-            row_idx = idx + seq_len - 1
-            if row_idx < len(timestamps):
-                ts_val = timestamps[row_idx]
-                if pd.isnull(ts_val):
-                    sequence_timestamps.append("unknown")
-                else:
-                    sequence_timestamps.append(
-                        ts_val.isoformat()
-                        if hasattr(ts_val, "isoformat")
-                        else str(ts_val)
-                    )
-            else:
-                sequence_timestamps.append("unknown")
-
-    scores_arr = np.asarray(anomaly_scores, dtype=np.float64)
-    threshold_used, threshold_method = calibrate_threshold(scores_arr)
-
-    lstm_high: list[UploadHighAnomalyDetail] = []
-    for seq_idx, score in enumerate(anomaly_scores):
-        if score > threshold_used:
-            lstm_high.append(
-                UploadHighAnomalyDetail(
-                    sequence_index=seq_idx,
-                    score=float(score),
-                    timestamp=sequence_timestamps[seq_idx]
-                    if seq_idx < len(sequence_timestamps)
-                    else "unknown",
-                    detector="lstm",
-                )
+    if persist_db is not None:
+        if sensor_rows_persisted + raw_rows_persisted == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="No data could be extracted from the uploaded CSV. "
+                "Check column names and data format.",
             )
-
-    statistical_summary = _run_statistical_detection(raw_readings)
-    stat_high = [
-        UploadHighAnomalyDetail(
-            score=min(1.0, detail.z_score / 5.0),
-            timestamp=detail.timestamp,
-            detector="statistical",
-            column=detail.column,
-            z_score=detail.z_score,
-            severity=detail.severity,
-            method=detail.method,
-            value=detail.value,
-        )
-        for detail in statistical_summary.anomalies
-        if detail.severity in ("critical", "warning")
-    ]
-
-    high_anomalies = _merge_by_timestamp(lstm_high, stat_high)
-    anomalies_detected = len(high_anomalies)
-
-    return (
-        UploadInferenceResponse(
+        await apply_anomaly_scores(
+            db=persist_db,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
-            sequences_processed=sequences_processed,
-            anomalies_detected=anomalies_detected,
-            anomaly_scores=anomaly_scores,
-            high_anomalies=high_anomalies,
-            threshold_used=float(threshold_used),
-            threshold_method=threshold_method,
-            imputed_channels=imputed_channels,
-            statistical_summary=statistical_summary,
-            embeddings=embeddings,
-            uncertainties=uncertainties,
-            embedding_dim=LATENT_DIM,
-            sequence_timestamps=sequence_timestamps,
-        ),
-        sequence_timestamps,
-    )
+            anomaly_scores_by_timestamp=build_anomaly_scores_by_timestamp(
+                response.high_anomalies
+            ),
+            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
+                response.high_anomalies
+            ),
+        )
+        response = response.model_copy(
+            update={
+                "data_persisted": True,
+                "rows_uploaded": sensor_rows_persisted or raw_rows_persisted,
+                "sensor_rows_uploaded": sensor_rows_persisted,
+                "raw_rows_uploaded": raw_rows_persisted,
+            }
+        )
+
+    return response, sequence_timestamps
 
 
 def _merge_timestamp_key(timestamp: str) -> str:
@@ -316,32 +320,3 @@ def _merge_by_timestamp(
     return merged
 
 
-def _run_statistical_detection(
-    raw_readings: list[dict[str, Any]],
-) -> StatisticalColdRunSummary:
-    if not raw_readings:
-        return StatisticalColdRunSummary()
-
-    stat_detector = ColdRunStatisticalDetector()
-    rolling_hits = stat_detector.detect_rolling(raw_readings)
-    anomalies: list[StatisticalAnomalyDetail] = [
-        StatisticalAnomalyDetail(
-            timestamp=hit.timestamp,
-            column=hit.column,
-            value=hit.value,
-            z_score=float(hit.z_score),
-            severity=hit.severity,
-            method=hit.method,
-        )
-        for hit in rolling_hits
-    ]
-
-    return StatisticalColdRunSummary(
-        anomalies=anomalies,
-        baseline_columns=stat_detector._discover_columns(raw_readings),
-        total_scored=max(
-            0,
-            len(raw_readings)
-            - _effective_rolling_window(len(raw_readings), COLD_RUN_STAT_ROLLING_WINDOW),
-        ),
-    )
