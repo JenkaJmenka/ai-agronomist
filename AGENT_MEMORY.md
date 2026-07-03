@@ -3,7 +3,20 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-**WS4 — B3 Batched Attribution — COMPLETE (2026-07-03)**
+**Perf Refactor + RabbitMQ Implementation — ALL CODE WORKSTREAMS COMPLETE (2026-07-04)**
+Plan: ~/.claude/plans/build-implementation-plan-based-elegant-pudding.md. All on perf/upload-path,
+7 unpushed commits (56de59c..35e779c): WS1/2 LRUDict detector cache + strict persist_scores (B2/B4);
+WS3 single-pass upload, bulk_upsert_rows, upload_portions.py core (A1/A2/A5); WS4 batched attribution;
+WS5 /api/readings endpoints + dashboard reads via API + bounded landing window + NullPool off by
+default (DB_USE_NULLPOOL escape hatch) (C1-C3,C5); WS6 src/mq/ + Job/JobPortion (migration 014) +
+/api/jobs; WS7 upload-async producer + worker consumers (sync-vs-portioned equivalence-tested);
+WS8 ModelArtifact store db:// paths (migration 015) + online/retrain consumers (worker owns learner
+state); WS9 src/workers/main.py + start-worker.sh + compose rabbitmq/worker. Suite: 1658 passed.
+Migrations 014+015 run on next API deploy. USER ACTIONS PENDING: push branch/merge to Railway branch,
+deploy RabbitMQ template + worker service on Railway (env: DATABASE_URL, RABBITMQ_URL ref vars,
+MAX_PIPELINE_CACHE_SIZE=4), smoke test, capture Phase-0 baseline. QA/code-review pass pending.
+
+Previous phase: **WS4 — B3 Batched Attribution — COMPLETE (2026-07-03)**
 Agent: ml-ws4. Files: `src/models/anomaly_attributor.py`, `src/config.py`, `tests/models/test_attributor_batched.py`.
 
 Reworked `AnomalyAttributor` so attribution runs in ONE forward pass for a whole batch.
