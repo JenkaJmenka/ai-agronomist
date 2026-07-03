@@ -30,6 +30,7 @@ except (ImportError, ValueError):
     logging.basicConfig(level=logging.INFO)
 
 from src.db.session import engine, get_db, init_db
+from src.mq.connection import close_mq
 from src.api.routes import (
     bootstrap,
     feedback,
@@ -39,6 +40,7 @@ from src.api.routes import (
     incidents,
     inference,
     inference_integrated,
+    jobs,
     learning,
     models,
     monitoring,
@@ -74,6 +76,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     logger.info("Shutting down FastAPI application...")
+    try:
+        # Close the (lazily opened) RabbitMQ connection, if any.
+        await close_mq()
+    except Exception as e:
+        logger.error(f"Failed to cleanly close MQ connection: {e}", exc_info=True)
     try:
         # Dispose of SQLAlchemy pool and close active connections
         await engine.dispose()
@@ -238,6 +245,7 @@ app.include_router(feedback.router)
 app.include_router(feedback_integrated.router)
 app.include_router(monitoring.router)
 app.include_router(gas_anomalies.router)
+app.include_router(jobs.router)
 
 
 @app.get("/metrics", include_in_schema=False)

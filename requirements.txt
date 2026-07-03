@@ -42,6 +42,9 @@ requests>=2.31
 # Async utilities
 anyio>=4.0
 
+# Message queue (RabbitMQ)
+aio-pika>=9.4
+
 # Environment
 python-dotenv>=1.0
 
