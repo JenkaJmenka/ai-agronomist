@@ -37,3 +37,11 @@ class UploadJobAcceptedResponse(BaseModel):
     job_id: str
     portion_count: int
     poll_url: str
+
+
+class JobAcceptedResponse(BaseModel):
+    """Generic 202 acknowledgement for queued jobs."""
+
+    job_id: str
+    portion_count: int
+    poll_url: str

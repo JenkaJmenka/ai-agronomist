@@ -14,6 +14,7 @@ from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from src.db.models import SensorReading
+from src.models.artifact_store import resolve_checkpoint
 from src.models.inference import AnomalyDetector
 from src.models.model_registry import ModelRegistry
 from typing import List, Dict, Any, Optional
@@ -78,8 +79,10 @@ async def run_inference(
     if active_model_info:
         checkpoint_path = active_model_info["checkpoint_path"]
         model_id_used = active_model_info["model_id"]
-        
+
     try:
+        # Worker-trained checkpoints live in the DB artifact store (db:// paths).
+        checkpoint_path = await resolve_checkpoint(db, checkpoint_path)
         detector = get_cached_detector(checkpoint_path)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to initialize model: {e}")
@@ -194,6 +197,7 @@ async def run_inference_from_csv(
     checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
 
     try:
+        checkpoint_path = await resolve_checkpoint(db, checkpoint_path)
         detector = get_cached_detector(checkpoint_path)
     except Exception as e:
         if os.path.exists(tmp_path):

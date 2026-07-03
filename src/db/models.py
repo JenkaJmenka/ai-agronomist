@@ -5,7 +5,7 @@ SQLAlchemy database models for the AI Agronomist platform.
 import datetime
 import uuid
 from typing import Any, Dict, List, Optional
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.config import LATENT_DIM
@@ -489,3 +489,33 @@ class JobPortion(Base):
 
     def __repr__(self) -> str:
         return f"<JobPortion(job_id={self.job_id!r}, idx={self.portion_idx}, status={self.status!r})>"
+
+
+class ModelArtifact(Base):
+    """Binary model checkpoints shared across services via the DB.
+
+    Railway containers share no filesystem, so checkpoints produced by the
+    worker (retraining, online-learner state) travel as bytea rows addressed
+    by a stable key ("db://model_artifacts/<key>").
+    """
+
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_generate_uuid)
+    key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True, index=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ModelArtifact(key={self.key!r}, size={self.size_bytes})>"

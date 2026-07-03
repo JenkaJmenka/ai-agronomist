@@ -92,8 +92,10 @@ async def handle_upload_portion(
 
     # Local import keeps torch out of module import time for non-ML consumers.
     from src.api.routes.inference import get_cached_detector
+    from src.models.artifact_store import resolve_checkpoint
 
-    detector = get_cached_detector(msg.checkpoint_path)
+    checkpoint_path = await resolve_checkpoint(db, msg.checkpoint_path)
+    detector = get_cached_detector(checkpoint_path)
     normalized_df = pd.DataFrame(msg.rows) if msg.rows else None
     overlap_df = pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame()
     stat_carry = StatCarry(rows=list(msg.stat_carry_rows))

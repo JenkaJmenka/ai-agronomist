@@ -1,25 +1,16 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import logging
 
-from src.db.session import get_db, AsyncSessionLocal
+from src.db.session import get_db
 from src.models.model_registry import ModelRegistry
-from src.models.training_pipeline import PerCustomerTrainingPipeline
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/models", tags=["models"])
-
-# In-process training status store keyed by customer_id.
-# Holds the most recent job per customer; replaced on each new run.
-_training_status: Dict[str, Dict[str, Any]] = {}
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 class RollbackRequest(BaseModel):
     model_id: str
@@ -37,56 +28,73 @@ async def list_model_versions(customer_id: str, db: AsyncSession = Depends(get_d
     registry = ModelRegistry(db)
     return await registry.list_models(customer_id)
 
-async def _run_training_bg(customer_id: str) -> None:
-    """Run the training pipeline in a background task with status tracking."""
-    _training_status[customer_id] = {
-        "status": "running",
-        "customer_id": customer_id,
-        "started_at": _now(),
-        "finished_at": None,
-        "model_id": None,
-        "error": None,
-    }
-    try:
-        async with AsyncSessionLocal() as session:
-            pipeline = PerCustomerTrainingPipeline(session)
-            model_id = await pipeline.train_customer_model(customer_id)
-        _training_status[customer_id].update({
-            "status": "completed",
-            "finished_at": _now(),
-            "model_id": model_id,
-        })
-        logger.info(f"Training completed for {customer_id}: model_id={model_id}")
-    except Exception as exc:
-        _training_status[customer_id].update({
-            "status": "failed",
-            "finished_at": _now(),
-            "error": str(exc),
-        })
-        logger.error(f"Background training failed for {customer_id}: {exc}", exc_info=True)
-
 @router.post("/{customer_id}/train")
-async def train_customer_model(customer_id: str, background_tasks: BackgroundTasks):
-    """Trigger an asynchronous training pipeline. Poll /training-status for updates."""
-    background_tasks.add_task(_run_training_bg, customer_id)
+async def train_customer_model(customer_id: str, db: AsyncSession = Depends(get_db)):
+    """Queue a portioned retraining job on the worker. Poll /training-status.
+
+    Replaces the in-process BackgroundTasks runner: the job record is durable
+    across API restarts and the heavy torch training runs on the worker
+    service, streaming data from the DB in portions.
+    """
+    from src.db.jobs import create_job
+    from src.mq.publisher import publish_json
+    from src.mq.schemas import RetrainJobMessage
+    from src.mq.topology import TRAINING_RETRAIN_QUEUE
+
+    active = await ModelRegistry(db).get_active_model(customer_id)
+    baseline_checkpoint = active["checkpoint_path"] if active else None
+
+    job = await create_job(
+        db,
+        tenant_id=customer_id,
+        job_type="training_retrain",
+        payload={"baseline_checkpoint": baseline_checkpoint},
+    )
+    await publish_json(
+        TRAINING_RETRAIN_QUEUE,
+        RetrainJobMessage(
+            job_id=job.id,
+            tenant_id=customer_id,
+            baseline_checkpoint=baseline_checkpoint,
+        ),
+    )
     return {
         "status": "started",
         "customer_id": customer_id,
-        "message": "Training pipeline has been dispatched in the background.",
+        "job_id": job.id,
+        "message": "Retraining job queued for the worker service.",
         "poll_url": f"/api/models/{customer_id}/training-status",
     }
 
 
 @router.get("/{customer_id}/training-status")
-async def get_training_status(customer_id: str) -> Dict[str, Any]:
+async def get_training_status(customer_id: str, db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
     """Return the status of the most recent training job for this customer.
 
-    status values: "running" | "completed" | "failed" | "unknown"
+    status values: "pending" | "running" | "completed" | "failed" | "unknown"
     """
-    return _training_status.get(
-        customer_id,
-        {"status": "unknown", "customer_id": customer_id, "message": "No training job found."},
+    from src.db.jobs import list_jobs
+
+    jobs = await list_jobs(
+        db, tenant_id=customer_id, job_type="training_retrain", limit=1
     )
+    if not jobs:
+        return {
+            "status": "unknown",
+            "customer_id": customer_id,
+            "message": "No training job found.",
+        }
+    job = jobs[0]
+    return {
+        "status": job.status,
+        "customer_id": customer_id,
+        "job_id": job.id,
+        "started_at": job.created_at.isoformat() if job.created_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "model_id": (job.result or {}).get("model_id"),
+        "error": job.error,
+        "progress": (job.result or {}).get("progress"),
+    }
 
 @router.post("/{customer_id}/rollback")
 async def rollback_model(

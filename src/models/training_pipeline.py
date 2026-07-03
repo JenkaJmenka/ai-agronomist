@@ -111,3 +111,42 @@ class PerCustomerTrainingPipeline:
             
         logger.info(f"New model did not improve baseline for {customer_id}. Discarding.")
         return None
+
+
+async def iter_customer_data(
+    db: AsyncSession,
+    customer_id: str,
+    portion_rows: int,
+):
+    """Keyset-paginated stream of a customer's sensor data as (N, 4) arrays.
+
+    Memory stays bounded at `portion_rows` regardless of history size —
+    replaces the load-everything `_load_customer_data` for portioned training.
+    """
+    from sqlalchemy import tuple_
+
+    last_key: Optional[Tuple] = None
+    while True:
+        stmt = (
+            select(
+                SensorReading.timestamp,
+                SensorReading.id,
+                SensorReading.temperature,
+                SensorReading.humidity,
+                SensorReading.co2,
+                SensorReading.light,
+            )
+            .where(SensorReading.tenant_id == customer_id)
+            .order_by(SensorReading.timestamp.asc(), SensorReading.id.asc())
+            .limit(portion_rows)
+        )
+        if last_key is not None:
+            stmt = stmt.where(
+                tuple_(SensorReading.timestamp, SensorReading.id) > last_key
+            )
+        result = await db.execute(stmt)
+        rows = result.all()
+        if not rows:
+            return
+        last_key = (rows[-1][0], rows[-1][1])
+        yield np.asarray([[r[2], r[3], r[4], r[5]] for r in rows], dtype=np.float32)
