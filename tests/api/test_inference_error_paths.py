@@ -113,7 +113,7 @@ def patch_detector():
         yield mock_enriched
 
 
-def post_inference(client, sequences, timestamps=None):
+def post_inference(client, sequences, timestamps=None, persist=False):
     payload = {
         "sequences": sequences,
         "tenant_id": "tenant_1",
@@ -121,6 +121,8 @@ def post_inference(client, sequences, timestamps=None):
     }
     if timestamps is not None:
         payload["timestamps"] = timestamps
+    if persist:
+        payload["persist_scores"] = True
     return client.post("/api/inference", json=payload)
 
 
@@ -137,34 +139,49 @@ class TestTimestampPersistenceBranch:
         self, test_client, test_sequences
     ):
         timestamps = [moment.isoformat() for moment in seeded_timestamps()]
-        response = post_inference(test_client, test_sequences, timestamps)
+        response = post_inference(test_client, test_sequences, timestamps, persist=True)
         assert response.status_code == status.HTTP_200_OK
         scores = response.json()["anomaly_scores"]
         assert all(score == pytest.approx(0.15) for score in scores)
 
-    def test_one_malformed_timestamp_is_skipped_not_fatal(
+    def test_malformed_timestamp_is_rejected_with_400(
         self, test_client, test_sequences
     ):
+        # Persistence is strict now: a single unparseable timestamp fails the
+        # request instead of silently skipping that score.
         timestamps = [moment.isoformat() for moment in seeded_timestamps()]
         timestamps[-1] = "not-a-timestamp"
-        response = post_inference(test_client, test_sequences, timestamps)
-        assert response.status_code == status.HTTP_200_OK
+        response = post_inference(test_client, test_sequences, timestamps, persist=True)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Unparseable timestamp" in response.text
 
-    def test_all_malformed_timestamps_skip_persistence_gracefully(
+    def test_persist_without_timestamps_rejected_with_400(
         self, test_client, test_sequences
     ):
-        timestamps = ["garbage"] * BATCH_SIZE
+        response = post_inference(test_client, test_sequences, persist=True)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "timestamps required" in response.text
+
+    def test_timestamps_without_persist_flag_do_not_write(
+        self, test_client, test_sequences
+    ):
+        # Pure inference with timestamps but no persist flag stays 200 and
+        # performs no DB writes (persistence is opt-in).
+        timestamps = [moment.isoformat() for moment in seeded_timestamps()]
         response = post_inference(test_client, test_sequences, timestamps)
         assert response.status_code == status.HTTP_200_OK
 
     def test_commit_failure_returns_500_and_rolls_back(
         self, test_client, test_database, test_sequences
     ):
+        timestamps = [moment.isoformat() for moment in seeded_timestamps()]
         rollback_mock = AsyncMock()
         with patch.object(
             test_database, "commit", AsyncMock(side_effect=RuntimeError("disk full"))
         ), patch.object(test_database, "rollback", rollback_mock):
-            response = post_inference(test_client, test_sequences)
+            response = post_inference(
+                test_client, test_sequences, timestamps, persist=True
+            )
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
         assert "persist" in response.json()["message"]
         rollback_mock.assert_awaited_once()

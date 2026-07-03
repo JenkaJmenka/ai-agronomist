@@ -23,22 +23,41 @@ from fastapi import UploadFile, File, Form
 import tempfile
 import os
 import logging
-from functools import lru_cache
 
 from src.vendors.csv_adapter import CSVAdapter
 from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, MAX_PIPELINE_CACHE_SIZE
+from src.utils.lru import LRUDict
+from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
 
-@lru_cache(maxsize=MAX_PIPELINE_CACHE_SIZE)
+_BASELINE_CACHE_KEY = "__baseline__"
+# Single eviction policy for loaded detectors (AnomalyDetector no longer keeps
+# its own class-level cache); sized by MAX_PIPELINE_CACHE_SIZE.
+_detector_cache: LRUDict = LRUDict(max_size=MAX_PIPELINE_CACHE_SIZE)
+
+
 def get_cached_detector(checkpoint_path: Optional[str]) -> AnomalyDetector:
     """
-    LRU cached AnomalyDetector factory to prevent unbounded model memory leaks and reuse instances.
+    LRU-cached AnomalyDetector factory to prevent unbounded model memory growth
+    and reuse loaded instances across requests.
     """
-    return AnomalyDetector(checkpoint_path=checkpoint_path)
+    key = checkpoint_path or _BASELINE_CACHE_KEY
+    try:
+        return _detector_cache[key]
+    except KeyError:
+        detector = AnomalyDetector(checkpoint_path=checkpoint_path)
+        _detector_cache[key] = detector
+        return detector
+
+
+def clear_detector_cache() -> None:
+    """Reset the detector cache (primarily for tests)."""
+    _detector_cache.data.clear()
+    _detector_cache.usage.clear()
 
 @router.post("/inference", response_model=InferenceResponse)
 async def run_inference(
@@ -84,52 +103,50 @@ async def run_inference(
     ]
     
     
-    # Persist scores to the matching database records for this tenant/greenhouse
-    if getattr(request, "timestamps", None) is not None and len(request.timestamps) == len(batch_scores):
-        dt_timestamps = []
-        for ts_str in request.timestamps:
-            try:
-                dt_timestamps.append(datetime.fromisoformat(ts_str.replace('Z', '+00:00')))
-            except Exception as exc:
-                logger.warning(
-                    "Could not parse timestamp %r for anomaly score persistence: %s",
-                    ts_str, exc,
-                )
-                
-        if dt_timestamps:
-            stmt = select(SensorReading).where(
-                SensorReading.tenant_id == request.tenant_id,
-                SensorReading.greenhouse_id == request.greenhouse_id,
-                SensorReading.timestamp.in_(dt_timestamps)
+    # Persist scores to the matching database records for this tenant/greenhouse.
+    # Persistence is opt-in and requires one timestamp per sequence — the old
+    # blind positional fallback (ORDER BY timestamp DESC) mis-attributed scores
+    # and was removed.
+    if request.persist_scores:
+        if not request.timestamps or len(request.timestamps) != len(batch_scores):
+            raise HTTPException(
+                status_code=400,
+                detail="timestamps required (one per sequence) to persist anomaly scores",
             )
-            result = await db.execute(stmt)
-            records = result.scalars().all()
-            
-            for record in records:
-                for idx, dt in enumerate(dt_timestamps):
-                    if record.timestamp == dt or record.timestamp.replace(tzinfo=timezone.utc) == dt.replace(tzinfo=timezone.utc):
-                        record.anomaly_score = float(batch_scores[idx])
-                        break
-    else:
-        # Fallback to the old blind-matching logic if no timestamps provided
+
+        scores_by_key: dict[str, float] = {}
+        dt_timestamps: list[datetime] = []
+        for ts_str, score in zip(request.timestamps, batch_scores):
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unparseable timestamp {ts_str!r} for anomaly score persistence",
+                ) from exc
+            dt_timestamps.append(dt)
+            key = normalize_timestamp_key(dt)
+            if key is not None:
+                scores_by_key[key] = float(score)
+
         stmt = select(SensorReading).where(
             SensorReading.tenant_id == request.tenant_id,
             SensorReading.greenhouse_id == request.greenhouse_id,
-        ).order_by(SensorReading.timestamp.desc()).limit(len(batch_scores))
-        
+            SensorReading.timestamp.in_(dt_timestamps),
+        )
         result = await db.execute(stmt)
         records = result.scalars().all()
-        
-        # We update records with anomaly scores starting from the matching indices
-        for idx, record in enumerate(reversed(records)):
-            if idx < len(batch_scores):
-                record.anomaly_score = float(batch_scores[idx])
 
-    try:
-        await db.commit()
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to persist anomaly scores: {str(e)}")
+        for record in records:
+            record_key = normalize_timestamp_key(record.timestamp)
+            if record_key is not None and record_key in scores_by_key:
+                record.anomaly_score = scores_by_key[record_key]
+
+        try:
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to persist anomaly scores: {str(e)}")
 
 
 

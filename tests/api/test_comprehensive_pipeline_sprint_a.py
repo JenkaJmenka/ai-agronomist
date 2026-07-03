@@ -89,7 +89,6 @@ def checkpoint_path(tmp_path) -> str:
 def detector(checkpoint_path: str):
     instance = AnomalyDetector(checkpoint_path=checkpoint_path)
     yield instance
-    AnomalyDetector._model_cache.pop(checkpoint_path, None)
 
 
 @pytest_asyncio.fixture
