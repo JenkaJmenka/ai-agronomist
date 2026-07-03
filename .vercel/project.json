@@ -1,0 +1,13 @@
+{
+  "settings": {
+    "createdAt": 1782833415953,
+    "framework": "fastapi",
+    "devCommand": null,
+    "installCommand": null,
+    "buildCommand": null,
+    "outputDirectory": null,
+    "rootDirectory": null,
+    "directoryListing": false,
+    "nodeVersion": "24.x"
+  }
+}

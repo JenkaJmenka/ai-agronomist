@@ -3,7 +3,30 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
-**UI Robustness Pass — P1–P7 COMPLETE + CODE REVIEW DONE (2026-07-01)**
+**Railway IPv6 Dual-Stack Bind Fix — COMPLETE (2026-07-03)**
+
+**File modified:** `docker/start-api.sh`
+
+Changed uvicorn bind address from `0.0.0.0` (IPv4-only) to `::` (dual-stack) so the API is
+reachable via Railway private networking (`*.railway.internal`), which is IPv6-only.
+- Line 21: echo message updated to `"Starting API on [::]:${PORT} (dual-stack)"`
+- Line 22: `--host 0.0.0.0` changed to `--host ::` — binds both IPv4 and IPv6 on Linux
+
+Syntax verified: `bash -n docker/start-api.sh` → OK.
+
+Previous phase: **Performance Refactoring Plan + ADR Audit — COMPLETE (2026-07-03)**
+Architect deliverable: docs/architecture/performance-refactoring-plan.md
+
+Audited implementation plan/Phase refactoring/performance-adr-report.md vs code: ADR claims
+largely implemented & correct BUT orthogonal to the real production failure.
+Root cause: (1) src/db/session.py:45 defaults DATABASE_URL to ephemeral SQLite -> empty prod DB on
+Vercel; (2) src/dashboard/services/api_client.py:14 defaults to localhost:8000 -> deployed API gets
+zero traffic; (3) ~510MB baseline = torch + .pt load per serverless instance = cold-start problem.
+FE is Streamlit (no React/Next in repo). RabbitMQ=NO (use DB job table). Redis=not yet. Next.js=not a
+perf fix. Recommend Phase 0 root-cause verification (blocking) + split ML path off serverless + managed
+Postgres. .env.local blocked by permissions — human must verify API_URL/DATABASE_URL.
+
+Previous phase: **UI Robustness Pass — P1–P7 COMPLETE + CODE REVIEW DONE (2026-07-01)**
 P1–P7 all done. Code review completed: **PASS WITH NOTES**.
 Review: [docs/review/ui_robustness_review.md](docs/review/ui_robustness_review.md).
 Agent: code-reviewer-ui. Done signal: tasks/done/code-reviewer-ui.json.
