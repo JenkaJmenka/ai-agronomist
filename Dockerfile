@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY . .
 
-RUN chmod +x docker/start-api.sh docker/start-dashboard.sh \
+RUN chmod +x docker/start-api.sh docker/start-dashboard.sh docker/start-worker.sh \
     && mkdir -p logs models/checkpoints data/synthetic \
     && useradd -m -u 1000 appuser \
     && chown -R appuser:appuser /app
