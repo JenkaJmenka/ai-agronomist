@@ -12,6 +12,11 @@ eval mode, so two passes over the same input give slightly different errors
 (~1e-3) --- enough to swamp small per-sensor contributions. Attribution
 therefore uses the deterministic path ``encode -> decode(mu)`` instead of
 ``forward`` so that results are reproducible.
+
+Batching: a batch of B sequences over S sensors is scored in a single forward
+pass of ``B * (S + 1)`` rows --- S masked variants plus one unmasked copy per
+sequence (the unmasked row supplies that sequence's anomaly error). The pass is
+micro-batched by ``ATTRIBUTION_MAX_BATCH`` to bound peak memory.
 """
 
 import logging
@@ -25,6 +30,7 @@ import torch.nn.functional as F
 from src.config import (
     ATTRIBUTION_AFFECTED_SENSOR_THRESHOLD,
     ATTRIBUTION_CONFIDENCE_SCALE,
+    ATTRIBUTION_MAX_BATCH,
     DEVICE,
     EXPLANATION_DEVIATION_THRESHOLD,
     NUMERICAL_EPSILON,
@@ -130,12 +136,14 @@ class AnomalyAttributor:
 
         Each sensor channel is replaced by its baseline mean; the drop in
         reconstruction error is that sensor's (clamped, then normalized)
-        contribution.
+        contribution. Delegates to the batched core with ``B == 1`` so single
+        and batch attribution can never diverge.
 
         Args:
             sequence: Array of shape (seq_len, input_dim).
             anomaly_error: Optional precomputed anomaly reconstruction error.
-                If provided, uses it directly.
+                If provided, uses it directly and skips the unmasked forward
+                row (one fewer row per sequence in the pass).
 
         Returns:
             Dict with keys: ``attribution`` (name -> normalized contribution,
@@ -157,73 +165,28 @@ class AnomalyAttributor:
                 a non-finite reconstruction error.
         """
         sequence = self._validate_sequence(sequence)
-        assert self.baseline_sequences is not None  # narrowed by validation
-        assert self.baseline_means is not None
-
-        if anomaly_error is None:
-            anomaly_error = self._reconstruction_error(self._to_batch_tensor(sequence))
-
-        num_sensors = sequence.shape[1]
-        # Batch all masked sequences into shape (num_sensors, seq_len, input_dim)
-        masked_batch = np.repeat(sequence[np.newaxis, :, :], num_sensors, axis=0)
-        for i in range(num_sensors):
-            masked_batch[i, :, i] = self.baseline_means[i]
-
-        x = torch.from_numpy(masked_batch).to(self.device)
-        if self.model.training:
-            self.model.eval()
-        with torch.no_grad():
-            mu, _ = self.model.encode(x)
-            reconstruction = self.model.decode(mu)
-            mse_elements = (reconstruction - x) ** 2
-            masked_errors = mse_elements.mean(dim=(1, 2)).cpu().numpy()
-
-        raw_contributions: List[float] = []
-        for sensor_idx in range(num_sensors):
-            masked_error = float(masked_errors[sensor_idx])
-            if not math.isfinite(masked_error):
-                raise ValueError(
-                    f"Non-finite reconstruction error ({masked_error}): model weights "
-                    f"or input data are corrupted; attribution aborted"
-                )
-            # Contribution = how much masking this sensor reduces the error.
-            raw_contributions.append(max(0.0, anomaly_error - masked_error))
-
-        attribution, is_fallback = self._normalize_contributions(raw_contributions)
-        affected_sensors = [
-            name
-            for name, contribution in attribution.items()
-            if contribution > ATTRIBUTION_AFFECTED_SENSOR_THRESHOLD
-        ]
-        if is_fallback:
-            # Nothing attributable: don't dress the uniform split up as 0.5.
-            confidence = 0.0
-        else:
-            # A single dominant sensor -> high confidence; evenly spread -> low.
-            max_contribution = max(attribution.values())
-            confidence = min(max_contribution * ATTRIBUTION_CONFIDENCE_SCALE, 1.0)
-
-        return {
-            "attribution": attribution,
-            "sensor_contributions": raw_contributions,
-            "affected_sensors": affected_sensors,
-            "confidence": confidence,
-            "anomaly_error": anomaly_error,
-            "baseline_error": self.baseline_error,
-            "is_fallback": is_fallback,
-        }
+        anomaly_errors = (
+            None
+            if anomaly_error is None
+            else np.array([anomaly_error], dtype=np.float64)
+        )
+        return self._attribute_core(sequence[np.newaxis, :, :], anomaly_errors)[0]
 
     def attribute_batch(self, sequences: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Attribute a batch of sequences.
+        Attribute a batch of sequences in a single forward pass.
 
         Args:
             sequences: Array of shape (batch, seq_len, input_dim).
 
         Returns:
             One attribution dict (see :meth:`attribute_sequence`) per sequence.
+            An empty batch yields an empty list.
         """
-        return [self.attribute_sequence(sequence) for sequence in sequences]
+        sequences = self._validate_batch(sequences)
+        if sequences.shape[0] == 0:
+            return []
+        return self._attribute_core(sequences, None)
 
     def get_explanation(
         self, attribution_result: Dict[str, Any], sequence: np.ndarray
@@ -261,6 +224,130 @@ class AnomalyAttributor:
                 )
 
         return " + ".join(explanation_parts) if explanation_parts else "Unknown cause"
+
+    def _attribute_core(
+        self, sequences: np.ndarray, anomaly_errors: Optional[np.ndarray]
+    ) -> List[Dict[str, Any]]:
+        """
+        Batched attribution over B validated sequences.
+
+        Builds one tensor of ``B * variants_per_seq`` rows laid out contiguously
+        per sequence: variants ``[0 .. num_sensors - 1]`` are the masked
+        variants (channel i replaced by its baseline mean) and, when
+        ``anomaly_errors`` is None, variant ``num_sensors`` is an unmasked copy
+        whose error is that sequence's anomaly error. A single micro-batched
+        forward pass yields per-row errors, reshaped to
+        ``(B, variants_per_seq)``, then post-processed with NumPy.
+
+        Args:
+            sequences: Validated (B, seq_len, input_dim) float32 array, B >= 1.
+            anomaly_errors: Optional precomputed anomaly errors, shape (B,).
+                When provided, the unmasked rows are omitted and these values
+                are used directly.
+
+        Returns:
+            One attribution dict per sequence (see :meth:`attribute_sequence`).
+
+        Raises:
+            ValueError: If the model produces a non-finite reconstruction error.
+        """
+        assert self.baseline_means is not None  # narrowed by validation
+        batch_size, _, num_sensors = sequences.shape
+        include_unmasked = anomaly_errors is None
+        variants_per_seq = num_sensors + 1 if include_unmasked else num_sensors
+
+        stacked = np.repeat(sequences, variants_per_seq, axis=0)
+        for sensor_idx in range(num_sensors):
+            # Every sequence's masked variant for this sensor sits at the same
+            # offset within its per-sequence block: rows sensor_idx, +V, +2V ...
+            stacked[sensor_idx::variants_per_seq, :, sensor_idx] = (
+                self.baseline_means[sensor_idx]
+            )
+
+        row_errors = self._batched_row_errors(stacked).reshape(
+            batch_size, variants_per_seq
+        )
+        if not np.isfinite(row_errors).all():
+            raise ValueError(
+                "Non-finite reconstruction error: model weights or input data "
+                "are corrupted; attribution aborted"
+            )
+
+        if include_unmasked:
+            anomaly_error_per_seq = row_errors[:, num_sensors]
+            masked_errors = row_errors[:, :num_sensors]
+        else:
+            anomaly_error_per_seq = np.asarray(anomaly_errors, dtype=np.float64)
+            masked_errors = row_errors
+
+        # Contribution = how much masking each sensor reduces the error, clamped.
+        raw_contributions = np.maximum(
+            0.0, anomaly_error_per_seq[:, np.newaxis] - masked_errors
+        )
+
+        return [
+            self._build_result(
+                raw_contributions[seq_idx].tolist(),
+                float(anomaly_error_per_seq[seq_idx]),
+            )
+            for seq_idx in range(batch_size)
+        ]
+
+    def _build_result(
+        self, raw_contributions: List[float], anomaly_error: float
+    ) -> Dict[str, Any]:
+        """Assemble one attribution result dict from raw per-sensor contributions."""
+        attribution, is_fallback = self._normalize_contributions(raw_contributions)
+        affected_sensors = [
+            name
+            for name, contribution in attribution.items()
+            if contribution > ATTRIBUTION_AFFECTED_SENSOR_THRESHOLD
+        ]
+        if is_fallback:
+            # Nothing attributable: don't dress the uniform split up as 0.5.
+            confidence = 0.0
+        else:
+            # A single dominant sensor -> high confidence; evenly spread -> low.
+            max_contribution = max(attribution.values())
+            confidence = min(max_contribution * ATTRIBUTION_CONFIDENCE_SCALE, 1.0)
+
+        return {
+            "attribution": attribution,
+            "sensor_contributions": raw_contributions,
+            "affected_sensors": affected_sensors,
+            "confidence": confidence,
+            "anomaly_error": anomaly_error,
+            "baseline_error": self.baseline_error,
+            "is_fallback": is_fallback,
+        }
+
+    def _batched_row_errors(self, rows: np.ndarray) -> np.ndarray:
+        """
+        Deterministic per-row MSE for a stack of (N, seq_len, input_dim) rows.
+
+        Runs the deterministic ``encode -> decode(mu)`` path (see module
+        docstring) and micro-batches the forward pass by
+        ``ATTRIBUTION_MAX_BATCH`` to bound peak memory on large batches.
+
+        Re-asserts eval mode first: pipelines sharing the model call
+        ``model.train()``, which would silently re-enable dropout and break the
+        determinism guarantee.
+
+        Returns:
+            A (N,) float64 array of per-row mean-squared errors.
+        """
+        if self.model.training:
+            self.model.eval()
+        inputs = torch.from_numpy(rows).to(self.device)
+        chunk_errors: List[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, inputs.shape[0], ATTRIBUTION_MAX_BATCH):
+                chunk = inputs[start : start + ATTRIBUTION_MAX_BATCH]
+                mu, _ = self.model.encode(chunk)
+                reconstruction = self.model.decode(mu)
+                mse_per_row = ((reconstruction - chunk) ** 2).mean(dim=(1, 2))
+                chunk_errors.append(mse_per_row.cpu().numpy())
+        return np.concatenate(chunk_errors).astype(np.float64)
 
     def _reconstruction_error(self, x: torch.Tensor) -> float:
         """
@@ -332,3 +419,25 @@ class AnomalyAttributor:
                 "clean the sensor data before attribution"
             )
         return sequence
+
+    def _validate_batch(self, sequences: np.ndarray) -> np.ndarray:
+        """Validate and coerce a (batch, seq_len, input_dim) array to float32.
+
+        Raises:
+            ValueError: If no baseline is set, the array is not 3D, the sensor
+                axis does not match, or it contains non-finite values (NaN/Inf).
+        """
+        if self.baseline_sequences is None:
+            raise ValueError("Must call set_baseline() first")
+        sequences = np.asarray(sequences, dtype=np.float32)
+        if sequences.ndim != 3 or sequences.shape[2] != len(self.sensor_names):
+            raise ValueError(
+                f"Batch must have shape (batch, seq_len, "
+                f"{len(self.sensor_names)}), got {sequences.shape}"
+            )
+        if sequences.size and not np.isfinite(sequences).all():
+            raise ValueError(
+                "Batch contains non-finite values (NaN/Inf); "
+                "clean the sensor data before attribution"
+            )
+        return sequences

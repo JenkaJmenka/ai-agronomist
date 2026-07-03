@@ -289,6 +289,12 @@ NUMERICAL_EPSILON: float = 1e-6
 # Maximum number of sequences accepted by one /api/learning/observe request.
 MAX_OBSERVE_BATCH: int = 256
 
+# Maximum number of masked/unmasked rows fed to the model in a single
+# attribution forward pass. Batched attribution builds B*(num_sensors+1)
+# rows; this caps each micro-batch to bound peak memory on large batches.
+# Override via ATTRIBUTION_MAX_BATCH env var.
+ATTRIBUTION_MAX_BATCH: int = int(os.environ.get("ATTRIBUTION_MAX_BATCH", "256"))
+
 # =============================================================================
 # Anomaly Attribution (Phase 1.9.1 Week 1 — Anomaly Attributor)
 # =============================================================================
