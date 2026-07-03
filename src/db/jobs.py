@@ -193,3 +193,28 @@ async def prune_portion_results(db: AsyncSession, job_id: str) -> None:
         .values(result=None, updated_at=datetime.now(timezone.utc))
     )
     await db.commit()
+
+
+async def set_total_portions(
+    db: AsyncSession,
+    job_id: str,
+    total: int,
+) -> tuple[int, int]:
+    """Producer sets the portion count once streaming ends; returns progress.
+
+    The returned (completed, failed) lets the producer detect the race where
+    every portion finished before the total was known, and fire finalize itself.
+    """
+    table = Job.__table__
+    stmt = (
+        update(table)
+        .where(table.c.id == job_id)
+        .values(total_portions=total, updated_at=datetime.now(timezone.utc))
+        .returning(table.c.completed_portions, table.c.failed_portions)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    row = result.one_or_none()
+    if row is None:
+        raise ValueError(f"Unknown job {job_id!r}")
+    return int(row[0]), int(row[1])

@@ -8,6 +8,8 @@ from src.api.services.cold_run_upload import (
     EmptyCsvError,
     run_cold_run_upload,
 )
+from src.api.services.upload_producer import produce_upload_portions
+from src.api.schemas.jobs import UploadJobAcceptedResponse
 from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -221,6 +223,67 @@ async def run_inference_from_csv(
         raise HTTPException(status_code=422, detail=f"Invalid CSV format: {e}") from e
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid CSV format: {e}") from e
+    finally:
+        adapter.disconnect()
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@router.post(
+    "/inference/upload-async",
+    response_model=UploadJobAcceptedResponse,
+    status_code=202,
+)
+async def run_inference_from_csv_async(
+    tenant_id: str = Form(...),
+    greenhouse_id: str = Form(default="default"),
+    file: UploadFile = File(...),
+    persist_data: bool = Form(default=False),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
+
+    The file is parsed once and published to RabbitMQ portion-by-portion; the
+    worker service scores and persists each portion and finalizes the
+    file-level threshold when all portions are done.
+    """
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+            while chunk := await file.read(1024 * 1024):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write uploaded file: {e}")
+
+    registry = ModelRegistry(db)
+    active_model_info = await registry.get_active_model(tenant_id)
+    checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
+
+    adapter = CSVAdapter({"filepath": tmp_path})
+    try:
+        adapter.connect()
+        job_id, portion_count = await produce_upload_portions(
+            tmp_path=tmp_path,
+            adapter=adapter,
+            db=db,
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+            checkpoint_path=checkpoint_path,
+            persist_data=persist_data,
+            filename=file.filename,
+        )
+        return UploadJobAcceptedResponse(
+            job_id=job_id,
+            portion_count=portion_count,
+            poll_url=f"/api/jobs/{job_id}",
+        )
+    except EmptyCsvError as e:
+        raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
     finally:
         adapter.disconnect()
         if os.path.exists(tmp_path):

@@ -53,6 +53,34 @@ class DashboardApiClient:
         raise_for_status_with_detail(resp)
         return resp.json()
 
+    def upload_csv_async(
+        self,
+        *,
+        tenant_id: str,
+        greenhouse_id: str,
+        file_name: str,
+        file_bytes: bytes,
+        persist_data: bool = True,
+    ) -> Dict[str, Any]:
+        """Queue a CSV for portioned processing; returns {job_id, portion_count, poll_url}."""
+        resp = requests.post(
+            f"{self.base_url}/api/inference/upload-async",
+            files={"file": (file_name, file_bytes, "text/csv")},
+            data={
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+                "persist_data": str(persist_data).lower(),
+            },
+            headers={k: v for k, v in self._headers().items() if k != "Content-Type"},
+            timeout=120,
+        )
+        raise_for_status_with_detail(resp)
+        return resp.json()
+
+    def get_job(self, job_id: str) -> Dict[str, Any]:
+        """Poll async job status/progress/result."""
+        return self._get(f"/api/jobs/{job_id}")
+
     def mark_anomaly(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post("/api/feedback/mark-anomaly", payload)
 

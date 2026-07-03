@@ -12,17 +12,24 @@ from pydantic import BaseModel, Field
 
 
 class UploadPortionMessage(BaseModel):
-    """One scored+persisted portion of an uploaded CSV."""
+    """One scored+persisted portion of an uploaded CSV.
+
+    `rows` are adapter-normalized sensor records (ISO timestamp + canonical
+    sensor columns); `raw_rows` are the NaN-stripped original records used for
+    statistical detection and RawReading persistence — the worker never needs
+    the CSV file or adapter.
+    """
 
     job_id: str
     tenant_id: str
     greenhouse_id: str
     portion_idx: int = Field(..., ge=0)
-    portion_count: int = Field(..., ge=1)
+    # 0 = unknown at publish time; jobs.total_portions is authoritative.
+    portion_count: int = Field(default=0, ge=0)
     rows: list[dict[str, Any]]
+    raw_rows: list[dict[str, Any]] = Field(default_factory=list)
     overlap_rows: list[dict[str, Any]] = Field(default_factory=list)
     stat_carry_rows: list[dict[str, Any]] = Field(default_factory=list)
-    csv_props: dict[str, Any] = Field(default_factory=dict)
     adaptive_ranges: list[list[float]]
     checkpoint_path: Optional[str] = None
     seq_len: int = 20
