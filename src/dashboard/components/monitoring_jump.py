@@ -112,12 +112,17 @@ def load_monitoring_readings(
             data_min, data_max = time_start, time_end
         return df, data_min, data_max
 
+    # Landing load is a bounded recent window (C2); the timeline bounds come
+    # from the cheap min/max endpoint so navigation still spans full history.
     df = query_sensor_readings(tenant_id, greenhouse_id)
     if df.empty:
         now = pd.Timestamp.utcnow().tz_localize(None)
         return df, now, now
+    min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
     ts = pd.to_datetime(df["timestamp"])
-    return df, ts.min(), ts.max()
+    data_min = pd.Timestamp(min_iso) if min_iso else ts.min()
+    data_max = pd.Timestamp(max_iso) if max_iso else ts.max()
+    return df, data_min, data_max
 
 
 def _sync_monitor_timeline_pickers(start: pd.Timestamp, end: pd.Timestamp) -> None:

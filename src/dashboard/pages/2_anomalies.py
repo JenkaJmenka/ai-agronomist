@@ -45,12 +45,20 @@ from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
 from src.dashboard.services.upload_validator import validate_csv_upload
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
+from src.dashboard.constants import CACHE_TTL_SHORT
 from src.dashboard.services.review_queue import (
     build_sequence_from_readings,
     register_anomaly_as_incident,
 )
 
 API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
+
+
+@st.cache_data(ttl=CACHE_TTL_SHORT)
+def _cached_active_model_version(tenant_id: str) -> str:
+    """Short-TTL cache (C5) so renders don't pay an API hop per upload click."""
+    return DashboardApiClient().get_active_model_version(tenant_id)
+
 
 st.set_page_config(page_title="Anomaly Detection", layout="wide")
 render_global_sidebar()
@@ -172,7 +180,7 @@ def _render_upload_section(
                     st.warning(_warn)
                 file_hash = compute_file_hash(file_bytes)
                 _client = DashboardApiClient(api_key=st.session_state.get("api_key"))
-                model_version = _client.get_active_model_version(tenant_id_inf)
+                model_version = _cached_active_model_version(tenant_id_inf)
                 cached = read_layer1(file_hash, model_version)
                 _stats = st.session_state.setdefault(
                     "_cache_stats", {"l1_hits": 0, "l1_misses": 0}

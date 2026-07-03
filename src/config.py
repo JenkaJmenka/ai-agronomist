@@ -317,6 +317,11 @@ RETRAIN_PORTION_ROWS: int = int(os.environ.get("RETRAIN_PORTION_ROWS", "10000"))
 # Files at or below this row count keep the synchronous upload path.
 UPLOAD_SYNC_MAX_ROWS: int = int(os.environ.get("UPLOAD_SYNC_MAX_ROWS", "20000"))
 
+# Hard cap on rows returned by any /api/readings list endpoint.
+READINGS_MAX_ROWS: int = int(os.environ.get("READINGS_MAX_ROWS", "50000"))
+# Default landing-page window for the Monitoring dashboard (item C2).
+READINGS_RECENT_HOURS: int = int(os.environ.get("READINGS_RECENT_HOURS", "24"))
+
 # =============================================================================
 # Anomaly Attribution (Phase 1.9.1 Week 1 — Anomaly Attributor)
 # =============================================================================
