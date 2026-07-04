@@ -23,3 +23,5 @@ models/detect_cust_*/
 models/patterns_cust_*/
 .vercel/
 .cursor/
+data/inference_result_cache/
+data/upload_inference_cache/
