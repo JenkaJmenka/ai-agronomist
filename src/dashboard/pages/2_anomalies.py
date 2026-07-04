@@ -181,7 +181,14 @@ def _render_upload_section(
                 file_hash = compute_file_hash(file_bytes)
                 _client = DashboardApiClient(api_key=st.session_state.get("api_key"))
                 model_version = _cached_active_model_version(tenant_id_inf)
-                cached = read_layer1(file_hash, model_version)
+                # Cached inference results say nothing about whether the rows
+                # still exist in the DB — when the user asks to load data into
+                # the platform, always go to the API so persistence runs.
+                cached = (
+                    None
+                    if load_data_into_platform
+                    else read_layer1(file_hash, model_version)
+                )
                 _stats = st.session_state.setdefault(
                     "_cache_stats", {"l1_hits": 0, "l1_misses": 0}
                 )

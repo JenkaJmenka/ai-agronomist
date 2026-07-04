@@ -26,6 +26,7 @@ tasks/
 data/raw/*
 data/processed/*
 data/upload_inference_cache/
+data/inference_result_cache/
 
 # Model artifacts (keep canonical checkpoints at models/*.pt if needed)
 models/*.pth
