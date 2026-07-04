@@ -41,7 +41,8 @@ _BASELINE_PROFILES = {
 def _baseline_value(sensor: str, hour: float) -> float:
     lo, hi, peak_hour = _BASELINE_PROFILES[sensor]
     phase = (hour - peak_hour) / 24.0 * 2 * math.pi
-    value = (lo + hi) / 2.0 - (hi - lo) / 2.0 * math.cos(phase)
+    # cos(0) = 1 at peak_hour → maximum there; minimum 12h later.
+    value = (lo + hi) / 2.0 + (hi - lo) / 2.0 * math.cos(phase)
     if sensor == "light" and (hour < 6.0 or hour >= 20.0):
         return 0.0
     return max(lo, min(hi, value))
