@@ -104,6 +104,21 @@ class TestBulkUpsert:
         assert len(deduped) == 1
         assert deduped[0]["temperature"] == pytest.approx(2.0)
 
+    async def test_rows_exceeding_bind_param_limit_are_chunked(self, session):
+        # 5000 rows x 8 params = 40k binds — over asyncpg's 32767 limit (and
+        # SQLite's 32766 default); must succeed by splitting into statements.
+        rows = [_sensor_row(minute) for minute in range(5000)]
+        written = await bulk_upsert_rows(
+            session,
+            SensorReading,
+            rows,
+            update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
+            preserve_when_null=("anomaly_score",),
+        )
+        await session.commit()
+        assert written == 5000
+        assert await _count(session) == 5000
+
 
 class TestChunkEquivalence:
     """Scoring must be identical whether the file fits in one chunk or many."""

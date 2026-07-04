@@ -40,7 +40,9 @@ from src.dashboard.components.timeline import (
     init_monitoring_session_state,
     render_date_range_filters,
 )
+from src.config import UPLOAD_SYNC_MAX_ROWS
 from src.dashboard.services.api_client import DashboardApiClient
+from src.dashboard.services.async_upload import estimate_csv_rows, run_async_upload
 from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
 from src.dashboard.services.upload_validator import validate_csv_upload
@@ -118,6 +120,54 @@ def _submit_feedback(
         st.warning(
             f"Feedback could not be submitted (is the API server running?): {exc}"
         )
+
+
+def _run_portioned_upload(
+    tenant_id: str,
+    greenhouse_id: str,
+    file_name: str,
+    file_bytes: bytes,
+    persist_data: bool,
+) -> dict | None:
+    """Queue a large CSV on the async route and poll the job to completion.
+
+    Returns the upload results dict on success, or None after rendering an
+    error/warning when the job failed.
+    """
+    client = DashboardApiClient(api_key=st.session_state.get("api_key"))
+    progress_bar = st.progress(0, text="Queued for processing…")
+
+    def _on_progress(pct: float, status: str) -> None:
+        progress_bar.progress(
+            min(int(pct), 100), text=f"Processing portions… {pct:.0f}% ({status})"
+        )
+
+    job = run_async_upload(
+        client,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        file_name=file_name,
+        file_bytes=file_bytes,
+        persist_data=persist_data,
+        on_progress=_on_progress,
+    )
+    progress_bar.empty()
+
+    results = job.get("result")
+    if job["status"] == "failed" or not results or "error" in results:
+        detail = job.get("error") or (results or {}).get("error") or "unknown error"
+        st.error(f"Upload processing failed: {detail}")
+        return None
+    if job["status"] == "partially_failed":
+        st.warning(
+            f"{job.get('failed_portions', 0)} portion(s) failed — "
+            "results may be incomplete."
+        )
+    # The job result omits embeddings/uncertainties; downstream renderers
+    # expect the keys to exist (sync responses carry them as empty lists).
+    results.setdefault("embeddings", [])
+    results.setdefault("uncertainties", [])
+    return results
 
 
 def _render_upload_section(
@@ -213,61 +263,71 @@ def _render_upload_section(
                 else:
                     # Layer 1 MISS — call API, then populate cache
                     _stats["l1_misses"] += 1
-                    with st.spinner(
-                        "Running inference pipeline"
-                        + (" and loading data…" if load_data_into_platform else "…")
-                    ):
-                        files = {
-                            "file": (
-                                uploaded_file.name,
-                                file_bytes,
-                                "text/csv",
-                            )
-                        }
-                        data = {
-                            "tenant_id": tenant_id_inf,
-                            "greenhouse_id": greenhouse_id_inf,
-                            "persist_data": str(load_data_into_platform).lower(),
-                        }
-                        try:
-                            res_inf = api_post(
-                                f"{API_URL}/api/inference/upload",
-                                files=files,
-                                data=data,
-                                timeout=300,
-                            )
-                            results = res_inf.json()
-                            write_layer1(file_hash, model_version, {"results": results})
-                            save_inference_results(
-                                results,
+                    use_async = estimate_csv_rows(file_bytes) > UPLOAD_SYNC_MAX_ROWS
+                    try:
+                        if use_async:
+                            results = _run_portioned_upload(
                                 tenant_id_inf,
                                 greenhouse_id_inf,
-                                filename=uploaded_file.name,
+                                uploaded_file.name,
+                                file_bytes,
+                                load_data_into_platform,
                             )
-                            clear_sensor_cache()
-                            get_available_greenhouses.clear()
-                            queue_sidebar_selection(
-                                tenant=tenant_id_inf,
-                                greenhouse=greenhouse_id_inf,
+                            if results is None:
+                                return
+                        else:
+                            with st.spinner(
+                                "Running inference pipeline"
+                                + (" and loading data…" if load_data_into_platform else "…")
+                            ):
+                                res_inf = api_post(
+                                    f"{API_URL}/api/inference/upload",
+                                    files={
+                                        "file": (
+                                            uploaded_file.name,
+                                            file_bytes,
+                                            "text/csv",
+                                        )
+                                    },
+                                    data={
+                                        "tenant_id": tenant_id_inf,
+                                        "greenhouse_id": greenhouse_id_inf,
+                                        "persist_data": str(load_data_into_platform).lower(),
+                                    },
+                                    timeout=300,
+                                )
+                                results = res_inf.json()
+                        write_layer1(file_hash, model_version, {"results": results})
+                        save_inference_results(
+                            results,
+                            tenant_id_inf,
+                            greenhouse_id_inf,
+                            filename=uploaded_file.name,
+                        )
+                        clear_sensor_cache()
+                        get_available_greenhouses.clear()
+                        queue_sidebar_selection(
+                            tenant=tenant_id_inf,
+                            greenhouse=greenhouse_id_inf,
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        exc_str = str(exc)
+                        if "connection" in exc_str.lower() or "refused" in exc_str.lower() or "timeout" in exc_str.lower():
+                            st.error(
+                                "Could not reach the API server. "
+                                "Check that the API service is running and that API_URL is set correctly."
                             )
-                            st.rerun()
-                        except Exception as exc:
-                            exc_str = str(exc)
-                            if "connection" in exc_str.lower() or "refused" in exc_str.lower() or "timeout" in exc_str.lower():
-                                st.error(
-                                    "Could not reach the API server. "
-                                    "Check that the API service is running and that API_URL is set correctly."
-                                )
-                            elif "422" in exc_str or "400" in exc_str:
-                                detail = exc_str.split(":", 1)[-1].strip()[:300]
-                                st.error(f"The file was rejected by the server: {detail}")
-                            elif "500" in exc_str or "503" in exc_str:
-                                st.error(
-                                    "The inference server encountered an internal error. "
-                                    "Check the API server logs for details."
-                                )
-                            else:
-                                st.error(f"Inference failed: {exc}")
+                        elif "422" in exc_str or "400" in exc_str:
+                            detail = exc_str.split(":", 1)[-1].strip()[:300]
+                            st.error(f"The file was rejected by the server: {detail}")
+                        elif "500" in exc_str or "503" in exc_str:
+                            st.error(
+                                "The inference server encountered an internal error. "
+                                "Check the API server logs for details."
+                            )
+                        else:
+                            st.error(f"Inference failed: {exc}")
 
         if st.session_state.get("debug_cache"):
             with st.expander("Cache stats", expanded=False):
