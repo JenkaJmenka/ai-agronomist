@@ -20,6 +20,10 @@ _DIALECT_INSERTS = {
 
 READING_CONFLICT_COLS: tuple[str, ...] = ("tenant_id", "greenhouse_id", "timestamp")
 
+# asyncpg rejects statements with more than 32767 bind parameters; stay well
+# below so a multi-VALUES upsert never exceeds the wire-protocol limit.
+MAX_BIND_PARAMS = 30000
+
 
 def dedupe_rows_by_key(
     rows: list[dict[str, Any]],
@@ -60,14 +64,21 @@ async def bulk_upsert_rows(
         raise NotImplementedError(f"Upsert not supported for dialect {dialect_name!r}")
 
     rows = dedupe_rows_by_key(rows, conflict_cols)
-    stmt = insert_fn(model).values(rows)
-    set_map: dict[str, Any] = {}
-    for col in update_cols:
-        excluded_col = getattr(stmt.excluded, col)
-        if col in preserve_when_null:
-            set_map[col] = func.coalesce(excluded_col, getattr(model, col))
-        else:
-            set_map[col] = excluded_col
-    stmt = stmt.on_conflict_do_update(index_elements=list(conflict_cols), set_=set_map)
-    await db.execute(stmt)
+    params_per_row = max(len(row) for row in rows)
+    rows_per_stmt = max(1, MAX_BIND_PARAMS // params_per_row)
+
+    for start in range(0, len(rows), rows_per_stmt):
+        batch = rows[start : start + rows_per_stmt]
+        stmt = insert_fn(model).values(batch)
+        set_map: dict[str, Any] = {}
+        for col in update_cols:
+            excluded_col = getattr(stmt.excluded, col)
+            if col in preserve_when_null:
+                set_map[col] = func.coalesce(excluded_col, getattr(model, col))
+            else:
+                set_map[col] = excluded_col
+        stmt = stmt.on_conflict_do_update(
+            index_elements=list(conflict_cols), set_=set_map
+        )
+        await db.execute(stmt)
     return len(rows)
