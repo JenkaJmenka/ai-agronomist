@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Optional
 
 from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
@@ -20,6 +21,46 @@ from src.dashboard.services.upload_results_store import (
 )
 
 _INF_RESULTS_KEY = "inf_upload_results"
+_JOBS_FALLBACK_CHECKED_KEY = "_upload_results_jobs_checked"
+_JOBS_FALLBACK_RECHECK_SECONDS = 30.0
+
+
+def results_from_job_list(jobs: list[dict]) -> dict | None:
+    """Newest usable upload result from a jobs-API listing (newest first)."""
+    from src.dashboard.services.async_upload import (
+        TERMINAL_JOB_STATUSES,
+        extract_upload_results,
+    )
+
+    for job in jobs:
+        if job.get("status") not in TERMINAL_JOB_STATUSES:
+            continue
+        results, _error = extract_upload_results(job)
+        if results is not None:
+            return results
+    return None
+
+
+def _fetch_results_from_jobs_api(tenant_id: str, greenhouse_id: str) -> dict | None:
+    """Rehydrate the last upload's results from the durable jobs table.
+
+    Session state and the container-local disk cache are ephemeral (redeploys
+    wipe them; every browser session is separate), but the finished job result
+    lives in Postgres — treat it as the source of truth on cache miss.
+    Failure-tolerant: any API error just means no fallback this render.
+    """
+    from src.dashboard.services.api_client import DashboardApiClient
+
+    try:
+        jobs = DashboardApiClient(api_key=st.session_state.get("api_key")).list_jobs(
+            tenant_id,
+            greenhouse_id=greenhouse_id,
+            job_type="upload_csv",
+            limit=5,
+        )
+    except Exception:
+        return None
+    return results_from_job_list(jobs)
 
 
 def _as_dict_list(items: Any) -> list[dict]:
@@ -108,7 +149,7 @@ def clear_inference_results_for(tenant_id: str, greenhouse_id: str) -> None:
 
 
 def load_inference_results(tenant_id: str, greenhouse_id: str) -> dict | None:
-    """Restore cold-run upload results from session or on-disk cache."""
+    """Restore cold-run upload results: session → disk cache → jobs API."""
     existing = st.session_state.get(_INF_RESULTS_KEY)
     if (
         isinstance(existing, dict)
@@ -122,7 +163,22 @@ def load_inference_results(tenant_id: str, greenhouse_id: str) -> dict | None:
         st.session_state[_INF_RESULTS_KEY] = cached
         return cached
 
-    return None
+    # Rate-limit the API fallback so a tenant with no uploads doesn't pay an
+    # extra jobs call on every rerun.
+    scope = f"{tenant_id}|{greenhouse_id}"
+    checked: dict = st.session_state.setdefault(_JOBS_FALLBACK_CHECKED_KEY, {})
+    now = time.time()
+    if now - checked.get(scope, 0.0) < _JOBS_FALLBACK_RECHECK_SECONDS:
+        return None
+    checked[scope] = now
+
+    results = _fetch_results_from_jobs_api(tenant_id, greenhouse_id)
+    if results is None:
+        return None
+    payload = build_cache_payload(results, tenant_id, greenhouse_id, filename=None)
+    st.session_state[_INF_RESULTS_KEY] = payload
+    write_upload_cache(payload)
+    return payload
 
 
 def get_recent_inference_results() -> dict | None:

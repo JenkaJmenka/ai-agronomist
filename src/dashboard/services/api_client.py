@@ -174,6 +174,25 @@ class DashboardApiClient:
         """Poll async job status/progress/result."""
         return self._get(f"/api/jobs/{job_id}")
 
+    def list_jobs(
+        self,
+        tenant_id: str,
+        *,
+        greenhouse_id: Optional[str] = None,
+        job_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Jobs for a tenant, newest first."""
+        params: Dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+        if greenhouse_id:
+            params["greenhouse_id"] = greenhouse_id
+        if job_type:
+            params["job_type"] = job_type
+        if status:
+            params["status"] = status
+        return self._get("/api/jobs", params=params)["jobs"]
+
     def mark_anomaly(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post("/api/feedback/mark-anomaly", payload)
 

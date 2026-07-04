@@ -170,3 +170,31 @@ def test_scoped_upload_anomalies_unwindowed_passthrough():
     stat, high, fallback = scoped_upload_anomalies(_results_with_anomalies(), None, None)
     assert not fallback
     assert len(high) == 2 and len(stat) == 1
+
+
+def test_results_from_job_list_picks_newest_terminal_with_result():
+    from src.dashboard.components.inference_results import results_from_job_list
+
+    jobs = [
+        {"status": "running", "result": None},
+        {"status": "failed", "result": None, "error": "boom"},
+        {
+            "status": "completed",
+            "result": {"anomaly_scores": [0.1], "anomalies_detected": 1},
+        },
+        {
+            "status": "completed",
+            "result": {"anomaly_scores": [0.9], "anomalies_detected": 9},
+        },
+    ]
+    results = results_from_job_list(jobs)
+    assert results["anomalies_detected"] == 1  # first usable = newest
+    assert results["embeddings"] == []  # renderer keys backfilled
+
+
+def test_results_from_job_list_none_when_no_usable_job():
+    from src.dashboard.components.inference_results import results_from_job_list
+
+    assert results_from_job_list([]) is None
+    assert results_from_job_list([{"status": "running"}]) is None
+    assert results_from_job_list([{"status": "failed", "error": "x"}]) is None
