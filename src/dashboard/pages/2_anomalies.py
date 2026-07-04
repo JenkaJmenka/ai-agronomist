@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Callable, Optional
 
 from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
@@ -42,7 +43,13 @@ from src.dashboard.components.timeline import (
 )
 from src.config import UPLOAD_SYNC_MAX_ROWS
 from src.dashboard.services.api_client import DashboardApiClient
-from src.dashboard.services.async_upload import estimate_csv_rows, run_async_upload
+from src.dashboard.services.async_upload import (
+    JOB_TIMEOUT_SECONDS,
+    POLL_INTERVAL_SECONDS,
+    TERMINAL_JOB_STATUSES,
+    estimate_csv_rows,
+    extract_upload_results,
+)
 from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
 from src.dashboard.services.upload_validator import validate_csv_upload
@@ -122,52 +129,112 @@ def _submit_feedback(
         )
 
 
-def _run_portioned_upload(
+_PENDING_UPLOAD_KEY = "pending_upload_job"
+
+
+def _queue_portioned_upload(
+    client: DashboardApiClient,
+    *,
     tenant_id: str,
     greenhouse_id: str,
     file_name: str,
     file_bytes: bytes,
     persist_data: bool,
-) -> dict | None:
-    """Queue a large CSV on the async route and poll the job to completion.
-
-    Returns the upload results dict on success, or None after rendering an
-    error/warning when the job failed.
-    """
-    client = DashboardApiClient(api_key=st.session_state.get("api_key"))
-    progress_bar = st.progress(0, text="Queued for processing…")
-
-    def _on_progress(pct: float, status: str) -> None:
-        progress_bar.progress(
-            min(int(pct), 100), text=f"Processing portions… {pct:.0f}% ({status})"
-        )
-
-    job = run_async_upload(
-        client,
+    file_hash: str,
+    model_version: str,
+) -> None:
+    """Queue a large CSV on the async route; tracking happens per render."""
+    accepted = client.upload_csv_async(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         file_name=file_name,
         file_bytes=file_bytes,
         persist_data=persist_data,
-        on_progress=_on_progress,
     )
-    progress_bar.empty()
+    st.session_state[_PENDING_UPLOAD_KEY] = {
+        "job_id": accepted["job_id"],
+        "tenant_id": tenant_id,
+        "greenhouse_id": greenhouse_id,
+        "filename": file_name,
+        "file_hash": file_hash,
+        "model_version": model_version,
+        "queued_at": time.time(),
+    }
+    st.toast(
+        f"Upload queued — processing {accepted.get('portion_count', '?')} portions",
+        icon="⏳",
+    )
 
-    results = job.get("result")
-    if job["status"] == "failed" or not results or "error" in results:
-        detail = job.get("error") or (results or {}).get("error") or "unknown error"
-        st.error(f"Upload processing failed: {detail}")
-        return None
-    if job["status"] == "partially_failed":
-        st.warning(
+
+def _finish_pending_upload(pending: dict, job: dict) -> None:
+    """Persist a terminal job's results into the page caches, then rerun."""
+    results, error = extract_upload_results(job)
+    if error is not None:
+        st.error(f"Upload processing failed: {error}")
+        return
+    if job.get("status") == "partially_failed":
+        st.toast(
             f"{job.get('failed_portions', 0)} portion(s) failed — "
-            "results may be incomplete."
+            "results may be incomplete.",
+            icon="⚠️",
         )
-    # The job result omits embeddings/uncertainties; downstream renderers
-    # expect the keys to exist (sync responses carry them as empty lists).
-    results.setdefault("embeddings", [])
-    results.setdefault("uncertainties", [])
-    return results
+    write_layer1(pending["file_hash"], pending["model_version"], {"results": results})
+    save_inference_results(
+        results,
+        pending["tenant_id"],
+        pending["greenhouse_id"],
+        filename=pending["filename"],
+    )
+    clear_sensor_cache()
+    get_available_greenhouses.clear()
+    queue_sidebar_selection(
+        tenant=pending["tenant_id"],
+        greenhouse=pending["greenhouse_id"],
+    )
+    st.toast("Upload processing complete", icon="✅")
+    st.rerun()
+
+
+def _render_pending_upload_tracker() -> None:
+    """One poll per render for the queued upload job.
+
+    Interruption-proof by design: the job id lives in session state, so a
+    rerun, a page reload or one failed poll never orphans a job that
+    succeeds server-side — the next render just polls again.
+    """
+    pending = st.session_state.get(_PENDING_UPLOAD_KEY)
+    if not pending:
+        return
+
+    client = DashboardApiClient(api_key=st.session_state.get("api_key"))
+    job: dict | None = None
+    try:
+        job = client.get_job(pending["job_id"])
+    except Exception:
+        pass  # transient API/network hiccup — keep tracking on the next poll
+
+    if job is not None and job.get("status") in TERMINAL_JOB_STATUSES:
+        st.session_state.pop(_PENDING_UPLOAD_KEY, None)
+        _finish_pending_upload(pending, job)
+        return
+
+    if time.time() - pending["queued_at"] > JOB_TIMEOUT_SECONDS:
+        st.session_state.pop(_PENDING_UPLOAD_KEY, None)
+        st.error(
+            "Upload processing did not finish within "
+            f"{JOB_TIMEOUT_SECONDS / 60:.0f} minutes — check the worker service "
+            f"logs (job {pending['job_id']})."
+        )
+        return
+
+    pct = float(job.get("progress_pct") or 0.0) if job else 0.0
+    status = job.get("status", "queued") if job else "queued"
+    st.progress(
+        min(int(pct), 100),
+        text=f"Processing upload in portions… {pct:.0f}% ({status})",
+    )
+    time.sleep(POLL_INTERVAL_SECONDS)
+    st.rerun()
 
 
 def _render_upload_section(
@@ -260,43 +327,48 @@ def _render_upload_section(
                         greenhouse=greenhouse_id_inf,
                     )
                     st.rerun()
-                else:
-                    # Layer 1 MISS — call API, then populate cache
+                elif estimate_csv_rows(file_bytes) > UPLOAD_SYNC_MAX_ROWS:
+                    # Layer 1 MISS, large file — queue on the async route; the
+                    # per-render tracker below picks the job up.
                     _stats["l1_misses"] += 1
-                    use_async = estimate_csv_rows(file_bytes) > UPLOAD_SYNC_MAX_ROWS
                     try:
-                        if use_async:
-                            results = _run_portioned_upload(
-                                tenant_id_inf,
-                                greenhouse_id_inf,
-                                uploaded_file.name,
-                                file_bytes,
-                                load_data_into_platform,
+                        _queue_portioned_upload(
+                            _client,
+                            tenant_id=tenant_id_inf,
+                            greenhouse_id=greenhouse_id_inf,
+                            file_name=uploaded_file.name,
+                            file_bytes=file_bytes,
+                            persist_data=load_data_into_platform,
+                            file_hash=file_hash,
+                            model_version=model_version,
+                        )
+                    except Exception as exc:
+                        st.error(f"Could not queue the upload: {exc}")
+                else:
+                    # Layer 1 MISS, small file — synchronous inference
+                    _stats["l1_misses"] += 1
+                    try:
+                        with st.spinner(
+                            "Running inference pipeline"
+                            + (" and loading data…" if load_data_into_platform else "…")
+                        ):
+                            res_inf = api_post(
+                                f"{API_URL}/api/inference/upload",
+                                files={
+                                    "file": (
+                                        uploaded_file.name,
+                                        file_bytes,
+                                        "text/csv",
+                                    )
+                                },
+                                data={
+                                    "tenant_id": tenant_id_inf,
+                                    "greenhouse_id": greenhouse_id_inf,
+                                    "persist_data": str(load_data_into_platform).lower(),
+                                },
+                                timeout=300,
                             )
-                            if results is None:
-                                return
-                        else:
-                            with st.spinner(
-                                "Running inference pipeline"
-                                + (" and loading data…" if load_data_into_platform else "…")
-                            ):
-                                res_inf = api_post(
-                                    f"{API_URL}/api/inference/upload",
-                                    files={
-                                        "file": (
-                                            uploaded_file.name,
-                                            file_bytes,
-                                            "text/csv",
-                                        )
-                                    },
-                                    data={
-                                        "tenant_id": tenant_id_inf,
-                                        "greenhouse_id": greenhouse_id_inf,
-                                        "persist_data": str(load_data_into_platform).lower(),
-                                    },
-                                    timeout=300,
-                                )
-                                results = res_inf.json()
+                            results = res_inf.json()
                         write_layer1(file_hash, model_version, {"results": results})
                         save_inference_results(
                             results,
@@ -475,6 +547,7 @@ inf_tenant = saved_inf["tenant_id"] if saved_inf else tenant
 inf_greenhouse = saved_inf["greenhouse_id"] if saved_inf else greenhouse
 
 _render_upload_section(tenant, greenhouse, saved_inf)
+_render_pending_upload_tracker()
 
 if render_upload_status_bar(saved_inf):
     clear_inference_results()

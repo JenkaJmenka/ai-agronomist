@@ -1,21 +1,23 @@
-"""Async CSV upload flow: queue a portioned job and poll it to completion.
+"""Async CSV upload helpers: queue a portioned job and track it across reruns.
 
 Large uploads must not go through the synchronous inference endpoint — a big
 file holds an API worker for minutes of CPU-bound scoring, starving every
 other dashboard request (observed as ReadTimeouts). The async route returns
 immediately and the queue worker does the heavy lifting.
+
+Tracking must NOT block inside a single Streamlit script run: a long poll
+loop dies on any rerun (user interaction, page reload) or a single transient
+get_job error, losing the results of a job that succeeds server-side. The
+page stores the pending job in session state and polls once per render.
 """
 
 from __future__ import annotations
 
-import time
-from typing import Any, Callable, Dict, Optional
-
-from src.dashboard.services.api_client import DashboardApiClient
+from typing import Any, Dict, Optional, Tuple
 
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "partially_failed"})
-DEFAULT_POLL_INTERVAL_SECONDS = 2.0
-DEFAULT_JOB_TIMEOUT_SECONDS = 1800.0
+POLL_INTERVAL_SECONDS = 2.0
+JOB_TIMEOUT_SECONDS = 1800.0
 
 
 def estimate_csv_rows(file_bytes: bytes) -> int:
@@ -23,41 +25,18 @@ def estimate_csv_rows(file_bytes: bytes) -> int:
     return max(0, file_bytes.count(b"\n") - 1)
 
 
-def run_async_upload(
-    client: DashboardApiClient,
-    *,
-    tenant_id: str,
-    greenhouse_id: str,
-    file_name: str,
-    file_bytes: bytes,
-    persist_data: bool,
-    on_progress: Optional[Callable[[float, str], None]] = None,
-    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
-    timeout_seconds: float = DEFAULT_JOB_TIMEOUT_SECONDS,
-) -> Dict[str, Any]:
-    """Queue the upload and block until the job reaches a terminal status.
+def extract_upload_results(
+    job: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Split a terminal job payload into (results, error_message).
 
-    Returns the final job payload (``status``, ``result``, ``error``, ...).
-    Raises ``TimeoutError`` if the job does not finish within the deadline.
+    Backfills the embeddings/uncertainties keys the renderers expect — the
+    worker's job result omits them, while sync responses carry empty lists.
     """
-    accepted = client.upload_csv_async(
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        file_name=file_name,
-        file_bytes=file_bytes,
-        persist_data=persist_data,
-    )
-    job_id = accepted["job_id"]
-    deadline = time.monotonic() + timeout_seconds
-
-    while time.monotonic() < deadline:
-        job = client.get_job(job_id)
-        if on_progress is not None:
-            on_progress(job.get("progress_pct") or 0.0, job["status"])
-        if job["status"] in TERMINAL_JOB_STATUSES:
-            return job
-        time.sleep(poll_interval_seconds)
-
-    raise TimeoutError(
-        f"Upload job {job_id} did not finish within {timeout_seconds:.0f}s"
-    )
+    results = job.get("result")
+    if job.get("status") == "failed" or not results:
+        error = job.get("error") or (results or {}).get("error") or "unknown error"
+        return None, str(error)
+    results.setdefault("embeddings", [])
+    results.setdefault("uncertainties", [])
+    return results, None
