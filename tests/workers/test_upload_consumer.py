@@ -28,10 +28,21 @@ TENANT = "tenant_portions"
 ROWS = 130
 
 
-def _csv_content(rows: int = ROWS) -> str:
+# Accelerating ramp: the rolling baseline absorbs each anomalous row, so only
+# values that outrun the inflating std keep z >= COLD_RUN_STAT_Z_MIN for the
+# COLD_RUN_STAT_MIN_CONSECUTIVE rows the detector requires.
+_FAULT_RAMP = (45.0, 75.0, 130.0, 220.0, 380.0)
+
+
+def _csv_content(rows: int = ROWS, fault_at: int | None = None) -> str:
+    def _temp(i: int) -> float:
+        if fault_at is not None and fault_at <= i < fault_at + len(_FAULT_RAMP):
+            return _FAULT_RAMP[i - fault_at]
+        return 20 + (i % 7) * 0.5
+
     return "timestamp,temperature,humidity,co2,light\n" + "\n".join(
         f"2026-06-09T{11 + i // 60:02d}:{i % 60:02d}:00Z,"
-        f"{20 + (i % 7) * 0.5},{50 + (i % 5)},{400 + i % 11},{1000 + i % 13}"
+        f"{_temp(i)},{50 + (i % 5)},{400 + i % 11},{1000 + i % 13}"
         for i in range(rows)
     )
 
@@ -188,6 +199,47 @@ async def test_sync_vs_portioned_equivalence(session):
     assert [h["timestamp"] for h in job.result["high_anomalies"]] == [
         h.timestamp for h in sync_response.high_anomalies
     ]
+
+
+async def test_statistical_anomalies_survive_portioning(session):
+    """Injected spikes must show up in the portioned job result's stat summary."""
+    from src.api.services.cold_run_upload import run_cold_run_upload
+    from src.vendors.csv_adapter import CSVAdapter
+
+    csv_content = _csv_content(fault_at=70)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+        tmp.write(csv_content)
+        tmp_name = tmp.name
+    try:
+        adapter = CSVAdapter({"filepath": tmp_name})
+        adapter.connect()
+        sync_response, _ = await run_cold_run_upload(
+            tmp_path=tmp_name,
+            adapter=adapter,
+            detector=_mock_detector(),
+            tenant_id=TENANT,
+            greenhouse_id="default",
+            chunk_size=50,
+        )
+    finally:
+        os.unlink(tmp_name)
+
+    sync_stat = sync_response.statistical_summary
+    assert sync_stat is not None and len(sync_stat.anomalies) > 0
+
+    job_id, messages = await _produce_messages(
+        session, csv_content, portion_rows=50, persist=False
+    )
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    await handle_upload_finalize(finalize_msgs[0], session)
+    job = await get_job(session, job_id)
+
+    portioned_hits = job.result["statistical_summary"]["anomalies"]
+    sync_hits = [a.model_dump() for a in sync_stat.anomalies]
+    assert sorted(
+        (h["timestamp"], h["column"]) for h in portioned_hits
+    ) == sorted((h["timestamp"], h["column"]) for h in sync_hits)
 
 
 async def test_failed_portion_marks_job_partially_failed(session):
