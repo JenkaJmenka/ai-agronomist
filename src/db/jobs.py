@@ -55,11 +55,14 @@ async def list_jobs(
     db: AsyncSession,
     *,
     tenant_id: str,
+    greenhouse_id: Optional[str] = None,
     job_type: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
 ) -> list[Job]:
     stmt = select(Job).where(Job.tenant_id == tenant_id)
+    if greenhouse_id:
+        stmt = stmt.where(Job.greenhouse_id == greenhouse_id)
     if job_type:
         stmt = stmt.where(Job.job_type == job_type)
     if status:

@@ -75,3 +75,20 @@ async def test_job_list_filters_by_tenant(test_client, test_database):
     jobs = response.json()["jobs"]
     assert len(jobs) == 1
     assert jobs[0]["tenant_id"] == "tenant_1"
+
+@pytest.mark.asyncio
+async def test_job_list_filters_by_greenhouse(test_client, test_database):
+    await create_job(
+        test_database, tenant_id="tenant_gh", job_type="upload_csv", greenhouse_id="gh_A"
+    )
+    await create_job(
+        test_database, tenant_id="tenant_gh", job_type="upload_csv", greenhouse_id="gh_B"
+    )
+
+    response = test_client.get(
+        "/api/jobs", params={"tenant_id": "tenant_gh", "greenhouse_id": "gh_A"}
+    )
+    assert response.status_code == status.HTTP_200_OK
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["greenhouse_id"] == "gh_A"

@@ -51,12 +51,18 @@ async def get_job_status(job_id: str, db: AsyncSession = Depends(get_db)) -> Job
 @router.get("", response_model=JobListResponse)
 async def get_jobs(
     tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: Optional[str] = Query(default=None),
     job_type: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ) -> JobListResponse:
     jobs = await list_jobs(
-        db, tenant_id=tenant_id, job_type=job_type, status=status, limit=limit
+        db,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        job_type=job_type,
+        status=status,
+        limit=limit,
     )
     return JobListResponse(jobs=[_to_response(job) for job in jobs])
