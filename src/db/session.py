@@ -51,6 +51,9 @@ if DATABASE_URL.startswith("sqlite"):
 elif "+asyncpg" in DATABASE_URL:
     connect_args.update(_extra_connect_args)
     connect_args["timeout"] = float(os.environ.get("DB_CONNECT_TIMEOUT", "15"))
+    # Bound every statement so a half-dead pooled connection surfaces as a
+    # fast error instead of an indefinite hang behind the HTTP layer.
+    connect_args["command_timeout"] = float(os.environ.get("DB_COMMAND_TIMEOUT", "20"))
 
 # The dashboard no longer opens DB sessions directly (reads go through the
 # API), so the Streamlit per-call-event-loop constraint that once forced
@@ -58,9 +61,22 @@ elif "+asyncpg" in DATABASE_URL:
 # handshake to the Supabase pooler on every query. DB_USE_NULLPOOL=true is the
 # escape hatch if pooled asyncpg misbehaves behind Supavisor.
 _use_nullpool = os.environ.get("DB_USE_NULLPOOL", "false").lower() in ("1", "true", "yes")
-_pool_kwargs = (
-    {"poolclass": NullPool} if ("+asyncpg" in DATABASE_URL and _use_nullpool) else {}
-)
+if "+asyncpg" in DATABASE_URL and _use_nullpool:
+    _pool_kwargs: dict = {"poolclass": NullPool}
+elif "+asyncpg" in DATABASE_URL:
+    # Supavisor silently drops idle client connections; without pre-ping the
+    # next query on a dropped connection hangs until TCP gives up (observed as
+    # dashboard ReadTimeouts). Pre-ping validates on checkout, recycle keeps
+    # connections younger than the pooler's idle window.
+    _pool_kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE_SECONDS", "240")),
+        "pool_size": int(os.environ.get("DB_POOL_SIZE", "5")),
+        "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "5")),
+        "pool_timeout": float(os.environ.get("DB_POOL_TIMEOUT", "15")),
+    }
+else:
+    _pool_kwargs = {}
 
 # Create AsyncEngine
 engine = create_async_engine(
