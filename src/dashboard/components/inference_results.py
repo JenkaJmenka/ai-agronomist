@@ -459,6 +459,35 @@ def render_inference_upload_summary(results: dict, tenant_id: str, greenhouse_id
         )
 
 
+def scoped_upload_anomalies(
+    results: dict,
+    window_start: pd.Timestamp | None,
+    window_end: pd.Timestamp | None,
+) -> tuple[list[dict], list[dict], bool]:
+    """(stat_rows, high_rows, used_fallback) for the cold-run tables.
+
+    Rows are scoped to the active date window; when the window contains none,
+    fall back to the full upload. The page window is anchored to DB bounds,
+    which can be disjoint from the upload's timestamps (multiple files per
+    tenant) — a real upload result must never hide behind an accidental
+    empty window.
+    """
+    from src.dashboard.services.anomalies_page_data import trim_cold_run_rows
+
+    scoped = results
+    window_scoped = window_start is not None and window_end is not None
+    if window_scoped:
+        scoped = _filter_upload_results_by_window(results, window_start, window_end)
+    stat_rows = trim_cold_run_rows(_statistical_anomalies_from_results(scoped))
+    high_rows = trim_cold_run_rows(_high_anomalies_from_results(scoped))
+    if window_scoped and not stat_rows and not high_rows:
+        full_stat = trim_cold_run_rows(_statistical_anomalies_from_results(results))
+        full_high = trim_cold_run_rows(_high_anomalies_from_results(results))
+        if full_stat or full_high:
+            return full_stat, full_high, True
+    return stat_rows, high_rows, False
+
+
 def render_cold_run_anomaly_tables(
     results: dict | None,
     tenant_id: str,
@@ -473,16 +502,19 @@ def render_cold_run_anomaly_tables(
     window_end: pd.Timestamp | None = None,
 ) -> None:
     """Cold-run tables using the same columns and reasoning as Top Anomalies."""
-    from src.dashboard.services.anomalies_page_data import trim_cold_run_rows
-
     stat_anomalies: list[dict] = []
     high_anomalies: list[dict] = []
     if results:
-        scoped = results
-        if window_start is not None and window_end is not None:
-            scoped = _filter_upload_results_by_window(results, window_start, window_end)
-        stat_anomalies = trim_cold_run_rows(_statistical_anomalies_from_results(scoped))
-        high_anomalies = trim_cold_run_rows(_high_anomalies_from_results(scoped))
+        stat_anomalies, high_anomalies, used_fallback = scoped_upload_anomalies(
+            results, window_start, window_end
+        )
+        if used_fallback:
+            st.info(
+                "No upload anomalies fall inside the selected date window — "
+                f"showing all {len(high_anomalies)} anomalies "
+                f"({len(stat_anomalies)} statistical) from the last upload instead. "
+                "Adjust the date range above to narrow them down."
+            )
 
     empty_hint = (
         "No anomalies in this section. Upload a CSV via **Upload & find anomalies** "

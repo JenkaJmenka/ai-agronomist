@@ -92,3 +92,81 @@ def test_looks_like_upload_score_frame():
         }
     )
     assert not _looks_like_upload_score_frame(db_df)
+
+
+def _results_with_anomalies() -> dict:
+    payload = _sample_results()
+    payload["high_anomalies"] = [
+        {"timestamp": "2026-01-01T02:00:00+00:00", "score": 0.9, "detector": "lstm"},
+        {
+            "timestamp": "2026-01-01T03:00:00+00:00",
+            "score": 0.8,
+            "detector": "statistical",
+            "column": "temperature",
+            "z_score": 6.0,
+            "severity": "critical",
+        },
+    ]
+    payload["statistical_summary"] = {
+        "anomalies": [
+            {
+                "timestamp": "2026-01-01T03:00:00+00:00",
+                "column": "temperature",
+                "value": 42.0,
+                "z_score": 6.0,
+                "severity": "critical",
+                "method": "rolling_z_score",
+            }
+        ],
+        "baseline_columns": ["temperature"],
+        "total_scored": 5,
+    }
+    return payload
+
+
+def test_scoped_upload_anomalies_within_window():
+    from src.dashboard.components.inference_results import scoped_upload_anomalies
+
+    stat, high, fallback = scoped_upload_anomalies(
+        _results_with_anomalies(),
+        pd.Timestamp("2026-01-01T00:00:00+00:00"),
+        pd.Timestamp("2026-01-01T05:00:00+00:00"),
+    )
+    assert not fallback
+    assert len(high) == 2
+    assert len(stat) == 1
+
+
+def test_scoped_upload_anomalies_disjoint_window_falls_back_to_full_upload():
+    """A window anchored to unrelated DB bounds must not blank real results."""
+    from src.dashboard.components.inference_results import scoped_upload_anomalies
+
+    stat, high, fallback = scoped_upload_anomalies(
+        _results_with_anomalies(),
+        pd.Timestamp("2026-12-24T00:00:00+00:00"),
+        pd.Timestamp("2026-12-31T00:00:00+00:00"),
+    )
+    assert fallback
+    assert len(high) == 2
+    assert len(stat) == 1
+
+
+def test_scoped_upload_anomalies_no_fallback_when_upload_has_none():
+    from src.dashboard.components.inference_results import scoped_upload_anomalies
+
+    payload = _sample_results()  # no anomalies at all
+    stat, high, fallback = scoped_upload_anomalies(
+        payload,
+        pd.Timestamp("2026-12-24T00:00:00+00:00"),
+        pd.Timestamp("2026-12-31T00:00:00+00:00"),
+    )
+    assert not fallback
+    assert stat == [] and high == []
+
+
+def test_scoped_upload_anomalies_unwindowed_passthrough():
+    from src.dashboard.components.inference_results import scoped_upload_anomalies
+
+    stat, high, fallback = scoped_upload_anomalies(_results_with_anomalies(), None, None)
+    assert not fallback
+    assert len(high) == 2 and len(stat) == 1
