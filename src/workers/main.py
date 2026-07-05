@@ -18,7 +18,14 @@ from typing import Any, Awaitable, Callable, Optional
 import aio_pika
 from pydantic import BaseModel
 
-from src.config import MQ_PREFETCH_COUNT
+import time
+
+from src.config import (
+    MQ_HANDLER_TIMEOUT_SECONDS,
+    MQ_PREFETCH_COUNT,
+    MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS,
+    MQ_WATCHDOG_INTERVAL_SECONDS,
+)
 from src.db.session import AsyncSessionLocal
 from src.mq.connection import close_mq, get_mq_connection
 from src.mq.publisher import decode_message_body, publish_json, publish_raw
@@ -53,6 +60,8 @@ class QueueBinding:
     # Called once retries are exhausted; receives (db, message_model, error, attempt).
     on_terminal_failure: Optional[TerminalHook] = None
     prefetch: int = MQ_PREFETCH_COUNT
+    # Hard deadline per message: a hung handler becomes a retry, not a jam.
+    handler_timeout: float = MQ_HANDLER_TIMEOUT_SECONDS
 
 
 async def _terminal_upload_portion(db, msg: UploadPortionMessage, error: str, attempt: int) -> None:
@@ -110,6 +119,7 @@ def build_bindings() -> list[QueueBinding]:
                 on_terminal_failure=_terminal_job_failure,
                 # Retraining is long-running; never hold extra messages hostage.
                 prefetch=1,
+                handler_timeout=MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS,
             )
         )
     except ImportError:
@@ -146,13 +156,28 @@ async def _handle_message(binding: QueueBinding, message: aio_pika.abc.AbstractI
         await message.ack()
         return
 
+    portion = getattr(parsed, "portion_idx", None)
+    label = f"{binding.queue_name}" + (f"[portion {portion}]" if portion is not None else "")
+    started = time.monotonic()
+    logger.info("Handling %s (attempt %s)", label, attempt)
     try:
         async with AsyncSessionLocal() as db:
-            await binding.handler(parsed, db)
+            await asyncio.wait_for(
+                binding.handler(parsed, db), timeout=binding.handler_timeout
+            )
         await message.ack()
+        logger.info("Finished %s in %.1fs", label, time.monotonic() - started)
         return
+    except asyncio.TimeoutError:
+        logger.error(
+            "Handler TIMED OUT on %s after %.0fs (attempt %s) — routing to retry/DLQ",
+            label,
+            binding.handler_timeout,
+            attempt,
+        )
+        error_text = f"handler timeout after {binding.handler_timeout:.0f}s"
     except Exception as exc:
-        logger.exception("Handler failed on %s (attempt %s)", binding.queue_name, attempt)
+        logger.exception("Handler failed on %s (attempt %s)", label, attempt)
         error_text = str(exc)
 
     # Retry/DLQ routing — must never leave the message unacked: if the
@@ -181,11 +206,20 @@ async def _handle_message(binding: QueueBinding, message: aio_pika.abc.AbstractI
     await message.ack()
 
 
+def _transport_dead(
+    connection: aio_pika.abc.AbstractConnection,
+    channels: list[aio_pika.abc.AbstractChannel],
+) -> bool:
+    """True when the MQ connection or any consumer channel is no longer live."""
+    return connection.is_closed or any(ch.is_closed for ch in channels)
+
+
 async def run_worker() -> None:
     logging.basicConfig(level=logging.INFO)
     connection = await get_mq_connection()
 
     stop_event = asyncio.Event()
+    unhealthy = False
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop_event.set)
@@ -204,13 +238,39 @@ async def run_worker() -> None:
         channels.append(channel)
         logger.info("Consuming %s (prefetch=%s)", binding.queue_name, binding.prefetch)
 
+    async def _watchdog() -> None:
+        # aio-pika channel restoration has failed in production after a broker
+        # restart ("No active transport in channel"), leaving a process that
+        # looks alive but consumes nothing. Exiting non-zero lets the platform
+        # restart the container into a clean connection.
+        nonlocal unhealthy
+        while not stop_event.is_set():
+            await asyncio.sleep(MQ_WATCHDOG_INTERVAL_SECONDS)
+            if _transport_dead(connection, channels):
+                logger.error("MQ connection/channel dead — exiting for a clean restart")
+                unhealthy = True
+                stop_event.set()
+                return
+
+    watchdog = asyncio.create_task(_watchdog())
+
     logger.info("Worker up — waiting for messages")
     await stop_event.wait()
+    watchdog.cancel()
 
     logger.info("Shutdown signal received — draining")
     for channel in channels:
-        await channel.close()
-    await close_mq()
+        try:
+            if not channel.is_closed:
+                await channel.close()
+        except Exception:
+            logger.exception("Channel close failed during drain")
+    try:
+        await close_mq()
+    except Exception:
+        logger.exception("Connection close failed during drain")
+    if unhealthy:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

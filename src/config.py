@@ -308,6 +308,17 @@ MQ_PREFETCH_COUNT: int = int(os.environ.get("MQ_PREFETCH_COUNT", "2"))
 MQ_MAX_RETRIES: int = int(os.environ.get("MQ_MAX_RETRIES", "3"))
 # Delay between retries, applied via TTL-backed retry queues.
 MQ_RETRY_DELAY_MS: int = int(os.environ.get("MQ_RETRY_DELAY_MS", "30000"))
+# Hard per-message handler deadline: a hung handler (e.g. a wedged DB call)
+# must surface as a visible retry, never a silent prefetch-window jam.
+MQ_HANDLER_TIMEOUT_SECONDS: float = float(os.environ.get("MQ_HANDLER_TIMEOUT_SECONDS", "600"))
+# Retraining legitimately runs long — separate, generous deadline.
+MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS: float = float(
+    os.environ.get("MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS", "3600")
+)
+# Watchdog cadence: exit for a clean container restart when the MQ connection
+# or any consumer channel dies (aio-pika channel restore can fail after a
+# broker restart, leaving a zombie process that consumes nothing).
+MQ_WATCHDOG_INTERVAL_SECONDS: float = float(os.environ.get("MQ_WATCHDOG_INTERVAL_SECONDS", "60"))
 # Rows per upload portion message (~1 MB JSON for typical sensor CSVs).
 UPLOAD_PORTION_ROWS: int = int(os.environ.get("UPLOAD_PORTION_ROWS", "5000"))
 # Sequences per online-learning portion message.
