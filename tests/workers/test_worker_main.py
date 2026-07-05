@@ -170,3 +170,48 @@ class TestTerminalHooks:
         with patch("src.db.jobs.set_job_result", new=AsyncMock()) as set_result:
             await _terminal_job_failure("db", msg, "err", 3)
         set_result.assert_awaited_once_with("db", "j9", status="failed", error="err")
+
+
+class TestHandlerTimeout:
+    async def test_hung_handler_times_out_to_retry(self):
+        """A wedged handler (e.g. a hung DB call) must become a retry, never a
+        silent prefetch-window jam — observed in production as a worker that
+        consumed nothing for 26 minutes."""
+        import asyncio
+
+        async def hang(parsed, db):
+            await asyncio.sleep(3600)
+
+        binding = QueueBinding(
+            queue_name=UPLOAD_FINALIZE_QUEUE,
+            schema=UploadFinalizeMessage,
+            handler=hang,
+            handler_timeout=0.05,
+        )
+        message = _incoming(json.dumps({"job_id": "j1"}), attempt=0)
+        with patch("src.workers.main.AsyncSessionLocal") as session_factory, patch(
+            "src.workers.main.publish_json", new=AsyncMock()
+        ) as publish:
+            session_factory.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            await _handle_message(binding, message)
+        assert publish.await_args.args[0] == retry_queue(UPLOAD_FINALIZE_QUEUE)
+        message.ack.assert_awaited_once()
+
+    def test_retrain_binding_gets_long_timeout(self):
+        from src.config import MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS
+
+        by_name = {b.queue_name: b for b in build_bindings()}
+        assert by_name[TRAINING_RETRAIN_QUEUE].handler_timeout == MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS
+
+
+class TestTransportWatchdog:
+    def test_transport_dead_detection(self):
+        from src.workers.main import _transport_dead
+
+        conn = MagicMock(is_closed=False)
+        live = MagicMock(is_closed=False)
+        dead = MagicMock(is_closed=True)
+        assert not _transport_dead(conn, [live, live])
+        assert _transport_dead(conn, [live, dead])
+        assert _transport_dead(MagicMock(is_closed=True), [live])
