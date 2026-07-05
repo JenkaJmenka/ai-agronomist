@@ -11,7 +11,7 @@ from typing import Optional
 
 import aio_pika
 
-from src.config import RABBITMQ_URL
+from src.config import MQ_HEARTBEAT_SECONDS, RABBITMQ_URL
 
 _connection: Optional[aio_pika.abc.AbstractRobustConnection] = None
 _channel: Optional[aio_pika.abc.AbstractChannel] = None
@@ -22,7 +22,11 @@ async def get_mq_connection() -> aio_pika.abc.AbstractRobustConnection:
     global _connection
     async with _lock:
         if _connection is None or _connection.is_closed:
-            _connection = await aio_pika.connect_robust(RABBITMQ_URL)
+            # Generous heartbeat: brief event-loop stalls around CPU-heavy
+            # work must not get the connection reset by the broker.
+            _connection = await aio_pika.connect_robust(
+                RABBITMQ_URL, heartbeat=int(MQ_HEARTBEAT_SECONDS)
+            )
     return _connection
 
 

@@ -7,6 +7,7 @@ and attach scores/metadata to persisted rows — race-free via try_transition.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -95,27 +96,35 @@ async def handle_upload_portion(
     from src.models.artifact_store import resolve_checkpoint
 
     checkpoint_path = await resolve_checkpoint(db, msg.checkpoint_path)
-    detector = get_cached_detector(checkpoint_path)
-    normalized_df = pd.DataFrame(msg.rows) if msg.rows else None
-    overlap_df = pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame()
     stat_carry = StatCarry(rows=list(msg.stat_carry_rows))
 
-    portion, _ = score_portion(
-        normalized_df=normalized_df,
-        prev_overlap_df=overlap_df,
-        raw_rows=msg.raw_rows,
-        stat_carry=stat_carry,
-        adaptive_ranges=[tuple(r) for r in msg.adaptive_ranges],
-        detector=detector,
-        seq_len=msg.seq_len,
-        include_embeddings=False,
-    )
+    def _score() -> PortionScores:
+        # Torch model load + inference are CPU-bound for minutes on large
+        # portions. Run OFF the event loop: a blocked loop cannot answer AMQP
+        # heartbeats, and the broker then resets the connection mid-handling
+        # (observed in production as 'Connection reset by peer' + requeue loop).
+        detector = get_cached_detector(checkpoint_path)
+        normalized_df = pd.DataFrame(msg.rows) if msg.rows else None
+        overlap_df = pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame()
+        result, _ = score_portion(
+            normalized_df=normalized_df,
+            prev_overlap_df=overlap_df,
+            raw_rows=msg.raw_rows,
+            stat_carry=stat_carry,
+            adaptive_ranges=[tuple(r) for r in msg.adaptive_ranges],
+            detector=detector,
+            seq_len=msg.seq_len,
+            include_embeddings=False,
+        )
+        return result
+
+    portion = await asyncio.to_thread(_score)
 
     sensor_rows = raw_rows = 0
     if msg.persist_data:
         persist_df = None
-        if normalized_df is not None and not normalized_df.empty:
-            persist_df = normalized_df.copy()
+        if msg.rows:
+            persist_df = pd.DataFrame(msg.rows)
             persist_df["timestamp"] = pd.to_datetime(persist_df["timestamp"])
         raw_persist_df = None
         if msg.raw_rows:
