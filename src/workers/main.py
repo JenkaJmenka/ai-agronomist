@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from src.config import MQ_PREFETCH_COUNT
 from src.db.session import AsyncSessionLocal
 from src.mq.connection import close_mq, get_mq_connection
-from src.mq.publisher import decode_message_body, publish_json
+from src.mq.publisher import decode_message_body, publish_json, publish_raw
 from src.mq.topology import (
     ATTEMPT_HEADER,
     TRAINING_ONLINE_QUEUE,
@@ -118,18 +118,49 @@ def build_bindings() -> list[QueueBinding]:
 
 
 async def _handle_message(binding: QueueBinding, message: aio_pika.abc.AbstractIncomingMessage) -> None:
+    """Process one message. Every exit path acks or rejects.
+
+    A message left neither acked nor rejected stays 'unacked' forever and —
+    with prefetch=N — N such messages silently starve the whole consumer
+    channel. Observed in production: a broker restart mid-job left two
+    poison messages that froze the worker at 2/22 portions across restarts.
+    """
     attempt = int((message.headers or {}).get(ATTEMPT_HEADER, 0))
-    body = decode_message_body(message.body, message.content_encoding)
-    parsed = binding.schema.model_validate_json(body)
+
+    try:
+        body = decode_message_body(message.body, message.content_encoding)
+        parsed = binding.schema.model_validate_json(body)
+    except Exception:
+        logger.exception(
+            "Unparseable message on %s — moving raw body to DLQ", binding.queue_name
+        )
+        try:
+            await publish_raw(
+                dlq_queue(binding.queue_name),
+                message.body,
+                content_encoding=message.content_encoding,
+                headers=dict(message.headers or {}),
+            )
+        except Exception:
+            logger.exception("Could not preserve unparseable message in DLQ — dropping")
+        await message.ack()
+        return
 
     try:
         async with AsyncSessionLocal() as db:
             await binding.handler(parsed, db)
         await message.ack()
+        return
     except Exception as exc:
         logger.exception("Handler failed on %s (attempt %s)", binding.queue_name, attempt)
-        from src.config import MQ_MAX_RETRIES
+        error_text = str(exc)
 
+    # Retry/DLQ routing — must never leave the message unacked: if the
+    # republish itself fails (broker hiccup), give the message back to the
+    # queue instead of starving the prefetch window.
+    from src.config import MQ_MAX_RETRIES
+
+    try:
         if attempt + 1 < MQ_MAX_RETRIES:
             await publish_json(retry_queue(binding.queue_name), parsed, attempt=attempt + 1)
         else:
@@ -137,10 +168,17 @@ async def _handle_message(binding: QueueBinding, message: aio_pika.abc.AbstractI
             if binding.on_terminal_failure is not None:
                 try:
                     async with AsyncSessionLocal() as db:
-                        await binding.on_terminal_failure(db, parsed, str(exc), attempt + 1)
+                        await binding.on_terminal_failure(db, parsed, error_text, attempt + 1)
                 except Exception:
                     logger.exception("Terminal-failure hook failed for %s", binding.queue_name)
-        await message.ack()
+    except Exception:
+        logger.exception(
+            "Retry/DLQ publish failed on %s — requeueing original message",
+            binding.queue_name,
+        )
+        await message.reject(requeue=True)
+        return
+    await message.ack()
 
 
 async def run_worker() -> None:

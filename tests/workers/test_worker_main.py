@@ -118,11 +118,39 @@ class TestHandleMessage:
             await _handle_message(_binding(handler, terminal), message)
         message.ack.assert_awaited_once()
 
-    async def test_invalid_schema_raises_before_ack(self):
+    async def test_unparseable_message_moves_to_dlq_and_acks(self):
+        """Poison messages must never stay unacked — with prefetch=N, N of
+        them permanently starve the consumer channel."""
         handler = AsyncMock()
         message = _incoming(json.dumps({"not_the_schema": True}))
-        with pytest.raises(Exception):
+        with patch("src.workers.main.publish_raw", new=AsyncMock()) as publish_raw:
             await _handle_message(_binding(handler), message)
+        handler.assert_not_awaited()
+        publish_raw.assert_awaited_once()
+        assert publish_raw.await_args.args[0] == dlq_queue(UPLOAD_FINALIZE_QUEUE)
+        message.ack.assert_awaited_once()
+
+    async def test_unparseable_message_acked_even_when_dlq_publish_fails(self):
+        handler = AsyncMock()
+        message = _incoming(b"\x00garbage".decode("latin1"))
+        with patch(
+            "src.workers.main.publish_raw", new=AsyncMock(side_effect=RuntimeError("down"))
+        ):
+            await _handle_message(_binding(handler), message)
+        message.ack.assert_awaited_once()
+
+    async def test_retry_publish_failure_requeues_instead_of_starving(self):
+        handler = AsyncMock(side_effect=RuntimeError("boom"))
+        message = _incoming(json.dumps({"job_id": "j1"}), attempt=0)
+        message.reject = AsyncMock()
+        with patch("src.workers.main.AsyncSessionLocal") as session_factory, patch(
+            "src.workers.main.publish_json",
+            new=AsyncMock(side_effect=RuntimeError("broker down")),
+        ):
+            session_factory.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            await _handle_message(_binding(handler), message)
+        message.reject.assert_awaited_once_with(requeue=True)
         message.ack.assert_not_awaited()
 
 

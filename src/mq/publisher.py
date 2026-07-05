@@ -30,6 +30,33 @@ def decode_message_body(body: bytes, content_encoding: str | None) -> bytes:
     return body
 
 
+async def publish_raw(
+    routing_key: str,
+    body: bytes,
+    *,
+    content_encoding: str | None = None,
+    headers: dict | None = None,
+) -> None:
+    """Publish opaque bytes (used to preserve unparseable messages in a DLQ)."""
+    global _topology_declared
+    channel = await get_mq_channel()
+    if not _topology_declared:
+        exchange = await declare_topology(channel)
+        _topology_declared = True
+    else:
+        exchange = await channel.get_exchange("agronomist.jobs", ensure=False)
+    await exchange.publish(
+        Message(
+            body,
+            content_type="application/json",
+            content_encoding=content_encoding,
+            delivery_mode=DeliveryMode.PERSISTENT,
+            headers=headers or {},
+        ),
+        routing_key=routing_key,
+    )
+
+
 async def publish_json(
     routing_key: str,
     payload: BaseModel,
