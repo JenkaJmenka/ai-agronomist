@@ -319,6 +319,10 @@ MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS: float = float(
 # or any consumer channel dies (aio-pika channel restore can fail after a
 # broker restart, leaving a zombie process that consumes nothing).
 MQ_WATCHDOG_INTERVAL_SECONDS: float = float(os.environ.get("MQ_WATCHDOG_INTERVAL_SECONDS", "60"))
+# AMQP heartbeat interval negotiated with the broker. Default broker-side is
+# 60s — too tight around CPU-heavy inference; brief event-loop stalls must not
+# get the connection reset ('Connection reset by peer' requeue loops).
+MQ_HEARTBEAT_SECONDS: int = int(os.environ.get("MQ_HEARTBEAT_SECONDS", "300"))
 # Rows per upload portion message (~1 MB JSON for typical sensor CSVs).
 UPLOAD_PORTION_ROWS: int = int(os.environ.get("UPLOAD_PORTION_ROWS", "5000"))
 # Sequences per online-learning portion message.

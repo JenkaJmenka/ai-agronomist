@@ -8,10 +8,11 @@ artifact store so it survives worker restarts and is visible to the API.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,12 +101,18 @@ async def handle_online_portion(
     learner = manager.learners.get(msg.tenant_id)
     updates_before = learner.update_count if learner is not None else 0
 
-    losses: list[float] = []
-    drift_status = None
-    for sequence in msg.sequences:
-        loss = manager.observe(msg.tenant_id, np.asarray(sequence, dtype=np.float32))
-        losses.append(loss)
-        drift_status = detector.update(loss)
+    def _observe_all() -> tuple[list[float], Any]:
+        # CPU-bound torch updates — keep off the event loop so AMQP heartbeats
+        # continue flowing (a starved loop gets its broker connection reset).
+        losses_acc: list[float] = []
+        status = None
+        for sequence in msg.sequences:
+            loss = manager.observe(msg.tenant_id, np.asarray(sequence, dtype=np.float32))
+            losses_acc.append(loss)
+            status = detector.update(loss)
+        return losses_acc, status
+
+    losses, drift_status = await asyncio.to_thread(_observe_all)
 
     updates_performed = manager.learners[msg.tenant_id].update_count - updates_before
 
