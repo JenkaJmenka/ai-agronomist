@@ -26,7 +26,6 @@ from src.dashboard.components.global_sidebar import (
     render_global_sidebar,
 )
 from src.dashboard.components.inference_results import (
-    clear_inference_results,
     get_recent_inference_results,
     load_inference_results,
     render_anomaly_score_charts,
@@ -595,10 +594,7 @@ inf_greenhouse = saved_inf["greenhouse_id"] if saved_inf else greenhouse
 
 _render_upload_section(tenant, greenhouse, saved_inf)
 _render_pending_upload_tracker()
-
-if render_upload_status_bar(saved_inf):
-    clear_inference_results()
-    st.rerun()
+render_upload_status_bar(saved_inf)
 
 
 def _resolve_data_bounds(

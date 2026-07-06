@@ -24,6 +24,72 @@ _INF_RESULTS_KEY = "inf_upload_results"
 _JOBS_FALLBACK_CHECKED_KEY = "_upload_results_jobs_checked"
 _JOBS_FALLBACK_RECHECK_SECONDS = 30.0
 _COLD_RUN_ENRICH_CACHE_KEY = "_cold_run_enrich_cache"
+_UPLOAD_DISMISSED_KEY = "_upload_results_dismissed"
+_PENDING_UPLOAD_JOB_KEY = "pending_upload_job"
+_UPLOAD_FILE_WIDGET_KEY = "anomaly_upload_file"
+
+
+def upload_scope_key(tenant_id: str, greenhouse_id: str) -> str:
+    return f"{tenant_id}|{greenhouse_id}"
+
+
+def is_upload_dismissed(tenant_id: str, greenhouse_id: str) -> bool:
+    """True when the user explicitly cleared upload results for this scope."""
+    dismissed = st.session_state.get(_UPLOAD_DISMISSED_KEY)
+    if not isinstance(dismissed, set):
+        return False
+    return upload_scope_key(tenant_id, greenhouse_id) in dismissed
+
+
+def mark_upload_dismissed(tenant_id: str, greenhouse_id: str) -> None:
+    dismissed = st.session_state.setdefault(_UPLOAD_DISMISSED_KEY, set())
+    dismissed.add(upload_scope_key(tenant_id, greenhouse_id))
+
+
+def clear_upload_dismissed(tenant_id: str, greenhouse_id: str) -> None:
+    dismissed = st.session_state.get(_UPLOAD_DISMISSED_KEY)
+    if isinstance(dismissed, set):
+        dismissed.discard(upload_scope_key(tenant_id, greenhouse_id))
+
+
+def reset_upload_ui_state() -> None:
+    """Drop uploader widgets and async job tracking after a clear."""
+    st.session_state.pop(_UPLOAD_FILE_WIDGET_KEY, None)
+    st.session_state.pop(_PENDING_UPLOAD_JOB_KEY, None)
+
+
+def clear_upload_analysis(
+    tenant_id: str,
+    greenhouse_id: str,
+    *,
+    clear_reading_caches: bool = True,
+) -> None:
+    """Remove cold-run upload analysis for a tenant/greenhouse (session + disk)."""
+    delete_upload_cache(tenant_id, greenhouse_id)
+    clear_cold_run_enrich_cache()
+    mark_upload_dismissed(tenant_id, greenhouse_id)
+    reset_upload_ui_state()
+
+    existing = st.session_state.get(_INF_RESULTS_KEY)
+    if (
+        isinstance(existing, dict)
+        and existing.get("tenant_id") == tenant_id
+        and existing.get("greenhouse_id") == greenhouse_id
+    ):
+        st.session_state.pop(_INF_RESULTS_KEY, None)
+
+    scope = upload_scope_key(tenant_id, greenhouse_id)
+    checked = st.session_state.get(_JOBS_FALLBACK_CHECKED_KEY)
+    if isinstance(checked, dict):
+        checked.pop(scope, None)
+
+    if clear_reading_caches:
+        from src.dashboard.components.charts import clear_sensor_cache, get_available_greenhouses
+        from src.dashboard.services.anomalies_page_data import clear_anomaly_page_cache
+
+        clear_sensor_cache()
+        clear_anomaly_page_cache()
+        get_available_greenhouses.clear()
 
 
 def results_signature(results: dict) -> str:
@@ -184,6 +250,7 @@ def save_inference_results(
     )
     st.session_state[_INF_RESULTS_KEY] = payload
     write_upload_cache(payload)
+    clear_upload_dismissed(tenant_id, greenhouse_id)
     clear_anomaly_page_cache()
     clear_cold_run_enrich_cache()
 
@@ -194,26 +261,22 @@ def clear_inference_results() -> None:
         tenant_id = existing.get("tenant_id")
         greenhouse_id = existing.get("greenhouse_id")
         if tenant_id and greenhouse_id:
-            clear_inference_results_for(str(tenant_id), str(greenhouse_id))
+            clear_upload_analysis(str(tenant_id), str(greenhouse_id))
             return
     st.session_state.pop(_INF_RESULTS_KEY, None)
+    reset_upload_ui_state()
 
 
 def clear_inference_results_for(tenant_id: str, greenhouse_id: str) -> None:
-    """Remove cold-run upload results for a tenant/greenhouse (session + disk)."""
-    delete_upload_cache(tenant_id, greenhouse_id)
-    clear_cold_run_enrich_cache()
-    existing = st.session_state.get(_INF_RESULTS_KEY)
-    if (
-        isinstance(existing, dict)
-        and existing.get("tenant_id") == tenant_id
-        and existing.get("greenhouse_id") == greenhouse_id
-    ):
-        st.session_state.pop(_INF_RESULTS_KEY, None)
+    """Backward-compatible alias for clear_upload_analysis."""
+    clear_upload_analysis(tenant_id, greenhouse_id)
 
 
 def load_inference_results(tenant_id: str, greenhouse_id: str) -> dict | None:
     """Restore cold-run upload results: session → disk cache → jobs API."""
+    if is_upload_dismissed(tenant_id, greenhouse_id):
+        return None
+
     existing = st.session_state.get(_INF_RESULTS_KEY)
     if (
         isinstance(existing, dict)
@@ -416,14 +479,31 @@ def plot_upload_lstm_chart(
     return _apply_chart_theme(fig, bottom_margin=60)
 
 
-def render_upload_status_bar(saved_inf: dict | None) -> bool:
-    """Single-line upload status; returns True when user clears results."""
+def _on_clear_upload_click() -> None:
+    """Instant clear via button callback — avoids rerun-then-rehydrate race."""
+    existing = st.session_state.get(_INF_RESULTS_KEY)
+    if not isinstance(existing, dict):
+        st.session_state.pop(_INF_RESULTS_KEY, None)
+        reset_upload_ui_state()
+        return
+    tenant_id = existing.get("tenant_id")
+    greenhouse_id = existing.get("greenhouse_id")
+    if tenant_id and greenhouse_id:
+        clear_upload_analysis(str(tenant_id), str(greenhouse_id))
+        return
+    st.session_state.pop(_INF_RESULTS_KEY, None)
+    reset_upload_ui_state()
+
+
+def render_upload_status_bar(saved_inf: dict | None) -> None:
+    """Single-line upload status with a clear action that cannot rehydrate from jobs."""
     status_col, clear_col = st.columns([6, 1])
     if saved_inf:
         name = saved_inf.get("filename") or "last upload"
         tenant_id = saved_inf["tenant_id"]
         greenhouse_id = saved_inf["greenhouse_id"]
         detected = saved_inf["results"].get("anomalies_detected", 0)
+        persisted = bool(saved_inf["results"].get("data_persisted"))
         processed_at = saved_inf.get("processed_at")
         processed_note = ""
         if processed_at:
@@ -437,12 +517,31 @@ def render_upload_status_bar(saved_inf: dict | None) -> bool:
             f"Showing saved analysis: **{name}** · `{tenant_id}` / `{greenhouse_id}` · "
             f"{detected} anomalies{processed_note} — no re-inference on page load"
         )
-        return clear_col.button("Clear upload", key="clear_inf_results")
-    status_col.caption(
-        "No cold-run upload for this greenhouse — expand **Upload & find anomalies** above to analyze a CSV."
-    )
+        if persisted:
+            status_col.caption(
+                "**Clear upload** removes the saved analysis view only. "
+                "Persisted sensor readings stay in the database — use "
+                "**Upload & Operations → Clear all data** to delete them."
+            )
+        clear_col.button(
+            "Clear upload",
+            key="clear_inf_results",
+            on_click=_on_clear_upload_click,
+        )
+        return
+    if is_upload_dismissed(
+        st.session_state.get("selected_tenant", ""),
+        st.session_state.get("selected_greenhouse", ""),
+    ):
+        status_col.caption(
+            "Upload analysis cleared for this greenhouse. "
+            "Upload a new CSV or restore persisted readings below."
+        )
+    else:
+        status_col.caption(
+            "No cold-run upload for this greenhouse — expand **Upload & find anomalies** above to analyze a CSV."
+        )
     clear_col.write("")
-    return False
 
 
 def _lstm_chart_message(text: str) -> go.Figure:
