@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import timedelta
 from typing import Callable, Optional
 
 from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
@@ -11,17 +12,14 @@ import streamlit as st
 from src.dashboard.components.sensor_columns import get_all_sensor_columns
 from src.dashboard.components.anomaly_table import render as render_anomaly_table
 from src.dashboard.components.charts import (
-    apply_datetime_filter,
     clear_sensor_cache,
     get_available_greenhouses,
 )
 from src.dashboard.services.anomalies_page_data import (
-    bounds_from_upload_results,
     enrich_anomalies_table,
     filter_anomalies,
-    load_readings_window,
-    load_timestamp_bounds,
-    load_upload_score_frame,
+    resolve_data_bounds,
+    resolve_window_dataframe,
 )
 from src.dashboard.components.global_sidebar import (
     queue_sidebar_selection,
@@ -195,13 +193,8 @@ def _finish_pending_upload(pending: dict, job: dict) -> None:
     st.rerun()
 
 
-def _render_pending_upload_tracker() -> None:
-    """One poll per render for the queued upload job.
-
-    Interruption-proof by design: the job id lives in session state, so a
-    rerun, a page reload or one failed poll never orphans a job that
-    succeeds server-side — the next render just polls again.
-    """
+def _render_pending_upload_tracker_body() -> None:
+    """Poll the queued upload job once; invoked inside a timed fragment."""
     pending = st.session_state.get(_PENDING_UPLOAD_KEY)
     if not pending:
         return
@@ -233,7 +226,41 @@ def _render_pending_upload_tracker() -> None:
         min(int(pct), 100),
         text=f"Processing upload in portions… {pct:.0f}% ({status})",
     )
-    time.sleep(POLL_INTERVAL_SECONDS)
+
+
+@st.fragment(run_every=timedelta(seconds=POLL_INTERVAL_SECONDS))
+def _render_pending_upload_tracker_poll() -> None:
+    """Poll only while a queued upload job is active."""
+    _render_pending_upload_tracker_body()
+
+
+def _render_pending_upload_tracker() -> None:
+    if st.session_state.get(_PENDING_UPLOAD_KEY):
+        _render_pending_upload_tracker_poll()
+
+
+def _clear_upload_file_widget() -> None:
+    """Drop the file uploader value so revisiting the page cannot re-trigger upload."""
+    st.session_state.pop("anomaly_upload_file", None)
+
+
+def _apply_cached_upload_results(
+    results: dict,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    filename: str,
+) -> None:
+    save_inference_results(
+        results,
+        tenant_id,
+        greenhouse_id,
+        filename=filename,
+    )
+    clear_sensor_cache()
+    get_available_greenhouses.clear()
+    queue_sidebar_selection(tenant=tenant_id, greenhouse=greenhouse_id)
+    _clear_upload_file_widget()
     st.rerun()
 
 
@@ -298,35 +325,32 @@ def _render_upload_section(
                 file_hash = compute_file_hash(file_bytes)
                 _client = DashboardApiClient(api_key=st.session_state.get("api_key"))
                 model_version = _cached_active_model_version(tenant_id_inf)
-                # Cached inference results say nothing about whether the rows
-                # still exist in the DB — when the user asks to load data into
-                # the platform, always go to the API so persistence runs.
+                layer1 = read_layer1(file_hash, model_version)
+                needs_persist = load_data_into_platform
+                already_persisted = bool(
+                    layer1 and layer1.get("results", {}).get("data_persisted")
+                )
+                # Reuse layer-1 inference when persistence already ran, or when the
+                # user only wants analysis (no DB write).
                 cached = (
-                    None
-                    if load_data_into_platform
-                    else read_layer1(file_hash, model_version)
+                    layer1
+                    if layer1 is not None and (not needs_persist or already_persisted)
+                    else None
                 )
                 _stats = st.session_state.setdefault(
                     "_cache_stats", {"l1_hits": 0, "l1_misses": 0}
                 )
                 if cached is not None:
-                    # Layer 1 HIT — skip API call
+                    # Layer 1 HIT — skip API inference call
                     results = cached["results"]
                     _stats["l1_hits"] += 1
-                    st.toast("Loaded from cache", icon="⚡")
-                    save_inference_results(
+                    st.toast("Loaded from cache — no re-inference", icon="⚡")
+                    _apply_cached_upload_results(
                         results,
-                        tenant_id_inf,
-                        greenhouse_id_inf,
+                        tenant_id=tenant_id_inf,
+                        greenhouse_id=greenhouse_id_inf,
                         filename=uploaded_file.name,
                     )
-                    clear_sensor_cache()
-                    get_available_greenhouses.clear()
-                    queue_sidebar_selection(
-                        tenant=tenant_id_inf,
-                        greenhouse=greenhouse_id_inf,
-                    )
-                    st.rerun()
                 elif estimate_csv_rows(file_bytes) > UPLOAD_SYNC_MAX_ROWS:
                     # Layer 1 MISS, large file — queue on the async route; the
                     # per-render tracker below picks the job up.
@@ -370,19 +394,12 @@ def _render_upload_section(
                             )
                             results = res_inf.json()
                         write_layer1(file_hash, model_version, {"results": results})
-                        save_inference_results(
+                        _apply_cached_upload_results(
                             results,
-                            tenant_id_inf,
-                            greenhouse_id_inf,
+                            tenant_id=tenant_id_inf,
+                            greenhouse_id=greenhouse_id_inf,
                             filename=uploaded_file.name,
                         )
-                        clear_sensor_cache()
-                        get_available_greenhouses.clear()
-                        queue_sidebar_selection(
-                            tenant=tenant_id_inf,
-                            greenhouse=greenhouse_id_inf,
-                        )
-                        st.rerun()
                     except Exception as exc:
                         exc_str = str(exc)
                         if "connection" in exc_str.lower() or "refused" in exc_str.lower() or "timeout" in exc_str.lower():
@@ -559,12 +576,7 @@ def _resolve_data_bounds(
     greenhouse: str,
     inf_results: dict | None,
 ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
-    min_iso, max_iso = load_timestamp_bounds(tenant, greenhouse)
-    if min_iso and max_iso:
-        return pd.Timestamp(min_iso), pd.Timestamp(max_iso)
-    if inf_results:
-        return bounds_from_upload_results(inf_results)
-    return None
+    return resolve_data_bounds(tenant, greenhouse, inf_results)
 
 
 def _load_window_dataframe(
@@ -577,23 +589,15 @@ def _load_window_dataframe(
 ) -> tuple[pd.DataFrame, bool]:
     start_iso = pd.Timestamp(window_start).isoformat()
     end_iso = pd.Timestamp(window_end).isoformat()
-    df_window = load_readings_window(tenant, greenhouse, start_iso, end_iso)
-    if not df_window.empty:
-        return df_window, False
-
-    if inf_results:
-        upload_frame = load_upload_score_frame(
-            tenant,
-            greenhouse,
-            int(inf_results.get("sequences_processed", 0) or 0),
-            len(inf_results.get("anomaly_scores") or []),
-            inf_results,
-        )
-        if not upload_frame.empty:
-            filtered = apply_datetime_filter(upload_frame, window_start, window_end)
-            if not filtered.empty:
-                return filtered, True
-    return pd.DataFrame(), False
+    return resolve_window_dataframe(
+        tenant_id=tenant,
+        greenhouse_id=greenhouse,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        window_start=window_start,
+        window_end=window_end,
+        inf_results=inf_results,
+    )
 
 
 @st.fragment
@@ -695,7 +699,8 @@ def _render_anomaly_dashboard(
         col4.metric("Window span", "—")
 
     st.caption(
-        f"Range: {range_label} · loaded at {loaded_at} · window-cached 2 min"
+        f"Range: {range_label} · loaded at {loaded_at}"
+        + (" · saved upload analysis" if inf_results else " · window-cached 2 min")
     )
 
     feedback_state_key = "feedback_results"

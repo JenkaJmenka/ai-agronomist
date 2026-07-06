@@ -51,6 +51,173 @@ def test_rows_in_window_filters_by_timestamp():
     assert kept[0]["score"] == 0.8
 
 
+def test_resolve_window_dataframe_merges_upload_scores_when_db_lacks_them(monkeypatch):
+    from src.dashboard.services import anomalies_page_data as mod
+
+    db_frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
+            "temperature": [22.0],
+        }
+    )
+    upload_frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
+            "anomaly_score": [0.95],
+        }
+    )
+    inf_results = {
+        "sequences_processed": 1,
+        "anomaly_scores": [0.95],
+        "sequence_timestamps": ["2026-06-17T12:00:00+00:00"],
+        "data_persisted": True,
+    }
+
+    monkeypatch.setattr(mod, "load_readings_window", lambda *a, **k: db_frame)
+    monkeypatch.setattr(
+        mod,
+        "_upload_score_frame_for_window",
+        lambda *a, **k: upload_frame,
+    )
+
+    window_start = pd.Timestamp("2026-06-16T00:00:00+00:00")
+    window_end = pd.Timestamp("2026-06-18T00:00:00+00:00")
+    df, using_fallback = mod.resolve_window_dataframe(
+        tenant_id="tenant_1",
+        greenhouse_id="gh_A",
+        start_iso=window_start.isoformat(),
+        end_iso=window_end.isoformat(),
+        window_start=window_start,
+        window_end=window_end,
+        inf_results=inf_results,
+    )
+
+    assert not using_fallback
+    assert len(df) == 1
+    assert float(df.iloc[0]["anomaly_score"]) == 0.95
+
+
+def test_resolve_window_dataframe_uses_upload_when_db_empty(monkeypatch):
+    from src.dashboard.services import anomalies_page_data as mod
+
+    upload_frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
+            "anomaly_score": [0.88],
+        }
+    )
+    inf_results = {"sequences_processed": 1, "anomaly_scores": [0.88]}
+
+    monkeypatch.setattr(
+        mod, "load_readings_window", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.setattr(
+        mod,
+        "_upload_score_frame_for_window",
+        lambda *a, **k: upload_frame,
+    )
+
+    window_start = pd.Timestamp("2026-06-16T00:00:00+00:00")
+    window_end = pd.Timestamp("2026-06-18T00:00:00+00:00")
+    df, using_fallback = mod.resolve_window_dataframe(
+        tenant_id="tenant_1",
+        greenhouse_id="gh_A",
+        start_iso=window_start.isoformat(),
+        end_iso=window_end.isoformat(),
+        window_start=window_start,
+        window_end=window_end,
+        inf_results=inf_results,
+    )
+
+    assert using_fallback
+    assert len(df) == 1
+
+
+def test_resolve_data_bounds_unions_db_and_upload(monkeypatch):
+    from src.dashboard.services import anomalies_page_data as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_timestamp_bounds",
+        lambda *a, **k: ("2026-06-10T00:00:00+00:00", "2026-06-15T00:00:00+00:00"),
+    )
+    inf_results = {
+        "anomaly_scores": [0.5, 0.6],
+        "sequence_timestamps": [
+            "2026-06-14T00:00:00+00:00",
+            "2026-06-20T00:00:00+00:00",
+        ],
+        "data_persisted": True,
+    }
+
+    bounds = mod.resolve_data_bounds("tenant_1", "gh_A", inf_results)
+    assert bounds is not None
+    start, end = bounds
+    assert start == pd.Timestamp("2026-06-10T00:00:00+00:00")
+    assert end == pd.Timestamp("2026-06-20T00:00:00+00:00")
+
+
+def test_resolve_window_dataframe_skips_db_for_upload_only(monkeypatch):
+    from src.dashboard.services import anomalies_page_data as mod
+
+    upload_frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
+            "anomaly_score": [0.91],
+        }
+    )
+    inf_results = {
+        "sequences_processed": 1,
+        "anomaly_scores": [0.91],
+        "data_persisted": False,
+    }
+
+    def _fail_db_load(*_args, **_kwargs):
+        raise AssertionError("DB load should be skipped for upload-only results")
+
+    monkeypatch.setattr(mod, "load_readings_window", _fail_db_load)
+    monkeypatch.setattr(
+        mod,
+        "_upload_score_frame_for_window",
+        lambda *a, **k: upload_frame,
+    )
+
+    window_start = pd.Timestamp("2026-06-16T00:00:00+00:00")
+    window_end = pd.Timestamp("2026-06-18T00:00:00+00:00")
+    df, using_fallback = mod.resolve_window_dataframe(
+        tenant_id="tenant_1",
+        greenhouse_id="gh_A",
+        start_iso=window_start.isoformat(),
+        end_iso=window_end.isoformat(),
+        window_start=window_start,
+        window_end=window_end,
+        inf_results=inf_results,
+    )
+
+    assert using_fallback
+    assert len(df) == 1
+
+
+def test_resolve_data_bounds_skips_db_for_upload_only(monkeypatch):
+    from src.dashboard.services import anomalies_page_data as mod
+
+    def _fail_bounds(*_args, **_kwargs):
+        raise AssertionError("DB bounds should be skipped for upload-only results")
+
+    monkeypatch.setattr(mod, "load_timestamp_bounds", _fail_bounds)
+    inf_results = {
+        "anomaly_scores": [0.5],
+        "sequence_timestamps": ["2026-06-17T12:00:00+00:00"],
+        "data_persisted": False,
+    }
+
+    bounds = mod.resolve_data_bounds("tenant_1", "gh_A", inf_results)
+    assert bounds is not None
+    start, end = bounds
+    assert start == pd.Timestamp("2026-06-17T12:00:00+00:00")
+    assert end == pd.Timestamp("2026-06-17T12:00:00+00:00")
+
+
 def test_trim_cold_run_rows_limits_and_keeps_highest_scores():
     rows = [{"score": index / 100.0, "timestamp": f"2026-01-01T{index:02d}:00:00"} for index in range(100)]
     trimmed = trim_cold_run_rows(rows, limit=10)

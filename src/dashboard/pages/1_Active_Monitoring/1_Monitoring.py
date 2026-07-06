@@ -12,6 +12,7 @@ from src.dashboard.components.charts import (
     query_sensor_timestamp_bounds,
 )
 from src.dashboard.components.color_manager import get_chart_color_manager
+from src.dashboard.components.data_availability import render_no_sensor_data_hint
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.monitoring_jump import (
     apply_pending_jump_columns,
@@ -186,7 +187,7 @@ except Exception as exc:
     st.stop()
 
 if not _min_iso or not _max_iso:
-    st.info("No data found. Upload a CSV with sensor readings via the Upload page.")
+    render_no_sensor_data_hint(tenant, greenhouse)
     st.stop()
 
 _data_min_ts = pd.Timestamp(_min_iso)

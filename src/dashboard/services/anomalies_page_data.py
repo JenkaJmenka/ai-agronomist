@@ -8,6 +8,8 @@ import streamlit as st
 from src.dashboard.constants import CACHE_TTL_LONG, CACHE_TTL_MEDIUM, CACHE_TTL_SHORT
 
 from src.dashboard.components.charts import (
+    apply_datetime_filter,
+    merge_anomaly_scores_into_readings,
     query_sensor_readings_window,
     query_sensor_timestamp_bounds,
 )
@@ -37,6 +39,105 @@ def load_timestamp_bounds(
 ) -> tuple[str | None, str | None]:
     # Caching is handled by query_sensor_timestamp_bounds in charts.py.
     return query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
+
+
+def _has_usable_anomaly_scores(df: pd.DataFrame) -> bool:
+    if df.empty or "anomaly_score" not in df.columns:
+        return False
+    scores = pd.to_numeric(df["anomaly_score"], errors="coerce")
+    return bool(scores.notna().any())
+
+
+def _upload_score_frame_for_window(
+    tenant_id: str,
+    greenhouse_id: str,
+    inf_results: dict,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+) -> pd.DataFrame:
+    upload_frame = load_upload_score_frame(
+        tenant_id,
+        greenhouse_id,
+        int(inf_results.get("sequences_processed", 0) or 0),
+        len(inf_results.get("anomaly_scores") or []),
+        inf_results,
+    )
+    if upload_frame.empty:
+        return upload_frame
+    return apply_datetime_filter(upload_frame, window_start, window_end)
+
+
+def _upload_only_results(inf_results: dict | None) -> bool:
+    """True when inference exists only in the upload cache (not yet in the DB)."""
+    return bool(inf_results) and not inf_results.get("data_persisted")
+
+
+def resolve_window_dataframe(
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start_iso: str,
+    end_iso: str,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    inf_results: dict | None,
+) -> tuple[pd.DataFrame, bool]:
+    """Load the active window, merging upload scores when DB rows lack them.
+
+    Returns (dataframe, using_upload_fallback). Fallback is True only when the
+    primary series comes from the cold-run upload rather than persisted readings.
+    """
+    if _upload_only_results(inf_results):
+        upload_frame = _upload_score_frame_for_window(
+            tenant_id, greenhouse_id, inf_results, window_start, window_end
+        )
+        if not upload_frame.empty:
+            return upload_frame, True
+
+    df_window = load_readings_window(tenant_id, greenhouse_id, start_iso, end_iso)
+    upload_frame = (
+        _upload_score_frame_for_window(
+            tenant_id, greenhouse_id, inf_results, window_start, window_end
+        )
+        if inf_results
+        else pd.DataFrame()
+    )
+
+    if not df_window.empty:
+        if not upload_frame.empty:
+            merged = merge_anomaly_scores_into_readings(
+                df_window, upload_frame, tenant_id, greenhouse_id
+            )
+            if _has_usable_anomaly_scores(merged):
+                return merged, False
+            return upload_frame, True
+        return df_window, False
+
+    if not upload_frame.empty:
+        return upload_frame, True
+    return pd.DataFrame(), False
+
+
+def resolve_data_bounds(
+    tenant_id: str,
+    greenhouse_id: str,
+    inf_results: dict | None,
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """Union DB and upload timestamp bounds so filters span all available data."""
+    upload_bounds = bounds_from_upload_results(inf_results) if inf_results else None
+    if _upload_only_results(inf_results) and upload_bounds:
+        return upload_bounds
+
+    min_iso, max_iso = load_timestamp_bounds(tenant_id, greenhouse_id)
+
+    if min_iso and max_iso:
+        db_min, db_max = pd.Timestamp(min_iso), pd.Timestamp(max_iso)
+        if upload_bounds:
+            u_min, u_max = upload_bounds
+            return min(db_min, u_min), max(db_max, u_max)
+        return db_min, db_max
+
+    return upload_bounds
 
 
 @st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False)

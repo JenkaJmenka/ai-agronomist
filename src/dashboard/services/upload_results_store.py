@@ -41,11 +41,14 @@ def build_cache_payload(
     *,
     filename: str | None = None,
 ) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
     return {
         "results": slim_results_for_cache(results),
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
         "filename": filename,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
