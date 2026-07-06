@@ -43,7 +43,7 @@ async def run_upload_async_pipeline(
                     model_trained,
                     model_id_used,
                     training_skipped_reason,
-                ) = await _resolve_upload_checkpoint(
+                ) = await resolve_upload_checkpoint(
                     db, tenant_id, tmp_path, train_model
                 )
             except InsufficientDataError as exc:
