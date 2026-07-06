@@ -265,10 +265,14 @@ async def handle_upload_finalize(msg: UploadFinalizeMessage, db: AsyncSession) -
         )
 
     final_status = "partially_failed" if job.failed_portions else "completed"
+    result_payload = response.model_dump(mode="json", exclude={"embeddings", "uncertainties"})
+    result_payload["model_trained"] = payload.get("model_trained", False)
+    result_payload["model_id"] = payload.get("model_id")
+    result_payload["training_skipped_reason"] = payload.get("training_skipped_reason")
     await set_job_result(
         db,
         msg.job_id,
         status=final_status,
-        result=response.model_dump(mode="json", exclude={"embeddings", "uncertainties"}),
+        result=result_payload,
     )
     await prune_portion_results(db, msg.job_id)

@@ -120,6 +120,10 @@ class Pass2BootstrapDetector:
         self._threshold: float = 0.5
         self._ranges: list[tuple[float, float]] = list(SENSOR_RANGES)
 
+    @property
+    def trained_model(self) -> LSTMVAE | None:
+        return self._model
+
     def train(self, clean_path: str) -> None:
         df = pd.read_csv(clean_path, index_col=0, parse_dates=True)
         data = _df_to_array(df)
@@ -141,6 +145,16 @@ class Pass2BootstrapDetector:
         train_losses = _train_loop(self._model, sequences)
         if train_losses:
             self._threshold = float(np.percentile(train_losses, BOOTSTRAP_THRESHOLD_PERCENTILE))
+
+    def save_checkpoint(self, path: str) -> float:
+        """Persist the trained model; returns the calibration threshold."""
+        if self._model is None:
+            raise ValueError("No trained model to save")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._model.save_checkpoint(path, epoch=0, loss=self._threshold, accuracy=0.0)
+        return self._threshold
 
     def infer(self, full_df: pd.DataFrame) -> list[BootstrapRowResult]:
         data = _df_to_array(full_df)

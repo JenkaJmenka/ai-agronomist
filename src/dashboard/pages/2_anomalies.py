@@ -140,6 +140,7 @@ def _queue_portioned_upload(
     persist_data: bool,
     file_hash: str,
     model_version: str,
+    train_model: bool = False,
 ) -> None:
     """Queue a large CSV on the async route; tracking happens per render."""
     accepted = client.upload_csv_async(
@@ -148,6 +149,7 @@ def _queue_portioned_upload(
         file_name=file_name,
         file_bytes=file_bytes,
         persist_data=persist_data,
+        train_model=train_model,
     )
     st.session_state[_PENDING_UPLOAD_KEY] = {
         "job_id": accepted["job_id"],
@@ -288,6 +290,16 @@ def _render_upload_section(
             ),
             key="inf_load_data",
         )
+        force_retrain = st.checkbox(
+            "Retrain model from this upload",
+            value=False,
+            help=(
+                "When checked, trains a new cold-start model from this CSV even if a "
+                "tenant model already exists. When unchecked, a model is trained only "
+                "when none exists yet."
+            ),
+            key="inf_force_retrain",
+        )
 
         col1, col2 = st.columns(2)
         with col1:
@@ -301,6 +313,15 @@ def _render_upload_section(
             greenhouse_id_inf = st.selectbox(
                 "Greenhouse ID", gh_opts, index=gh_idx, key="anomaly_upload_greenhouse"
             )
+
+        try:
+            _active_model = _cached_active_model_version(tenant_id_inf)
+            if _active_model != "baseline":
+                st.caption(f"Active model: `{_active_model}`")
+            else:
+                st.caption("No tenant model — upload will auto-train a cold-start model.")
+        except Exception:
+            st.caption("Active model: unknown")
 
         uploaded_file = st.file_uploader(
             "Choose a CSV file for anomaly detection",
@@ -334,7 +355,9 @@ def _render_upload_section(
                 # user only wants analysis (no DB write).
                 cached = (
                     layer1
-                    if layer1 is not None and (not needs_persist or already_persisted)
+                    if layer1 is not None
+                    and not force_retrain
+                    and (not needs_persist or already_persisted)
                     else None
                 )
                 _stats = st.session_state.setdefault(
@@ -365,6 +388,7 @@ def _render_upload_section(
                             persist_data=load_data_into_platform,
                             file_hash=file_hash,
                             model_version=model_version,
+                            train_model=force_retrain,
                         )
                     except Exception as exc:
                         st.error(f"Could not queue the upload: {exc}")
@@ -389,11 +413,17 @@ def _render_upload_section(
                                     "tenant_id": tenant_id_inf,
                                     "greenhouse_id": greenhouse_id_inf,
                                     "persist_data": str(load_data_into_platform).lower(),
+                                    "train_model": str(force_retrain).lower(),
                                 },
                                 timeout=300,
                             )
                             results = res_inf.json()
-                        write_layer1(file_hash, model_version, {"results": results})
+                        cache_model_version = (
+                            results.get("model_id") or model_version
+                            if results.get("model_trained")
+                            else model_version
+                        )
+                        write_layer1(file_hash, cache_model_version, {"results": results})
                         _apply_cached_upload_results(
                             results,
                             tenant_id=tenant_id_inf,

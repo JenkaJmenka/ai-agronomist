@@ -8,6 +8,12 @@ from src.api.services.cold_run_upload import (
     EmptyCsvError,
     run_cold_run_upload,
 )
+from src.api.services.cold_start_training import (
+    ColdStartTrainResult,
+    should_train_cold_start,
+    train_cold_start_from_csv,
+)
+from src.models.bootstrap import InsufficientDataError
 from src.api.services.upload_producer import produce_upload_portions
 from src.api.schemas.jobs import UploadJobAcceptedResponse
 from src.db.session import get_db
@@ -59,6 +65,52 @@ def clear_detector_cache() -> None:
     """Reset the detector cache (primarily for tests)."""
     _detector_cache.data.clear()
     _detector_cache.usage.clear()
+
+
+async def _resolve_upload_checkpoint(
+    db: AsyncSession,
+    tenant_id: str,
+    tmp_path: str,
+    train_model: bool,
+) -> tuple[str | None, bool, str | None, str | None]:
+    """Return (checkpoint_path, model_trained, model_id, training_skipped_reason)."""
+    registry = ModelRegistry(db)
+    active = await registry.get_active_model(tenant_id)
+    has_active = active is not None
+
+    if not should_train_cold_start(force_train=train_model, has_active_model=has_active):
+        checkpoint = active["checkpoint_path"] if active else None
+        return checkpoint, False, None, "active_model_exists"
+
+    try:
+        train_result: ColdStartTrainResult = await train_cold_start_from_csv(
+            db, tenant_id, tmp_path
+        )
+    except InsufficientDataError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Cold-start training failed") from exc
+
+    clear_detector_cache()
+    return train_result.checkpoint_path, True, train_result.model_id, None
+
+
+def _attach_training_meta(
+    response: UploadInferenceResponse,
+    *,
+    model_trained: bool,
+    model_id: str | None,
+    training_skipped_reason: str | None,
+) -> UploadInferenceResponse:
+    return response.model_copy(
+        update={
+            "model_trained": model_trained,
+            "model_id": model_id,
+            "training_skipped_reason": training_skipped_reason,
+        }
+    )
 
 @router.post("/inference", response_model=InferenceResponse)
 async def run_inference(
@@ -173,10 +225,15 @@ async def run_inference_from_csv(
     file: UploadFile = File(...),
     persist_data: bool = Form(default=False),
     include_embeddings: bool = Form(default=False),
+    train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Run cold-run inference on an uploaded CSV.
+
+    When no tenant model is deployed, a cold-start model is trained from the
+    upload automatically (Option A). Pass train_model=true to force retraining
+    even when an active model exists.
 
     When persist_data is true, also loads rows into the database with
     anomaly scores attached so Monitoring and Anomaly pages work immediately.
@@ -195,6 +252,21 @@ async def run_inference_from_csv(
     registry = ModelRegistry(db)
     active_model_info = await registry.get_active_model(tenant_id)
     checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
+    model_trained = False
+    model_id_used: str | None = None
+    training_skipped_reason: str | None = None
+
+    try:
+        (
+            checkpoint_path,
+            model_trained,
+            model_id_used,
+            training_skipped_reason,
+        ) = await _resolve_upload_checkpoint(db, tenant_id, tmp_path, train_model)
+    except HTTPException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
     try:
         checkpoint_path = await resolve_checkpoint(db, checkpoint_path)
@@ -216,7 +288,12 @@ async def run_inference_from_csv(
             include_embeddings=include_embeddings,
             persist_db=db if persist_data else None,
         )
-        return response
+        return _attach_training_meta(
+            response,
+            model_trained=model_trained,
+            model_id=model_id_used,
+            training_skipped_reason=training_skipped_reason,
+        )
     except EmptyCsvError as e:
         raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
     except ValueError as e:
@@ -243,6 +320,7 @@ async def run_inference_from_csv_async(
     greenhouse_id: str = Form(default="default"),
     file: UploadFile = File(...),
     persist_data: bool = Form(default=False),
+    train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
 ):
     """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
@@ -265,6 +343,21 @@ async def run_inference_from_csv_async(
     registry = ModelRegistry(db)
     active_model_info = await registry.get_active_model(tenant_id)
     checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
+    model_trained = False
+    model_id_used: str | None = None
+    training_skipped_reason: str | None = None
+
+    try:
+        (
+            checkpoint_path,
+            model_trained,
+            model_id_used,
+            training_skipped_reason,
+        ) = await _resolve_upload_checkpoint(db, tenant_id, tmp_path, train_model)
+    except HTTPException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
     adapter = CSVAdapter({"filepath": tmp_path})
     try:
@@ -278,6 +371,9 @@ async def run_inference_from_csv_async(
             checkpoint_path=checkpoint_path,
             persist_data=persist_data,
             filename=file.filename,
+            model_trained=model_trained,
+            model_id=model_id_used,
+            training_skipped_reason=training_skipped_reason,
         )
         return UploadJobAcceptedResponse(
             job_id=job_id,

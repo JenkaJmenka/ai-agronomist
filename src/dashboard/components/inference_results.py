@@ -586,6 +586,15 @@ def render_inference_upload_summary(results: dict, tenant_id: str, greenhouse_id
             + " — excluded from stuck-fault checks."
         )
 
+    if results.get("model_trained") and results.get("model_id"):
+        st.success(f"Trained and registered cold-start model `{results['model_id']}`.")
+    elif results.get("training_skipped_reason") == "active_model_exists":
+        active_id = results.get("model_id")
+        if active_id:
+            st.info(f"Scored with existing model `{active_id}`.")
+        else:
+            st.info("Scored with the active tenant model (training skipped).")
+
 
 def scoped_upload_anomalies(
     results: dict,

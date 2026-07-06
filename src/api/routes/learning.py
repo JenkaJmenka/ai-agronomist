@@ -316,5 +316,8 @@ async def clear_models(
     # Clear drift detector from memory cache
     if tenant_id in _drift_detectors:
         del _drift_detectors[tenant_id]
+
+    from src.api.routes.inference import clear_detector_cache
+    clear_detector_cache()
         
     return {"status": "success", "deleted_versions": count, "message": f"Successfully cleared {count} model(s) for tenant {tenant_id}"}

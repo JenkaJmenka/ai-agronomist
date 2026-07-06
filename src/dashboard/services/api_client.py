@@ -154,6 +154,7 @@ class DashboardApiClient:
         file_name: str,
         file_bytes: bytes,
         persist_data: bool = True,
+        train_model: bool = False,
     ) -> Dict[str, Any]:
         """Queue a CSV for portioned processing; returns {job_id, portion_count, poll_url}."""
         resp = requests.post(
@@ -163,6 +164,7 @@ class DashboardApiClient:
                 "tenant_id": tenant_id,
                 "greenhouse_id": greenhouse_id,
                 "persist_data": str(persist_data).lower(),
+                "train_model": str(train_model).lower(),
             },
             headers={k: v for k, v in self._headers().items() if k != "Content-Type"},
             timeout=120,
@@ -229,3 +231,31 @@ class DashboardApiClient:
             return r.get("model_id", "baseline")
         except Exception:
             return "baseline"
+
+    def list_model_versions(self, tenant_id: str) -> List[Dict[str, Any]]:
+        return self._get(f"/api/models/{tenant_id}/versions")
+
+    def activate_model(self, tenant_id: str, model_id: str) -> Dict[str, Any]:
+        return self._post(
+            f"/api/models/{tenant_id}/activate",
+            {"model_id": model_id},
+        )
+
+    def delete_model(self, tenant_id: str, model_id: str, *, force: bool = False) -> Dict[str, Any]:
+        resp = requests.delete(
+            f"{self.base_url}/api/models/{tenant_id}/versions/{model_id}",
+            params={"force": str(force).lower()},
+            headers=self._headers(),
+            timeout=30,
+        )
+        raise_for_status_with_detail(resp)
+        return resp.json()
+
+    def clear_models(self, tenant_id: str) -> Dict[str, Any]:
+        resp = requests.delete(
+            f"{self.base_url}/api/models/{tenant_id}/versions",
+            headers=self._headers(),
+            timeout=30,
+        )
+        raise_for_status_with_detail(resp)
+        return resp.json()

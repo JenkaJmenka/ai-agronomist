@@ -3,8 +3,8 @@ import uuid
 from typing import Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update
 from src.db.models import ModelVersion, ModelDeployment, ModelBaseline
+from src.models.artifact_store import delete_artifact
 
 class ModelRegistry:
     """
@@ -162,24 +162,97 @@ class ModelRegistry:
         await self.db.commit()
         return True
 
+    async def activate_model(self, customer_id: str, model_id: str) -> bool:
+        """Set *model_id* as the active deployment for *customer_id*."""
+        return await self.rollback_model(customer_id, model_id)
+
+    async def delete_model(
+        self,
+        customer_id: str,
+        model_id: str,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Delete one model version and its checkpoint artifact.
+
+        When deleting the active model, auto-activates the next newest version
+        unless it is the only version and *force* is False.
+        """
+        stmt = select(ModelVersion).where(
+            ModelVersion.id == model_id,
+            ModelVersion.customer_id == customer_id,
+        )
+        result = await self.db.execute(stmt)
+        version = result.scalars().first()
+        if not version:
+            return False
+
+        stmt_active = select(ModelDeployment).where(
+            ModelDeployment.customer_id == customer_id,
+            ModelDeployment.model_id == model_id,
+            ModelDeployment.is_current == True,
+        )
+        is_active = (await self.db.execute(stmt_active)).scalars().first() is not None
+
+        if is_active:
+            stmt_others = (
+                select(ModelVersion)
+                .where(
+                    ModelVersion.customer_id == customer_id,
+                    ModelVersion.id != model_id,
+                )
+                .order_by(ModelVersion.created_at.desc())
+            )
+            others = (await self.db.execute(stmt_others)).scalars().all()
+            if not others and not force:
+                return False
+            stmt_deps = select(ModelDeployment).where(
+                ModelDeployment.customer_id == customer_id,
+                ModelDeployment.is_current == True,
+            )
+            for dep in (await self.db.execute(stmt_deps)).scalars().all():
+                dep.is_current = False
+            if others:
+                self.db.add(
+                    ModelDeployment(
+                        id=f"dep_{uuid.uuid4().hex[:8]}",
+                        customer_id=customer_id,
+                        model_id=others[0].id,
+                        is_current=True,
+                    )
+                )
+
+        stmt_model_deps = select(ModelDeployment).where(
+            ModelDeployment.customer_id == customer_id,
+            ModelDeployment.model_id == model_id,
+        )
+        for dep in (await self.db.execute(stmt_model_deps)).scalars().all():
+            await self.db.delete(dep)
+
+        checkpoint_path = version.checkpoint_path
+        await self.db.delete(version)
+        await self.db.commit()
+        await delete_artifact(self.db, checkpoint_path)
+        return True
+
     async def clear_models(self, customer_id: str) -> int:
         """
         Deletes all model deployments and versions for a specific customer.
         Returns the number of model versions deleted.
         """
-        # Delete deployments
-        stmt_deps = select(ModelDeployment).where(ModelDeployment.customer_id == customer_id)
-        res_deps = await self.db.execute(stmt_deps)
-        for d in res_deps.scalars().all():
-            await self.db.delete(d)
-            
-        # Delete versions
         stmt_vers = select(ModelVersion).where(ModelVersion.customer_id == customer_id)
-        res_vers = await self.db.execute(stmt_vers)
-        versions = res_vers.scalars().all()
+        versions = (await self.db.execute(stmt_vers)).scalars().all()
         count = len(versions)
+        checkpoint_paths = [v.checkpoint_path for v in versions]
+
+        stmt_deps = select(ModelDeployment).where(ModelDeployment.customer_id == customer_id)
+        for d in (await self.db.execute(stmt_deps)).scalars().all():
+            await self.db.delete(d)
+
         for v in versions:
             await self.db.delete(v)
-            
+
         await self.db.commit()
+        for path in checkpoint_paths:
+            await delete_artifact(self.db, path)
         return count

@@ -372,3 +372,6 @@ class UploadInferenceResponse(BaseModel):
     rows_uploaded: int = Field(default=0, ge=0)
     sensor_rows_uploaded: int = Field(default=0, ge=0)
     raw_rows_uploaded: int = Field(default=0, ge=0)
+    model_trained: bool = False
+    model_id: Optional[str] = None
+    training_skipped_reason: Optional[str] = None

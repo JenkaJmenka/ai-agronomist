@@ -60,6 +60,9 @@ async def produce_upload_portions(
     filename: str | None = None,
     seq_len: int = 20,
     portion_rows: int = UPLOAD_PORTION_ROWS,
+    model_trained: bool = False,
+    model_id: str | None = None,
+    training_skipped_reason: str | None = None,
 ) -> tuple[str, int]:
     """Create the job, publish one message per portion, stamp total_portions.
 
@@ -81,6 +84,9 @@ async def produce_upload_portions(
             "checkpoint_path": checkpoint_path,
             "imputed_channels": imputed_channels,
             "adaptive_ranges": [list(r) for r in adaptive_ranges],
+            "model_trained": model_trained,
+            "model_id": model_id,
+            "training_skipped_reason": training_skipped_reason,
         },
     )
 

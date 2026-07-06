@@ -64,6 +64,21 @@ async def put_checkpoint(db: AsyncSession, key: str, local_path: str) -> str:
     return f"{DB_SCHEME}{key}"
 
 
+async def delete_artifact(db: AsyncSession, checkpoint_path: str | None) -> bool:
+    """Remove a db:// artifact if present. Returns True when a row was deleted."""
+    if not is_artifact_path(checkpoint_path):
+        return False
+    key = artifact_key(checkpoint_path)
+    result = await db.execute(select(ModelArtifact).where(ModelArtifact.key == key))
+    artifact = result.scalar_one_or_none()
+    if artifact is None:
+        return False
+    await db.delete(artifact)
+    await db.commit()
+    logger.info("Deleted checkpoint artifact %s", key)
+    return True
+
+
 async def resolve_checkpoint(db: AsyncSession, checkpoint_path: str | None) -> str | None:
     """db:// path → local cached file path; anything else passes through."""
     if not is_artifact_path(checkpoint_path):

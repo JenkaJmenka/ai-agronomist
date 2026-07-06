@@ -5,6 +5,7 @@ import streamlit as st
 
 from src.dashboard.components.charts import get_available_greenhouses
 from src.dashboard.components.global_sidebar import render_global_sidebar
+from src.dashboard.components.model_registry import render_model_registry
 from src.dashboard.services.api_client import DEFAULT_API_URL
 from src.dashboard.services.http_utils import api_delete, api_get, api_post
 from src.dashboard.services.upload_validator import validate_csv_upload
@@ -315,3 +316,7 @@ with tab2:
     )
     if st.button("Go to Anomaly Detection", type="primary", key="goto_anomalies"):
         st.switch_page("pages/2_anomalies.py")
+
+st.markdown("---")
+tenant_id_models = st.text_input("Tenant ID (models)", "tenant_1", key="tenant_models")
+render_model_registry(tenant_id_models, api_url=API_URL)
