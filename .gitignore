@@ -27,12 +27,15 @@ data/raw/*
 data/processed/*
 data/upload_inference_cache/
 data/inference_result_cache/
+data/bootstrapped_clean_*.csv
+data/pass1_suspected_anomalies_*.csv
 
 # Model artifacts (keep canonical checkpoints at models/*.pt if needed)
 models/*.pth
 models/detect_cust_*/
 models/patterns_cust_*/
 models/test_customer/
+models/checkpoints/artifact_cache/
 
 # Agent orchestration (local only)
 .agents/
