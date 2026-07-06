@@ -23,6 +23,65 @@ from src.dashboard.services.upload_results_store import (
 _INF_RESULTS_KEY = "inf_upload_results"
 _JOBS_FALLBACK_CHECKED_KEY = "_upload_results_jobs_checked"
 _JOBS_FALLBACK_RECHECK_SECONDS = 30.0
+_COLD_RUN_ENRICH_CACHE_KEY = "_cold_run_enrich_cache"
+
+
+def results_signature(results: dict) -> str:
+    """Stable fingerprint for caching enrichment derived from upload results."""
+    stat = results.get("statistical_summary") or {}
+    stat_count = len(stat.get("anomalies") or []) if isinstance(stat, dict) else 0
+    return (
+        f"{results.get('sequences_processed', 0)}|"
+        f"{results.get('anomalies_detected', 0)}|"
+        f"{len(results.get('anomaly_scores') or [])}|"
+        f"{len(results.get('high_anomalies') or [])}|"
+        f"{stat_count}|"
+        f"{results.get('threshold_used', '')}"
+    )
+
+
+def enrich_cold_run_rows_cached(
+    results: dict,
+    rows: list[dict],
+    incidents: list[dict] | None,
+    *,
+    cache_scope: str,
+) -> pd.DataFrame:
+    """Cache cold-run row enrichment in session for repeat page visits."""
+    if not rows:
+        return pd.DataFrame()
+
+    incident_key = (
+        f"{len(incidents)}|{incidents[0].get('id')}|{incidents[-1].get('id')}"
+        if incidents
+        else "none"
+    )
+    row_key = tuple(
+        (
+            str(row.get("timestamp", "")),
+            str(row.get("detector", "")),
+            str(row.get("column", "")),
+            str(row.get("score", "")),
+        )
+        for row in rows[:50]
+    )
+    cache_key = f"{cache_scope}|{results_signature(results)}|{incident_key}|{row_key}"
+
+    store: dict = st.session_state.setdefault(_COLD_RUN_ENRICH_CACHE_KEY, {})
+    cached = store.get(cache_key)
+    if isinstance(cached, pd.DataFrame):
+        return cached.copy()
+
+    enriched = enrich_cold_run_rows(rows, incidents)
+    store[cache_key] = enriched
+    if len(store) > 8:
+        for stale_key in list(store.keys())[:-8]:
+            store.pop(stale_key, None)
+    return enriched
+
+
+def clear_cold_run_enrich_cache() -> None:
+    st.session_state.pop(_COLD_RUN_ENRICH_CACHE_KEY, None)
 
 
 def results_from_job_list(jobs: list[dict]) -> dict | None:
@@ -115,6 +174,8 @@ def save_inference_results(
     *,
     filename: str | None = None,
 ) -> None:
+    from src.dashboard.services.anomalies_page_data import clear_anomaly_page_cache
+
     payload = build_cache_payload(
         results,
         tenant_id,
@@ -123,6 +184,8 @@ def save_inference_results(
     )
     st.session_state[_INF_RESULTS_KEY] = payload
     write_upload_cache(payload)
+    clear_anomaly_page_cache()
+    clear_cold_run_enrich_cache()
 
 
 def clear_inference_results() -> None:
@@ -139,6 +202,7 @@ def clear_inference_results() -> None:
 def clear_inference_results_for(tenant_id: str, greenhouse_id: str) -> None:
     """Remove cold-run upload results for a tenant/greenhouse (session + disk)."""
     delete_upload_cache(tenant_id, greenhouse_id)
+    clear_cold_run_enrich_cache()
     existing = st.session_state.get(_INF_RESULTS_KEY)
     if (
         isinstance(existing, dict)
@@ -163,12 +227,11 @@ def load_inference_results(tenant_id: str, greenhouse_id: str) -> dict | None:
         st.session_state[_INF_RESULTS_KEY] = cached
         return cached
 
-    # Rate-limit the API fallback so a tenant with no uploads doesn't pay an
-    # extra jobs call on every rerun.
     scope = f"{tenant_id}|{greenhouse_id}"
     checked: dict = st.session_state.setdefault(_JOBS_FALLBACK_CHECKED_KEY, {})
     now = time.time()
-    if now - checked.get(scope, 0.0) < _JOBS_FALLBACK_RECHECK_SECONDS:
+    last_checked = checked.get(scope, 0.0)
+    if now - last_checked < _JOBS_FALLBACK_RECHECK_SECONDS:
         return None
     checked[scope] = now
 
@@ -361,9 +424,18 @@ def render_upload_status_bar(saved_inf: dict | None) -> bool:
         tenant_id = saved_inf["tenant_id"]
         greenhouse_id = saved_inf["greenhouse_id"]
         detected = saved_inf["results"].get("anomalies_detected", 0)
+        processed_at = saved_inf.get("processed_at")
+        processed_note = ""
+        if processed_at:
+            try:
+                processed_note = (
+                    f" · cached {pd.Timestamp(processed_at).strftime('%d %b %H:%M')}"
+                )
+            except (TypeError, ValueError):
+                processed_note = ""
         status_col.caption(
-            f"Last cold-run: **{name}** · `{tenant_id}` / `{greenhouse_id}` · "
-            f"{detected} anomalies detected"
+            f"Showing saved analysis: **{name}** · `{tenant_id}` / `{greenhouse_id}` · "
+            f"{detected} anomalies{processed_note} — no re-inference on page load"
         )
         return clear_col.button("Clear upload", key="clear_inf_results")
     status_col.caption(
@@ -579,11 +651,20 @@ def render_cold_run_anomaly_tables(
     uploaded_stat_msg = "No statistical anomalies in the last upload."
     uploaded_all_msg = "No merged anomalies in the last upload."
 
-    stat_enriched = enrich_cold_run_rows(
+    enrich_scope = f"{tenant_id}|{greenhouse_id}"
+    base_results = results or {}
+    stat_enriched = enrich_cold_run_rows_cached(
+        base_results,
         stat_rows_to_jump_rows(stat_anomalies),
         incidents,
+        cache_scope=enrich_scope,
     )
-    all_enriched = enrich_cold_run_rows(high_anomalies, incidents)
+    all_enriched = enrich_cold_run_rows_cached(
+        base_results,
+        high_anomalies,
+        incidents,
+        cache_scope=enrich_scope,
+    )
 
     render_anomaly_table(
         stat_enriched,

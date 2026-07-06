@@ -1,5 +1,6 @@
 import streamlit as st
 from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
+from src.dashboard.components.data_availability import render_no_sensor_data_hint
 from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.timeline import (
@@ -41,7 +42,7 @@ with st.spinner("Loading sensor data…"):
         st.stop()
 
 if df.empty:
-    st.info("No sensor data available.")
+    render_no_sensor_data_hint(tenant, greenhouse)
     st.stop()
 
 _ts = pd.to_datetime(df["timestamp"])

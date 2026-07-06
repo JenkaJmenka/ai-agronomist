@@ -1,5 +1,5 @@
 import os
-import time
+from datetime import timedelta
 
 import streamlit as st
 
@@ -10,6 +10,69 @@ from src.dashboard.services.http_utils import api_delete, api_get, api_post
 from src.dashboard.services.upload_validator import validate_csv_upload
 
 API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
+
+_TRAINING_POLL_SECONDS = 5
+_MAX_POLL_ERRORS = 5
+_MAX_POLL_ATTEMPTS = 120  # 120 × 5 s ≈ 10 min ceiling
+
+
+@st.fragment(run_every=timedelta(seconds=_TRAINING_POLL_SECONDS))
+def _render_training_status_poller() -> None:
+    """Non-blocking training job poll (replaces sleep + full-page rerun)."""
+    job = st.session_state.get("training_job")
+    if not job or job.get("status") != "running":
+        return
+
+    _poll_errors = job.get("poll_errors", 0)
+    _poll_attempts = job.get("poll_attempts", 0)
+
+    if _poll_attempts >= _MAX_POLL_ATTEMPTS:
+        st.warning(
+            "Training job status is unknown — it has been polling for over 10 minutes. "
+            "Check the API server logs to see if training completed."
+        )
+        st.session_state["training_job"] = None
+        return
+
+    _current: dict | None = None
+    try:
+        res_status = api_get(
+            f"{API_URL}/api/models/{job['customer_id']}/training-status",
+            timeout=5,
+        )
+        _current = res_status.json() if res_status.ok else {"status": "running"}
+        _poll_errors = 0
+    except Exception as _poll_exc:
+        _poll_errors += 1
+        if _poll_errors >= _MAX_POLL_ERRORS:
+            st.warning(
+                f"Training status API is not responding ({_poll_errors} consecutive failures). "
+                f"Last error: {_poll_exc}"
+            )
+            st.session_state["training_job"] = None
+            return
+        _current = {"status": "running"}
+
+    job["poll_errors"] = _poll_errors
+    job["poll_attempts"] = _poll_attempts + 1
+    st.session_state["training_job"] = job
+
+    if _current["status"] == "running":
+        st.info("Training in progress…")
+    elif _current["status"] == "completed":
+        model_id = _current.get("model_id")
+        if model_id:
+            st.success(f"Training complete. New model registered: `{model_id}`")
+        else:
+            st.warning(
+                "Training finished but no model was registered "
+                "(new model did not outperform the baseline)."
+            )
+        st.session_state["training_job"] = None
+    elif _current["status"] == "failed":
+        st.error(f"Training failed: {_current.get('error', 'unknown error')}")
+        st.session_state["training_job"] = None
+
 
 st.set_page_config(page_title="Upload & Operations", page_icon="📤", layout="wide")
 render_global_sidebar()
@@ -35,65 +98,7 @@ with tab1:
 
     uploaded_file_train = st.file_uploader("Choose a CSV file for training", type="csv", key="file_train")
 
-    # ── Training status poller (runs on every rerun while a job is active) ───
-    job = st.session_state.get("training_job")
-    if job and job.get("status") == "running":
-        _status_placeholder = st.empty()
-        _MAX_POLL_ERRORS = 5
-        _MAX_POLL_ATTEMPTS = 120  # 120 × 5 s = 10 min ceiling
-        _poll_errors = job.get("poll_errors", 0)
-        _poll_attempts = job.get("poll_attempts", 0)
-
-        if _poll_attempts >= _MAX_POLL_ATTEMPTS:
-            _status_placeholder.warning(
-                "Training job status is unknown — it has been polling for over 10 minutes. "
-                "Check the API server logs to see if training completed."
-            )
-            st.session_state["training_job"] = None
-        else:
-            _current: dict | None = None
-            try:
-                res_status = api_get(
-                    f"{API_URL}/api/models/{job['customer_id']}/training-status",
-                    timeout=5,
-                )
-                _current = res_status.json() if res_status.ok else {"status": "running"}
-                _poll_errors = 0
-            except Exception as _poll_exc:
-                _poll_errors += 1
-                if _poll_errors >= _MAX_POLL_ERRORS:
-                    _status_placeholder.warning(
-                        f"Training status API is not responding ({_poll_errors} consecutive failures). "
-                        f"Last error: {_poll_exc}"
-                    )
-                    st.session_state["training_job"] = None
-                else:
-                    _current = {"status": "running"}
-
-            if _current is not None:
-                job["poll_errors"] = _poll_errors
-                job["poll_attempts"] = _poll_attempts + 1
-                st.session_state["training_job"] = job
-
-                if _current["status"] == "running":
-                    _status_placeholder.info("Training in progress — checking again in 5 seconds…")
-                    time.sleep(5)
-                    st.rerun()
-                elif _current["status"] == "completed":
-                    model_id = _current.get("model_id")
-                    if model_id:
-                        _status_placeholder.success(f"Training complete. New model registered: `{model_id}`")
-                    else:
-                        _status_placeholder.warning(
-                            "Training finished but no model was registered "
-                            "(new model did not outperform the baseline)."
-                        )
-                    st.session_state["training_job"] = None
-                elif _current["status"] == "failed":
-                    _status_placeholder.error(
-                        f"Training failed: {_current.get('error', 'unknown error')}"
-                    )
-                    st.session_state["training_job"] = None
+    _render_training_status_poller()
 
     if st.button("Upload & Train", type="primary"):
         if not tenant_id_train or not greenhouse_id_train:

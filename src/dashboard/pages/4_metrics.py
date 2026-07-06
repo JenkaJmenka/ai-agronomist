@@ -1,5 +1,6 @@
 import streamlit as st
 from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
+from src.dashboard.components.data_availability import render_no_sensor_data_hint
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.timeline import (
     get_timeline_bounds,
@@ -82,7 +83,7 @@ with st.spinner("Compiling sensor coverage..."):
         df = pd.DataFrame()
 
 if df.empty:
-    st.info("No sensor data available to calculate coverage metrics.")
+    render_no_sensor_data_hint(tenant, greenhouse)
 else:
     _ts = pd.to_datetime(df["timestamp"])
     init_monitoring_session_state(tenant, greenhouse, _ts.min(), _ts.max())
