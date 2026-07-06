@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.services import upload_async_runner
-from src.db.jobs import create_job, get_job
+from src.db.jobs import create_job, fail_stale_preparing_jobs, get_job
 from src.db.models import Base
 from src.db.session import AsyncSessionLocal, engine
 
@@ -102,3 +102,28 @@ async def test_pipeline_marks_job_failed_on_checkpoint_error(
     assert failed_job.status == "failed"
     assert "no valid data" in (failed_job.error or "")
     assert not csv_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_fails_orphaned_preparing_jobs(database_schema):
+    """Jobs stuck in 'preparing' (background task lost to a restart) must be
+    failed by the startup sweep; jobs in other states are untouched."""
+    async with AsyncSessionLocal() as db:
+        orphan = await create_job(
+            db, tenant_id="tenant_async", job_type="upload_csv", status="preparing"
+        )
+        in_flight = await create_job(
+            db, tenant_id="tenant_async", job_type="upload_csv", status="pending"
+        )
+        orphan_id, in_flight_id = orphan.id, in_flight.id
+
+        swept_count = await fail_stale_preparing_jobs(db)
+
+    assert swept_count == 1
+    async with AsyncSessionLocal() as db:
+        swept_job = await get_job(db, orphan_id)
+        untouched_job = await get_job(db, in_flight_id)
+    assert swept_job.status == "failed"
+    assert "re-upload" in (swept_job.error or "")
+    assert swept_job.finished_at is not None
+    assert untouched_job.status == "pending"

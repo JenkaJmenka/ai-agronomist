@@ -199,6 +199,32 @@ async def prune_portion_results(db: AsyncSession, job_id: str) -> None:
     await db.commit()
 
 
+async def fail_stale_preparing_jobs(db: AsyncSession) -> int:
+    """Fail 'preparing' upload jobs orphaned by a service restart.
+
+    The async upload pipeline runs in-process (BackgroundTasks); a container
+    restart kills it along with the temp CSV, so a job still 'preparing' at
+    startup can never resume. Returns the number of jobs failed.
+    """
+    table = Job.__table__
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(table)
+        .where(table.c.status == "preparing", table.c.job_type == "upload_csv")
+        .values(
+            status="failed",
+            error=(
+                "Upload preparation was interrupted by a service restart — "
+                "please re-upload the file."
+            ),
+            finished_at=now,
+            updated_at=now,
+        )
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
 async def update_job(
     db: AsyncSession,
     job_id: str,

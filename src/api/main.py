@@ -29,7 +29,8 @@ try:
 except (ImportError, ValueError):
     logging.basicConfig(level=logging.INFO)
 
-from src.db.session import engine, get_db, init_db
+from src.db.jobs import fail_stale_preparing_jobs
+from src.db.session import AsyncSessionLocal, engine, get_db, init_db
 from src.mq.connection import close_mq
 from src.api.routes import (
     bootstrap,
@@ -73,6 +74,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.critical(f"Failed to initialize database: {e}", exc_info=True)
         raise e
+
+    try:
+        async with AsyncSessionLocal() as db:
+            orphaned_count = await fail_stale_preparing_jobs(db)
+        if orphaned_count:
+            logger.warning(
+                "Marked %d orphaned 'preparing' upload job(s) as failed "
+                "(background task lost in a previous restart).",
+                orphaned_count,
+            )
+    except Exception as e:
+        logger.error(f"Orphaned upload-job recovery failed: {e}", exc_info=True)
 
     yield
 
