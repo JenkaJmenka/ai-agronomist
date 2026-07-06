@@ -9,12 +9,14 @@ from src.dashboard.components.charts import (
     apply_datetime_filter,
     get_sensor_label,
     plot_combined_sensors,
+    query_sensor_timestamp_bounds,
 )
 from src.dashboard.components.color_manager import get_chart_color_manager
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.monitoring_jump import (
-    apply_pending_monitoring_jump,
-    load_monitoring_readings,
+    apply_pending_jump_columns,
+    apply_pending_jump_window,
+    load_monitoring_window,
     resolve_highlight_columns,
 )
 from src.dashboard.components.timeline import (
@@ -174,9 +176,33 @@ tenant = st.session_state["selected_tenant"]
 greenhouse = st.session_state["selected_greenhouse"]
 st.markdown(f"**{tenant}** · Greenhouse **{greenhouse}**")
 
+try:
+    _min_iso, _max_iso = query_sensor_timestamp_bounds(tenant, greenhouse)
+except Exception as exc:
+    st.error(
+        f"Could not load sensor data — is the API server running? "
+        f"Details: {exc}"
+    )
+    st.stop()
+
+if not _min_iso or not _max_iso:
+    st.info("No data found. Upload a CSV with sensor readings via the Upload page.")
+    st.stop()
+
+_data_min_ts = pd.Timestamp(_min_iso)
+_data_max_ts = pd.Timestamp(_max_iso)
+
+# Bounds → timeline → window query: pick the range first, then load exactly that
+# window from the API. Loading a fixed recent frame and filtering it in memory
+# is what limited these pages to the tail of the dataset.
+init_monitoring_session_state(tenant, greenhouse, _data_min_ts, _data_max_ts)
+apply_pending_jump_window()
+
+timeline_start, timeline_end = render_timeline_controls(_data_min_ts, _data_max_ts)
+
 with st.spinner("Loading sensor data…"):
     try:
-        df, _data_min_ts, _data_max_ts = load_monitoring_readings(tenant, greenhouse)
+        df = load_monitoring_window(tenant, greenhouse, timeline_start, timeline_end)
     except Exception as exc:
         st.error(
             f"Could not load sensor data — is the API server running? "
@@ -184,17 +210,7 @@ with st.spinner("Loading sensor data…"):
         )
         st.stop()
 
-if df.empty:
-    st.info("No data found. Upload a CSV with sensor readings via the Upload page.")
-    st.stop()
-
-_all_numeric: List[str] = get_all_sensor_columns(df)
-
-init_monitoring_session_state(tenant, greenhouse, _data_min_ts, _data_max_ts)
-apply_pending_monitoring_jump(_all_numeric)
-
-timeline_start, timeline_end = render_timeline_controls(_data_min_ts, _data_max_ts)
-
+# Cheap in-memory trim to the exact bounds (the window query is inclusive).
 df = apply_datetime_filter(df, timeline_start, timeline_end)
 if df.empty:
     st.warning(
@@ -202,6 +218,9 @@ if df.empty:
         f"Available data: {_data_min_ts} → {_data_max_ts}."
     )
     st.stop()
+
+_all_numeric: List[str] = get_all_sensor_columns(df)
+apply_pending_jump_columns(_all_numeric)
 
 st.markdown("---")
 st.markdown("### Sensor channels")

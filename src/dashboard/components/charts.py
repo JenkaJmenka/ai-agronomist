@@ -15,6 +15,10 @@ from src.dashboard.constants import (
 )
 from src.api.services.readings_service import merge_anomaly_scores_into_readings
 from src.dashboard.services.api_client import DashboardApiClient
+from src.dashboard.services.tz_normalize import (
+    align_bound_to_series,
+    normalize_series_tz,
+)
 
 # All dashboard reads go through the API (which holds warm DB connections)
 # instead of opening a fresh Supabase connection per query.
@@ -327,28 +331,20 @@ def apply_datetime_filter(
     start_dt: pd.Timestamp,
     end_dt: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Filter by inclusive start/end datetime."""
+    """Filter by inclusive start/end datetime.
+
+    Both sides of the comparison are aligned to one tz state first: a tz-aware
+    Series compared against a tz-naive bound silently drops every row (a cause
+    of the 'only recent data shows' symptom), so bounds are localized to match
+    the data instead.
+    """
     if df.empty:
         return df
     work = df.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"])
-    data_is_tz_aware = work["timestamp"].dt.tz is not None
-    start_is_tz_aware = getattr(start_dt, "tzinfo", None) is not None
-    end_is_tz_aware = getattr(end_dt, "tzinfo", None) is not None
-    if data_is_tz_aware:
-        # Data has timezone → make bounds tz-aware (UTC)
-        if not start_is_tz_aware:
-            start_dt = pd.Timestamp(start_dt).tz_localize("UTC")
-        if not end_is_tz_aware:
-            end_dt = pd.Timestamp(end_dt).tz_localize("UTC")
-    else:
-        # Data is tz-naive → strip timezone from bounds
-        if start_is_tz_aware:
-            start_dt = pd.Timestamp(start_dt).tz_localize(None)
-        if end_is_tz_aware:
-            end_dt = pd.Timestamp(end_dt).tz_localize(None)
-    filtered = work[(work["timestamp"] >= start_dt) & (work["timestamp"] <= end_dt)]
-    return filtered
+    work["timestamp"] = normalize_series_tz(pd.to_datetime(work["timestamp"]))
+    start_dt = align_bound_to_series(pd.Timestamp(start_dt), work["timestamp"])
+    end_dt = align_bound_to_series(pd.Timestamp(end_dt), work["timestamp"])
+    return work[(work["timestamp"] >= start_dt) & (work["timestamp"] <= end_dt)]
 
 
 def _apply_x_range(
