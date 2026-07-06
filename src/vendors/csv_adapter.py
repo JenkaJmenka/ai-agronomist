@@ -105,6 +105,41 @@ def _detect_csv_properties(filepath: str) -> Dict[str, Any]:
     return {"sep": sep, "encoding": encoding, "decimal": decimal}
 
 
+def pandas_csv_reader_kwargs(csv_props: Dict[str, Any]) -> Dict[str, Any]:
+    """Shared pandas.read_csv kwargs for all upload / inference CSV readers."""
+    return {
+        "sep": csv_props.get("sep", ","),
+        "encoding": csv_props.get("encoding", "utf-8"),
+        "decimal": csv_props.get("decimal", "."),
+        "on_bad_lines": "skip",
+        "skipinitialspace": True,
+        "quotechar": '"',
+    }
+
+
+def detect_csv_properties_from_bytes(file_bytes: bytes) -> Dict[str, Any]:
+    """Like _detect_csv_properties but for in-memory uploads (validator path)."""
+    raw = file_bytes[:4096]
+    encoding = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+    text = raw.decode(encoding, errors="replace")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    header = lines[0] if lines else ""
+    sep = ";" if header.count(";") > header.count(",") else ","
+    decimal = "."
+    if len(lines) > 1 and sep == ";":
+        for field in lines[1].split(sep)[1:]:
+            stripped = field.strip().replace("-", "")
+            if "," in stripped:
+                candidate = stripped.replace(",", ".")
+                try:
+                    float(candidate)
+                    decimal = ","
+                    break
+                except ValueError:
+                    pass
+    return {"sep": sep, "encoding": encoding, "decimal": decimal}
+
+
 def _smart_column_map(columns: List[str]) -> Dict[str, str]:
     """Return {original_col: canonical_col} using keyword-score matching.
 
@@ -334,9 +369,7 @@ class CSVAdapter(DataSourceAdapter):
         try:
             return pd.read_csv(
                 self.file_path,
-                sep=self._csv_props["sep"],
-                encoding=self._csv_props["encoding"],
-                decimal=self._csv_props["decimal"],
+                **pandas_csv_reader_kwargs(self._csv_props),
             )
         except Exception as exc:
             raise DataReadError(f"Failed to read raw CSV data at {self.file_path}: {exc}") from exc

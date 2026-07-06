@@ -165,6 +165,15 @@ def test_valid_result_has_no_errors():
     assert r.errors == []
 
 
+def test_malformed_row_warns_but_allows_upload():
+    # Header has 3 cols; row 3 has extra unquoted fields (simulates line 4 error).
+    csv_bytes = b"timestamp,temperature,humidity\n2024-01-01,22,65\n2024-01-02,23,66\nbad,row,with,extra,cols\n"
+    r = validate_csv_upload(csv_bytes)
+    assert r.is_valid, r.errors
+    assert r.warnings
+    assert "skipped" in r.warnings[0].lower()
+
+
 def test_validation_result_is_dataclass():
     r = validate_csv_upload(_csv(_VALID_ROW))
     assert isinstance(r, ValidationResult)

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.schemas.sensor_data import UploadResponse
 from src.db.models import RawReading, SensorReading
 from src.db.session import get_db
-from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
+from src.vendors.csv_adapter import CSVAdapter, pandas_csv_reader_kwargs, parse_raw_rows
 
 logger = logging.getLogger(__name__)
 
@@ -140,14 +140,12 @@ async def upload_csv(
     }
 
     props = adapter._csv_props
+
     try:
         reader = pd.read_csv(
             tmp_path,
             chunksize=CHUNK_SIZE,
-            on_bad_lines="skip",
-            sep=props.get("sep", ","),
-            encoding=props.get("encoding", "utf-8"),
-            decimal=props.get("decimal", "."),
+            **pandas_csv_reader_kwargs(props),
         )
     except pd.errors.EmptyDataError:
         if os.path.exists(tmp_path):

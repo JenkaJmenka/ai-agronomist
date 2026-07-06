@@ -72,12 +72,12 @@ def build_anomaly_metadata_by_timestamp(
 
 
 def _read_chunks(tmp_path: str, chunk_size: int, csv_props: dict[str, Any]):
+    from src.vendors.csv_adapter import pandas_csv_reader_kwargs
+
     return pd.read_csv(
         tmp_path,
         chunksize=chunk_size,
-        sep=csv_props.get("sep", ","),
-        encoding=csv_props.get("encoding", "utf-8"),
-        decimal=csv_props.get("decimal", "."),
+        **pandas_csv_reader_kwargs(csv_props),
     )
 
 

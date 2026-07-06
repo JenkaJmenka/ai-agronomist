@@ -384,6 +384,17 @@ async def run_inference_from_csv_async(
         raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
+    except Exception as e:
+        detail = str(e)
+        if "tokenizing" in detail.lower() or "parser" in detail.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid CSV format: {detail}. "
+                    "Re-export with comma delimiters and quote text fields that contain commas."
+                ),
+            ) from e
+        raise HTTPException(status_code=400, detail=f"Could not queue upload: {detail}") from e
     finally:
         adapter.disconnect()
         if os.path.exists(tmp_path):

@@ -15,7 +15,7 @@ from sqlalchemy.future import select
 
 from src.db.models import RawReading, SensorReading
 from src.db.upsert import bulk_upsert_rows
-from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
+from src.vendors.csv_adapter import CSVAdapter, pandas_csv_reader_kwargs, parse_raw_rows
 
 logger = logging.getLogger(__name__)
 
@@ -337,10 +337,7 @@ async def persist_csv_file(
         reader = pd.read_csv(
             tmp_path,
             chunksize=CHUNK_SIZE,
-            on_bad_lines="skip",
-            sep=props.get("sep", ","),
-            encoding=props.get("encoding", "utf-8"),
-            decimal=props.get("decimal", "."),
+            **pandas_csv_reader_kwargs(props),
         )
     except pd.errors.EmptyDataError as exc:
         raise HTTPException(status_code=400, detail="Invalid CSV format: Empty file") from exc
