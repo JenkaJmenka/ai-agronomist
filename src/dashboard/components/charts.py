@@ -15,6 +15,10 @@ from src.dashboard.constants import (
 )
 from src.api.services.readings_service import merge_anomaly_scores_into_readings
 from src.dashboard.services.api_client import DashboardApiClient
+from src.dashboard.services.tz_normalize import (
+    align_bound_to_series,
+    normalize_series_tz,
+)
 
 # All dashboard reads go through the API (which holds warm DB connections)
 # instead of opening a fresh Supabase connection per query.
@@ -92,42 +96,51 @@ def apply_date_filter(
     is passed, start defaults to midnight and end defaults to 23:59:59 so the
     full calendar day is included.
     """
-    from datetime import datetime as _datetime
-
     if df.empty or start_date is None or end_date is None:
         return df
 
     work = df.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"])
-
-    # datetime is a subclass of date, so check for datetime first.
-    if isinstance(start_date, _datetime):
-        start = pd.to_datetime(start_date)
-    else:
-        start = pd.Timestamp(start_date)
-
-    if isinstance(end_date, _datetime):
-        end = pd.to_datetime(end_date)
-    else:
-        # date-only: extend to end of day so the full calendar day is included.
-        end = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
-
-    if work["timestamp"].dt.tz is not None:
-        start = start.tz_localize("UTC") if start.tzinfo is None else start
-        end = end.tz_localize("UTC") if end.tzinfo is None else end
+    # Align both sides to one tz state before comparing (see apply_datetime_filter).
+    work["timestamp"] = normalize_series_tz(pd.to_datetime(work["timestamp"]))
+    start = _parse_date_bound(start_date, is_end=False)
+    end = _parse_date_bound(end_date, is_end=True)
+    start = align_bound_to_series(start, work["timestamp"])
+    end = align_bound_to_series(end, work["timestamp"])
 
     filtered = work[(work["timestamp"] >= start) & (work["timestamp"] <= end)]
     if filtered.empty and not work.empty:
-        data_start = work["timestamp"].min()
-        data_end = work["timestamp"].max()
-        if show_warning:
-            st.warning(
-                "No readings in the selected date range. Showing all available data "
-                f"({data_start.strftime('%Y-%m-%d')} → {data_end.strftime('%Y-%m-%d')}). "
-                "Adjust **Date Range** in the sidebar or re-seed with `venv/bin/python run_seeds.py`."
-            )
+        _warn_empty_range(work, show_warning)
         return work
     return filtered
+
+
+def _parse_date_bound(value, *, is_end: bool) -> pd.Timestamp:
+    """Convert a date or datetime bound to a Timestamp.
+
+    datetime is a subclass of date, so it is checked first and used verbatim.
+    A date-only end bound is extended to 23:59:59 so the full calendar day is
+    included.
+    """
+    from datetime import datetime as _datetime
+
+    if isinstance(value, _datetime):
+        return pd.to_datetime(value)
+    if is_end:
+        return pd.Timestamp(value) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    return pd.Timestamp(value)
+
+
+def _warn_empty_range(work: pd.DataFrame, show_warning: bool) -> None:
+    """Warn (once) that the selected range matched nothing and all data is shown."""
+    if not show_warning:
+        return
+    data_start = work["timestamp"].min()
+    data_end = work["timestamp"].max()
+    st.warning(
+        "No readings in the selected date range. Showing all available data "
+        f"({data_start.strftime('%Y-%m-%d')} → {data_end.strftime('%Y-%m-%d')}). "
+        "Adjust **Date Range** in the sidebar or re-seed with `venv/bin/python run_seeds.py`."
+    )
 
 
 def clear_raw_cache() -> None:
@@ -327,28 +340,20 @@ def apply_datetime_filter(
     start_dt: pd.Timestamp,
     end_dt: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Filter by inclusive start/end datetime."""
+    """Filter by inclusive start/end datetime.
+
+    Both sides of the comparison are aligned to one tz state first: a tz-aware
+    Series compared against a tz-naive bound silently drops every row (a cause
+    of the 'only recent data shows' symptom), so bounds are localized to match
+    the data instead.
+    """
     if df.empty:
         return df
     work = df.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"])
-    data_is_tz_aware = work["timestamp"].dt.tz is not None
-    start_is_tz_aware = getattr(start_dt, "tzinfo", None) is not None
-    end_is_tz_aware = getattr(end_dt, "tzinfo", None) is not None
-    if data_is_tz_aware:
-        # Data has timezone → make bounds tz-aware (UTC)
-        if not start_is_tz_aware:
-            start_dt = pd.Timestamp(start_dt).tz_localize("UTC")
-        if not end_is_tz_aware:
-            end_dt = pd.Timestamp(end_dt).tz_localize("UTC")
-    else:
-        # Data is tz-naive → strip timezone from bounds
-        if start_is_tz_aware:
-            start_dt = pd.Timestamp(start_dt).tz_localize(None)
-        if end_is_tz_aware:
-            end_dt = pd.Timestamp(end_dt).tz_localize(None)
-    filtered = work[(work["timestamp"] >= start_dt) & (work["timestamp"] <= end_dt)]
-    return filtered
+    work["timestamp"] = normalize_series_tz(pd.to_datetime(work["timestamp"]))
+    start_dt = align_bound_to_series(pd.Timestamp(start_dt), work["timestamp"])
+    end_dt = align_bound_to_series(pd.Timestamp(end_dt), work["timestamp"])
+    return work[(work["timestamp"] >= start_dt) & (work["timestamp"] <= end_dt)]
 
 
 def _apply_x_range(

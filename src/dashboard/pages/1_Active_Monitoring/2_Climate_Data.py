@@ -13,7 +13,8 @@ from src.dashboard.components.charts import (
     plot_combined_sensors,
     plot_synced_sensor_grid,
     query_incidents,
-    query_sensor_readings,
+    query_sensor_readings_window,
+    query_sensor_timestamp_bounds,
 )
 from src.dashboard.components.color_manager import get_chart_color_manager
 from src.dashboard.components.global_sidebar import render_global_sidebar
@@ -52,9 +53,32 @@ _anomaly_threshold = st.session_state.get("anomaly_threshold", DEFAULT_ANOMALY_T
 if "sdetail_filter_col" not in st.session_state:
     st.session_state["sdetail_filter_col"] = None
 
+try:
+    _min_iso, _max_iso = query_sensor_timestamp_bounds(tenant, greenhouse)
+except Exception as exc:
+    st.error(
+        f"Could not load climate data — is the API server running? "
+        f"Details: {exc}"
+    )
+    st.stop()
+
+if not _min_iso or not _max_iso:
+    st.info("No data found. Upload a CSV with sensor readings via the Upload page.")
+    st.stop()
+
+_d_min = pd.Timestamp(_min_iso)
+_d_max = pd.Timestamp(_max_iso)
+
+# Bounds → timeline → window query (see Monitoring): pick the range, then load
+# exactly that window so the pickers span the full dataset, not just its tail.
+init_monitoring_session_state(tenant, greenhouse, _d_min, _d_max)
+timeline_start, timeline_end = render_timeline_controls(_d_min, _d_max)
+
 with st.spinner("Loading climate data…"):
     try:
-        df = query_sensor_readings(tenant, greenhouse)
+        df = query_sensor_readings_window(
+            tenant, greenhouse, timeline_start.isoformat(), timeline_end.isoformat()
+        )
     except Exception as exc:
         st.error(
             f"Could not load climate data — is the API server running? "
@@ -62,28 +86,17 @@ with st.spinner("Loading climate data…"):
         )
         st.stop()
 
-if df.empty:
-    st.info("No data found. Upload a CSV with sensor readings via the Upload page.")
-    st.stop()
-
-_available = get_climate_columns(df)
-if not _available:
-    st.info("No climate sensor columns found in the loaded data.")
-    st.stop()
-
-_ts_col = pd.to_datetime(df["timestamp"])
-_d_min = _ts_col.min()
-_d_max = _ts_col.max()
-
-init_monitoring_session_state(tenant, greenhouse, _d_min, _d_max)
-timeline_start, timeline_end = render_timeline_controls(_d_min, _d_max)
-
 df = apply_datetime_filter(df, timeline_start, timeline_end)
 if df.empty:
     st.warning(
         "No data in the selected window. "
         f"Available data: {_d_min} → {_d_max}."
     )
+    st.stop()
+
+_available = get_climate_columns(df)
+if not _available:
+    st.info("No climate sensor columns found in the loaded data.")
     st.stop()
 
 st.markdown("---")

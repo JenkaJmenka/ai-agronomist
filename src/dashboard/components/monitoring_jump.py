@@ -10,8 +10,10 @@ import streamlit as st
 from src.dashboard.components.charts import apply_datetime_filter
 from src.dashboard.components.global_sidebar import queue_sidebar_selection
 from src.dashboard.services.diagnosis_enricher import canonical_slot_for_column
+from src.dashboard.services.tz_normalize import strip_tz
 
 _PENDING_JUMP_KEY = "_pending_monitoring_jump"
+_PENDING_JUMP_COLUMNS_KEY = "_pending_monitoring_jump_columns"
 _MONITORING_PREFETCH_KEY = "_monitoring_prefetch"
 
 
@@ -54,75 +56,56 @@ def clear_monitoring_prefetch() -> None:
 def _consume_monitoring_prefetch(
     tenant_id: str,
     greenhouse_id: str,
-    time_start: pd.Timestamp,
-    time_end: pd.Timestamp,
-) -> dict[str, Any] | None:
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame | None:
+    """Return the prefetch df trimmed to [start, end] when it CONTAINS that window.
+
+    The handoff cache from an anomaly-table jump is one-shot: it is popped on
+    every lookup. It is only usable when its window fully covers the requested
+    window (containment), so a later, wider timeline selection re-queries the
+    API instead of showing a too-narrow slice.
+    """
     prefetch = st.session_state.pop(_MONITORING_PREFETCH_KEY, None)
     if not prefetch:
         return None
     if prefetch.get("tenant_id") != tenant_id or prefetch.get("greenhouse_id") != greenhouse_id:
         return None
-    if pd.Timestamp(prefetch["time_start"]) != time_start:
+    prefetch_start = strip_tz(pd.Timestamp(prefetch["time_start"]))
+    prefetch_end = strip_tz(pd.Timestamp(prefetch["time_end"]))
+    if not (prefetch_start <= strip_tz(start) and prefetch_end >= strip_tz(end)):
         return None
-    if pd.Timestamp(prefetch["time_end"]) != time_end:
+    df = prefetch.get("df")
+    if df is None or df.empty:
         return None
-    return prefetch
+    return apply_datetime_filter(df, start, end)
 
 
-def load_monitoring_readings(
+def load_monitoring_window(
     tenant_id: str,
     greenhouse_id: str,
-) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
-    """Load sensor data for Monitoring; prefer session prefetch or window query on jump."""
-    from src.dashboard.components.charts import (
-        query_sensor_readings,
-        query_sensor_readings_window,
-        query_sensor_timestamp_bounds,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Load sensor readings for [start, end].
+
+    Uses the one-shot session prefetch when it covers the requested window
+    (fast path after an anomaly-table jump); otherwise queries the readings
+    API for exactly the selected window so any timeline range re-queries the
+    server instead of filtering a stale landing frame.
+    """
+    from src.dashboard.components.charts import query_sensor_readings_window
+
+    prefetch = _consume_monitoring_prefetch(tenant_id, greenhouse_id, start, end)
+    if prefetch is not None:
+        return prefetch
+
+    return query_sensor_readings_window(
+        tenant_id,
+        greenhouse_id,
+        pd.Timestamp(start).isoformat(),
+        pd.Timestamp(end).isoformat(),
     )
-
-    pending = peek_pending_monitoring_jump()
-    if pending:
-        time_start = pd.Timestamp(pending["time_start"])
-        time_end = pd.Timestamp(pending["time_end"])
-
-        prefetch = _consume_monitoring_prefetch(
-            tenant_id, greenhouse_id, time_start, time_end
-        )
-        if prefetch is not None and not prefetch["df"].empty:
-            return (
-                prefetch["df"].copy(),
-                pd.Timestamp(prefetch["data_min"]),
-                pd.Timestamp(prefetch["data_max"]),
-            )
-
-        df = query_sensor_readings_window(
-            tenant_id,
-            greenhouse_id,
-            time_start.isoformat(),
-            time_end.isoformat(),
-        )
-        min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
-        if min_iso and max_iso:
-            data_min = pd.Timestamp(min_iso)
-            data_max = pd.Timestamp(max_iso)
-        elif not df.empty:
-            ts = pd.to_datetime(df["timestamp"])
-            data_min, data_max = ts.min(), ts.max()
-        else:
-            data_min, data_max = time_start, time_end
-        return df, data_min, data_max
-
-    # Landing load is a bounded recent window (C2); the timeline bounds come
-    # from the cheap min/max endpoint so navigation still spans full history.
-    df = query_sensor_readings(tenant_id, greenhouse_id)
-    if df.empty:
-        now = pd.Timestamp.utcnow().tz_localize(None)
-        return df, now, now
-    min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
-    ts = pd.to_datetime(df["timestamp"])
-    data_min = pd.Timestamp(min_iso) if min_iso else ts.min()
-    data_max = pd.Timestamp(max_iso) if max_iso else ts.max()
-    return df, data_min, data_max
 
 
 def _sync_monitor_timeline_pickers(start: pd.Timestamp, end: pd.Timestamp) -> None:
@@ -196,8 +179,14 @@ def queue_monitoring_jump(
     queue_sidebar_selection(tenant=tenant_id, greenhouse=greenhouse_id)
 
 
-def apply_pending_monitoring_jump(all_columns: list[str] | None = None) -> bool:
-    """Apply a queued jump after session init, before timeline/checkbox widgets."""
+def apply_pending_jump_window() -> bool:
+    """Apply a queued jump's WINDOW after session init, before the timeline widgets.
+
+    Sets the applied time range + anomaly highlights and syncs the pickers so
+    the timeline controls render the jump window. The checkbox/column selection
+    is deferred to apply_pending_jump_columns, which runs after the window data
+    (and thus the available sensor columns) is loaded.
+    """
     pending = st.session_state.pop(_PENDING_JUMP_KEY, None)
     if not pending:
         return False
@@ -209,16 +198,31 @@ def apply_pending_monitoring_jump(all_columns: list[str] | None = None) -> bool:
     st.session_state["monitoring_anomaly_highlights"] = pending["highlights"]
     _sync_monitor_timeline_pickers(pending["time_start"], pending["time_end"])
 
-    columns = all_columns or []
-    highlight_cols = pending.get("highlight_columns") or []
-    if columns:
-        if highlight_cols:
-            apply_sensor_checkbox_selection(highlight_cols, columns)
-        else:
-            row = pending["highlights"][0] if pending["highlights"] else {}
-            resolved = resolve_highlight_columns(row, columns)
-            apply_sensor_checkbox_selection(resolved or columns[:2], columns)
+    st.session_state[_PENDING_JUMP_COLUMNS_KEY] = {
+        "highlight_columns": pending.get("highlight_columns") or [],
+        "highlights": pending["highlights"],
+    }
     return True
+
+
+def apply_pending_jump_columns(all_columns: list[str]) -> None:
+    """Apply a queued jump's channel selection once the sensor columns are known.
+
+    Must run before the Monitoring checkboxes render so the `cb_<col>` keys are
+    seeded. No-op when there is no pending jump.
+    """
+    stashed = st.session_state.pop(_PENDING_JUMP_COLUMNS_KEY, None)
+    if not stashed or not all_columns:
+        return
+
+    highlight_cols = stashed.get("highlight_columns") or []
+    if highlight_cols:
+        apply_sensor_checkbox_selection(highlight_cols, all_columns)
+        return
+    highlights = stashed.get("highlights") or []
+    row = highlights[0] if highlights else {}
+    resolved = resolve_highlight_columns(row, all_columns)
+    apply_sensor_checkbox_selection(resolved or all_columns[:2], all_columns)
 
 
 _DISPLAY_COLUMN_ORDER = (
