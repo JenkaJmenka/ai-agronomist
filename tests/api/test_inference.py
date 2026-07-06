@@ -300,12 +300,16 @@ def test_inference_upload_csv(test_client, patch_detector):
     )
     import io
     csv_bytes = io.BytesIO(csv_content.encode("utf-8"))
-    
-    response = test_client.post(
-        "/api/inference/upload",
-        files={"file": ("test_inference.csv", csv_bytes, "text/csv")},
-        data={"tenant_id": "tenant_1", "greenhouse_id": "house_alpha"}
-    )
+
+    with patch(
+        "src.api.services.upload_checkpoint.should_train_cold_start",
+        return_value=False,
+    ):
+        response = test_client.post(
+            "/api/inference/upload",
+            files={"file": ("test_inference.csv", csv_bytes, "text/csv")},
+            data={"tenant_id": "tenant_1", "greenhouse_id": "house_alpha"},
+        )
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["tenant_id"] == "tenant_1"

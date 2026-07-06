@@ -30,12 +30,13 @@ async def create_job(
     greenhouse_id: Optional[str] = None,
     total_portions: Optional[int] = None,
     payload: Optional[dict[str, Any]] = None,
+    status: str = "pending",
 ) -> Job:
     job = Job(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         job_type=job_type,
-        status="pending",
+        status=status,
         total_portions=total_portions,
         payload=payload,
     )
@@ -195,6 +196,24 @@ async def prune_portion_results(db: AsyncSession, job_id: str) -> None:
         .where(table.c.job_id == job_id)
         .values(result=None, updated_at=datetime.now(timezone.utc))
     )
+    await db.commit()
+
+
+async def update_job(
+    db: AsyncSession,
+    job_id: str,
+    *,
+    status: Optional[str] = None,
+    payload: Optional[dict[str, Any]] = None,
+) -> None:
+    """Patch job status and/or payload (e.g. after background cold-start training)."""
+    table = Job.__table__
+    values: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+    if status is not None:
+        values["status"] = status
+    if payload is not None:
+        values["payload"] = payload
+    await db.execute(update(table).where(table.c.id == job_id).values(**values))
     await db.commit()
 
 

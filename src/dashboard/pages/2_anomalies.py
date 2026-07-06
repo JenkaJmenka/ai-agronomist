@@ -21,6 +21,7 @@ from src.dashboard.services.anomalies_page_data import (
     resolve_data_bounds,
     resolve_window_dataframe,
 )
+from src.dashboard.components.model_registry import render_model_registry
 from src.dashboard.components.global_sidebar import (
     queue_sidebar_selection,
     render_global_sidebar,
@@ -160,7 +161,7 @@ def _queue_portioned_upload(
         "queued_at": time.time(),
     }
     st.toast(
-        f"Upload queued — processing {accepted.get('portion_count', '?')} portions",
+        "Upload queued — training and portion processing run in the background",
         icon="⏳",
     )
 
@@ -223,9 +224,14 @@ def _render_pending_upload_tracker_body() -> None:
 
     pct = float(job.get("progress_pct") or 0.0) if job else 0.0
     status = job.get("status", "queued") if job else "queued"
+    if status == "preparing":
+        progress_text = "Preparing upload (training model and queueing portions)…"
+        pct = 0.0
+    else:
+        progress_text = f"Processing upload in portions… {pct:.0f}% ({status})"
     st.progress(
         min(int(pct), 100),
-        text=f"Processing upload in portions… {pct:.0f}% ({status})",
+        text=progress_text,
     )
 
 
@@ -450,6 +456,10 @@ def _render_upload_section(
         if st.session_state.get("debug_cache"):
             with st.expander("Cache stats", expanded=False):
                 st.json(st.session_state.get("_cache_stats", {}))
+
+    with st.expander("Model registry", expanded=False):
+        registry_tenant = st.session_state.get("anomaly_upload_tenant") or tenant
+        render_model_registry(registry_tenant, api_url=API_URL)
 
 
 def _make_feedback_handler(

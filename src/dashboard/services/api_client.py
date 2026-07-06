@@ -167,7 +167,10 @@ class DashboardApiClient:
                 "train_model": str(train_model).lower(),
             },
             headers={k: v for k, v in self._headers().items() if k != "Content-Type"},
-            timeout=120,
+            timeout=(
+                int(os.getenv("UPLOAD_QUEUE_CONNECT_TIMEOUT", "30")),
+                int(os.getenv("UPLOAD_QUEUE_TIMEOUT", "300")),
+            ),
         )
         raise_for_status_with_detail(resp)
         return resp.json()

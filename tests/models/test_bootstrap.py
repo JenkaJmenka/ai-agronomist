@@ -14,6 +14,7 @@ from src.models.bootstrap import (
     _compute_physics_flags,
     _df_to_array,
     _extract_timestamps,
+    _load_and_resample,
 )
 
 _SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
@@ -34,6 +35,26 @@ def _write_csv(path, rows: int, mutate=None) -> str:
         mutate(df)
     df.to_csv(path)
     return str(path)
+
+
+class TestLoadAndResample:
+    def test_skips_malformed_csv_lines(self, tmp_path):
+        rows = [
+            "timestamp,temperature,humidity,co2,light",
+            "2024-01-01 00:00:00,22,65,400,500",
+            "2024-01-01 00:05:00,23,66,401,501",
+            "2024-01-01 00:10:00,24,67,402,502,extra,fields,here",
+        ]
+        for i in range(3, 200):
+            hour, minute = divmod(i * 5, 60)
+            rows.append(f"2024-01-02 {hour:02d}:{minute:02d}:00,22,65,400,500")
+        path = tmp_path / "malformed.csv"
+        path.write_text("\n".join(rows))
+
+        df = _load_and_resample(str(path))
+
+        assert list(df.columns) == _SENSOR_COLS
+        assert len(df) > 0
 
 
 class TestPass1:

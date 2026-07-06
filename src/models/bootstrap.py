@@ -208,9 +208,54 @@ class Pass2BootstrapDetector:
 # ---------------------------------------------------------------------------
 
 
+def _prepare_raw_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+    """Rename pandas index-export first column to timestamp when needed."""
+    from src.vendors.csv_adapter import TIMESTAMP_COL
+
+    if chunk.columns.empty:
+        return chunk
+    first = chunk.columns[0]
+    if first == TIMESTAMP_COL:
+        return chunk
+    if first == "" or str(first).startswith("Unnamed"):
+        return chunk.rename(columns={first: TIMESTAMP_COL})
+    return chunk
+
+
 def _load_and_resample(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+    from src.vendors.csv_adapter import CSVAdapter, TIMESTAMP_COL, pandas_csv_reader_kwargs
+
+    adapter = CSVAdapter({"filepath": csv_path})
+    adapter.connect()
+    csv_props = adapter._csv_props
+    pieces: list[pd.DataFrame] = []
+    total_raw = 0
+
+    try:
+        reader = pd.read_csv(
+            csv_path,
+            chunksize=5000,
+            **pandas_csv_reader_kwargs(csv_props),
+        )
+        for raw_chunk in reader:
+            if raw_chunk.empty:
+                continue
+            total_raw += len(raw_chunk)
+            raw_chunk = _prepare_raw_chunk(raw_chunk)
+            try:
+                normalized = adapter.normalize(raw_chunk)
+                pieces.append(normalized.set_index(TIMESTAMP_COL))
+            except Exception:
+                continue
+    except pd.errors.EmptyDataError as exc:
+        raise ValueError("Uploaded CSV contains no valid data.") from exc
+
+    if not pieces:
+        raise ValueError("Uploaded CSV contains no valid data.")
+
+    df = pd.concat(pieces).sort_index()
     df.index = pd.to_datetime(df.index, utc=True)
+    df = df[~df.index.duplicated(keep="last")]
     df = df.resample(BOOTSTRAP_RESAMPLE_INTERVAL).mean()
     for col in _SENSOR_COLS:
         if col not in df.columns:

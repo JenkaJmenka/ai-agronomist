@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from src.api.schemas.sensor_data import (
     InferenceRequest,
     InferenceResponse,
@@ -8,14 +8,16 @@ from src.api.services.cold_run_upload import (
     EmptyCsvError,
     run_cold_run_upload,
 )
-from src.api.services.cold_start_training import (
-    ColdStartTrainResult,
-    should_train_cold_start,
-    train_cold_start_from_csv,
-)
 from src.models.bootstrap import InsufficientDataError
-from src.api.services.upload_producer import produce_upload_portions
+from src.api.services.detector_cache import clear_detector_cache, get_cached_detector
+from src.api.services.upload_checkpoint import (
+    ColdStartTrainingError,
+    attach_training_meta,
+    resolve_upload_checkpoint,
+)
+from src.api.services.upload_async_runner import run_upload_async_pipeline
 from src.api.schemas.jobs import UploadJobAcceptedResponse
+from src.db.jobs import create_job
 from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -32,8 +34,7 @@ import os
 import logging
 
 from src.vendors.csv_adapter import CSVAdapter
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, MAX_PIPELINE_CACHE_SIZE
-from src.utils.lru import LRUDict
+from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM
 from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
@@ -41,76 +42,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_BASELINE_CACHE_KEY = "__baseline__"
-# Single eviction policy for loaded detectors (AnomalyDetector no longer keeps
-# its own class-level cache); sized by MAX_PIPELINE_CACHE_SIZE.
-_detector_cache: LRUDict = LRUDict(max_size=MAX_PIPELINE_CACHE_SIZE)
-
-
-def get_cached_detector(checkpoint_path: Optional[str]) -> AnomalyDetector:
-    """
-    LRU-cached AnomalyDetector factory to prevent unbounded model memory growth
-    and reuse loaded instances across requests.
-    """
-    key = checkpoint_path or _BASELINE_CACHE_KEY
-    try:
-        return _detector_cache[key]
-    except KeyError:
-        detector = AnomalyDetector(checkpoint_path=checkpoint_path)
-        _detector_cache[key] = detector
-        return detector
-
-
-def clear_detector_cache() -> None:
-    """Reset the detector cache (primarily for tests)."""
-    _detector_cache.data.clear()
-    _detector_cache.usage.clear()
-
-
-async def _resolve_upload_checkpoint(
-    db: AsyncSession,
-    tenant_id: str,
-    tmp_path: str,
-    train_model: bool,
-) -> tuple[str | None, bool, str | None, str | None]:
-    """Return (checkpoint_path, model_trained, model_id, training_skipped_reason)."""
-    registry = ModelRegistry(db)
-    active = await registry.get_active_model(tenant_id)
-    has_active = active is not None
-
-    if not should_train_cold_start(force_train=train_model, has_active_model=has_active):
-        checkpoint = active["checkpoint_path"] if active else None
-        return checkpoint, False, None, "active_model_exists"
-
-    try:
-        train_result: ColdStartTrainResult = await train_cold_start_from_csv(
-            db, tenant_id, tmp_path
-        )
-    except InsufficientDataError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Cold-start training failed") from exc
-
-    clear_detector_cache()
-    return train_result.checkpoint_path, True, train_result.model_id, None
-
-
-def _attach_training_meta(
-    response: UploadInferenceResponse,
-    *,
-    model_trained: bool,
-    model_id: str | None,
-    training_skipped_reason: str | None,
-) -> UploadInferenceResponse:
-    return response.model_copy(
-        update={
-            "model_trained": model_trained,
-            "model_id": model_id,
-            "training_skipped_reason": training_skipped_reason,
-        }
-    )
 
 @router.post("/inference", response_model=InferenceResponse)
 async def run_inference(
@@ -262,11 +193,22 @@ async def run_inference_from_csv(
             model_trained,
             model_id_used,
             training_skipped_reason,
-        ) = await _resolve_upload_checkpoint(db, tenant_id, tmp_path, train_model)
-    except HTTPException:
+        ) = await resolve_upload_checkpoint(db, tenant_id, tmp_path, train_model)
+    except InsufficientDataError as exc:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-        raise
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ColdStartTrainingError as exc:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if model_trained:
+        clear_detector_cache()
 
     try:
         checkpoint_path = await resolve_checkpoint(db, checkpoint_path)
@@ -288,7 +230,7 @@ async def run_inference_from_csv(
             include_embeddings=include_embeddings,
             persist_db=db if persist_data else None,
         )
-        return _attach_training_meta(
+        return attach_training_meta(
             response,
             model_trained=model_trained,
             model_id=model_id_used,
@@ -316,6 +258,7 @@ async def run_inference_from_csv(
     status_code=202,
 )
 async def run_inference_from_csv_async(
+    background_tasks: BackgroundTasks,
     tenant_id: str = Form(...),
     greenhouse_id: str = Form(default="default"),
     file: UploadFile = File(...),
@@ -325,9 +268,9 @@ async def run_inference_from_csv_async(
 ):
     """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
 
-    The file is parsed once and published to RabbitMQ portion-by-portion; the
-    worker service scores and persists each portion and finalizes the
-    file-level threshold when all portions are done.
+    Returns 202 immediately after the file is saved. Cold-start training (when
+    needed) and portion publishing run in a background task so large uploads
+    do not hit HTTP client timeouts.
     """
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
@@ -340,62 +283,36 @@ async def run_inference_from_csv_async(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write uploaded file: {e}")
 
-    registry = ModelRegistry(db)
-    active_model_info = await registry.get_active_model(tenant_id)
-    checkpoint_path = active_model_info["checkpoint_path"] if active_model_info else None
-    model_trained = False
-    model_id_used: str | None = None
-    training_skipped_reason: str | None = None
-
     try:
-        (
-            checkpoint_path,
-            model_trained,
-            model_id_used,
-            training_skipped_reason,
-        ) = await _resolve_upload_checkpoint(db, tenant_id, tmp_path, train_model)
-    except HTTPException:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
-
-    adapter = CSVAdapter({"filepath": tmp_path})
-    try:
-        adapter.connect()
-        job_id, portion_count = await produce_upload_portions(
-            tmp_path=tmp_path,
-            adapter=adapter,
-            db=db,
+        job = await create_job(
+            db,
             tenant_id=tenant_id,
+            job_type="upload_csv",
             greenhouse_id=greenhouse_id,
-            checkpoint_path=checkpoint_path,
-            persist_data=persist_data,
-            filename=file.filename,
-            model_trained=model_trained,
-            model_id=model_id_used,
-            training_skipped_reason=training_skipped_reason,
+            status="preparing",
+            payload={
+                "filename": file.filename,
+                "persist_data": persist_data,
+                "train_model": train_model,
+            },
         )
-        return UploadJobAcceptedResponse(
-            job_id=job_id,
-            portion_count=portion_count,
-            poll_url=f"/api/jobs/{job_id}",
-        )
-    except EmptyCsvError as e:
-        raise HTTPException(status_code=400, detail=f"Uploaded CSV contains no valid data: {e}") from e
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"Data validation failed: {e}") from e
     except Exception as e:
-        detail = str(e)
-        if "tokenizing" in detail.lower() or "parser" in detail.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid CSV format: {detail}. "
-                    "Re-export with comma delimiters and quote text fields that contain commas."
-                ),
-            ) from e
-        raise HTTPException(status_code=400, detail=f"Could not queue upload: {detail}") from e
-    finally:
-        adapter.disconnect()
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create upload job: {e}") from e
+
+    background_tasks.add_task(
+        run_upload_async_pipeline,
+        job_id=job.id,
+        tmp_path=tmp_path,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        persist_data=persist_data,
+        filename=file.filename,
+        train_model=train_model,
+    )
+    return UploadJobAcceptedResponse(
+        job_id=job.id,
+        portion_count=0,
+        poll_url=f"/api/jobs/{job.id}",
+    )

@@ -20,7 +20,7 @@ from src.api.services.cold_run_upload import (
     _strip_raw_records,
 )
 from src.config import COLD_RUN_STAT_ROLLING_WINDOW, UPLOAD_PORTION_ROWS
-from src.db.jobs import create_job, set_total_portions
+from src.db.jobs import create_job, get_job, set_total_portions, update_job
 from src.mq.publisher import publish_json
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE, UPLOAD_PORTIONS_QUEUE
@@ -63,8 +63,12 @@ async def produce_upload_portions(
     model_trained: bool = False,
     model_id: str | None = None,
     training_skipped_reason: str | None = None,
+    existing_job_id: str | None = None,
 ) -> tuple[str, int]:
     """Create the job, publish one message per portion, stamp total_portions.
+
+    When *existing_job_id* is set the job was created earlier (async upload
+    ack); payload and status are updated here before portions are published.
 
     Returns (job_id, portion_count).
     """
@@ -73,22 +77,33 @@ async def produce_upload_portions(
         tmp_path, portion_rows, csv_props, adapter
     )
 
-    job = await create_job(
-        db,
-        tenant_id=tenant_id,
-        job_type="upload_csv",
-        greenhouse_id=greenhouse_id,
-        payload={
-            "filename": filename,
-            "persist_data": persist_data,
-            "checkpoint_path": checkpoint_path,
-            "imputed_channels": imputed_channels,
-            "adaptive_ranges": [list(r) for r in adaptive_ranges],
-            "model_trained": model_trained,
-            "model_id": model_id,
-            "training_skipped_reason": training_skipped_reason,
-        },
-    )
+    payload = {
+        "filename": filename,
+        "persist_data": persist_data,
+        "checkpoint_path": checkpoint_path,
+        "imputed_channels": imputed_channels,
+        "adaptive_ranges": [list(r) for r in adaptive_ranges],
+        "model_trained": model_trained,
+        "model_id": model_id,
+        "training_skipped_reason": training_skipped_reason,
+    }
+
+    if existing_job_id:
+        job = await get_job(db, existing_job_id)
+        if job is None:
+            raise ValueError(f"Unknown job {existing_job_id!r}")
+        merged_payload = {**(job.payload or {}), **payload}
+        await update_job(db, existing_job_id, payload=merged_payload, status="pending")
+        job_id = existing_job_id
+    else:
+        job = await create_job(
+            db,
+            tenant_id=tenant_id,
+            job_type="upload_csv",
+            greenhouse_id=greenhouse_id,
+            payload=payload,
+        )
+        job_id = job.id
 
     portion_idx = 0
     prev_normalized_tail: list[dict[str, Any]] = []
@@ -108,7 +123,7 @@ async def produce_upload_portions(
         raw_rows = _raw_records(raw_df) if not raw_df.empty else []
 
         message = UploadPortionMessage(
-            job_id=job.id,
+            job_id=job_id,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
             portion_idx=portion_idx,
@@ -129,9 +144,9 @@ async def produce_upload_portions(
         if raw_rows:
             prev_raw_tail = (prev_raw_tail + raw_rows)[-COLD_RUN_STAT_ROLLING_WINDOW:]
 
-    completed, failed = await set_total_portions(db, job.id, portion_idx)
+    completed, failed = await set_total_portions(db, job_id, portion_idx)
     if portion_idx > 0 and completed + failed >= portion_idx:
         # Workers beat the producer to the finish line — fire finalize here.
-        await publish_json(UPLOAD_FINALIZE_QUEUE, UploadFinalizeMessage(job_id=job.id))
+        await publish_json(UPLOAD_FINALIZE_QUEUE, UploadFinalizeMessage(job_id=job_id))
 
-    return job.id, portion_idx
+    return job_id, portion_idx

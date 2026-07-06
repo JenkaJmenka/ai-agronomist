@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import logging
 
-from src.api.routes.inference import clear_detector_cache
+from src.api.services.detector_cache import clear_detector_cache
 from src.db.session import get_db
 from src.models.model_registry import ModelRegistry
 
