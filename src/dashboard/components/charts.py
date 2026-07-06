@@ -96,42 +96,51 @@ def apply_date_filter(
     is passed, start defaults to midnight and end defaults to 23:59:59 so the
     full calendar day is included.
     """
-    from datetime import datetime as _datetime
-
     if df.empty or start_date is None or end_date is None:
         return df
 
     work = df.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"])
-
-    # datetime is a subclass of date, so check for datetime first.
-    if isinstance(start_date, _datetime):
-        start = pd.to_datetime(start_date)
-    else:
-        start = pd.Timestamp(start_date)
-
-    if isinstance(end_date, _datetime):
-        end = pd.to_datetime(end_date)
-    else:
-        # date-only: extend to end of day so the full calendar day is included.
-        end = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
-
-    if work["timestamp"].dt.tz is not None:
-        start = start.tz_localize("UTC") if start.tzinfo is None else start
-        end = end.tz_localize("UTC") if end.tzinfo is None else end
+    # Align both sides to one tz state before comparing (see apply_datetime_filter).
+    work["timestamp"] = normalize_series_tz(pd.to_datetime(work["timestamp"]))
+    start = _parse_date_bound(start_date, is_end=False)
+    end = _parse_date_bound(end_date, is_end=True)
+    start = align_bound_to_series(start, work["timestamp"])
+    end = align_bound_to_series(end, work["timestamp"])
 
     filtered = work[(work["timestamp"] >= start) & (work["timestamp"] <= end)]
     if filtered.empty and not work.empty:
-        data_start = work["timestamp"].min()
-        data_end = work["timestamp"].max()
-        if show_warning:
-            st.warning(
-                "No readings in the selected date range. Showing all available data "
-                f"({data_start.strftime('%Y-%m-%d')} → {data_end.strftime('%Y-%m-%d')}). "
-                "Adjust **Date Range** in the sidebar or re-seed with `venv/bin/python run_seeds.py`."
-            )
+        _warn_empty_range(work, show_warning)
         return work
     return filtered
+
+
+def _parse_date_bound(value, *, is_end: bool) -> pd.Timestamp:
+    """Convert a date or datetime bound to a Timestamp.
+
+    datetime is a subclass of date, so it is checked first and used verbatim.
+    A date-only end bound is extended to 23:59:59 so the full calendar day is
+    included.
+    """
+    from datetime import datetime as _datetime
+
+    if isinstance(value, _datetime):
+        return pd.to_datetime(value)
+    if is_end:
+        return pd.Timestamp(value) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    return pd.Timestamp(value)
+
+
+def _warn_empty_range(work: pd.DataFrame, show_warning: bool) -> None:
+    """Warn (once) that the selected range matched nothing and all data is shown."""
+    if not show_warning:
+        return
+    data_start = work["timestamp"].min()
+    data_end = work["timestamp"].max()
+    st.warning(
+        "No readings in the selected date range. Showing all available data "
+        f"({data_start.strftime('%Y-%m-%d')} → {data_end.strftime('%Y-%m-%d')}). "
+        "Adjust **Date Range** in the sidebar or re-seed with `venv/bin/python run_seeds.py`."
+    )
 
 
 def clear_raw_cache() -> None:
