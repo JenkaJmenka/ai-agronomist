@@ -563,7 +563,7 @@ def render_upload_status_bar(saved_inf: dict | None) -> None:
 def _lstm_chart_message(text: str) -> go.Figure:
     fig = go.Figure()
     fig.update_layout(
-        xaxis_title="Time",
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
         yaxis_title="Anomaly Score",
         height=420,
         annotations=[

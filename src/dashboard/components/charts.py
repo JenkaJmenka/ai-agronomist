@@ -662,6 +662,7 @@ def _timeline_message_figure(message: str, *, title: str = "Anomaly Score Timeli
         xaxis_title="Time",
         yaxis_title="Anomaly score",
         height=420,
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
         annotations=[
             dict(
                 text=message,
