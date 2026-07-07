@@ -1,165 +1,158 @@
 # Handover — Upload & Processing Fixes
 
 **Branch:** `wip/upload-fixes` (pushed to `origin`, remote `JenkaJmenka/ai-agronomist`)
-**Last commit at handover:** `40d7f73`
+**Last commit at handover:** `b5040fb`
 **Date:** 2026-07-07
 
 ---
 
-## 1. Goal
+## 1. Goal (recap)
 
-Two user-facing asks, plus a production incident:
-
-1. **Fix uploading & processing** — an upload showed **455 anomalies detected** on the
-   Anomaly Detection page, but `sensor_readings` and `raw_readings` were **empty in the
-   database**. Data is being analyzed but not persisted (or the job never truly completed).
-2. **Improve performance** as originally planned — large-CSV uploads must not hit HTTP
-   timeouts; processing is portioned and runs off the request path.
-
-Earlier feature work (already done, see commits below): cold-start training on upload +
-tenant model registry management (list / select / delete / delete-all).
+1. **Fix uploading & processing** — an upload showed **455 anomalies detected** while
+   `sensor_readings` / `raw_readings` were **empty in the database** (data analyzed but
+   not persisted, or the job never truly completed).
+2. **Improve performance** — large-CSV uploads must not hit HTTP timeouts; processing is
+   portioned and runs off the request path.
 
 ---
 
-## 2. Current state of the branch
+## 2. What this session did
 
-Working tree is **clean**; everything is committed. `main` and `wip/upload-fixes` both
-point at `40d7f73`.
-
-Recent commits (newest first):
+All work below is committed and **pushed** to `origin/wip/upload-fixes`.
 
 | Commit    | Summary |
 |-----------|---------|
-| `40d7f73` | fix(upload): recover upload jobs orphaned in `preparing` by restarts |
-| `88a9b33` | chore(models): refresh `pipeline_cust_model` checkpoint from local run |
-| `36b2d4d` | fix(upload): NameError in async pipeline (`_resolve_upload_checkpoint` leftover) |
-| `5d6fb23` | chore: gitignore cold-start bootstrap outputs and artifact cache |
-| `03202e3` | feat(upload): background async upload pipeline + opportunistic cold-start training |
+| `b5040fb` | feat(upload): move cold-start prep onto durable worker (§5.1) |
+| `df10e0e` | fix(upload): fail loud when persist requested but 0 rows written (§5.2 + §5.3) |
+| `fedbc56` | docs: add upload/processing handover (previous session) |
+
+Full test suite: **1800 passed, 12 skipped, 1 xfailed**, clean collection, no regressions.
+
+### 2a. §5.2 + §5.3 — a 0-row persist can no longer be silent (`df10e0e`)
+- **Worker** (`src/workers/upload_consumer.py`, `handle_upload_finalize`): when `persist_data`
+  is true and data was processed (`stat_carry.total_rows > 0`) but 0 rows reached
+  `sensor_readings`/`raw_readings`, the job is marked **`partially_failed`** with an
+  actionable `error`, instead of `completed`.
+- **Dashboard** (`src/dashboard/components/inference_results.py`, `render_upload_status_bar`):
+  shows an **error banner** when a terminal upload persisted 0 rows despite requesting
+  persistence (gated on the row-count keys being present, so legacy job payloads don't
+  false-fire).
+- Tests: end-to-end persist writes rows + completes clean; the incident shape →
+  `partially_failed`; single-table partial writes stay `completed`; `partially_failed`
+  jobs stay displayable.
+
+### 2b. §5.1 — cold-start upload prep moved onto the durable worker (`b5040fb`)
+Design doc: **`DESIGN_upload_prepare_on_worker.md`** (repo root).
+- **New `upload.prepare` queue** + `UploadPrepareMessage` (declared first in `MAIN_QUEUES`,
+  so it inherits retry/DLQ wiring).
+- **CSV transport**: the uploaded CSV crosses the API→worker boundary via the existing
+  `model_artifacts` bytea store — new `put_upload_blob` / `resolve_upload_blob` /
+  `delete_upload_blob` in `src/models/artifact_store.py`, keyed `uploads/<job_id>`
+  (Railway containers share no filesystem). **No DB migration.** bytea confirmed fine for
+  the real workload (largest known CSV ≈ 13 MB / 110K rows; dashboard already caps at 50 MB).
+- **New worker handler** `handle_upload_prepare` (`src/workers/upload_prepare_consumer.py`,
+  prefetch=1, `MQ_PREPARE_HANDLER_TIMEOUT_SECONDS=1800`): idempotent claim/resume
+  (`preparing→running` via `try_transition`; a crashed attempt resumes and **skips
+  retraining** via the persisted `checkpoint_path`), cold-start train **off the event loop**
+  (heartbeat-safe), `produce_upload_portions`, stamp `total_portions`, delete the blob.
+- **Route** (`POST /inference/upload-async`): store blob → publish prepare → 202.
+  `BackgroundTasks` removed; `upload_async_runner.py` **deleted**.
+- **`fail_stale_preparing_jobs`** (`src/db/jobs.py`) is now a **time-based, blob-aware
+  backstop** (`STALE_PREPARE_MINUTES=45`) instead of failing every `preparing` job at API
+  startup — because prep is now legitimately durable. `try_transition` bumps `updated_at`,
+  so an actively-progressing prep is never swept mid-run.
+- **Error semantics**: deterministic errors (bad/empty CSV, insufficient data, cold-start
+  failure) fail the job + delete the blob + ACK; transient errors ride retry/DLQ and
+  **preserve** the blob so a resumed attempt can re-read it.
+- Tests: rewritten async-route test (stores blob, publishes prepare, 202, no in-process
+  training); prepare-handler unit tests (happy path, resume-without-retrain,
+  deterministic/transient split, blob lifecycle, missing-blob, terminal hook); worker-binding
+  test updated for the 5th queue.
 
 ---
 
-## 3. The open bug — "455 anomalies but empty tables"
+## 3. Diagnosis of the original incident (RESOLVED)
 
-### What we PROVED this session
-`persist_readings_chunk` (the exact function the worker uses to write rows) is **correct**.
-Driving it directly against a fresh SQLite DB with valid normalized rows wrote to **both**
-tables:
+The decisive SQL (§4 of the prior handover) was run against Supabase and disambiguated it:
 
-```
-persist_readings_chunk returned (s_ins,s_upd,r_ins,r_upd): (2, 0, 2, 0)
-sensor_readings rows: 2
-raw_readings rows: 2
-```
+| Jobs | Result | Meaning |
+|------|--------|---------|
+| **07-05 ×2** | `completed`, 22/22 portions, `persist=true`, **but `sensor_readings` empty** | **Stale deployment.** These ran on 2026-07-05, ~24h *before* the async persist pipeline (`03202e3`, committed 2026-07-06 17:38) existed. The "455 anomalies, empty tables" you saw is old code that no longer exists in the branch — not reproducible against HEAD. |
+| **07-06 ×2** | `failed`, `total_portions=NULL` | Died during in-process "preparing" before portions were enqueued → the §5.1 redeploy-kills-BackgroundTasks problem. |
+| **07-06 ×1** | `preparing`, `total_portions=NULL` | Orphaned mid-prep (swept by the old startup sweep). |
 
-So the write path is not the bug. Anomaly scoring (455) is produced only by worker-side
-`finalize_scores`, which means a worker DID run finalize for *some* job.
+`SELECT tenant_id, greenhouse_id, count(*) FROM sensor_readings` → **no rows** (empty across
+all tenants — not a read-side filter mismatch).
 
-### Therefore the empty tables can only be one of:
-1. The job that produced 455 ran with **`persist_data = false`** (or the 455 is a **stale
-   sync analysis result** cached from an earlier "analysis-only" upload) → the persist
-   branch in `handle_upload_portion` (`if msg.persist_data:`) never executed.
-2. The async job **never actually completed on the worker** (matches earlier job
-   `ebfbcbd4`, which polled ~80× without ever reaching a terminal state). Nothing was
-   written; the visible 455 is leftover from a previous upload.
-
-### Known facts
-- Worker service on Railway **is running** (user confirmed).
-- Dashboard defaults `Load data into platform = True` → `persist_data=true` on upload
-  (`src/dashboard/pages/2_anomalies.py`, toggle `inf_load_data`, default `value=True`).
-- `persist_data` is threaded straight through: route → `run_upload_async_pipeline` →
-  `produce_upload_portions(persist_data=...)` → `UploadPortionMessage.persist_data`.
-- Table names: `sensor_readings`, `raw_readings` (user's "sensor data" = `sensor_readings`).
+**Conclusion:** the empty-tables incident was old deployed behavior; the genuinely-current
+bug was jobs dying in `preparing` (now fixed by §5.1). The current branch's persist path
+(`persist_readings_chunk` + upsert) is correct — for non-empty valid rows it either writes
+or raises (which would fail the portion). §5.2 now makes any *future* 0-row persist loud.
 
 ---
 
-## 4. DECISIVE next step (blocks the fix direction)
+## 4. Immediate to-do for whoever picks this up
 
-Run this against the Railway Postgres (Query tab) — it pins the ground truth:
+1. **Deploy `wip/upload-fixes`.** Deploy order matters: **worker first** (so it is consuming
+   `upload.prepare`), **then the API** (which starts publishing). No DB migration.
+2. **Validate against prod.** Upload a large CSV (>20000 rows; the ≈13 MB / 110K-row file is
+   ideal) with **Load data into platform** on, then re-run:
+   ```sql
+   SELECT status, payload->>'persist_data' AS persist, total_portions,
+          completed_portions, failed_portions, created_at
+   FROM jobs WHERE job_type='upload_csv' ORDER BY created_at DESC LIMIT 5;
 
-```sql
-SELECT status, payload->>'persist_data' AS persist, total_portions,
-       completed_portions, failed_portions, created_at
-FROM jobs WHERE job_type='upload_csv' ORDER BY created_at DESC LIMIT 5;
-```
-
-Interpretation:
-
-| Result | Meaning | Fix |
-|--------|---------|-----|
-| `persist='false'` on the relevant job | Persist was never requested for that job | Plumbing is fine; verify the dashboard toggle state / educate. Add a guard (see §5). |
-| `status` not in (`completed`,`partially_failed`,`failed`) | Async job never finished on worker | Reliability fix — see §5 root cause. |
-| `status='completed'`, `persist='true'`, counts look full | Rows *should* exist | Re-check tenant/greenhouse filter; check `apply_anomaly_scores` UPDATE targets. |
-
-Also useful:
-```sql
-SELECT tenant_id, greenhouse_id, count(*) FROM sensor_readings GROUP BY 1,2;
-```
-
----
-
-## 5. Architectural root cause & recommended fix
-
-All real processing depends on a separately-running **worker**, and **cold-start training
-runs in the API's in-process `BackgroundTasks`**. This is fragile:
-
-- A Railway redeploy kills the in-process training task **and** the temp CSV mid-run →
-  job stuck in `preparing` (mitigated by `fail_stale_preparing_jobs` startup sweep, but
-  the upload still fails silently from the user's view).
-- If the worker is down or slow, portions never get scored/persisted and **no error is
-  surfaced** — you get "analysis appears, DB empty, no explanation."
-
-### Recommended durable fixes (in priority order)
-1. **Move cold-start training onto the worker** (like retrain already is) via a durable
-   RabbitMQ job, so it survives redeploys and doesn't block the API. Break the
-   "retrain-every-upload because no active model ever registers" loop.
-2. **Make persistence observable / fail loud.** In `handle_upload_finalize`, if
-   `payload.persist_data` is true but `sensor_rows_total == 0 and raw_rows_total == 0`,
-   mark the job `partially_failed` with a clear error instead of `completed`. Surface
-   `sensor_rows_uploaded` / `raw_rows_uploaded` in the dashboard summary so "0 rows
-   persisted" is never silent again.
-3. **Dashboard warning:** if the user requested persistence but the terminal job reports
-   0 persisted rows, show an error banner (not just the anomaly count).
+   SELECT tenant_id, greenhouse_id, count(*) FROM sensor_readings GROUP BY 1,2;
+   ```
+   Expect: job `completed` with `sensor_readings`/`raw_readings` populated. If persistence
+   still writes 0 rows, §5.2 now surfaces it as `partially_failed` + a clear error (no longer
+   silent) — read `jobs.error` and the worker logs.
+3. **Optional — independent code review of §5.1.** This session's T8 (fresh `code-reviewer`
+   agent) was blocked by a Claude Code account session limit and was replaced by an inline
+   manual review. Re-run a fresh review on `b5040fb` if you want an independent pass. Manual
+   review found no blockers; the two accepted low-probability risks are documented in
+   `DESIGN_upload_prepare_on_worker.md` (multi-worker double-claim; a train→crash→resume
+   double-registration window).
 
 ---
 
-## 6. Key files
+## 5. Key files
 
 | Area | File |
 |------|------|
 | Async upload route (202) | `src/api/routes/inference.py` (`run_inference_from_csv_async`) |
-| Background pipeline | `src/api/services/upload_async_runner.py` |
-| Portion producer | `src/api/services/upload_producer.py` |
-| Worker handlers (score + persist + finalize) | `src/workers/upload_consumer.py` |
-| DB write path (proven correct) | `src/api/services/csv_persist.py` (`persist_readings_chunk`) |
+| **Worker prep handler (NEW)** | `src/workers/upload_prepare_consumer.py` (`handle_upload_prepare`) |
+| Upload-blob store (NEW helpers) | `src/models/artifact_store.py` (`put/resolve/delete_upload_blob`) |
+| Prepare message / queue | `src/mq/schemas.py` (`UploadPrepareMessage`), `src/mq/topology.py` (`UPLOAD_PREPARE_QUEUE`) |
+| Worker binding | `src/workers/main.py` (`build_bindings`) |
+| Portion producer | `src/api/services/upload_producer.py` (`produce_upload_portions`) |
+| Portion + finalize handlers | `src/workers/upload_consumer.py` (`handle_upload_portion`, `handle_upload_finalize`) |
+| DB write path | `src/api/services/csv_persist.py` (`persist_readings_chunk`) |
 | Bulk upsert | `src/db/upsert.py` |
-| Job store | `src/db/jobs.py` (`fail_stale_preparing_jobs`, `set_total_portions`, ...) |
+| Job store + stale sweep | `src/db/jobs.py` (`fail_stale_preparing_jobs`, `try_transition`, `set_total_portions`, ...) |
 | Startup sweep wiring | `src/api/main.py` (lifespan) |
-| Dashboard upload UI | `src/dashboard/pages/2_anomalies.py` |
-| Read endpoints (dashboard) | `src/api/routes/readings.py` |
-| Config thresholds | `src/config.py` (`UPLOAD_PORTION_ROWS=5000`, `UPLOAD_SYNC_MAX_ROWS=20000`) |
+| Dashboard upload UI + status bar | `src/dashboard/pages/2_anomalies.py`, `src/dashboard/components/inference_results.py` |
+| Config thresholds | `src/config.py` (`UPLOAD_PORTION_ROWS`, `UPLOAD_SYNC_MAX_ROWS`, `MQ_PREPARE_HANDLER_TIMEOUT_SECONDS`, `STALE_PREPARE_MINUTES`) |
+| §5.1 design | `DESIGN_upload_prepare_on_worker.md` (repo root) |
 
 ---
 
-## 7. Constraints / gotchas for the next session
+## 6. Constraints / gotchas
 
-- **Cannot reach Railway internal network** (`*.railway.internal`) or the prod DB from a
-  local machine. API/dashboard logs are the only prod window unless you use the Railway
-  dashboard Query/Logs tabs. Reading `.env` for secrets is blocked (and against project
-  rules).
-- **`docs/` is gitignored** — put tracked docs at the repo root (this file is `HANDOVER.md`).
-- Async path is taken only when `estimate_csv_rows > UPLOAD_SYNC_MAX_ROWS` (20000);
-  smaller files use the synchronous `/inference/upload` route.
-- Local quick-check of the persist path:
-  ```bash
-  PYTHONPATH=. python3 -c "..."   # drive persist_readings_chunk against sqlite (see §3)
-  ```
+- **Cannot reach Railway internal network / the prod DB from a local machine.** Use the
+  Supabase Query/Logs tabs (the `jobs` and `sensor_readings` tables both live in Supabase).
+- **`docs/` is gitignored** — tracked docs go at the repo root (`HANDOVER.md`,
+  `DESIGN_upload_prepare_on_worker.md`).
+- Async path is taken only when `estimate_csv_rows > UPLOAD_SYNC_MAX_ROWS` (20000); smaller
+  files use the synchronous `/inference/upload` route.
+- **Deploy order (§5.1):** worker before API. If the API publishes `upload.prepare` before
+  the worker declares/consumes it, messages queue harmlessly once topology is declared, but
+  deploying the worker first avoids a window of unconsumed prepare jobs.
 
 ---
 
-## 8. Immediate to-do for whoever picks this up
+## 7. Nice-to-have follow-ups (not blocking)
 
-1. Run the SQL in §4 → determine which branch of §3 is true.
-2. If job never completes on the worker → implement §5.1 (training on worker).
-3. Regardless → implement §5.2 + §5.3 so a 0-row persist can never be silent again.
-4. Add a test that runs the async pipeline end-to-end with `persist_data=true` and asserts
-   `sensor_readings`/`raw_readings` are non-empty.
+- Surface the worker's richer `job.error` in the dashboard for `partially_failed` uploads
+  (currently the dashboard re-derives its own banner text; `job.error` is log/API-only).
+- Consider a periodic worker-side stale sweep in addition to the API-startup one.
