@@ -88,24 +88,24 @@ def _inf_cache_token(inf_results: dict | None) -> str:
 
 
 @st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False)
-def load_scored_envelope(
+def load_scored_window(
     tenant_id: str,
     greenhouse_id: str,
-    bounds_min_iso: str,
-    bounds_max_iso: str,
+    start_iso: str,
+    end_iso: str,
     upload_job_id: str | None,
     _inf_token: str,
     _inf_results: dict | None,
 ) -> tuple[pd.DataFrame, bool]:
-    """Load the full scored envelope once; callers slice in-memory per filter."""
+    """Load the scored window data from the database."""
     del upload_job_id, _inf_token
-    window_start = pd.Timestamp(bounds_min_iso)
-    window_end = pd.Timestamp(bounds_max_iso)
+    window_start = pd.Timestamp(start_iso)
+    window_end = pd.Timestamp(end_iso)
     return resolve_window_dataframe(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
-        start_iso=bounds_min_iso,
-        end_iso=bounds_max_iso,
+        start_iso=start_iso,
+        end_iso=end_iso,
         window_start=window_start,
         window_end=window_end,
         upload_job_id=None,
@@ -251,11 +251,11 @@ def load_anomalies_for_window(
     """Slice the scored envelope in-memory, then filter anomalies."""
     window_start = pd.Timestamp(start_iso)
     window_end = pd.Timestamp(end_iso)
-    envelope, using_fallback = load_scored_envelope(
+    envelope, using_fallback = load_scored_window(
         tenant_id,
         greenhouse_id,
-        bounds_min_iso,
-        bounds_max_iso,
+        start_iso,
+        end_iso,
         upload_job_id,
         _inf_cache_token(_inf_results),
         _inf_results,
@@ -297,7 +297,7 @@ def clear_anomaly_page_cache() -> None:
     load_upload_score_frame.clear()
     enrich_anomalies_table.clear()
     load_enriched_top_anomalies.clear()
-    load_scored_envelope.clear()
+    load_scored_window.clear()
     resolve_window_dataframe.clear()
 
 

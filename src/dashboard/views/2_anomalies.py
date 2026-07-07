@@ -749,6 +749,23 @@ def _render_anomaly_dashboard(
         x_range=x_range,
     )
 
+    st.markdown("### Sensor Readings")
+    if not df.empty:
+        from src.dashboard.components.charts import plot_synced_sensor_grid
+        from src.dashboard.components.sensor_columns import get_canonical_sensor_columns
+        sensor_cols = get_canonical_sensor_columns(df)
+        if sensor_cols:
+            fig = plot_synced_sensor_grid(
+                df,
+                sensor_cols,
+                x_range=x_range,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No primary sensors found to display.")
+    else:
+        st.info("No data in window to display.")
+
     _render_top_anomalies_section(
         anomalies_df=anomalies_df,
         df=df,
