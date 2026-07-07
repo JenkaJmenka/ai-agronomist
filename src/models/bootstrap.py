@@ -295,6 +295,7 @@ def _load_and_resample(csv_path: str) -> pd.DataFrame:
         raise ValueError("Uploaded CSV contains no valid data after normalization.")
 
     df = pd.concat(processed_chunks).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
     return df
 
 
