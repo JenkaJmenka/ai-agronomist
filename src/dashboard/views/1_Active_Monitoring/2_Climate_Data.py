@@ -224,7 +224,7 @@ else:
     )
 st.plotly_chart(
     fig,
-    use_container_width=True,
+    width="stretch",
     key=f"climate_chart_{active_filter or 'all'}_{len(chart_cols)}_{len(df)}",
     config={"scrollZoom": True, "displayModeBar": True},
 )
@@ -280,7 +280,7 @@ with st.expander("Raw data table"):
         .reset_index(drop=True)
     )
     _table_df["timestamp"] = _table_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    st.dataframe(_table_df, use_container_width=True, height=320)
+    st.dataframe(_table_df, width="stretch", height=320)
     st.download_button(
         "Download CSV",
         data=_table_df.to_csv(index=False).encode("utf-8"),

@@ -273,7 +273,7 @@ if _highlights:
     )
     _fig = _add_anomaly_markers(_fig, df, selected_cols, _highlights)
 
-st.plotly_chart(_fig, use_container_width=True, key="combined_chart", config=_CHART_CONFIG)
+st.plotly_chart(_fig, width="stretch", key="combined_chart", config=_CHART_CONFIG)
 
 st.markdown("---")
 st.subheader("Data table")
@@ -288,7 +288,7 @@ _n_dupes = _n_raw - len(_table_df)
 
 _table_df["timestamp"] = _table_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-st.dataframe(_table_df, use_container_width=True, height=320)
+st.dataframe(_table_df, width="stretch", height=320)
 
 _dl_col, _cap_col = st.columns([1, 4])
 _dl_col.download_button(

@@ -640,7 +640,7 @@ def render_anomaly_score_charts(
                 anomalies_only=False,
                 x_range=x_range,
             ),
-            use_container_width=True,
+            width="stretch",
         )
         return
 
@@ -653,7 +653,7 @@ def render_anomaly_score_charts(
             anomalies_only=True,
             x_range=x_range,
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     st.markdown("#### LSTM anomaly scores (cold-run calibrated)")
@@ -661,16 +661,16 @@ def render_anomaly_score_charts(
     if upload_results:
         lstm_fig = plot_upload_lstm_chart(upload_results, x_range=x_range)
         if lstm_fig is not None:
-            st.plotly_chart(lstm_fig, use_container_width=True, key="lstm_upload_chart")
+            st.plotly_chart(lstm_fig, width="stretch", key="lstm_upload_chart")
         else:
             st.plotly_chart(
                 _missing_scores_lstm_chart(
                     int(upload_results.get("sequences_processed", 0) or 0)
                 ),
-                use_container_width=True,
+                width="stretch",
             )
     else:
-        st.plotly_chart(_empty_lstm_chart(), use_container_width=True)
+        st.plotly_chart(_empty_lstm_chart(), width="stretch")
 
 
 def render_inference_upload_summary(results: dict, tenant_id: str, greenhouse_id: str) -> None:

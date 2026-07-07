@@ -52,7 +52,7 @@ with st.spinner("Loading pipeline metrics…"):
                 pd.DataFrame(
                     [{"pattern": k, "count": v} for k, v in patterns.items()]
                 ),
-                use_container_width=True,
+                width="stretch",
             )
 
         conf_dist = pipeline_metrics.get("confidence_distribution") or {}
@@ -62,7 +62,7 @@ with st.spinner("Loading pipeline metrics…"):
                 pd.DataFrame(
                     [{"bucket": k, "count": v} for k, v in conf_dist.items()]
                 ),
-                use_container_width=True,
+                width="stretch",
             )
     except Exception as exc:
         st.warning(

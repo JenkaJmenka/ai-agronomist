@@ -240,7 +240,7 @@ else:
 if fig.data:
     st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         key="gas_chart",
         config={"scrollZoom": True, "displayModeBar": True},
     )
@@ -273,7 +273,7 @@ else:
     
     st.dataframe(
         df_display[["Time", "Fault Type", "Root Cause", "Anomaly Score", "Severity"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     

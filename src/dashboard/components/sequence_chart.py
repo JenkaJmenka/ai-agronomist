@@ -47,4 +47,4 @@ def render(sequence: Optional[List[List[float]]], title: str = "Sensor sequence"
         height=400,
         showlegend=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")

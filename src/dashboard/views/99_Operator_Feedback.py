@@ -118,7 +118,7 @@ if not open_incidents and pending:
             for p in pending
         ]
     )
-    st.dataframe(pending_df, use_container_width=True)
+    st.dataframe(pending_df, width="stretch")
 
     if st.button("Register all for review", type="primary"):
         created = 0
@@ -223,7 +223,7 @@ else:
         })
 
     queue_df = pd.DataFrame(queue_rows, index=range(1, len(queue_rows) + 1))
-    st.dataframe(queue_df, use_container_width=True)
+    st.dataframe(queue_df, width="stretch")
 
     incident_ids = [inc["id"] for inc in open_incidents if inc.get("id")]
     # index_map keeps the #-number (1-based) in sync with the table row

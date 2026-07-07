@@ -99,7 +99,7 @@ def render_compact_buttons(
             key=f"{table_key}_{suffix}_{row_index}",
             type="secondary",
             help=spec.get("help", ""),
-            use_container_width=True,
+            width="stretch",
         ):
             handler = spec.get("on_click")
             if callable(handler):

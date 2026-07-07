@@ -59,8 +59,13 @@ def _render_job_card(job: Dict[str, Any]) -> None:
         st.metric("Finished", finished_at if finished_at != "N/A" else "--")
 
     # If the job is active, show a progress bar
-    if status in ("pending", "preparing", "running", "finalizing"):
-        st.progress(min(int(progress_pct), 100), text=f"Processing {completed}/{total} portions...")
+    if status == "pending":
+        st.info("Waiting in queue...")
+    elif status in ("preparing", "running", "finalizing"):
+        if total == 0:
+            st.info("Training cold-start model (Pass 1 & Pass 2)... This may take a few minutes for large files.")
+        else:
+            st.progress(min(int(progress_pct), 100), text=f"Processing {completed}/{total} portions...")
         
     if failed > 0:
         st.error(f"{failed} portions failed during execution.")

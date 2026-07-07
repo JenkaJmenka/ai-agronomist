@@ -244,7 +244,7 @@ with tab1:
         format_func=lambda t: "All synthetic anomalies" if t == "" else _TYPE_LABELS.get(t, t),
         key="ia_rm_type",
     )
-    if _rm_btn_col.button("Remove", type="secondary", key="ia_rm_btn", use_container_width=True):
+    if _rm_btn_col.button("Remove", type="secondary", key="ia_rm_btn", width="stretch"):
         try:
             _params = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
             if _rm_type:
