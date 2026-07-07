@@ -8,10 +8,25 @@ import os
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from src.dashboard.services.http_utils import raise_for_status_with_detail
 
 DEFAULT_API_URL = "http://localhost:8000"
+
+# Shared session keeps TCP/TLS connections warm across dashboard reruns.
+_SESSION: requests.Session | None = None
+
+
+def _shared_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _SESSION = session
+    return _SESSION
 
 
 class DashboardApiClient:
@@ -21,11 +36,14 @@ class DashboardApiClient:
         self,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        *,
+        session: Optional[requests.Session] = None,
     ) -> None:
         self.base_url = (base_url or os.getenv("API_URL", DEFAULT_API_URL)).rstrip(
             "/"
         )
         self.api_key = api_key or os.getenv("API_KEY")
+        self._session = session or _shared_session()
 
     def _headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -34,7 +52,7 @@ class DashboardApiClient:
         return headers
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.base_url}{path}",
             params=params,
             headers=self._headers(),
@@ -44,7 +62,7 @@ class DashboardApiClient:
         return resp.json()
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Any:
-        resp = requests.post(
+        resp = self._session.post(
             f"{self.base_url}{path}",
             json=payload,
             headers=self._headers(),
@@ -157,7 +175,7 @@ class DashboardApiClient:
         train_model: bool = False,
     ) -> Dict[str, Any]:
         """Queue a CSV for portioned processing; returns {job_id, portion_count, poll_url}."""
-        resp = requests.post(
+        resp = self._session.post(
             f"{self.base_url}/api/inference/upload-async",
             files={"file": (file_name, file_bytes, "text/csv")},
             data={
@@ -245,7 +263,7 @@ class DashboardApiClient:
         )
 
     def delete_model(self, tenant_id: str, model_id: str, *, force: bool = False) -> Dict[str, Any]:
-        resp = requests.delete(
+        resp = self._session.delete(
             f"{self.base_url}/api/models/{tenant_id}/versions/{model_id}",
             params={"force": str(force).lower()},
             headers=self._headers(),
@@ -255,7 +273,7 @@ class DashboardApiClient:
         return resp.json()
 
     def clear_models(self, tenant_id: str) -> Dict[str, Any]:
-        resp = requests.delete(
+        resp = self._session.delete(
             f"{self.base_url}/api/models/{tenant_id}/versions",
             headers=self._headers(),
             timeout=30,

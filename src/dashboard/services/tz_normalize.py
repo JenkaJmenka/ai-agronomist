@@ -58,3 +58,8 @@ def strip_tz(ts: pd.Timestamp) -> pd.Timestamp:
     if getattr(ts, "tzinfo", None) is not None:
         return ts.tz_localize(None)
     return ts
+
+
+def ts_merge_key(series: pd.Series) -> pd.Series:
+    """UTC-normalized per-second key for joining readings with upload scores."""
+    return pd.to_datetime(series, utc=True).dt.floor("s")

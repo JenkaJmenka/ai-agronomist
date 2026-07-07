@@ -72,6 +72,47 @@ def _upload_only_results(inf_results: dict | None) -> bool:
     return bool(inf_results) and not inf_results.get("data_persisted")
 
 
+def _inf_cache_token(inf_results: dict | None) -> str:
+    """Stable cache key fragment for upload inference payloads."""
+    if not inf_results:
+        return "none"
+    return "|".join(
+        [
+            str(inf_results.get("job_id") or ""),
+            str(inf_results.get("sequences_processed", 0)),
+            str(len(inf_results.get("anomaly_scores") or [])),
+            str(inf_results.get("data_persisted")),
+            str(inf_results.get("threshold_used")),
+        ]
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False)
+def load_scored_envelope(
+    tenant_id: str,
+    greenhouse_id: str,
+    bounds_min_iso: str,
+    bounds_max_iso: str,
+    upload_job_id: str | None,
+    _inf_token: str,
+    _inf_results: dict | None,
+) -> tuple[pd.DataFrame, bool]:
+    """Load the full scored envelope once; callers slice in-memory per filter."""
+    del upload_job_id, _inf_token
+    window_start = pd.Timestamp(bounds_min_iso)
+    window_end = pd.Timestamp(bounds_max_iso)
+    return resolve_window_dataframe(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        start_iso=bounds_min_iso,
+        end_iso=bounds_max_iso,
+        window_start=window_start,
+        window_end=window_end,
+        upload_job_id=None,
+        _inf_results=_inf_results,
+    )
+
+
 @st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
 def resolve_window_dataframe(
     *,
@@ -119,6 +160,11 @@ def resolve_window_dataframe(
             )
             if _has_usable_anomaly_scores(merged):
                 return _finalize(merged, False)
+            if _has_usable_anomaly_scores(upload_frame):
+                return _finalize(upload_frame, True)
+        if _has_usable_anomaly_scores(df_window):
+            return _finalize(df_window, False)
+        if not upload_frame.empty and _has_usable_anomaly_scores(upload_frame):
             return _finalize(upload_frame, True)
         return _finalize(df_window, False)
 
@@ -190,30 +236,31 @@ def filter_anomalies(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     return df.loc[mask].copy()
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
 def load_anomalies_for_window(
     *,
     tenant_id: str,
     greenhouse_id: str,
+    bounds_min_iso: str,
+    bounds_max_iso: str,
     start_iso: str,
     end_iso: str,
     threshold: float,
     upload_job_id: str | None,
     _inf_results: dict | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
-    """Cached window load plus anomaly filtering for the detection page."""
+    """Slice the scored envelope in-memory, then filter anomalies."""
     window_start = pd.Timestamp(start_iso)
     window_end = pd.Timestamp(end_iso)
-    df_window, using_fallback = resolve_window_dataframe(
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        window_start=window_start,
-        window_end=window_end,
-        upload_job_id=upload_job_id,
-        _inf_results=_inf_results,
+    envelope, using_fallback = load_scored_envelope(
+        tenant_id,
+        greenhouse_id,
+        bounds_min_iso,
+        bounds_max_iso,
+        upload_job_id,
+        _inf_cache_token(_inf_results),
+        _inf_results,
     )
+    df_window = apply_datetime_filter(envelope, window_start, window_end)
     effective_threshold = threshold
     if using_fallback and _inf_results:
         effective_threshold = float(_inf_results.get("threshold_used", threshold))
@@ -249,8 +296,8 @@ def clear_anomaly_page_cache() -> None:
     # their underlying functions in charts.py carry their own cache.
     load_upload_score_frame.clear()
     enrich_anomalies_table.clear()
-    load_anomalies_for_window.clear()
     load_enriched_top_anomalies.clear()
+    load_scored_envelope.clear()
     resolve_window_dataframe.clear()
 
 

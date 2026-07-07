@@ -214,15 +214,6 @@ def queue_monitoring_jump(
         }
     else:
         clear_monitoring_prefetch()
-        from src.dashboard.components.charts import query_sensor_readings_window
-
-        # Warm the shared readings cache without blocking on upload merge.
-        query_sensor_readings_window(
-            tenant_id,
-            greenhouse_id,
-            day_start.isoformat(),
-            day_end.isoformat(),
-        )
 
     queue_sidebar_selection(tenant=tenant_id, greenhouse=greenhouse_id)
 

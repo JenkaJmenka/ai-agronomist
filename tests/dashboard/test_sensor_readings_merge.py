@@ -42,3 +42,21 @@ def test_merge_does_not_cross_tenant_scores():
 
     merged = merge_anomaly_scores_into_readings(raw, scores, "tenant_1", "gh_A")
     assert pd.isna(merged.iloc[0]["anomaly_score"])
+
+
+def test_merge_aligns_naive_readings_with_utc_upload_scores():
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17 12:00:00"]),
+            "temperature": [20.0],
+        }
+    )
+    scores = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
+            "anomaly_score": [0.91],
+        }
+    )
+
+    merged = merge_anomaly_scores_into_readings(raw, scores, "tenant_1", "gh_A")
+    assert float(merged.iloc[0]["anomaly_score"]) == 0.91

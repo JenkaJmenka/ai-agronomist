@@ -663,6 +663,8 @@ def _render_anomaly_dashboard(
             df_window, anomalies_df, using_upload_fallback = load_anomalies_for_window(
                 tenant_id=tenant,
                 greenhouse_id=greenhouse,
+                bounds_min_iso=data_min.isoformat(),
+                bounds_max_iso=data_max.isoformat(),
                 start_iso=window_start.isoformat(),
                 end_iso=window_end.isoformat(),
                 threshold=threshold,
@@ -767,6 +769,7 @@ def _render_anomaly_dashboard(
         on_feedback=handle_feedback,
         feedback_state_key=feedback_state_key,
         available_columns=get_all_sensor_columns(df) if has_sensor_data and not df.empty else None,
+        source_df=df if has_sensor_data and not df.empty else None,
         window_start=window_start,
         window_end=window_end,
     )

@@ -618,43 +618,67 @@ def render_anomaly_score_charts(
 ) -> None:
     """Render timeline + optional LSTM upload chart."""
     from src.dashboard.components.charts import plot_anomaly_timeline
+    from src.dashboard.services.anomalies_page_data import (
+        _has_usable_anomaly_scores,
+        downsample_for_chart,
+    )
 
     upload_results = resolve_upload_results(inference_results)
     using_upload_fallback = upload_results is not None and _looks_like_upload_score_frame(df)
     chart_df = df
     if not chart_df.empty and len(chart_df) > 2000:
-        from src.dashboard.services.anomalies_page_data import downsample_for_chart
-
         chart_df = downsample_for_chart(chart_df)
 
-    if using_upload_fallback:
+    upload_score_df = pd.DataFrame()
+    if upload_results and not using_upload_fallback:
+        upload_score_df = build_sensor_dataframe_from_upload(upload_results)
+        if x_range is not None and not upload_score_df.empty:
+            from src.dashboard.components.charts import apply_datetime_filter
+
+            upload_score_df = apply_datetime_filter(
+                upload_score_df, x_range[0], x_range[1]
+            )
+
+    timeline_df = chart_df
+    timeline_threshold = threshold
+    if (
+        upload_results
+        and not _has_usable_anomaly_scores(chart_df)
+        and _has_usable_anomaly_scores(upload_score_df)
+    ):
+        timeline_df = upload_score_df
+        timeline_threshold = float(
+            upload_results.get("threshold_used", threshold)
+        )
+        st.markdown("#### Anomaly scores (from upload)")
+        st.caption(
+            "LSTM scores from your CSV upload in the selected date range. "
+            f"Threshold used at upload: {timeline_threshold:.3f}."
+        )
+    elif using_upload_fallback:
         st.markdown("#### Anomaly scores (from upload)")
         st.caption(
             "Full LSTM score series from your CSV upload in the selected date range. "
             f"Threshold used at upload: {threshold:.3f}."
         )
-        st.plotly_chart(
-            plot_anomaly_timeline(
-                chart_df,
-                threshold,
-                anomalies_only=False,
-                x_range=x_range,
-            ),
-            width="stretch",
-        )
-        return
+    else:
+        st.markdown("#### Stored anomalies")
+        st.caption("Flagged anomalies from platform data in the selected date range.")
 
-    st.markdown("#### Stored anomalies")
-    st.caption("Flagged anomalies from platform data in the selected date range.")
     st.plotly_chart(
         plot_anomaly_timeline(
-            chart_df,
-            threshold,
-            anomalies_only=True,
+            timeline_df,
+            timeline_threshold,
+            anomalies_only=not (
+                using_upload_fallback or _has_usable_anomaly_scores(upload_score_df)
+            ),
             x_range=x_range,
         ),
         width="stretch",
     )
+
+    if using_upload_fallback:
+        return
 
     st.markdown("#### LSTM anomaly scores (cold-run calibrated)")
     st.caption("Full LSTM score series from the most recent CSV upload for this greenhouse.")
@@ -749,6 +773,7 @@ def render_cold_run_anomaly_tables(
     on_feedback: Callable[..., None] | None = None,
     feedback_state_key: str = "feedback_results",
     available_columns: list[str] | None = None,
+    source_df: pd.DataFrame | None = None,
     window_start: pd.Timestamp | None = None,
     window_end: pd.Timestamp | None = None,
 ) -> None:
@@ -798,6 +823,7 @@ def render_cold_run_anomaly_tables(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         available_columns=available_columns,
+        source_df=source_df,
         empty_message=uploaded_stat_msg if results else empty_hint,
         show_legend=False,
     )
@@ -811,6 +837,7 @@ def render_cold_run_anomaly_tables(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         available_columns=available_columns,
+        source_df=source_df,
         empty_message=uploaded_all_msg if results else empty_hint,
         show_legend=False,
     )

@@ -49,23 +49,33 @@ def merge_anomaly_scores_into_readings(
             merged["anomaly_score"] = pd.NA
         return merged
 
+    from src.dashboard.services.tz_normalize import ts_merge_key
+
     merged["timestamp"] = pd.to_datetime(merged["timestamp"])
     scores["timestamp"] = pd.to_datetime(scores["timestamp"])
-    merged["_ts_key"] = merged["timestamp"].dt.floor("s")
-    scores["_ts_key"] = scores["timestamp"].dt.floor("s")
+    merged["_ts_key"] = ts_merge_key(merged["timestamp"])
+    scores["_ts_key"] = ts_merge_key(scores["timestamp"])
     scores = scores.groupby("_ts_key", as_index=False)["anomaly_score"].max()
     merged = merged.drop_duplicates(subset=["_ts_key"], keep="first")
     merged = merged.merge(
         scores[["_ts_key", "anomaly_score"]],
         on="_ts_key",
         how="left",
-        suffixes=("", "_sensor"),
+        suffixes=("_db", "_upload"),
     )
-    if "anomaly_score_sensor" in merged.columns:
-        merged["anomaly_score"] = merged["anomaly_score_sensor"].combine_first(
-            merged.get("anomaly_score")
+    upload_col = "anomaly_score_upload"
+    db_col = "anomaly_score_db"
+    if upload_col in merged.columns:
+        upload_scores = pd.to_numeric(merged[upload_col], errors="coerce")
+        db_scores = (
+            pd.to_numeric(merged[db_col], errors="coerce")
+            if db_col in merged.columns
+            else pd.Series(pd.NA, index=merged.index)
         )
-        merged = merged.drop(columns=["anomaly_score_sensor"])
+        # Prefer upload/LSTM scores; fall back to persisted DB values.
+        merged["anomaly_score"] = upload_scores.combine_first(db_scores)
+        drop_cols = [c for c in (upload_col, db_col) if c in merged.columns]
+        merged = merged.drop(columns=drop_cols)
     return merged.drop(columns=["_ts_key"])
 
 
