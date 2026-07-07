@@ -48,7 +48,7 @@ def _render_job_card(job: Dict[str, Any]) -> None:
 
     st.markdown(f"### Job: `{job_id}` ({job_type})")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
     with col1:
         st.metric("Status", status.upper())
     with col2:
@@ -57,6 +57,16 @@ def _render_job_card(job: Dict[str, Any]) -> None:
         st.metric("Created", created_at)
     with col4:
         st.metric("Finished", finished_at if finished_at != "N/A" else "--")
+    with col5:
+        if status in ("pending", "preparing", "running", "finalizing"):
+            st.write("") # spacing
+            if st.button("Terminate", key=f"term_{job_id}", type="primary"):
+                try:
+                    _client.cancel_job(job_id)
+                    st.toast("Job terminated successfully.", icon="🛑")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to terminate job: {e}")
 
     # If the job is active, show a progress bar
     if status == "pending":

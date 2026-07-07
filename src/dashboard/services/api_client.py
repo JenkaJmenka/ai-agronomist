@@ -197,6 +197,10 @@ class DashboardApiClient:
         """Poll async job status/progress/result."""
         return self._get(f"/api/jobs/{job_id}")
 
+    def cancel_job(self, job_id: str) -> Dict[str, Any]:
+        """Cancel a pending or running job."""
+        return self._post(f"/api/jobs/{job_id}/cancel", {})
+
     def list_jobs(
         self,
         tenant_id: str,

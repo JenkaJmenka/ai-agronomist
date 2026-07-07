@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobListResponse, JobStatusResponse
-from src.db.jobs import get_job, list_jobs
+from src.db.jobs import get_job, list_jobs, set_job_result
 from src.db.models import Job
 from src.db.session import get_db
 
@@ -45,6 +45,17 @@ async def get_job_status(job_id: str, db: AsyncSession = Depends(get_db)) -> Job
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    return _to_response(job)
+
+
+@router.post("/{job_id}/cancel", response_model=JobStatusResponse)
+async def cancel_job(job_id: str, db: AsyncSession = Depends(get_db)) -> JobStatusResponse:
+    job = await get_job(db, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    if job.status not in ("completed", "failed", "partially_failed"):
+        await set_job_result(db, job_id, status="failed", error="Job cancelled by user")
+        job = await get_job(db, job_id)
     return _to_response(job)
 
 
