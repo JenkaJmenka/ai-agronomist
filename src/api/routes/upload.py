@@ -171,22 +171,27 @@ async def upload_csv(
                     ranges[col]["min"] = min(ranges[col]["min"], float(df[col].min()))
                     ranges[col]["max"] = max(ranges[col]["max"], float(df[col].max()))
 
+                from src.db.upsert import bulk_upsert_rows
                 records = []
                 for _, row in df.iterrows():
-                    records.append(
-                        SensorReading(
-                            tenant_id=tenant_id,
-                            greenhouse_id=greenhouse_id,
-                            timestamp=row["timestamp"].to_pydatetime(),
-                            temperature=row["temperature"],
-                            humidity=row["humidity"],
-                            co2=row["co2"],
-                            light=row["light"],
-                        )
-                    )
+                    records.append({
+                        "tenant_id": tenant_id,
+                        "greenhouse_id": greenhouse_id,
+                        "timestamp": row["timestamp"].to_pydatetime(),
+                        "temperature": row["temperature"],
+                        "humidity": row["humidity"],
+                        "co2": row["co2"],
+                        "light": row["light"],
+                    })
 
-                db.add_all(records)
                 try:
+                    await bulk_upsert_rows(
+                        db,
+                        SensorReading,
+                        records,
+                        update_cols=["temperature", "humidity", "co2", "light"],
+                        preserve_when_null=["anomaly_score", "anomaly_type"],
+                    )
                     await db.commit()
                     total_uploaded += len(records)
                 except Exception as e:
@@ -212,6 +217,7 @@ async def upload_csv(
                 raw_df, _ = parse_raw_rows(raw_chunk)
                 if not raw_df.empty:
                     sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
+                    from src.db.upsert import bulk_upsert_rows
                     raw_records = []
                     for _, row in raw_df.iterrows():
                         data_dict = {
@@ -222,17 +228,20 @@ async def upload_csv(
                         }
                         if not data_dict:
                             continue
-                        raw_records.append(
-                            RawReading(
-                                tenant_id=tenant_id,
-                                greenhouse_id=greenhouse_id,
-                                timestamp=row["timestamp"].to_pydatetime(),
-                                source=row["source"] or None,
-                                data=data_dict,
-                            )
-                        )
+                        raw_records.append({
+                            "tenant_id": tenant_id,
+                            "greenhouse_id": greenhouse_id,
+                            "timestamp": row["timestamp"].to_pydatetime(),
+                            "source": row["source"] or None,
+                            "data": data_dict,
+                        })
                     if raw_records:
-                        db.add_all(raw_records)
+                        await bulk_upsert_rows(
+                            db,
+                            RawReading,
+                            raw_records,
+                            update_cols=["source", "data"],
+                        )
                         await db.commit()
                         total_raw_uploaded += len(raw_records)
             except Exception as raw_exc:
