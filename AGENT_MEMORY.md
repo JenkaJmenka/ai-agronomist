@@ -3,6 +3,46 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**QA — Regression tests for "455 anomalies, empty tables" upload incident — COMPLETE (2026-07-07)**
+Agent: qa-engineer. Locked in coverage for the two just-landed fixes (not modified by this pass):
+`handle_upload_finalize` fail-loud guard (partially_failed + non-null error when persist_data=true,
+rows were processed, but sensor_rows_total==0 and raw_rows_total==0) and the matching
+`render_upload_status_bar` dashboard error banner.
+
+New files:
+- `tests/workers/test_upload_finalize_persist_guard.py` (4 tests) — mirrors the producer -> portion
+  handler -> finalize harness in `tests/workers/test_upload_consumer.py` (no real MQ broker):
+  `test_end_to_end_persist_writes_rows_and_job_completes_clean` (item #4 handover case: real portioned
+  pipeline run, asserts sensor_readings AND raw_readings non-empty, job `completed`, `error` None,
+  `sensor_rows_uploaded`/`raw_rows_uploaded` > 0); `test_persist_requested_but_zero_rows_written_marks_partially_failed`
+  (patches `src.workers.upload_consumer.persist_readings_chunk` to return `(0,0,0,0)` while portions
+  still record `status="completed"` and `rows_processed>0` — reproduces the incident shape where no
+  portion ever "fails" — asserts `failed_portions==0`, `status=="partially_failed"`, `error` contains
+  "0 rows" and mentions sensor_readings/raw_readings); `test_persist_success_no_false_positive_error`
+  and `test_persist_data_false_stays_completed_with_no_error` (guard must not over-fire).
+- `tests/dashboard/test_upload_status_bar_persist_guard.py` (3 tests) — follows the `patch("...st")`
+  pattern from `tests/dashboard/test_inference_results_clear.py` (mocks `st.columns` return tuple):
+  asserts `render_upload_status_bar` calls `status_col.error(...)` with "0 rows"/"sensor_readings" text
+  when `data_persisted=True` and both row counters are 0, and does NOT call `.error()` when rows were
+  persisted or when persistence wasn't requested.
+
+Result: `PYTHONPATH=. python3 -m pytest tests/ -k "upload or finalize or persist" -q` -> 147 passed;
+full suite `pytest tests/` -> 1782 passed, 12 skipped, 1 xfailed (no regressions). Coverage of the
+touched guard branch in `src/workers/upload_consumer.py` (lines ~273-298, the new fail-loud check) is
+fully exercised by the A/B/C scenarios; the file overall sits at 89.31% stmt / covers all finalize
+control flow except a few pre-existing dead-letter/log-only branches (concurrent-duplicate-insert
+early return, second try_transition fallback log lines, unknown-job log) unrelated to this fix.
+`src/dashboard/*` is excluded from the coverage gate by repo `.coveragerc` convention (pre-existing),
+so the new dashboard test is a pure regression lock, not a coverage-gate contributor.
+No bugs found in the fix itself; both guard implementations behaved exactly as specified. One
+pre-existing test-harness note: had to call `handle_upload_portion`/`handle_upload_finalize` directly
+(as the existing harness already does) rather than through a real broker — there's no RabbitMQ in the
+test sandbox — and reaching the incident's "0 rows persisted" state requires patching
+`persist_readings_chunk`'s return value directly, since the CSV data itself has no way to make a
+real chunk persist zero rows all on its own (the bug only reproduces when the persistence call itself
+silently no-ops).
+
+Previous phase:
 **Perf Refactor + RabbitMQ Implementation — ALL CODE WORKSTREAMS COMPLETE (2026-07-04)**
 Plan: ~/.claude/plans/build-implementation-plan-based-elegant-pudding.md. All on perf/upload-path,
 7 unpushed commits (56de59c..35e779c): WS1/2 LRUDict detector cache + strict persist_scores (B2/B4);
@@ -1131,3 +1171,17 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
 - **Tests**: 64 tests in `tests/models/test_active_learner.py`, all passed (0.03s). Gate check: 296 passed, 1 xfailed. No regressions.
 - **Contract**: `RetrainingOrchestrator.observe()` → collect feedback + auto-retrain if criteria met. `get_progress()` → `{progress_percent, samples_needed, ...}`. `validate_and_promote(improvement_pct)` → promote/rollback.
 - **Pending**: Router registration in `src/api/main.py` (backend-engineer scope), QA coverage pass, code review.
+
+## Upload 0-row-persist guard — regression tests (QA, 2026-07-07)
+- **Task**: extend `tests/workers/test_upload_finalize_persist_guard.py` with two regression cases flagged by code review, plus dashboard-side coverage for `extract_upload_results`.
+- **New tests — `tests/workers/test_upload_finalize_persist_guard.py`** (section D, appended):
+  - `test_persist_partial_write_sensor_only_stays_completed` — mocks `persist_readings_chunk` to return `(60, 0, 0, 0)` (sensor_rows=60, raw_rows=0). Asserts job stays `completed` with `error is None`, since `handle_upload_finalize`'s guard only fires when **both** `sensor_rows_total == 0` **and** `raw_rows_total == 0` (currently `and`-joined, not `or`).
+  - `test_persist_partial_write_raw_only_stays_completed` — mirror case, `(0, 0, 60, 0)` (raw_rows=60, sensor_rows=0). Same assertion. Together these lock in the "both must be zero" semantics so a future refactor to `or` can't silently reclassify legitimate partial writes as failures.
+- **New file — `tests/dashboard/test_async_upload_extract_results.py`** (no prior test file existed for `src/dashboard/services/async_upload.py`):
+  - `test_terminal_job_statuses_includes_partially_failed` — `TERMINAL_JOB_STATUSES` contains `"partially_failed"`.
+  - `test_extract_upload_results_partially_failed_still_returns_results` — builds a job dict shaped like the stored job (`status="partially_failed"`, populated `result` with 455 anomalies, non-null `error`); asserts `extract_upload_results` returns `(results, None)` with `results is not None` — i.e. results stay visible, not hidden the way a `failed` job's would be. Note: `extract_upload_results` only returns a non-None error message on the `failed`/falsy-result branch, so the second tuple element is `None` here even though `job["error"]` is set — that's expected, the banner itself comes from `render_upload_status_bar`, not this function.
+  - `test_extract_upload_results_partially_failed_backfills_render_keys` — asserts `embeddings`/`uncertainties` are backfilled to `[]` for a `partially_failed` job (renderers expect these keys unconditionally).
+  - `test_extract_upload_results_failed_status_hides_results_by_contrast` — contrast case: `status="failed"` returns `(None, "hard failure")`, demonstrating why the incident fix deliberately uses `partially_failed` instead.
+- **No bugs found** in `handle_upload_finalize`'s guard logic or `extract_upload_results` — both behave exactly per the documented "both must be zero" / "only failed hides results" semantics.
+- **Gate**: `PYTHONPATH=. python3 -m pytest tests/ -k "persist or finalize or upload or extract" -q` → **156 passed**, 0 failed (198 warnings, all pre-existing pandas ChainedAssignmentError FutureWarnings from `src/`, unrelated to this change). Isolated run of just the touched files: `tests/workers/test_upload_finalize_persist_guard.py` + `tests/dashboard/test_async_upload_extract_results.py` → **10 passed**.
+- **Files touched (tests only, per instructions)**: `tests/workers/test_upload_finalize_persist_guard.py` (appended), `tests/dashboard/test_async_upload_extract_results.py` (new). No `src/` files modified.

@@ -502,8 +502,18 @@ def render_upload_status_bar(saved_inf: dict | None) -> None:
         name = saved_inf.get("filename") or "last upload"
         tenant_id = saved_inf["tenant_id"]
         greenhouse_id = saved_inf["greenhouse_id"]
-        detected = saved_inf["results"].get("anomalies_detected", 0)
-        persisted = bool(saved_inf["results"].get("data_persisted"))
+        results = saved_inf["results"]
+        detected = results.get("anomalies_detected", 0)
+        persisted = bool(results.get("data_persisted"))
+        has_row_counts = "sensor_rows_uploaded" in results and "raw_rows_uploaded" in results
+        sensor_rows_uploaded = results.get("sensor_rows_uploaded", 0)
+        raw_rows_uploaded = results.get("raw_rows_uploaded", 0)
+        persist_wrote_nothing = (
+            persisted
+            and has_row_counts
+            and sensor_rows_uploaded == 0
+            and raw_rows_uploaded == 0
+        )
         processed_at = saved_inf.get("processed_at")
         processed_note = ""
         if processed_at:
@@ -517,7 +527,13 @@ def render_upload_status_bar(saved_inf: dict | None) -> None:
             f"Showing saved analysis: **{name}** · `{tenant_id}` / `{greenhouse_id}` · "
             f"{detected} anomalies{processed_note} — no re-inference on page load"
         )
-        if persisted:
+        if persist_wrote_nothing:
+            status_col.error(
+                "Persistence was requested but 0 rows were written to the database "
+                "(sensor_readings/raw_readings are empty). Check the worker service "
+                "logs, or re-upload."
+            )
+        elif persisted:
             status_col.caption(
                 "**Clear upload** removes the saved analysis view only. "
                 "Persisted sensor readings stay in the database — use "

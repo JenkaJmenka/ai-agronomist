@@ -269,10 +269,31 @@ async def handle_upload_finalize(msg: UploadFinalizeMessage, db: AsyncSession) -
     result_payload["model_trained"] = payload.get("model_trained", False)
     result_payload["model_id"] = payload.get("model_id")
     result_payload["training_skipped_reason"] = payload.get("training_skipped_reason")
+
+    finalize_error = None
+    if (
+        payload.get("persist_data")
+        and stat_carry.total_rows > 0
+        and sensor_rows_total == 0
+        and raw_rows_total == 0
+    ):
+        final_status = "partially_failed"
+        finalize_error = (
+            "Persistence was requested but 0 rows were written to "
+            f"sensor_readings/raw_readings (processed {stat_carry.total_rows} data rows). "
+            "Check the worker service logs."
+        )
+        logger.error(
+            "Job %s: persist_data requested but 0 rows persisted (processed %s rows)",
+            msg.job_id,
+            stat_carry.total_rows,
+        )
+
     await set_job_result(
         db,
         msg.job_id,
         status=final_status,
         result=result_payload,
+        error=finalize_error,
     )
     await prune_portion_results(db, msg.job_id)
