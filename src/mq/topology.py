@@ -15,12 +15,14 @@ from src.config import MQ_RETRY_DELAY_MS
 
 JOBS_EXCHANGE = "agronomist.jobs"
 
+UPLOAD_PREPARE_QUEUE = "upload.prepare"
 UPLOAD_PORTIONS_QUEUE = "upload.portions"
 UPLOAD_FINALIZE_QUEUE = "upload.finalize"
 TRAINING_ONLINE_QUEUE = "training.online"
 TRAINING_RETRAIN_QUEUE = "training.retrain"
 
 MAIN_QUEUES = (
+    UPLOAD_PREPARE_QUEUE,      # NEW — declared first
     UPLOAD_PORTIONS_QUEUE,
     UPLOAD_FINALIZE_QUEUE,
     TRAINING_ONLINE_QUEUE,

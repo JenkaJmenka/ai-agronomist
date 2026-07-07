@@ -36,6 +36,21 @@ class UploadPortionMessage(BaseModel):
     persist_data: bool = False
 
 
+class UploadPrepareMessage(BaseModel):
+    """Instruction to prepare an uploaded CSV on the worker: cold-start train
+    (when needed), then publish scored portions. The CSV itself lives in the
+    artifact store; only its db:// reference travels here."""
+
+    job_id: str
+    tenant_id: str
+    greenhouse_id: str = "default"
+    blob_path: str                 # db://model_artifacts/uploads/<job_id>
+    filename: Optional[str] = None
+    persist_data: bool = False
+    train_model: bool = False
+    seq_len: int = 20              # SEQ_LEN default; carried for forward-compat
+
+
 class UploadFinalizeMessage(BaseModel):
     """Fired once all portions of an upload job are recorded."""
 

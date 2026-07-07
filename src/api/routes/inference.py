@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from src.api.schemas.sensor_data import (
     InferenceRequest,
     InferenceResponse,
@@ -15,16 +15,18 @@ from src.api.services.upload_checkpoint import (
     attach_training_meta,
     resolve_upload_checkpoint,
 )
-from src.api.services.upload_async_runner import run_upload_async_pipeline
 from src.api.schemas.jobs import UploadJobAcceptedResponse
-from src.db.jobs import create_job
+from src.db.jobs import create_job, set_job_result, update_job
 from src.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from src.db.models import SensorReading
-from src.models.artifact_store import resolve_checkpoint
+from src.models.artifact_store import put_upload_blob, resolve_checkpoint
 from src.models.inference import AnomalyDetector
 from src.models.model_registry import ModelRegistry
+from src.mq.publisher import publish_json
+from src.mq.schemas import UploadPrepareMessage
+from src.mq.topology import UPLOAD_PREPARE_QUEUE
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 import numpy as np
@@ -34,7 +36,7 @@ import os
 import logging
 
 from src.vendors.csv_adapter import CSVAdapter
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM
+from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, SEQ_LEN
 from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
@@ -258,7 +260,6 @@ async def run_inference_from_csv(
     status_code=202,
 )
 async def run_inference_from_csv_async(
-    background_tasks: BackgroundTasks,
     tenant_id: str = Form(...),
     greenhouse_id: str = Form(default="default"),
     file: UploadFile = File(...),
@@ -268,9 +269,13 @@ async def run_inference_from_csv_async(
 ):
     """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
 
-    Returns 202 immediately after the file is saved. Cold-start training (when
-    needed) and portion publishing run in a background task so large uploads
-    do not hit HTTP client timeouts.
+    Returns 202 immediately after the file is durably stored and a prepare
+    message is published. Cold-start training (when needed) and portion
+    publishing run on the RabbitMQ worker, so a redeploy can no longer lose an
+    in-flight upload. The uploaded CSV is written to the artifact store (bytea)
+    keyed ``uploads/<job_id>`` — the worker resolves that db:// reference since
+    Railway containers share no filesystem. The local temp file is transient
+    scratch on the API side only, deleted before the request returns.
     """
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
@@ -283,6 +288,11 @@ async def run_inference_from_csv_async(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write uploaded file: {e}")
 
+    payload = {
+        "filename": file.filename,
+        "persist_data": persist_data,
+        "train_model": train_model,
+    }
     try:
         job = await create_job(
             db,
@@ -290,27 +300,56 @@ async def run_inference_from_csv_async(
             job_type="upload_csv",
             greenhouse_id=greenhouse_id,
             status="preparing",
-            payload={
-                "filename": file.filename,
-                "persist_data": persist_data,
-                "train_model": train_model,
-            },
+            payload=payload,
         )
     except Exception as e:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise HTTPException(status_code=500, detail=f"Failed to create upload job: {e}") from e
 
-    background_tasks.add_task(
-        run_upload_async_pipeline,
-        job_id=job.id,
-        tmp_path=tmp_path,
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        persist_data=persist_data,
-        filename=file.filename,
-        train_model=train_model,
-    )
+    try:
+        try:
+            blob_path = await put_upload_blob(db, f"uploads/{job.id}", tmp_path)
+        except Exception as e:
+            # Job exists but has no blob; the stale-prepare sweep is sweep-safe.
+            logger.exception("Failed to store upload blob for job %s", job.id)
+            await set_job_result(
+                db,
+                job.id,
+                status="failed",
+                error="Failed to store the uploaded file for processing.",
+            )
+            raise HTTPException(status_code=500, detail=f"Failed to store uploaded file: {e}") from e
+
+        # Record the blob ref so the sweep can clean it even if publish is lost.
+        await update_job(db, job.id, payload={**payload, "blob_path": blob_path})
+
+        try:
+            await publish_json(
+                UPLOAD_PREPARE_QUEUE,
+                UploadPrepareMessage(
+                    job_id=job.id,
+                    tenant_id=tenant_id,
+                    greenhouse_id=greenhouse_id,
+                    blob_path=blob_path,
+                    filename=file.filename,
+                    persist_data=persist_data,
+                    train_model=train_model,
+                    seq_len=SEQ_LEN,
+                ),
+            )
+        except Exception as e:
+            # Blob is stored but the message is lost — the (time-gated) sweep
+            # will fail the job and clean the blob. Surface a 500 so the client
+            # knows to retry rather than silently swallowing.
+            logger.exception("Failed to publish upload-prepare message for job %s", job.id)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to queue upload for processing: {e}"
+            ) from e
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
     return UploadJobAcceptedResponse(
         job_id=job.id,
         portion_count=0,

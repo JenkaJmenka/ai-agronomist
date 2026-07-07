@@ -7,14 +7,18 @@ into double-counting or double-finalizing.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import STALE_PREPARE_MINUTES
 from src.db.models import Job, JobPortion
+
+logger = logging.getLogger(__name__)
 
 _DIALECT_INSERTS = {
     "postgresql": postgresql.insert,
@@ -200,29 +204,58 @@ async def prune_portion_results(db: AsyncSession, job_id: str) -> None:
 
 
 async def fail_stale_preparing_jobs(db: AsyncSession) -> int:
-    """Fail 'preparing' upload jobs orphaned by a service restart.
+    """Fail upload jobs whose durable preparation is genuinely lost.
 
-    The async upload pipeline runs in-process (BackgroundTasks); a container
-    restart kills it along with the temp CSV, so a job still 'preparing' at
-    startup can never resume. Returns the number of jobs failed.
+    Preparation now runs on the RabbitMQ worker (durable), so a 'preparing'
+    (or orphaned 'running' with total_portions still NULL) upload job may simply
+    have an 'upload.prepare' message queued or actively in flight — the API
+    redeploys independently of the worker, so it must NOT be failed eagerly.
+
+    Only jobs with no activity for STALE_PREPARE_MINUTES — longer than the prep
+    handler timeout plus retry budget — are treated as lost (message never
+    delivered, or the DLQ terminal hook itself failed). Each such job's upload
+    CSV blob is deleted as a storage backstop. This is now belt-and-suspenders:
+    the worker's retry -> DLQ -> terminal-hook path fails broken prep promptly.
+
+    Returns the number of jobs failed.
     """
-    table = Job.__table__
+    # Local import avoids a config/import cycle and keeps artifact_store lazy.
+    from src.models.artifact_store import delete_upload_blob
+
     now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=STALE_PREPARE_MINUTES)
     result = await db.execute(
-        update(table)
-        .where(table.c.status == "preparing", table.c.job_type == "upload_csv")
-        .values(
-            status="failed",
-            error=(
-                "Upload preparation was interrupted by a service restart — "
-                "please re-upload the file."
+        select(Job).where(
+            Job.job_type == "upload_csv",
+            Job.updated_at < cutoff,
+            or_(
+                Job.status == "preparing",
+                and_(Job.status == "running", Job.total_portions.is_(None)),
             ),
-            finished_at=now,
-            updated_at=now,
         )
     )
+    stale_jobs = list(result.scalars().all())
+    if not stale_jobs:
+        return 0
+
+    for job in stale_jobs:
+        blob_path = (job.payload or {}).get("blob_path")
+        if blob_path:
+            try:
+                await delete_upload_blob(db, blob_path)
+            except Exception:
+                logger.warning(
+                    "Stale-sweep blob delete failed for job %s", job.id, exc_info=True
+                )
+        job.status = "failed"
+        job.error = (
+            "Upload preparation did not complete within the expected time — "
+            "please re-upload the file."
+        )
+        job.finished_at = now
+        job.updated_at = now
     await db.commit()
-    return result.rowcount or 0
+    return len(stale_jobs)
 
 
 async def update_job(

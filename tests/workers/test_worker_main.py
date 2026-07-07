@@ -13,6 +13,7 @@ from src.mq.topology import (
     TRAINING_RETRAIN_QUEUE,
     UPLOAD_FINALIZE_QUEUE,
     UPLOAD_PORTIONS_QUEUE,
+    UPLOAD_PREPARE_QUEUE,
     dlq_queue,
     retry_queue,
 )
@@ -44,7 +45,7 @@ def _binding(handler, on_terminal_failure=None) -> QueueBinding:
 
 
 class TestBuildBindings:
-    def test_all_four_queues_bound(self):
+    def test_all_queues_bound(self):
         bindings = build_bindings()
         names = [b.queue_name for b in bindings]
         assert names == [
@@ -52,12 +53,21 @@ class TestBuildBindings:
             UPLOAD_FINALIZE_QUEUE,
             TRAINING_ONLINE_QUEUE,
             TRAINING_RETRAIN_QUEUE,
+            UPLOAD_PREPARE_QUEUE,
         ]
 
     def test_retrain_uses_prefetch_one(self):
         by_name = {b.queue_name: b for b in build_bindings()}
         assert by_name[TRAINING_RETRAIN_QUEUE].prefetch == 1
         assert by_name[UPLOAD_PORTIONS_QUEUE].prefetch == MQ_PREFETCH_COUNT
+
+    def test_prepare_binding_is_long_running_prefetch_one(self):
+        from src.config import MQ_PREPARE_HANDLER_TIMEOUT_SECONDS
+
+        by_name = {b.queue_name: b for b in build_bindings()}
+        prepare = by_name[UPLOAD_PREPARE_QUEUE]
+        assert prepare.prefetch == 1
+        assert prepare.handler_timeout == MQ_PREPARE_HANDLER_TIMEOUT_SECONDS
 
 
 class TestHandleMessage:

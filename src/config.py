@@ -315,6 +315,18 @@ MQ_HANDLER_TIMEOUT_SECONDS: float = float(os.environ.get("MQ_HANDLER_TIMEOUT_SEC
 MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS: float = float(
     os.environ.get("MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS", "3600")
 )
+# Upload preparation (cold-start train + portion production) runs on the worker
+# and can take minutes; deadline sits between the portion (600s) and retrain
+# (3600s) timeouts so a hung prep surfaces as a visible retry, never a jam.
+MQ_PREPARE_HANDLER_TIMEOUT_SECONDS: float = float(
+    os.environ.get("MQ_PREPARE_HANDLER_TIMEOUT_SECONDS", "1800")
+)
+# Backstop stale-prepare sweep: an upload job stuck 'preparing' (or 'running'
+# with total_portions NULL) with no activity for this long is treated as lost
+# (prepare message never delivered / DLQ hook failed) and failed, its blob
+# deleted. Kept safely above the prepare handler timeout + retry budget so it
+# never fails legitimately in-flight preparation.
+STALE_PREPARE_MINUTES: int = int(os.environ.get("STALE_PREPARE_MINUTES", "45"))
 # Watchdog cadence: exit for a clean container restart when the MQ connection
 # or any consumer channel dies (aio-pika channel restore can fail after a
 # broker restart, leaving a zombie process that consumes nothing).

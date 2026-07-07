@@ -23,6 +23,7 @@ import time
 from src.config import (
     MQ_HANDLER_TIMEOUT_SECONDS,
     MQ_PREFETCH_COUNT,
+    MQ_PREPARE_HANDLER_TIMEOUT_SECONDS,
     MQ_RETRAIN_HANDLER_TIMEOUT_SECONDS,
     MQ_WATCHDOG_INTERVAL_SECONDS,
 )
@@ -35,6 +36,7 @@ from src.mq.topology import (
     TRAINING_RETRAIN_QUEUE,
     UPLOAD_FINALIZE_QUEUE,
     UPLOAD_PORTIONS_QUEUE,
+    UPLOAD_PREPARE_QUEUE,
     declare_topology,
     dlq_queue,
     retry_queue,
@@ -44,6 +46,7 @@ from src.mq.schemas import (
     RetrainJobMessage,
     UploadFinalizeMessage,
     UploadPortionMessage,
+    UploadPrepareMessage,
 )
 
 logger = logging.getLogger("worker.main")
@@ -124,6 +127,29 @@ def build_bindings() -> list[QueueBinding]:
         )
     except ImportError:
         logger.warning("retrain_consumer not available — %s not consumed", TRAINING_RETRAIN_QUEUE)
+    try:
+        from src.workers.upload_prepare_consumer import (
+            _terminal_upload_prepare,
+            handle_upload_prepare,
+        )
+
+        bindings.append(
+            QueueBinding(
+                queue_name=UPLOAD_PREPARE_QUEUE,
+                schema=UploadPrepareMessage,
+                handler=handle_upload_prepare,
+                # Set the job failed + delete the blob once retries are exhausted.
+                on_terminal_failure=_terminal_upload_prepare,
+                # Cold-start train + portion production is long and CPU-heavy;
+                # like retrain, never hold other prepare messages hostage.
+                prefetch=1,
+                handler_timeout=MQ_PREPARE_HANDLER_TIMEOUT_SECONDS,
+            )
+        )
+    except ImportError:
+        logger.warning(
+            "upload_prepare_consumer not available — %s not consumed", UPLOAD_PREPARE_QUEUE
+        )
     return bindings
 
 
