@@ -5,10 +5,12 @@ import pandas as pd
 import pytest
 
 from src.config import SEQ_LEN
+from src.models import bootstrap as bootstrap_module
 from src.models.bootstrap import (
     ColdStartBootstrap,
     InsufficientDataError,
     Pass2BootstrapDetector,
+    _cap_training_sequences,
     _classify_root_cause,
     _compute_if_flags,
     _compute_physics_flags,
@@ -35,6 +37,32 @@ def _write_csv(path, rows: int, mutate=None) -> str:
         mutate(df)
     df.to_csv(path)
     return str(path)
+
+
+class TestCapTrainingSequences:
+    def _make(self, count: int) -> np.ndarray:
+        return np.arange(count * SEQ_LEN * 4, dtype=np.float32).reshape(
+            count, SEQ_LEN, 4
+        )
+
+    def test_returns_unchanged_when_under_cap(self, monkeypatch):
+        monkeypatch.setattr(bootstrap_module, "BOOTSTRAP_MAX_TRAIN_SEQUENCES", 1000)
+        seqs = self._make(200)
+        assert _cap_training_sequences(seqs) is seqs
+
+    def test_subsamples_to_cap_with_in_bounds_indices(self, monkeypatch):
+        monkeypatch.setattr(bootstrap_module, "BOOTSTRAP_MAX_TRAIN_SEQUENCES", 100)
+        seqs = self._make(1000)
+        capped = _cap_training_sequences(seqs)
+        assert len(capped) == 100
+        # Even stride keeps coverage across the whole range, not just the head.
+        assert np.array_equal(capped[0], seqs[0])
+        assert capped[-1] is not None  # last pick is a valid, in-bounds sequence
+
+    def test_cap_of_zero_disables(self, monkeypatch):
+        monkeypatch.setattr(bootstrap_module, "BOOTSTRAP_MAX_TRAIN_SEQUENCES", 0)
+        seqs = self._make(500)
+        assert _cap_training_sequences(seqs) is seqs
 
 
 class TestLoadAndResample:

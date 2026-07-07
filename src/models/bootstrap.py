@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.config import (
     BOOTSTRAP_GAS_NULL_THRESHOLD,
     BOOTSTRAP_IF_CONTAMINATION,
+    BOOTSTRAP_MAX_TRAIN_SEQUENCES,
     BOOTSTRAP_MIN_CLEAN_ROWS,
     BOOTSTRAP_MIN_IF_ROWS,
     BOOTSTRAP_RESAMPLE_INTERVAL,
@@ -139,6 +140,8 @@ class Pass2BootstrapDetector:
         except ValueError:
             logger.warning("preprocess_sequences failed — not enough clean rows")
             return
+
+        sequences = _cap_training_sequences(sequences)
 
         self._model = LSTMVAE()
         self._model.to(DEVICE)
@@ -322,6 +325,29 @@ def _extract_timestamps(df: pd.DataFrame) -> list[str]:
             for ts in df.index
         ]
     return [str(idx) for idx in df.index]
+
+
+def _cap_training_sequences(sequences: np.ndarray) -> np.ndarray:
+    """Bound Pass 2 training cost for long-span uploads.
+
+    Training time scales with the sequence count (≈ the resampled row count); an
+    uncapped large file exceeded the worker prepare timeout and retrain-looped.
+    When over ``BOOTSTRAP_MAX_TRAIN_SEQUENCES`` we take an even-stride subsample,
+    which preserves coverage across the whole time range instead of truncating to
+    a single window. A cap of 0 disables the behaviour.
+    """
+    cap = BOOTSTRAP_MAX_TRAIN_SEQUENCES
+    total = len(sequences)
+    if cap <= 0 or total <= cap:
+        return sequences
+    stride = total / cap
+    indices = (np.arange(cap) * stride).astype(int)
+    logger.info(
+        "Capping Pass 2 training set from %d to %d sequences (even stride)",
+        total,
+        cap,
+    )
+    return sequences[indices]
 
 
 def _train_loop(model: LSTMVAE, sequences: np.ndarray) -> list[float]:

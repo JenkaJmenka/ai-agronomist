@@ -714,6 +714,16 @@ BOOTSTRAP_ANOMALY_PATH: str = "data/pass1_suspected_anomalies.csv"
 # Percentile used to derive the dynamic detection threshold (tau) for Pass 2.
 BOOTSTRAP_THRESHOLD_PERCENTILE: float = 99.0
 
+# Cap on the number of training sequences fed to the Pass 2 LSTM-VAE. Cold-start
+# training time scales with the resampled row count (≈ the upload's time span);
+# an uncapped long-span upload exceeded the worker prepare timeout and drove a
+# retrain loop. An even-stride subsample keeps training bounded regardless of
+# file size while preserving coverage across the whole range. Override via
+# BOOTSTRAP_MAX_TRAIN_SEQUENCES; set to 0 to disable the cap.
+BOOTSTRAP_MAX_TRAIN_SEQUENCES: int = int(
+    os.environ.get("BOOTSTRAP_MAX_TRAIN_SEQUENCES", "15000")
+)
+
 # Psychrometric validation (Tetens equation): max allowable absolute error
 # between measured humidity deficit and the value computed from T_air + RH.
 PSYCHROMETRIC_HD_TOLERANCE: float = 0.05  # g/m³
