@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from sqlalchemy import distinct, func, select
+from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import READINGS_MAX_ROWS
@@ -289,6 +290,7 @@ async def fetch_incidents(
     if end is not None:
         stmt = stmt.where(Incident.detected_at <= end)
     stmt = stmt.order_by(Incident.detected_at.desc()).limit(_cap(limit))
+    stmt = stmt.options(defer(Incident.sequence), defer(Incident.embedding))
     records = (await db.execute(stmt)).scalars().all()
     return [
         {
@@ -300,7 +302,6 @@ async def fetch_incidents(
             "root_cause_details": r.root_cause_details,
             "actions_taken": r.actions_taken,
             "resolved": r.resolved,
-            "sequence": r.sequence,
         }
         for r in records
     ]
