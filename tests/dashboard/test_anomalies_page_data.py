@@ -54,6 +54,7 @@ def test_rows_in_window_filters_by_timestamp():
 def test_resolve_window_dataframe_merges_upload_scores_when_db_lacks_them(monkeypatch):
     from src.dashboard.services import anomalies_page_data as mod
 
+    mod.resolve_window_dataframe.clear()
     db_frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
@@ -89,7 +90,8 @@ def test_resolve_window_dataframe_merges_upload_scores_when_db_lacks_them(monkey
         end_iso=window_end.isoformat(),
         window_start=window_start,
         window_end=window_end,
-        inf_results=inf_results,
+        upload_job_id=None,
+        _inf_results=inf_results,
     )
 
     assert not using_fallback
@@ -100,6 +102,7 @@ def test_resolve_window_dataframe_merges_upload_scores_when_db_lacks_them(monkey
 def test_resolve_window_dataframe_uses_upload_when_db_empty(monkeypatch):
     from src.dashboard.services import anomalies_page_data as mod
 
+    mod.resolve_window_dataframe.clear()
     upload_frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
@@ -126,7 +129,8 @@ def test_resolve_window_dataframe_uses_upload_when_db_empty(monkeypatch):
         end_iso=window_end.isoformat(),
         window_start=window_start,
         window_end=window_end,
-        inf_results=inf_results,
+        upload_job_id=None,
+        _inf_results=inf_results,
     )
 
     assert using_fallback
@@ -160,6 +164,7 @@ def test_resolve_data_bounds_unions_db_and_upload(monkeypatch):
 def test_resolve_window_dataframe_skips_db_for_upload_only(monkeypatch):
     from src.dashboard.services import anomalies_page_data as mod
 
+    mod.resolve_window_dataframe.clear()
     upload_frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-06-17T12:00:00+00:00"]),
@@ -191,7 +196,8 @@ def test_resolve_window_dataframe_skips_db_for_upload_only(monkeypatch):
         end_iso=window_end.isoformat(),
         window_start=window_start,
         window_end=window_end,
-        inf_results=inf_results,
+        upload_job_id=None,
+        _inf_results=inf_results,
     )
 
     assert using_fallback

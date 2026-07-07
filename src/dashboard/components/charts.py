@@ -74,6 +74,23 @@ def query_incidents(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT)
+def query_incidents_window(
+    tenant_id: str,
+    greenhouse_id: str,
+    start_iso: str,
+    end_iso: str,
+) -> pd.DataFrame:
+    """Incidents within [start, end] — avoids loading full incident history."""
+    rows = _client.get_incidents(
+        tenant_id, greenhouse_id, start_iso=start_iso, end_iso=end_iso
+    )
+    df = pd.DataFrame(rows)
+    if not df.empty and "detected_at" in df.columns:
+        df["detected_at"] = pd.to_datetime(df["detected_at"])
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL_SHORT)
 def get_data_date_bounds(tenant_id: str, greenhouse_id: str):
     """Return (min_date, max_date) for available readings, or (None, None)."""
     min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
@@ -156,6 +173,8 @@ def clear_sensor_cache() -> None:
     get_data_date_bounds.clear()
     query_anomaly_readings.clear()
     query_raw_readings.clear()
+    query_incidents.clear()
+    query_incidents_window.clear()
     from src.dashboard.components.monitoring_jump import clear_monitoring_prefetch
     from src.dashboard.services.anomalies_page_data import clear_anomaly_page_cache
 

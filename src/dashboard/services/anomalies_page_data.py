@@ -190,6 +190,51 @@ def filter_anomalies(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     return df.loc[mask].copy()
 
 
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
+def load_anomalies_for_window(
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start_iso: str,
+    end_iso: str,
+    threshold: float,
+    upload_job_id: str | None,
+    _inf_results: dict | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    """Cached window load plus anomaly filtering for the detection page."""
+    window_start = pd.Timestamp(start_iso)
+    window_end = pd.Timestamp(end_iso)
+    df_window, using_fallback = resolve_window_dataframe(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        window_start=window_start,
+        window_end=window_end,
+        upload_job_id=upload_job_id,
+        _inf_results=_inf_results,
+    )
+    effective_threshold = threshold
+    if using_fallback and _inf_results:
+        effective_threshold = float(_inf_results.get("threshold_used", threshold))
+    anomalies = filter_anomalies(df_window, effective_threshold)
+    return df_window, anomalies, using_fallback
+
+
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
+def load_enriched_top_anomalies(
+    anomalies: pd.DataFrame,
+    tenant_id: str,
+    greenhouse_id: str,
+    start_iso: str,
+    end_iso: str,
+) -> pd.DataFrame:
+    """Cache enriched anomaly rows for the Top Anomalies table."""
+    return enrich_anomalies_table(
+        anomalies, tenant_id, greenhouse_id, start_iso, end_iso
+    )
+
+
 def downsample_for_chart(df: pd.DataFrame, max_points: int = _CHART_MAX_POINTS) -> pd.DataFrame:
     if df.empty or len(df) <= max_points:
         return df
@@ -204,6 +249,9 @@ def clear_anomaly_page_cache() -> None:
     # their underlying functions in charts.py carry their own cache.
     load_upload_score_frame.clear()
     enrich_anomalies_table.clear()
+    load_anomalies_for_window.clear()
+    load_enriched_top_anomalies.clear()
+    resolve_window_dataframe.clear()
 
 
 def rows_in_window(

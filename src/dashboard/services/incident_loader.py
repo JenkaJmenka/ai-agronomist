@@ -30,7 +30,6 @@ def fetch_incidents_in_range(
             "root_cause": row["root_cause"],
             "root_cause_details": row["root_cause_details"],
             "anomaly_score": row["anomaly_score"],
-            "sequence": row["sequence"],
             "fault_type": row["fault_type"],
         }
         for row in rows

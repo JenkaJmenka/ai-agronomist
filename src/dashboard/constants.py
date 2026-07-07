@@ -33,3 +33,7 @@ FAULT_LABELS: dict[str, str] = {
 LAYER1_CACHE_DIR: str = os.path.join(
     os.environ.get("DASHBOARD_DATA_DIR", "data"), "inference_result_cache"
 )
+
+# st.navigation / st.switch_page paths (relative to app.py).
+MONITORING_PAGE: str = "views/1_Active_Monitoring/1_Monitoring.py"
+ANOMALIES_PAGE: str = "views/2_anomalies.py"

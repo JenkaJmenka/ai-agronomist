@@ -16,10 +16,9 @@ from src.dashboard.components.charts import (
     get_available_greenhouses,
 )
 from src.dashboard.services.anomalies_page_data import (
-    enrich_anomalies_table,
-    filter_anomalies,
+    load_enriched_top_anomalies,
     resolve_data_bounds,
-    resolve_window_dataframe,
+    load_anomalies_for_window,
 )
 from src.dashboard.components.model_registry import render_model_registry
 from src.dashboard.components.global_sidebar import (
@@ -552,7 +551,7 @@ def _render_top_anomalies_section(
     end_iso = (ts_col.max() + pd.Timedelta(days=1)).isoformat()
 
     try:
-        enriched = enrich_anomalies_table(
+        enriched = load_enriched_top_anomalies(
             top_anomalies,
             tenant,
             greenhouse,
@@ -579,6 +578,7 @@ def _render_top_anomalies_section(
         greenhouse_id=greenhouse,
         table_title="",
         available_columns=get_all_sensor_columns(source_df) if not source_df.empty else None,
+        source_df=source_df if not source_df.empty else df,
     )
 
 
@@ -615,29 +615,6 @@ def _resolve_data_bounds(
     inf_results: dict | None,
 ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     return resolve_data_bounds(tenant, greenhouse, inf_results)
-
-
-def _load_window_dataframe(
-    *,
-    tenant: str,
-    greenhouse: str,
-    window_start: pd.Timestamp,
-    window_end: pd.Timestamp,
-    inf_results: dict | None,
-) -> tuple[pd.DataFrame, bool]:
-    start_iso = pd.Timestamp(window_start).isoformat()
-    end_iso = pd.Timestamp(window_end).isoformat()
-    upload_job_id = str(inf_results.get("job_id")) if inf_results else None
-    return resolve_window_dataframe(
-        tenant_id=tenant,
-        greenhouse_id=greenhouse,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        window_start=window_start,
-        window_end=window_end,
-        upload_job_id=upload_job_id,
-        _inf_results=inf_results,
-    )
 
 
 @st.fragment
@@ -682,16 +659,20 @@ def _render_anomaly_dashboard(
         selected_fault_types = st.session_state.get("fault_type_filter", [])
 
         try:
-            df_window, using_upload_fallback = _load_window_dataframe(
-                tenant=tenant,
-                greenhouse=greenhouse,
-                window_start=window_start,
-                window_end=window_end,
-                inf_results=inf_results,
+            upload_job_id = str(inf_results.get("job_id")) if inf_results else None
+            df_window, anomalies_df, using_upload_fallback = load_anomalies_for_window(
+                tenant_id=tenant,
+                greenhouse_id=greenhouse,
+                start_iso=window_start.isoformat(),
+                end_iso=window_end.isoformat(),
+                threshold=threshold,
+                upload_job_id=upload_job_id,
+                _inf_results=inf_results,
             )
         except Exception as exc:
             st.error(f"Could not load sensor readings: {exc}")
             df_window = pd.DataFrame()
+            anomalies_df = pd.DataFrame()
             using_upload_fallback = False
 
         if using_upload_fallback:
@@ -718,7 +699,6 @@ def _render_anomaly_dashboard(
             f"{window_start.strftime('%d %b %Y %H:%M')} → "
             f"{window_end.strftime('%d %b %Y %H:%M')}"
         )
-        anomalies_df = filter_anomalies(df, score_threshold)
     else:
         with st.expander("Filters", expanded=True):
             st.info(

@@ -17,6 +17,7 @@ import streamlit as st
 
 from src.dashboard.components import sticky_table as _sticky_table
 from src.dashboard.components.monitoring_jump import queue_monitoring_jump
+from src.dashboard.constants import MONITORING_PAGE
 from src.dashboard.services.diagnosis_enricher import format_sensor_label
 
 SENSOR_COLUMNS = ["temperature", "humidity", "co2", "light"]
@@ -322,6 +323,7 @@ def _monitor_jump(
     greenhouse: str,
     *,
     available_columns: list[str] | None,
+    source_df: pd.DataFrame | None = None,
 ) -> None:
     try:
         queue_monitoring_jump(
@@ -329,8 +331,9 @@ def _monitor_jump(
             tenant,
             greenhouse,
             available_columns=available_columns,
+            source_df=source_df,
         )
-        st.switch_page("pages/1_Active_Monitoring/1_Monitoring.py")
+        st.switch_page(MONITORING_PAGE)
     except ValueError as exc:
         st.error(str(exc))
 
@@ -350,6 +353,7 @@ def _render_row_action_buttons(
     tenant: str,
     greenhouse: str,
     available_columns: list[str] | None,
+    source_df: pd.DataFrame | None = None,
 ) -> None:
     safe_key = table_key.replace("_", "-")
     action_cell.markdown(
@@ -390,6 +394,7 @@ def _render_row_action_buttons(
             tenant,
             greenhouse,
             available_columns=available_columns,
+            source_df=source_df,
         )
 
     buttons.append(
@@ -450,6 +455,7 @@ def render(
     tenant_id: str = "",
     greenhouse_id: str = "",
     available_columns: list[str] | None = None,
+    source_df: pd.DataFrame | None = None,
     empty_message: Optional[str] = None,
     max_height: int = 420,
     show_legend: bool = True,
@@ -575,6 +581,7 @@ def render(
             tenant=tenant,
             greenhouse=greenhouse,
             available_columns=monitor_columns,
+            source_df=source_df,
         )
 
     _sticky_table.render_streamlit_sticky_table(

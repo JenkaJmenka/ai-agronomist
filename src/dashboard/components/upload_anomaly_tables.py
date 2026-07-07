@@ -13,6 +13,7 @@ from src.dashboard.components.monitoring_jump import (
     format_anomaly_cell,
     queue_monitoring_jump,
 )
+from src.dashboard.constants import MONITORING_PAGE
 from src.dashboard.components.sticky_table import (
     render_compact_buttons,
     render_streamlit_sticky_table,
@@ -59,7 +60,7 @@ def _monitor_jump(
             available_columns=available_columns,
             source_df=source_df,
         )
-        st.switch_page("pages/1_Active_Monitoring/1_Monitoring.py")
+        st.switch_page(MONITORING_PAGE)
     except ValueError as exc:
         st.error(str(exc))
 

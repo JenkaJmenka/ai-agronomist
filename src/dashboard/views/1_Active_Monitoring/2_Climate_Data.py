@@ -12,7 +12,7 @@ from src.dashboard.components.charts import (
     get_sensor_label,
     plot_combined_sensors,
     plot_synced_sensor_grid,
-    query_incidents,
+    query_incidents_window,
     query_sensor_readings_window,
     query_sensor_timestamp_bounds,
 )
@@ -129,7 +129,12 @@ if not selected_cols:
 _color_manager = get_chart_color_manager(_TAB_CONTEXT)
 _col_stats: dict[str, Any] = {}
 
-df_incidents = query_incidents(tenant, greenhouse)
+df_incidents = query_incidents_window(
+    tenant,
+    greenhouse,
+    timeline_start.isoformat(),
+    timeline_end.isoformat(),
+)
 df_anomaly_events = build_unified_anomaly_events(
     df,
     df_incidents,

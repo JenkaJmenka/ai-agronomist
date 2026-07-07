@@ -18,6 +18,7 @@ from src.dashboard.components.monitoring_jump import (
     apply_pending_jump_columns,
     apply_pending_jump_window,
     load_monitoring_window,
+    peek_monitoring_prefetch_bounds,
     resolve_highlight_columns,
 )
 from src.dashboard.components.timeline import (
@@ -178,7 +179,17 @@ greenhouse = st.session_state["selected_greenhouse"]
 st.markdown(f"**{tenant}** · Greenhouse **{greenhouse}**")
 
 try:
-    _min_iso, _max_iso = query_sensor_timestamp_bounds(tenant, greenhouse)
+    _prefetch_bounds = peek_monitoring_prefetch_bounds()
+    if _prefetch_bounds is not None:
+        _data_min_ts, _data_max_ts = _prefetch_bounds
+        _min_iso, _max_iso = _data_min_ts.isoformat(), _data_max_ts.isoformat()
+    else:
+        _min_iso, _max_iso = query_sensor_timestamp_bounds(tenant, greenhouse)
+        if not _min_iso or not _max_iso:
+            render_no_sensor_data_hint(tenant, greenhouse)
+            st.stop()
+        _data_min_ts = pd.Timestamp(_min_iso)
+        _data_max_ts = pd.Timestamp(_max_iso)
 except Exception as exc:
     st.error(
         f"Could not load sensor data — is the API server running? "
@@ -186,12 +197,9 @@ except Exception as exc:
     )
     st.stop()
 
-if not _min_iso or not _max_iso:
+if _prefetch_bounds is None and (not _min_iso or not _max_iso):
     render_no_sensor_data_hint(tenant, greenhouse)
     st.stop()
-
-_data_min_ts = pd.Timestamp(_min_iso)
-_data_max_ts = pd.Timestamp(_max_iso)
 
 # Bounds → timeline → window query: pick the range first, then load exactly that
 # window from the API. Loading a fixed recent frame and filtering it in memory
