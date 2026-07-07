@@ -95,7 +95,22 @@ async def handle_upload_portion(
     from src.api.routes.inference import get_cached_detector
     from src.models.artifact_store import resolve_checkpoint
 
-    checkpoint_path = await resolve_checkpoint(db, msg.checkpoint_path)
+    try:
+        checkpoint_path = await resolve_checkpoint(db, msg.checkpoint_path)
+    except FileNotFoundError as exc:
+        logger.warning(
+            "Portion %s/%s: model deleted (%s). Failing immediately without retries.", 
+            msg.job_id, msg.portion_idx, exc
+        )
+        await record_portion_failure(
+            db,
+            job_id=msg.job_id,
+            portion_idx=msg.portion_idx,
+            error=f"Upload failed: {exc}",
+            attempt=attempt,
+        )
+        return
+
     stat_carry = StatCarry(rows=list(msg.stat_carry_rows))
 
     def _score() -> PortionScores:
