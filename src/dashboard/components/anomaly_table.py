@@ -321,7 +321,6 @@ def _monitor_jump(
     tenant: str,
     greenhouse: str,
     *,
-    source_df: pd.DataFrame | None,
     available_columns: list[str] | None,
 ) -> None:
     try:
@@ -330,7 +329,6 @@ def _monitor_jump(
             tenant,
             greenhouse,
             available_columns=available_columns,
-            source_df=source_df,
         )
         st.switch_page("pages/1_Active_Monitoring/1_Monitoring.py")
     except ValueError as exc:
@@ -351,7 +349,6 @@ def _render_row_action_buttons(
     pending_action: list[Optional[Dict[str, Any]]],
     tenant: str,
     greenhouse: str,
-    source_df: pd.DataFrame | None,
     available_columns: list[str] | None,
 ) -> None:
     safe_key = table_key.replace("_", "-")
@@ -392,7 +389,6 @@ def _render_row_action_buttons(
             payload,
             tenant,
             greenhouse,
-            source_df=source_df,
             available_columns=available_columns,
         )
 
@@ -453,7 +449,6 @@ def render(
     table_key: str = _TOP_TABLE_KEY,
     tenant_id: str = "",
     greenhouse_id: str = "",
-    source_df: pd.DataFrame | None = None,
     available_columns: list[str] | None = None,
     empty_message: Optional[str] = None,
     max_height: int = 420,
@@ -579,7 +574,6 @@ def render(
             pending_action=pending_action_box,
             tenant=tenant,
             greenhouse=greenhouse,
-            source_df=source_df,
             available_columns=monitor_columns,
         )
 

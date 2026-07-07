@@ -349,11 +349,22 @@ def apply_datetime_filter(
     """
     if df.empty:
         return df
-    work = df.copy()
-    work["timestamp"] = normalize_series_tz(pd.to_datetime(work["timestamp"]))
-    start_dt = align_bound_to_series(pd.Timestamp(start_dt), work["timestamp"])
-    end_dt = align_bound_to_series(pd.Timestamp(end_dt), work["timestamp"])
-    return work[(work["timestamp"] >= start_dt) & (work["timestamp"] <= end_dt)]
+
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        ts_series = df["timestamp"]
+    else:
+        ts_series = normalize_series_tz(pd.to_datetime(df["timestamp"]))
+
+    start_dt = align_bound_to_series(pd.Timestamp(start_dt), ts_series)
+    end_dt = align_bound_to_series(pd.Timestamp(end_dt), ts_series)
+    
+    mask = (ts_series >= start_dt) & (ts_series <= end_dt)
+    work = df[mask].copy()
+    
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        work["timestamp"] = ts_series[mask]
+        
+    return work
 
 
 def _apply_x_range(

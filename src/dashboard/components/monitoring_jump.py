@@ -49,38 +49,7 @@ def peek_pending_monitoring_jump() -> dict[str, Any] | None:
 
 
 def clear_monitoring_prefetch() -> None:
-    """Drop session handoff cache (e.g. after refresh or tenant change)."""
-    st.session_state.pop(_MONITORING_PREFETCH_KEY, None)
-
-
-def _consume_monitoring_prefetch(
-    tenant_id: str,
-    greenhouse_id: str,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-) -> pd.DataFrame | None:
-    """Return the prefetch df trimmed to [start, end] when it CONTAINS that window.
-
-    The handoff cache from an anomaly-table jump is one-shot: it is popped on
-    every lookup. It is only usable when its window fully covers the requested
-    window (containment), so a later, wider timeline selection re-queries the
-    API instead of showing a too-narrow slice.
-    """
-    prefetch = st.session_state.pop(_MONITORING_PREFETCH_KEY, None)
-    if not prefetch:
-        return None
-    if prefetch.get("tenant_id") != tenant_id or prefetch.get("greenhouse_id") != greenhouse_id:
-        return None
-    prefetch_start = strip_tz(pd.Timestamp(prefetch["time_start"]))
-    prefetch_end = strip_tz(pd.Timestamp(prefetch["time_end"]))
-    if not (prefetch_start <= strip_tz(start) and prefetch_end >= strip_tz(end)):
-        return None
-    df = prefetch.get("df")
-    if df is None or df.empty:
-        return None
-    return apply_datetime_filter(df, start, end)
-
-
+    pass
 def load_monitoring_window(
     tenant_id: str,
     greenhouse_id: str,
@@ -89,23 +58,26 @@ def load_monitoring_window(
 ) -> pd.DataFrame:
     """Load sensor readings for [start, end].
 
-    Uses the one-shot session prefetch when it covers the requested window
-    (fast path after an anomaly-table jump); otherwise queries the readings
-    API for exactly the selected window so any timeline range re-queries the
-    server instead of filtering a stale landing frame.
+    Uses resolve_window_dataframe (which is @st.cache_data cached) to fetch
+    the exact selected window, guaranteeing sub-second reads for jumps and
+    incorporating unpersisted upload data natively.
     """
-    from src.dashboard.components.charts import query_sensor_readings_window
+    from src.dashboard.services.anomalies_page_data import resolve_window_dataframe
+    from src.dashboard.components.inference_results import resolve_upload_results
 
-    prefetch = _consume_monitoring_prefetch(tenant_id, greenhouse_id, start, end)
-    if prefetch is not None:
-        return prefetch
-
-    return query_sensor_readings_window(
-        tenant_id,
-        greenhouse_id,
-        pd.Timestamp(start).isoformat(),
-        pd.Timestamp(end).isoformat(),
+    inf_results = resolve_upload_results(None)
+    
+    df, _ = resolve_window_dataframe(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        start_iso=start.isoformat(),
+        end_iso=end.isoformat(),
+        window_start=start,
+        window_end=end,
+        upload_job_id=str(inf_results.get("job_id")) if inf_results else None,
+        _inf_results=inf_results,
     )
+    return df
 
 
 def _sync_monitor_timeline_pickers(start: pd.Timestamp, end: pd.Timestamp) -> None:
@@ -135,7 +107,6 @@ def queue_monitoring_jump(
     greenhouse_id: str,
     *,
     available_columns: list[str] | None = None,
-    source_df: pd.DataFrame | None = None,
 ) -> None:
     """Stage Monitoring navigation; apply on the Monitoring page before widgets mount."""
     ts_str = row.get("timestamp", "")
@@ -161,20 +132,22 @@ def queue_monitoring_jump(
         "highlight_columns": highlight_cols,
     }
 
-    if source_df is not None and not source_df.empty:
-        ts_series = pd.to_datetime(source_df["timestamp"])
-        day_df = apply_datetime_filter(source_df, day_start, day_end)
-        st.session_state[_MONITORING_PREFETCH_KEY] = {
-            "tenant_id": tenant_id,
-            "greenhouse_id": greenhouse_id,
-            "time_start": day_start,
-            "time_end": day_end,
-            "data_min": ts_series.min(),
-            "data_max": ts_series.max(),
-            "df": day_df.copy(),
-        }
-    else:
-        clear_monitoring_prefetch()
+    # Prefetch the 24-hour dataframe right now using the cached resolve_window_dataframe.
+    # This ensures it's instantly available when the Monitoring page calls load_monitoring_window.
+    from src.dashboard.services.anomalies_page_data import resolve_window_dataframe
+    from src.dashboard.components.inference_results import resolve_upload_results
+
+    inf_results = resolve_upload_results(None)
+    resolve_window_dataframe(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        start_iso=day_start.isoformat(),
+        end_iso=day_end.isoformat(),
+        window_start=day_start,
+        window_end=day_end,
+        upload_job_id=str(inf_results.get("job_id")) if inf_results else None,
+        _inf_results=inf_results,
+    )
 
     queue_sidebar_selection(tenant=tenant_id, greenhouse=greenhouse_id)
 

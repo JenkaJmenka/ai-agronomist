@@ -578,7 +578,6 @@ def _render_top_anomalies_section(
         tenant_id=tenant,
         greenhouse_id=greenhouse,
         table_title="",
-        source_df=source_df,
         available_columns=get_all_sensor_columns(source_df) if not source_df.empty else None,
     )
 
@@ -787,7 +786,6 @@ def _render_anomaly_dashboard(
         incidents=_incidents_for_cold_run(inf_results, inf_tenant, inf_greenhouse),
         on_feedback=handle_feedback,
         feedback_state_key=feedback_state_key,
-        source_df=df if has_sensor_data and not df.empty else None,
         available_columns=get_all_sensor_columns(df) if has_sensor_data and not df.empty else None,
         window_start=window_start,
         window_end=window_end,
