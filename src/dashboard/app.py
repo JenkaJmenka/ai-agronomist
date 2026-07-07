@@ -11,39 +11,44 @@ home = st.Page("home.py", title="Home", icon="🌱", default=True)
 
 active_monitoring = [
     st.Page(
-        "pages/1_Active_Monitoring/1_Monitoring.py",
+        "views/1_Active_Monitoring/1_Monitoring.py",
         title="Monitoring",
         icon="📊",
     ),
     st.Page(
-        "pages/1_Active_Monitoring/2_Climate_Data.py",
+        "views/1_Active_Monitoring/2_Climate_Data.py",
         title="Climate Data",
         icon="🌡️",
     ),
     st.Page(
-        "pages/1_Active_Monitoring/3_Gas_Monitoring.py",
+        "views/1_Active_Monitoring/3_Gas_Monitoring.py",
         title="Gas Monitoring",
         icon="🧪",
     ),
 ]
 
 detection_pages = [
-    st.Page("pages/2_anomalies.py", title="Anomaly Detection"),
-    st.Page("pages/3_thresholds.py", title="Thresholds"),
-    st.Page("pages/4_metrics.py", title="System Metrics"),
+    st.Page("views/2_anomalies.py", title="Anomaly Detection"),
+    st.Page("views/3_thresholds.py", title="Thresholds"),
+    st.Page("views/4_metrics.py", title="System Metrics"),
 ]
 
 operations_pages = [
     st.Page(
-        "pages/5_upload_operations.py",
+        "views/5_upload_operations.py",
         title="Upload & Operations",
         icon="📤",
+    ),
+    st.Page(
+        "views/6_job_monitoring.py",
+        title="Job Monitoring",
+        icon="⏱️",
     ),
 ]
 
 feedback_pages = [
     st.Page(
-        "pages/99_Operator_Feedback.py",
+        "views/99_Operator_Feedback.py",
         title="Operator Feedback",
         icon="📝",
     ),
