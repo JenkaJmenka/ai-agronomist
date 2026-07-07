@@ -50,7 +50,7 @@ InsufficientDataError = ValueError
 _SENSOR_COLS: list[str] = ["temperature", "humidity", "co2", "light"]
 _GAS_COLS: frozenset[str] = frozenset({"co2", "light"})
 _TRAIN_EPOCHS: int = 10
-_TRAIN_BATCH: int = 32
+_TRAIN_BATCH: int = 256
 _TRAIN_LR: float = 1e-3
 _PHYSICS_HD_MAX: float = 50.0  # g/m³ — above this the T+RH combination is impossible
 

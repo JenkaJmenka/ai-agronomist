@@ -721,7 +721,7 @@ BOOTSTRAP_THRESHOLD_PERCENTILE: float = 99.0
 # file size while preserving coverage across the whole range. Override via
 # BOOTSTRAP_MAX_TRAIN_SEQUENCES; set to 0 to disable the cap.
 BOOTSTRAP_MAX_TRAIN_SEQUENCES: int = int(
-    os.environ.get("BOOTSTRAP_MAX_TRAIN_SEQUENCES", "15000")
+    os.environ.get("BOOTSTRAP_MAX_TRAIN_SEQUENCES", "5000")
 )
 
 # Psychrometric validation (Tetens equation): max allowable absolute error
