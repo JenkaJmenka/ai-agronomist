@@ -72,6 +72,7 @@ def _upload_only_results(inf_results: dict | None) -> bool:
     return bool(inf_results) and not inf_results.get("data_persisted")
 
 
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
 def resolve_window_dataframe(
     *,
     tenant_id: str,
@@ -80,28 +81,36 @@ def resolve_window_dataframe(
     end_iso: str,
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
-    inf_results: dict | None,
+    upload_job_id: str | None,
+    _inf_results: dict | None,
 ) -> tuple[pd.DataFrame, bool]:
     """Load the active window, merging upload scores when DB rows lack them.
 
     Returns (dataframe, using_upload_fallback). Fallback is True only when the
     primary series comes from the cold-run upload rather than persisted readings.
     """
-    if _upload_only_results(inf_results):
+    if _upload_only_results(_inf_results):
         upload_frame = _upload_score_frame_for_window(
-            tenant_id, greenhouse_id, inf_results, window_start, window_end
+            tenant_id, greenhouse_id, _inf_results, window_start, window_end
         )
         if not upload_frame.empty:
+            # Cast upload frame scores to numeric immediately.
+            upload_frame["anomaly_score"] = pd.to_numeric(upload_frame["anomaly_score"], errors="coerce")
             return upload_frame, True
 
     df_window = load_readings_window(tenant_id, greenhouse_id, start_iso, end_iso)
     upload_frame = (
         _upload_score_frame_for_window(
-            tenant_id, greenhouse_id, inf_results, window_start, window_end
+            tenant_id, greenhouse_id, _inf_results, window_start, window_end
         )
-        if inf_results
+        if _inf_results
         else pd.DataFrame()
     )
+
+    def _finalize(df: pd.DataFrame, fallback: bool) -> tuple[pd.DataFrame, bool]:
+        if not df.empty and "anomaly_score" in df.columns:
+            df["anomaly_score"] = pd.to_numeric(df["anomaly_score"], errors="coerce")
+        return df, fallback
 
     if not df_window.empty:
         if not upload_frame.empty:
@@ -109,12 +118,12 @@ def resolve_window_dataframe(
                 df_window, upload_frame, tenant_id, greenhouse_id
             )
             if _has_usable_anomaly_scores(merged):
-                return merged, False
-            return upload_frame, True
-        return df_window, False
+                return _finalize(merged, False)
+            return _finalize(upload_frame, True)
+        return _finalize(df_window, False)
 
     if not upload_frame.empty:
-        return upload_frame, True
+        return _finalize(upload_frame, True)
     return pd.DataFrame(), False
 
 

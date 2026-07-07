@@ -229,10 +229,13 @@ def _render_pending_upload_tracker_body() -> None:
         pct = 0.0
     else:
         progress_text = f"Processing upload in portions… {pct:.0f}% ({status})"
-    st.progress(
-        min(int(pct), 100),
-        text=progress_text,
-    )
+    col1, col2 = st.columns([10, 1])
+    with col1:
+        st.progress(min(int(pct), 100), text=progress_text)
+    with col2:
+        if st.button("Stop", key="stop_upload_poll"):
+            st.session_state.pop(_PENDING_UPLOAD_KEY, None)
+            st.rerun()
 
 
 @st.fragment(run_every=timedelta(seconds=POLL_INTERVAL_SECONDS))
@@ -625,6 +628,7 @@ def _load_window_dataframe(
 ) -> tuple[pd.DataFrame, bool]:
     start_iso = pd.Timestamp(window_start).isoformat()
     end_iso = pd.Timestamp(window_end).isoformat()
+    upload_job_id = str(inf_results.get("job_id")) if inf_results else None
     return resolve_window_dataframe(
         tenant_id=tenant,
         greenhouse_id=greenhouse,
@@ -632,7 +636,8 @@ def _load_window_dataframe(
         end_iso=end_iso,
         window_start=window_start,
         window_end=window_end,
-        inf_results=inf_results,
+        upload_job_id=upload_job_id,
+        _inf_results=inf_results,
     )
 
 

@@ -227,11 +227,15 @@ def _prepare_raw_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
 
 def _load_and_resample(csv_path: str) -> pd.DataFrame:
     from src.vendors.csv_adapter import CSVAdapter, TIMESTAMP_COL, pandas_csv_reader_kwargs
+    import random
 
     adapter = CSVAdapter({"filepath": csv_path})
     adapter.connect()
     csv_props = adapter._csv_props
-    pieces: list[pd.DataFrame] = []
+    
+    MAX_CHUNKS = 10
+    reservoir: list[pd.DataFrame] = []
+    chunk_idx = 0
     total_raw = 0
 
     try:
@@ -243,27 +247,55 @@ def _load_and_resample(csv_path: str) -> pd.DataFrame:
         for raw_chunk in reader:
             if raw_chunk.empty:
                 continue
+            
+            if chunk_idx < MAX_CHUNKS:
+                reservoir.append(raw_chunk)
+            else:
+                j = random.randint(0, chunk_idx)
+                if j < MAX_CHUNKS:
+                    reservoir[j] = raw_chunk
+            
+            chunk_idx += 1
             total_raw += len(raw_chunk)
-            raw_chunk = _prepare_raw_chunk(raw_chunk)
-            try:
-                normalized = adapter.normalize(raw_chunk)
-                pieces.append(normalized.set_index(TIMESTAMP_COL))
-            except Exception:
-                continue
+            
     except pd.errors.EmptyDataError as exc:
         raise ValueError("Uploaded CSV contains no valid data.") from exc
 
-    if not pieces:
+    if not reservoir:
         raise ValueError("Uploaded CSV contains no valid data.")
 
-    df = pd.concat(pieces).sort_index()
-    df.index = pd.to_datetime(df.index, utc=True)
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.resample(BOOTSTRAP_RESAMPLE_INTERVAL).mean()
-    for col in _SENSOR_COLS:
-        if col not in df.columns:
-            df[col] = np.nan
-    return df[_SENSOR_COLS].interpolate(method="linear", limit=3)
+    # Process and resample each sampled chunk individually
+    # This prevents pandas from expanding the time index with millions of NaNs 
+    # between chronologically distant sampled chunks.
+    pieces: list[pd.DataFrame] = []
+    
+    # Sort reservoir by time (roughly) so the final dataframe is chronological
+    # We can do this safely after processing them
+    processed_chunks = []
+    
+    for raw_chunk in reservoir:
+        raw_chunk = _prepare_raw_chunk(raw_chunk)
+        try:
+            normalized = adapter.normalize(raw_chunk)
+            chunk_df = normalized.set_index(TIMESTAMP_COL).sort_index()
+            chunk_df.index = pd.to_datetime(chunk_df.index, utc=True)
+            chunk_df = chunk_df[~chunk_df.index.duplicated(keep="last")]
+            chunk_df = chunk_df.resample(BOOTSTRAP_RESAMPLE_INTERVAL).mean()
+            
+            for col in _SENSOR_COLS:
+                if col not in chunk_df.columns:
+                    chunk_df[col] = np.nan
+                    
+            chunk_df = chunk_df[_SENSOR_COLS].interpolate(method="linear", limit=3)
+            processed_chunks.append(chunk_df)
+        except Exception:
+            continue
+            
+    if not processed_chunks:
+        raise ValueError("Uploaded CSV contains no valid data after normalization.")
+
+    df = pd.concat(processed_chunks).sort_index()
+    return df
 
 
 def _compute_physics_flags(df: pd.DataFrame) -> pd.Series:

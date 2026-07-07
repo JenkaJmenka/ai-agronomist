@@ -66,3 +66,16 @@ def render_global_sidebar() -> None:
         key="global_api_key",
     )
     st.session_state["api_key"] = api_key or None
+
+    # Hide the native Streamlit top-right running indicator (blinking wheel and stop button)
+    # since it creates UI artifacts when polling via st.fragment(run_every=...)
+    st.markdown(
+        """
+        <style>
+            [data-testid="stStatusWidget"] {
+                display: none;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )

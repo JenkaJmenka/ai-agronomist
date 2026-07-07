@@ -29,26 +29,29 @@ def _dedupe_table(table: str) -> None:
 def upgrade() -> None:
     _dedupe_table("sensor_readings")
     _dedupe_table("raw_readings")
-    op.create_unique_constraint(
-        "uq_sensor_readings_tenant_greenhouse_timestamp",
-        "sensor_readings",
-        ["tenant_id", "greenhouse_id", "timestamp"],
-    )
-    op.create_unique_constraint(
-        "uq_raw_readings_tenant_greenhouse_timestamp",
-        "raw_readings",
-        ["tenant_id", "greenhouse_id", "timestamp"],
-    )
+    
+    with op.batch_alter_table("sensor_readings", schema=None) as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_sensor_readings_tenant_greenhouse_timestamp",
+            ["tenant_id", "greenhouse_id", "timestamp"],
+        )
+        
+    with op.batch_alter_table("raw_readings", schema=None) as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_raw_readings_tenant_greenhouse_timestamp",
+            ["tenant_id", "greenhouse_id", "timestamp"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "uq_raw_readings_tenant_greenhouse_timestamp",
-        "raw_readings",
-        type_="unique",
-    )
-    op.drop_constraint(
-        "uq_sensor_readings_tenant_greenhouse_timestamp",
-        "sensor_readings",
-        type_="unique",
-    )
+    with op.batch_alter_table("raw_readings", schema=None) as batch_op:
+        batch_op.drop_constraint(
+            "uq_raw_readings_tenant_greenhouse_timestamp",
+            type_="unique",
+        )
+        
+    with op.batch_alter_table("sensor_readings", schema=None) as batch_op:
+        batch_op.drop_constraint(
+            "uq_sensor_readings_tenant_greenhouse_timestamp",
+            type_="unique",
+        )
