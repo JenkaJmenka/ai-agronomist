@@ -10,6 +10,7 @@ from src.dashboard.constants import (
     CACHE_TTL_LONG,
     CACHE_TTL_MEDIUM,
     CACHE_TTL_SHORT,
+    DEFAULT_ANOMALY_THRESHOLD,
 )
 
 from src.dashboard.components.charts import (
@@ -287,11 +288,31 @@ def load_anomalies_for_window(
         _inf_results,
     )
     df_window = apply_datetime_filter(envelope, window_start, window_end)
-    effective_threshold = threshold
-    if using_fallback and _inf_results:
-        effective_threshold = float(_inf_results.get("threshold_used", threshold))
+    effective_threshold = _effective_anomaly_threshold(threshold, using_fallback, _inf_results)
     anomalies = filter_anomalies(df_window, effective_threshold)
     return df_window, anomalies, using_fallback
+
+
+def _effective_anomaly_threshold(
+    threshold: float, using_fallback: bool, inf_results: dict | None
+) -> float:
+    """Resolve the score cutoff, preferring the model's calibrated value.
+
+    The raw dashboard default (0.8) sits far above the squashed score scale
+    (scores are ``raw / ANOMALY_SCALING_FACTOR`` clipped to [0, 1]; a real day
+    tops out near 0.2), so filtering a *persisted* upload at 0.8 hides every
+    anomaly the model actually found. When the upload provides a calibrated
+    ``threshold_used`` and the user has NOT overridden the slider on the
+    Thresholds page (i.e. it is still the default), use the calibrated cutoff —
+    on both the DB and upload-only paths. An explicit user threshold always wins.
+    """
+    calibrated = (inf_results or {}).get("threshold_used")
+    if calibrated is None:
+        return threshold
+    user_overrode = threshold != DEFAULT_ANOMALY_THRESHOLD
+    if using_fallback or not user_overrode:
+        return float(calibrated)
+    return threshold
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
