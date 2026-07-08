@@ -3,7 +3,6 @@ import time
 from datetime import timedelta
 from typing import Callable, Optional
 
-from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 from src.dashboard.services.api_client import DEFAULT_API_URL
 
 import pandas as pd
@@ -26,6 +25,7 @@ from src.dashboard.components.global_sidebar import (
     render_global_sidebar,
 )
 from src.dashboard.components.inference_results import (
+    calibrated_threshold_default,
     get_recent_inference_results,
     load_inference_results,
     render_anomaly_score_charts,
@@ -593,7 +593,7 @@ if "selected_tenant" not in st.session_state:
 
 tenant = st.session_state["selected_tenant"]
 greenhouse = st.session_state["selected_greenhouse"]
-threshold = st.session_state.get("anomaly_threshold", DEFAULT_ANOMALY_THRESHOLD)
+saved_threshold_override = st.session_state.get("anomaly_threshold")
 api = DashboardApiClient(api_key=st.session_state.get("api_key"))
 
 saved_inf = load_inference_results(tenant, greenhouse)
@@ -608,6 +608,14 @@ if saved_inf is None:
 inf_results = saved_inf["results"] if saved_inf else None
 inf_tenant = saved_inf["tenant_id"] if saved_inf else tenant
 inf_greenhouse = saved_inf["greenhouse_id"] if saved_inf else greenhouse
+
+# Default the filter to the model's calibrated cutoff (scores top out ~0.2, so
+# the static 0.8 default hides everything). An explicit saved threshold wins.
+threshold = (
+    float(saved_threshold_override)
+    if saved_threshold_override is not None
+    else calibrated_threshold_default(inf_results)
+)
 
 _render_upload_section(tenant, greenhouse, saved_inf)
 _render_pending_upload_tracker()

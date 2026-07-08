@@ -1,8 +1,11 @@
 import streamlit as st
 from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
 from src.dashboard.components.data_availability import render_no_sensor_data_hint
-from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 from src.dashboard.components.global_sidebar import render_global_sidebar
+from src.dashboard.components.inference_results import (
+    calibrated_threshold_default,
+    load_inference_results,
+)
 from src.dashboard.components.timeline import (
     get_timeline_bounds,
     init_monitoring_session_state,
@@ -29,7 +32,15 @@ if 'selected_tenant' not in st.session_state:
 
 tenant = st.session_state['selected_tenant']
 greenhouse = st.session_state['selected_greenhouse']
-saved_threshold = float(st.session_state.get('anomaly_threshold', DEFAULT_ANOMALY_THRESHOLD))
+# Default to the model's calibrated cutoff (scores top out ~0.2, so the static
+# 0.8 default would flag nothing); an explicit saved threshold still wins.
+_saved_inf = load_inference_results(tenant, greenhouse)
+_inf_results = _saved_inf["results"] if _saved_inf else None
+_override = st.session_state.get('anomaly_threshold')
+saved_threshold = (
+    float(_override) if _override is not None
+    else calibrated_threshold_default(_inf_results)
+)
 
 with st.spinner("Loading sensor data…"):
     try:
@@ -65,9 +76,10 @@ new_threshold = st.slider(
     min_value=0.0,
     max_value=1.0,
     value=saved_threshold,
-    step=0.05,
+    step=0.01,
     key="threshold_preview_slider",
-    help="Drag to preview how many points would be flagged before saving.",
+    help="Drag to preview how many points would be flagged before saving. "
+    "LSTM-VAE scores are small (typically 0–0.2), so keep the threshold low.",
 )
 
 anomalies_saved = count_anomalies_at_threshold(scores, saved_threshold)

@@ -369,6 +369,23 @@ def build_sensor_dataframe_from_upload(results: dict) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
+def calibrated_threshold_default(inf_results: dict | None) -> float:
+    """Session default for the anomaly threshold.
+
+    Scores are ``raw_error / ANOMALY_SCALING_FACTOR`` clipped to [0, 1] and top
+    out near 0.2 on a real day, so the static 0.8 default hides every anomaly.
+    When an upload provides a calibrated ``threshold_used`` (percentile-based),
+    use it so the filter default lands inside the actual score scale.
+    """
+    calibrated = (inf_results or {}).get("threshold_used")
+    if calibrated is None:
+        return DEFAULT_ANOMALY_THRESHOLD
+    try:
+        return float(calibrated)
+    except (TypeError, ValueError):
+        return DEFAULT_ANOMALY_THRESHOLD
+
+
 def get_inference_results() -> dict | None:
     return st.session_state.get(_INF_RESULTS_KEY)
 
