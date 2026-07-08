@@ -40,7 +40,7 @@ from src.db.models import JobPortion
 from src.mq.publisher import publish_json
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE
-from src.utils.profiling import atimed
+from src.utils.profiling import atimed, profile_event
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +184,7 @@ async def handle_upload_portion(
 
     completed, failed, total = await increment_progress(db, msg.job_id)
     if total is not None and completed + failed >= total:
-        logger.info(
-            "PROFILE phase=upload.portions.complete ok=1 job=%s portions=%s",
-            msg.job_id,
-            total,
-        )
+        profile_event(logger, "upload.portions.complete", job=msg.job_id, portions=total)
         await publish_json(UPLOAD_FINALIZE_QUEUE, UploadFinalizeMessage(job_id=msg.job_id))
 
 

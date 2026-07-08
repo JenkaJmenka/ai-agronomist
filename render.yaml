@@ -26,6 +26,9 @@ services:
         sync: false  # set to an external broker URL (Render has no managed RabbitMQ)
       - key: TORCH_NUM_THREADS
         value: "4"
+      # Toggle PROFILE phase-timing logs without a redeploy (restart applies it).
+      - key: PROFILE_LOGGING_ENABLED
+        value: "true"
       - key: LOG_LEVEL
         value: INFO
 
@@ -52,6 +55,9 @@ services:
         value: "8"
       - key: MQ_PREFETCH_COUNT
         value: "1"
+      # Toggle PROFILE phase-timing logs without a redeploy (restart applies it).
+      - key: PROFILE_LOGGING_ENABLED
+        value: "true"
       - key: LOG_LEVEL
         value: INFO
 

@@ -44,6 +44,21 @@ DEVICE: str = _select_device()
 # deployed vCPU allocation (Railway worker: 8). 0 leaves PyTorch's default.
 TORCH_NUM_THREADS: int = int(os.environ.get("TORCH_NUM_THREADS", str(os.cpu_count() or 4)))
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var (1/true/yes/on -> True), falling back to *default*."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Toggle for the PROFILE phase-timing logs emitted by src/utils/profiling.py.
+# Enabled by default so the upload -> train -> find pipeline can be measured in
+# production; set PROFILE_LOGGING_ENABLED=0 (or false/no/off) on the service to
+# silence it once tuning is done — no code change, just a restart.
+PROFILE_LOGGING_ENABLED: bool = _env_flag("PROFILE_LOGGING_ENABLED", True)
+
 # =============================================================================
 # Reproducibility & Global Settings
 # =============================================================================
