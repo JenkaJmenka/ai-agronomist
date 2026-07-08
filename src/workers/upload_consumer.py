@@ -164,6 +164,9 @@ async def handle_upload_portion(
                 greenhouse_id=msg.greenhouse_id,
                 df=persist_df,
                 raw_df=raw_persist_df,
+                # Worker re-sums the split into a total; skip the two
+                # existing-key pre-SELECTs (2 fewer round-trips per portion).
+                count_split=False,
             )
             await db.commit()
             sensor_rows = s_ins + s_upd

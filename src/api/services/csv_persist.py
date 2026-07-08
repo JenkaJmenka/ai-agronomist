@@ -15,6 +15,7 @@ from sqlalchemy.future import select
 
 from src.db.models import RawReading, SensorReading
 from src.db.upsert import bulk_upsert_rows
+from src.utils.profiling import timed
 from src.vendors.csv_adapter import CSVAdapter, pandas_csv_reader_kwargs, parse_raw_rows
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ async def persist_readings_chunk(
     raw_df: pd.DataFrame | None,
     anomaly_scores_by_timestamp: dict[str, float] | None = None,
     anomaly_metadata_by_timestamp: dict[str, dict[str, list[str]]] | None = None,
+    count_split: bool = True,
 ) -> tuple[int, int, int, int]:
     """Upsert one normalized chunk (SensorReading) and raw chunk (RawReading).
 
@@ -169,13 +171,24 @@ async def persist_readings_chunk(
     Redelivery/re-upload safe: conflicts on (tenant_id, greenhouse_id,
     timestamp) update in place, and a NULL incoming anomaly_score never
     overwrites a previously stored one.
+
+    ``count_split`` controls the inserted-vs-updated breakdown. Computing it
+    needs a pre-SELECT of existing timestamp keys — one extra DB round-trip per
+    table, per chunk. The portioned worker path only ever re-sums the two into a
+    total, so it passes ``count_split=False`` to skip both pre-SELECTs (44 fewer
+    round-trips on a 22-portion upload); the whole total is then reported as
+    ``inserted``. The synchronous path keeps the accurate split (default True).
     """
     sensor_inserted = sensor_updated = raw_inserted = raw_updated = 0
 
     if df is not None and not df.empty:
         ts_norm = [normalize_persist_timestamp(v) for v in df["timestamp"]]
-        existing_keys = await _existing_timestamp_keys(
-            db, SensorReading, tenant_id, greenhouse_id, ts_norm
+        existing_keys = (
+            await _existing_timestamp_keys(
+                db, SensorReading, tenant_id, greenhouse_id, ts_norm
+            )
+            if count_split
+            else set()
         )
         rows: list[dict[str, Any]] = []
         for ts, temp, hum, co2, light in zip(
@@ -193,15 +206,18 @@ async def persist_readings_chunk(
                     "anomaly_score": lookup_anomaly_score(ts, anomaly_scores_by_timestamp),
                 }
             )
-        written = await bulk_upsert_rows(
-            db,
-            SensorReading,
-            rows,
-            update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
-            preserve_when_null=("anomaly_score",),
-        )
-        sensor_updated = len(
-            {persist_timestamp_key(ts) for ts in ts_norm} & existing_keys
+        with timed(logger, "persist.sensor_upsert", rows=len(rows), split=int(count_split)):
+            written = await bulk_upsert_rows(
+                db,
+                SensorReading,
+                rows,
+                update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
+                preserve_when_null=("anomaly_score",),
+            )
+        sensor_updated = (
+            len({persist_timestamp_key(ts) for ts in ts_norm} & existing_keys)
+            if count_split
+            else 0
         )
         sensor_inserted = written - sensor_updated
 
@@ -226,17 +242,24 @@ async def persist_readings_chunk(
                     "data": data_dict,
                 }
             )
-        existing_raw_keys = await _existing_timestamp_keys(
-            db, RawReading, tenant_id, greenhouse_id, raw_ts_norm
+        existing_raw_keys = (
+            await _existing_timestamp_keys(
+                db, RawReading, tenant_id, greenhouse_id, raw_ts_norm
+            )
+            if count_split
+            else set()
         )
-        written = await bulk_upsert_rows(
-            db,
-            RawReading,
-            raw_rows,
-            update_cols=("source", "data"),
-        )
-        raw_updated = len(
-            {persist_timestamp_key(ts) for ts in raw_ts_norm} & existing_raw_keys
+        with timed(logger, "persist.raw_upsert", rows=len(raw_rows), split=int(count_split)):
+            written = await bulk_upsert_rows(
+                db,
+                RawReading,
+                raw_rows,
+                update_cols=("source", "data"),
+            )
+        raw_updated = (
+            len({persist_timestamp_key(ts) for ts in raw_ts_norm} & existing_raw_keys)
+            if count_split
+            else 0
         )
         raw_inserted = written - raw_updated
 

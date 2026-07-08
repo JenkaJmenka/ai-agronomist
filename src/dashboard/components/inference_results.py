@@ -175,9 +175,14 @@ def _fetch_results_from_jobs_api(tenant_id: str, greenhouse_id: str) -> dict | N
     Failure-tolerant: any API error just means no fallback this render.
     """
     from src.dashboard.services.api_client import DashboardApiClient
+    from src.dashboard.services.async_upload import (
+        TERMINAL_JOB_STATUSES,
+        extract_upload_results,
+    )
 
+    client = DashboardApiClient(api_key=st.session_state.get("api_key"))
     try:
-        jobs = DashboardApiClient(api_key=st.session_state.get("api_key")).list_jobs(
+        jobs = client.list_jobs(
             tenant_id,
             greenhouse_id=greenhouse_id,
             job_type="upload_csv",
@@ -185,7 +190,25 @@ def _fetch_results_from_jobs_api(tenant_id: str, greenhouse_id: str) -> dict | N
         )
     except Exception:
         return None
-    return results_from_job_list(jobs)
+
+    # The list endpoint omits the per-sequence score arrays (multi-MB each), so
+    # fetch the full detail only for the newest usable upload — one job, not all
+    # five. This is what makes the fallback cheap instead of downloading tens of
+    # MB per render.
+    for job in jobs:
+        if job.get("status") not in TERMINAL_JOB_STATUSES:
+            continue
+        job_id = job.get("id")
+        if not job_id:
+            continue
+        try:
+            full_job = client.get_job(job_id)
+        except Exception:
+            continue
+        results, _error = extract_upload_results(full_job)
+        if results is not None:
+            return results
+    return None
 
 
 def _as_dict_list(items: Any) -> list[dict]:

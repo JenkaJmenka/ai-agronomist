@@ -191,7 +191,11 @@ def _finish_pending_upload(pending: dict, job: dict) -> None:
         greenhouse=pending["greenhouse_id"],
     )
     st.toast("Upload processing complete", icon="✅")
-    st.rerun()
+    # scope="app": a fragment-scoped rerun would leave the run_every poll
+    # fragment mounted, so its 2s timer keeps firing after the job is done
+    # ("fragment does not exist anymore" error flood). A full-app rerun
+    # re-evaluates the render gate and unmounts the poller, stopping the timer.
+    st.rerun(scope="app")
 
 
 def _render_pending_upload_tracker_body() -> None:
@@ -219,6 +223,7 @@ def _render_pending_upload_tracker_body() -> None:
             f"{JOB_TIMEOUT_SECONDS / 60:.0f} minutes — check the worker service "
             f"logs (job {pending['job_id']})."
         )
+        st.rerun(scope="app")  # unmount the poll fragment so its timer stops
         return
 
     pct = float(job.get("progress_pct") or 0.0) if job else 0.0
@@ -234,7 +239,7 @@ def _render_pending_upload_tracker_body() -> None:
     with col2:
         if st.button("Stop", key="stop_upload_poll"):
             st.session_state.pop(_PENDING_UPLOAD_KEY, None)
-            st.rerun()
+            st.rerun(scope="app")
 
 
 @st.fragment(run_every=timedelta(seconds=POLL_INTERVAL_SECONDS))

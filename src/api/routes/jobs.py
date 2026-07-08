@@ -14,6 +14,26 @@ from src.db.session import get_db
 
 router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 
+# Per-row arrays a cold-run upload job stores in `result`. Each holds one entry
+# per processed sequence (~105k on a full greenhouse day) — a few MB per job.
+# The list endpoint must never ship these: the job-monitoring poller lists 20
+# jobs every 5 s, and the recent-results fallback lists 5, so inlining them made
+# each poll download tens of MB. Callers that need the scores fetch the single
+# job's detail (GET /api/jobs/{id}), which keeps the full result.
+_HEAVY_RESULT_KEYS: tuple[str, ...] = (
+    "anomaly_scores",
+    "sequence_timestamps",
+    "embeddings",
+    "uncertainties",
+)
+
+
+def _lighten_result(result: Optional[dict]) -> Optional[dict]:
+    """Return *result* without the large per-sequence arrays (for list views)."""
+    if not result:
+        return result
+    return {k: v for k, v in result.items() if k not in _HEAVY_RESULT_KEYS}
+
 
 def _to_response(job: Job) -> JobStatusResponse:
     progress_pct: Optional[float] = None
@@ -76,4 +96,9 @@ async def get_jobs(
         status=status,
         limit=limit,
     )
-    return JobListResponse(jobs=[_to_response(job) for job in jobs])
+    responses = []
+    for job in jobs:
+        resp = _to_response(job)
+        resp.result = _lighten_result(resp.result)
+        responses.append(resp)
+    return JobListResponse(jobs=responses)
