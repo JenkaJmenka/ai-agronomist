@@ -752,8 +752,8 @@ def _render_anomaly_dashboard(
     st.markdown("### Sensor Readings")
     if not df.empty:
         from src.dashboard.components.charts import plot_synced_sensor_grid
-        from src.dashboard.components.sensor_columns import get_canonical_sensor_columns
-        sensor_cols = get_canonical_sensor_columns(df)
+        from src.dashboard.components.sensor_columns import get_all_sensor_columns
+        sensor_cols = get_all_sensor_columns(df)
         if sensor_cols:
             fig = plot_synced_sensor_grid(
                 df,
