@@ -25,6 +25,8 @@ _HEAVY_RESULT_KEYS: tuple[str, ...] = (
     "sequence_timestamps",
     "embeddings",
     "uncertainties",
+    "high_anomalies",
+    "statistical_summary",
 )
 
 
