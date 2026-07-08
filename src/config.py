@@ -37,6 +37,13 @@ def _select_device() -> str:
 
 DEVICE: str = _select_device()
 
+# Intra-op thread count for CPU PyTorch (LSTM matmuls dominate cold-start
+# training and portion scoring). PyTorch defaults to the physical core count,
+# but inside containers ``os.cpu_count()`` can misreport the cgroup CPU quota,
+# so we make it explicit and env-overridable. Pin TORCH_NUM_THREADS to the
+# deployed vCPU allocation (Railway worker: 8). 0 leaves PyTorch's default.
+TORCH_NUM_THREADS: int = int(os.environ.get("TORCH_NUM_THREADS", str(os.cpu_count() or 4)))
+
 # =============================================================================
 # Reproducibility & Global Settings
 # =============================================================================

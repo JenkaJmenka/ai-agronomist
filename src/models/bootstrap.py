@@ -39,6 +39,7 @@ from src.models.data_utils import (
 )
 from src.models.lstm_vae import LSTMVAE
 from src.models.psychrometric_validator import calculate_humidity_deficit
+from src.utils.profiling import timed
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,13 @@ class ColdStartBootstrap:
         self._anomaly_path = anomaly_path
 
     def run(self, csv_path: str) -> BootstrapPass1Result:
-        df = _load_and_resample(csv_path)
-        physics_flags = _compute_physics_flags(df)
-        gas_mask_cols, if_flags = _compute_if_flags(df)
+        with timed(logger, "bootstrap.pass1.load_resample") as ctx:
+            df = _load_and_resample(csv_path)
+            ctx["rows"] = len(df)
+        with timed(logger, "bootstrap.pass1.physics_flags", rows=len(df)):
+            physics_flags = _compute_physics_flags(df)
+        with timed(logger, "bootstrap.pass1.isolation_forest", rows=len(df)):
+            gas_mask_cols, if_flags = _compute_if_flags(df)
 
         combined = physics_flags | if_flags
         clean_df = df[~combined]
@@ -145,7 +150,14 @@ class Pass2BootstrapDetector:
 
         self._model = LSTMVAE()
         self._model.to(DEVICE)
-        train_losses = _train_loop(self._model, sequences)
+        with timed(
+            logger,
+            "bootstrap.pass2.train",
+            sequences=len(sequences),
+            epochs=_TRAIN_EPOCHS,
+            device=DEVICE,
+        ):
+            train_losses = _train_loop(self._model, sequences)
         if train_losses:
             self._threshold = float(np.percentile(train_losses, BOOTSTRAP_THRESHOLD_PERCENTILE))
 
