@@ -53,3 +53,5 @@ pytest>=7.4
 pytest-asyncio>=0.23
 pytest-cov>=4.1
 coverage>=7.3
+redis>=4.2.0,<5.0.0
+fastapi-cache2[redis]==0.2.1

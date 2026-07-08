@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi_cache.decorator import cache
 
 from src.api.services import readings_service
 from src.config import READINGS_RECENT_HOURS
@@ -25,6 +26,7 @@ def _parse_iso(value: str, param: str) -> datetime:
 
 
 @router.get("/window")
+@cache(expire=60)
 async def get_readings_window(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -46,6 +48,7 @@ async def get_readings_window(
 
 
 @router.get("/recent")
+@cache(expire=60)
 async def get_readings_recent(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -84,6 +87,7 @@ async def get_readings_recent(
 
 
 @router.get("/bounds")
+@cache(expire=60)
 async def get_readings_bounds(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -96,6 +100,7 @@ async def get_readings_bounds(
 
 
 @router.get("/anomalies")
+@cache(expire=60)
 async def get_anomaly_readings(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -118,6 +123,7 @@ async def get_anomaly_readings(
 
 
 @router.get("/raw")
+@cache(expire=60)
 async def get_raw_readings(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -168,6 +174,7 @@ async def get_greenhouses(
 
 
 @router.get("/incidents")
+@cache(expire=60)
 async def get_incidents(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),

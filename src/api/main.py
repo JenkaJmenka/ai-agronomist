@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 import uuid
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable
 
@@ -21,6 +22,10 @@ from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.redis import RedisBackend
+from redis import asyncio as aioredis
 
 # Try to load formatted logging configurations from our devops setup
 try:
@@ -87,9 +92,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Orphaned upload-job recovery failed: {e}", exc_info=True)
 
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    redis = aioredis.from_url(redis_url, encoding="utf8", decode_responses=True)
+    FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
+    logger.info("Redis cache initialized.")
+
     yield
 
     logger.info("Shutting down FastAPI application...")
+    try:
+        await redis.close()
+        logger.info("Redis connection closed.")
+    except Exception as e:
+        logger.error(f"Failed to cleanly close Redis connection: {e}", exc_info=True)
     try:
         # Close the (lazily opened) RabbitMQ connection, if any.
         await close_mq()

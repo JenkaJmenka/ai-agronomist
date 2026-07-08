@@ -26,6 +26,16 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build: .
     command: ["/app/docker/start-api.sh"]
@@ -34,6 +44,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/anomaly_db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
     volumes:
       - ./models:/app/models
@@ -50,6 +61,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/anomaly_db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
     volumes:
       - ./models:/app/models
