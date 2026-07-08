@@ -398,7 +398,18 @@ def _apply_x_range(
     return fig
 
 
+_CHART_MAX_POINTS = 2000
+
+def downsample_for_chart(df: pd.DataFrame, max_points: int = _CHART_MAX_POINTS) -> pd.DataFrame:
+    if df.empty or len(df) <= max_points:
+        return df
+    step = max(1, len(df) // max_points)
+    work = df.sort_values("timestamp") if "timestamp" in df.columns else df
+    return work.iloc[::step].copy()
+
+
 def plot_time_series(df: pd.DataFrame, column: str, title: str, color: str = "blue"):
+    df = downsample_for_chart(df)
     if df.empty:
         return go.Figure()
     fig = px.line(df, x="timestamp", y=column, title=title)
@@ -419,6 +430,7 @@ def plot_synced_sensor_grid(
     x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> go.Figure:
     """Dynamic 2-column subplot grid with synced x-axis zoom across all panels."""
+    df = downsample_for_chart(df)
     n = len(columns)
     if n == 0:
         return go.Figure()
@@ -483,6 +495,7 @@ def plot_combined_sensors(
     x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> go.Figure:
     """Single chart with one line per column; normalized by default for mixed units."""
+    df = downsample_for_chart(df)
     fig = go.Figure()
     plottable = [col for col in columns if col in df.columns]
     line_colors = _resolve_line_colors(
@@ -569,6 +582,7 @@ def plot_gas_sensor_stack(
     tab_context: str = "gas",
 ) -> go.Figure:
     """Vertical stack of gas sensor subplots with real Y values and anomaly markers."""
+    df = downsample_for_chart(df)
     valid_cols = [
         col for col in columns
         if col in df.columns and not pd.to_numeric(df[col], errors="coerce").isna().all()
@@ -720,6 +734,7 @@ def plot_anomaly_timeline(
     Only non-null scored rows are drawn. Marker colour reflects threshold
     bands; size is modest so dense periods do not form a solid stripe.
     """
+    df = downsample_for_chart(df)
     if df.empty or "anomaly_score" not in df.columns:
         return _timeline_message_figure("No scored readings in the selected date range.")
 

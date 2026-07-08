@@ -282,12 +282,7 @@ def load_enriched_top_anomalies(
     )
 
 
-def downsample_for_chart(df: pd.DataFrame, max_points: int = _CHART_MAX_POINTS) -> pd.DataFrame:
-    if df.empty or len(df) <= max_points:
-        return df
-    step = max(1, len(df) // max_points)
-    work = df.sort_values("timestamp") if "timestamp" in df.columns else df
-    return work.iloc[::step].copy()
+
 
 
 def clear_anomaly_page_cache() -> None:

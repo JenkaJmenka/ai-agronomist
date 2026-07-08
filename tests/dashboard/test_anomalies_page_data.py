@@ -2,8 +2,8 @@
 
 import pandas as pd
 
+from src.dashboard.components.charts import downsample_for_chart
 from src.dashboard.services.anomalies_page_data import (
-    downsample_for_chart,
     filter_anomalies,
     trim_cold_run_rows,
 )

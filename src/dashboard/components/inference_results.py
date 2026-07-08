@@ -620,14 +620,11 @@ def render_anomaly_score_charts(
     from src.dashboard.components.charts import plot_anomaly_timeline
     from src.dashboard.services.anomalies_page_data import (
         _has_usable_anomaly_scores,
-        downsample_for_chart,
     )
 
     upload_results = resolve_upload_results(inference_results)
     using_upload_fallback = upload_results is not None and _looks_like_upload_score_frame(df)
     chart_df = df
-    if not chart_df.empty and len(chart_df) > 2000:
-        chart_df = downsample_for_chart(chart_df)
 
     upload_score_df = pd.DataFrame()
     if upload_results and not using_upload_fallback:
