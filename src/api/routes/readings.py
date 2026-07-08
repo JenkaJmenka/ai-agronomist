@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi_cache.decorator import cache
 
 from src.api.services import readings_service
-from src.config import READINGS_RECENT_HOURS
+from src.config import READINGS_RECENT_HOURS, REDIS_CACHE_EXPIRE_SECONDS
 from src.db.session import get_db
 
 router = APIRouter(prefix="/api/readings", tags=["Readings"])
@@ -26,7 +26,7 @@ def _parse_iso(value: str, param: str) -> datetime:
 
 
 @router.get("/window")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_readings_window(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -48,7 +48,7 @@ async def get_readings_window(
 
 
 @router.get("/recent")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_readings_recent(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -87,7 +87,7 @@ async def get_readings_recent(
 
 
 @router.get("/bounds")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_readings_bounds(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -100,7 +100,7 @@ async def get_readings_bounds(
 
 
 @router.get("/anomalies")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_anomaly_readings(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -123,7 +123,7 @@ async def get_anomaly_readings(
 
 
 @router.get("/raw")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_raw_readings(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
@@ -174,7 +174,7 @@ async def get_greenhouses(
 
 
 @router.get("/incidents")
-@cache(expire=300)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
 async def get_incidents(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),

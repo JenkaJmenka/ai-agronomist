@@ -742,3 +742,4 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
     "yes",
 )
 TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
+REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS", "300"))
