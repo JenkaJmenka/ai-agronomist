@@ -157,8 +157,41 @@ def test_resolve_data_bounds_unions_db_and_upload(monkeypatch):
     bounds = mod.resolve_data_bounds("tenant_1", "gh_A", inf_results)
     assert bounds is not None
     start, end = bounds
-    assert start == pd.Timestamp("2026-06-10T00:00:00+00:00")
-    assert end == pd.Timestamp("2026-06-20T00:00:00+00:00")
+    # Bounds are normalized to tz-naive so the page's tz-naive date pickers and
+    # filters compare against them without raising.
+    assert start == pd.Timestamp("2026-06-10T00:00:00")
+    assert end == pd.Timestamp("2026-06-20T00:00:00")
+    assert start.tzinfo is None and end.tzinfo is None
+
+
+def test_resolve_data_bounds_unions_naive_db_and_aware_upload(monkeypatch):
+    """DB bounds come back tz-naive while upload bounds are tz-aware (UTC).
+
+    Comparing the two directly raised TypeError and blanked the whole page;
+    resolve_data_bounds must strip tz first and still union correctly.
+    """
+    from src.dashboard.services import anomalies_page_data as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_timestamp_bounds",
+        lambda *a, **k: ("2026-06-23T21:00:00", "2026-07-07T20:00:00"),  # tz-naive
+    )
+    inf_results = {
+        "anomaly_scores": [0.5, 0.6],
+        "sequence_timestamps": [
+            "2026-01-01T00:00:00+00:00",  # tz-aware
+            "2026-12-31T00:00:00+00:00",
+        ],
+        "data_persisted": True,
+    }
+
+    bounds = mod.resolve_data_bounds("tenant_1", "gh_A", inf_results)
+    assert bounds is not None
+    start, end = bounds
+    assert start == pd.Timestamp("2026-01-01T00:00:00")
+    assert end == pd.Timestamp("2026-12-31T00:00:00")
+    assert start.tzinfo is None and end.tzinfo is None
 
 
 def test_resolve_window_dataframe_skips_db_for_upload_only(monkeypatch):
@@ -220,8 +253,9 @@ def test_resolve_data_bounds_skips_db_for_upload_only(monkeypatch):
     bounds = mod.resolve_data_bounds("tenant_1", "gh_A", inf_results)
     assert bounds is not None
     start, end = bounds
-    assert start == pd.Timestamp("2026-06-17T12:00:00+00:00")
-    assert end == pd.Timestamp("2026-06-17T12:00:00+00:00")
+    assert start == pd.Timestamp("2026-06-17T12:00:00")
+    assert end == pd.Timestamp("2026-06-17T12:00:00")
+    assert start.tzinfo is None and end.tzinfo is None
 
 
 def test_trim_cold_run_rows_limits_and_keeps_highest_scores():

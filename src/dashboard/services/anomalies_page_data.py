@@ -17,6 +17,7 @@ from src.dashboard.components.inference_results import build_sensor_dataframe_fr
 from src.dashboard.services.anomaly_events import flagged_anomaly_mask
 from src.dashboard.services.diagnosis_enricher import enrich_dataframe
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
+from src.dashboard.services.tz_normalize import strip_tz
 
 _CHART_MAX_POINTS = 2000
 _TABLE_PAGE_SIZE = 10
@@ -178,15 +179,23 @@ def resolve_data_bounds(
     greenhouse_id: str,
     inf_results: dict | None,
 ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
-    """Union DB and upload timestamp bounds so filters span all available data."""
+    """Union DB and upload timestamp bounds so filters span all available data.
+
+    DB bounds come back tz-naive while upload bounds can be tz-aware (UTC);
+    comparing the two raises TypeError, so every bound is stripped to tz-naive
+    before the min/max union. The page's date pickers operate tz-naive too, so
+    a naive union keeps the whole pipeline on one tz state.
+    """
     upload_bounds = bounds_from_upload_results(inf_results) if inf_results else None
+    if upload_bounds:
+        upload_bounds = (strip_tz(upload_bounds[0]), strip_tz(upload_bounds[1]))
     if _upload_only_results(inf_results) and upload_bounds:
         return upload_bounds
 
     min_iso, max_iso = load_timestamp_bounds(tenant_id, greenhouse_id)
 
     if min_iso and max_iso:
-        db_min, db_max = pd.Timestamp(min_iso), pd.Timestamp(max_iso)
+        db_min, db_max = strip_tz(pd.Timestamp(min_iso)), strip_tz(pd.Timestamp(max_iso))
         if upload_bounds:
             u_min, u_max = upload_bounds
             return min(db_min, u_min), max(db_max, u_max)
@@ -222,10 +231,22 @@ def enrich_anomalies_table(
 
 
 def bounds_from_upload_results(results: dict) -> tuple[pd.Timestamp, pd.Timestamp] | None:
-    frame = build_sensor_dataframe_from_upload(results)
-    if frame.empty:
+    """Min/max upload timestamps without materializing the full score frame.
+
+    resolve_data_bounds runs on every page render, so rebuilding the entire
+    ~105k-row upload frame here (a per-row Python to_datetime loop) re-processed
+    the whole saved upload each time. Bounds only need the timestamps aligned to
+    a score, resolved in a single vectorized to_datetime pass. Mirrors the
+    pairing in build_sensor_dataframe_from_upload: scores[i] ↔ sequence_timestamps[i].
+    """
+    scores = results.get("anomaly_scores") or []
+    seq_ts = results.get("sequence_timestamps") or []
+    if not scores or not seq_ts:
         return None
-    ts = pd.to_datetime(frame["timestamp"])
+    aligned_ts = seq_ts[: len(scores)]
+    ts = pd.to_datetime(pd.Series(aligned_ts), errors="coerce", utc=True).dropna()
+    if ts.empty:
+        return None
     return ts.min(), ts.max()
 
 
