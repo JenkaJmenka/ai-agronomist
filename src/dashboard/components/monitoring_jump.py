@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pandas as pd
@@ -11,6 +12,9 @@ from src.dashboard.components.charts import apply_datetime_filter
 from src.dashboard.components.global_sidebar import queue_sidebar_selection
 from src.dashboard.services.diagnosis_enricher import canonical_slot_for_column
 from src.dashboard.services.tz_normalize import strip_tz
+from src.utils.profiling import timed
+
+logger = logging.getLogger("dashboard.monitoring_jump")
 
 _PENDING_JUMP_KEY = "_pending_monitoring_jump"
 _PENDING_JUMP_COLUMNS_KEY = "_pending_monitoring_jump_columns"
@@ -115,36 +119,44 @@ def load_monitoring_window(
     (fast path after an anomaly-table jump); otherwise queries the readings
     API for exactly the selected window. Upload merge runs only when needed.
     """
-    prefetch = _consume_monitoring_prefetch(tenant_id, greenhouse_id, start, end)
-    if prefetch is not None:
-        return prefetch
+    with timed(logger, "dashboard.monitor.load_window") as ctx:
+        prefetch = _consume_monitoring_prefetch(tenant_id, greenhouse_id, start, end)
+        if prefetch is not None:
+            ctx["path"] = "prefetch_hit"
+            ctx["rows"] = len(prefetch)
+            return prefetch
 
-    from src.dashboard.components.inference_results import resolve_upload_results
+        from src.dashboard.components.inference_results import resolve_upload_results
 
-    inf_results = resolve_upload_results(None)
-    if _needs_upload_merge(inf_results):
-        from src.dashboard.services.anomalies_page_data import resolve_window_dataframe
+        inf_results = resolve_upload_results(None)
+        if _needs_upload_merge(inf_results):
+            from src.dashboard.services.anomalies_page_data import resolve_window_dataframe
 
-        df, _ = resolve_window_dataframe(
-            tenant_id=tenant_id,
-            greenhouse_id=greenhouse_id,
-            start_iso=start.isoformat(),
-            end_iso=end.isoformat(),
-            window_start=start,
-            window_end=end,
-            upload_job_id=str(inf_results.get("job_id")) if inf_results else None,
-            _inf_results=inf_results,
+            df, _ = resolve_window_dataframe(
+                tenant_id=tenant_id,
+                greenhouse_id=greenhouse_id,
+                start_iso=start.isoformat(),
+                end_iso=end.isoformat(),
+                window_start=start,
+                window_end=end,
+                upload_job_id=str(inf_results.get("job_id")) if inf_results else None,
+                _inf_results=inf_results,
+            )
+            ctx["path"] = "upload_merge"
+            ctx["rows"] = len(df)
+            return df
+
+        from src.dashboard.components.charts import query_sensor_readings_window
+
+        df = query_sensor_readings_window(
+            tenant_id,
+            greenhouse_id,
+            pd.Timestamp(start).isoformat(),
+            pd.Timestamp(end).isoformat(),
         )
+        ctx["path"] = "window_query"
+        ctx["rows"] = len(df)
         return df
-
-    from src.dashboard.components.charts import query_sensor_readings_window
-
-    return query_sensor_readings_window(
-        tenant_id,
-        greenhouse_id,
-        pd.Timestamp(start).isoformat(),
-        pd.Timestamp(end).isoformat(),
-    )
 
 
 def _sync_monitor_timeline_pickers(start: pd.Timestamp, end: pd.Timestamp) -> None:

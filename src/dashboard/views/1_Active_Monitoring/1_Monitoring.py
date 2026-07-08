@@ -1,9 +1,11 @@
+import logging
 from typing import List
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.utils.profiling import timed
 from src.dashboard.components.sensor_columns import get_all_sensor_columns
 from src.dashboard.components.charts import (
     apply_datetime_filter,
@@ -25,6 +27,8 @@ from src.dashboard.components.timeline import (
     init_monitoring_session_state,
     render_timeline_controls,
 )
+
+logger = logging.getLogger("dashboard.monitoring")
 
 _LSTM_SEQ_LEN = 20
 _DRIFT_WINDOW_STEPS = 72
@@ -211,7 +215,8 @@ timeline_start, timeline_end = render_timeline_controls(_data_min_ts, _data_max_
 
 with st.spinner("Loading sensor data…"):
     try:
-        df = load_monitoring_window(tenant, greenhouse, timeline_start, timeline_end)
+        with timed(logger, "dashboard.monitor.page_load_data"):
+            df = load_monitoring_window(tenant, greenhouse, timeline_start, timeline_end)
     except Exception as exc:
         st.error(
             f"Could not load sensor data — is the API server running? "
@@ -263,13 +268,14 @@ st.caption(
 
 _CHART_CONFIG = {"scrollZoom": True, "displayModeBar": True}
 _color_manager = get_chart_color_manager("monitoring")
-_fig = plot_combined_sensors(
-    df,
-    selected_cols,
-    color_manager=_color_manager,
-    tab_context="monitoring",
-    x_range=(timeline_start, timeline_end),
-)
+with timed(logger, "dashboard.monitor.plot_combined", rows=len(df), cols=len(selected_cols)):
+    _fig = plot_combined_sensors(
+        df,
+        selected_cols,
+        color_manager=_color_manager,
+        tab_context="monitoring",
+        x_range=(timeline_start, timeline_end),
+    )
 
 _highlights = st.session_state.get("monitoring_anomaly_highlights")
 if _highlights:
