@@ -65,6 +65,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     and shutdown resource cleanup.
     """
     logger.info("Starting up FastAPI application...")
+
+    # Pin the CPU torch thread pool once at startup (the sync upload path and
+    # any in-process inference run here).
+    try:
+        from src.models.torch_runtime import configure_torch_threads
+
+        configure_torch_threads()
+    except Exception as exc:  # never block startup on a threading tweak
+        logger.warning("Could not configure torch threads: %s", exc)
+
     try:
         # Alembic migrations run before uvicorn starts, so init_db() is a
         # safety-net create_all only. Cap it at 10 s so a slow/unreachable DB

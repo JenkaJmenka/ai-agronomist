@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd /app
 
+# shellcheck source=docker/thread-env.sh
+source docker/thread-env.sh
+
 export API_URL="${API_URL:-http://localhost:8000}"
 # Render may pass hostname only via fromService
 if [[ "${API_URL}" != http* ]]; then

@@ -40,6 +40,7 @@ from src.db.models import JobPortion
 from src.mq.publisher import publish_json
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE
+from src.utils.profiling import atimed
 
 logger = logging.getLogger(__name__)
 
@@ -133,30 +134,40 @@ async def handle_upload_portion(
         )
         return result
 
-    portion = await asyncio.to_thread(_score)
+    async with atimed(
+        logger,
+        "upload.portion.score",
+        job=msg.job_id,
+        portion=msg.portion_idx,
+        rows=len(msg.rows or []),
+    ):
+        portion = await asyncio.to_thread(_score)
 
     sensor_rows = raw_rows = 0
     if msg.persist_data:
-        persist_df = None
-        if msg.rows:
-            persist_df = pd.DataFrame(msg.rows)
-            persist_df["timestamp"] = pd.to_datetime(persist_df["timestamp"])
-        raw_persist_df = None
-        if msg.raw_rows:
-            raw_persist_df = pd.DataFrame(msg.raw_rows)
-            raw_persist_df["timestamp"] = pd.to_datetime(raw_persist_df["timestamp"])
-            if "source" not in raw_persist_df.columns:
-                raw_persist_df["source"] = None
-        s_ins, s_upd, r_ins, r_upd = await persist_readings_chunk(
-            db=db,
-            tenant_id=msg.tenant_id,
-            greenhouse_id=msg.greenhouse_id,
-            df=persist_df,
-            raw_df=raw_persist_df,
-        )
-        await db.commit()
-        sensor_rows = s_ins + s_upd
-        raw_rows = r_ins + r_upd
+        async with atimed(
+            logger, "upload.portion.persist", job=msg.job_id, portion=msg.portion_idx
+        ):
+            persist_df = None
+            if msg.rows:
+                persist_df = pd.DataFrame(msg.rows)
+                persist_df["timestamp"] = pd.to_datetime(persist_df["timestamp"])
+            raw_persist_df = None
+            if msg.raw_rows:
+                raw_persist_df = pd.DataFrame(msg.raw_rows)
+                raw_persist_df["timestamp"] = pd.to_datetime(raw_persist_df["timestamp"])
+                if "source" not in raw_persist_df.columns:
+                    raw_persist_df["source"] = None
+            s_ins, s_upd, r_ins, r_upd = await persist_readings_chunk(
+                db=db,
+                tenant_id=msg.tenant_id,
+                greenhouse_id=msg.greenhouse_id,
+                df=persist_df,
+                raw_df=raw_persist_df,
+            )
+            await db.commit()
+            sensor_rows = s_ins + s_upd
+            raw_rows = r_ins + r_upd
 
     payload = _portion_result_payload(portion, sensor_rows, raw_rows)
     payload["stat_columns"] = stat_carry.columns
@@ -173,6 +184,11 @@ async def handle_upload_portion(
 
     completed, failed, total = await increment_progress(db, msg.job_id)
     if total is not None and completed + failed >= total:
+        logger.info(
+            "PROFILE phase=upload.portions.complete ok=1 job=%s portions=%s",
+            msg.job_id,
+            total,
+        )
         await publish_json(UPLOAD_FINALIZE_QUEUE, UploadFinalizeMessage(job_id=msg.job_id))
 
 
@@ -202,6 +218,11 @@ async def record_portion_failure(
 
 async def handle_upload_finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     """Assemble portions in order, calibrate the threshold, persist scores."""
+    async with atimed(logger, "upload.finalize", job=msg.job_id):
+        await _finalize(msg, db)
+
+
+async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     claimed = await try_transition(db, msg.job_id, "running", "finalizing")
     if not claimed:
         # Producer may finalize before any portion transitioned the status.

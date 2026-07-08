@@ -63,6 +63,17 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
+      # CPU thread pools for torch + numpy/sklearn; match to the cpus limit
+      # below. Production values live in docs/deployment/railway.md.
+      TORCH_NUM_THREADS: "4"
+      # One portion per worker at a time so each portion uses the full thread
+      # pool; scale find-phase throughput with replicas, not prefetch.
+      MQ_PREFETCH_COUNT: "1"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
     volumes:
       - ./models:/app/models
       - ./data:/app/data

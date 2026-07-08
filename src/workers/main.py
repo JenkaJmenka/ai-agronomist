@@ -242,6 +242,13 @@ def _transport_dead(
 
 async def run_worker() -> None:
     logging.basicConfig(level=logging.INFO)
+
+    # Pin the CPU torch thread pool before any inference/training runs — the
+    # worker is where cold-start training and portion scoring happen.
+    from src.models.torch_runtime import configure_torch_threads
+
+    configure_torch_threads()
+
     connection = await get_mq_connection()
 
     stop_event = asyncio.Event()

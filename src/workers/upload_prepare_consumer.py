@@ -34,6 +34,7 @@ from src.db.jobs import get_job, set_job_result, try_transition, update_job
 from src.models.artifact_store import delete_upload_blob, resolve_upload_blob
 from src.models.bootstrap import InsufficientDataError
 from src.mq.schemas import UploadPrepareMessage
+from src.utils.profiling import atimed
 from src.vendors.csv_adapter import CSVAdapter
 
 logger = logging.getLogger(__name__)
@@ -126,12 +127,17 @@ async def handle_upload_prepare(msg: UploadPrepareMessage, db: AsyncSession) -> 
             model_id = payload.get("model_id")
             skip_reason = payload.get("training_skipped_reason")
         else:
-            (
-                checkpoint_path,
-                model_trained,
-                model_id,
-                skip_reason,
-            ) = await resolve_upload_checkpoint(db, msg.tenant_id, local_csv, msg.train_model)
+            async with atimed(
+                logger, "upload.prepare.train", job=msg.job_id, train=int(msg.train_model)
+            ):
+                (
+                    checkpoint_path,
+                    model_trained,
+                    model_id,
+                    skip_reason,
+                ) = await resolve_upload_checkpoint(
+                    db, msg.tenant_id, local_csv, msg.train_model
+                )
             # Persist the result BEFORE producing portions so a crash-retry does
             # NOT retrain (idempotency): resume reuses this checkpoint.
             await update_job(
@@ -152,21 +158,22 @@ async def handle_upload_prepare(msg: UploadPrepareMessage, db: AsyncSession) -> 
         adapter = CSVAdapter({"filepath": local_csv})
         adapter.connect()
         try:
-            await produce_upload_portions(
-                tmp_path=local_csv,
-                adapter=adapter,
-                db=db,
-                tenant_id=msg.tenant_id,
-                greenhouse_id=msg.greenhouse_id,
-                checkpoint_path=checkpoint_path,
-                persist_data=msg.persist_data,
-                filename=msg.filename,
-                seq_len=msg.seq_len,
-                model_trained=model_trained,
-                model_id=model_id,
-                training_skipped_reason=skip_reason,
-                existing_job_id=msg.job_id,
-            )
+            async with atimed(logger, "upload.prepare.produce_portions", job=msg.job_id):
+                await produce_upload_portions(
+                    tmp_path=local_csv,
+                    adapter=adapter,
+                    db=db,
+                    tenant_id=msg.tenant_id,
+                    greenhouse_id=msg.greenhouse_id,
+                    checkpoint_path=checkpoint_path,
+                    persist_data=msg.persist_data,
+                    filename=msg.filename,
+                    seq_len=msg.seq_len,
+                    model_trained=model_trained,
+                    model_id=model_id,
+                    training_skipped_reason=skip_reason,
+                    existing_job_id=msg.job_id,
+                )
         finally:
             adapter.disconnect()
 

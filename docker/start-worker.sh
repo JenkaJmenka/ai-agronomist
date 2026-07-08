@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd /app
 
+# shellcheck source=docker/thread-env.sh
+source docker/thread-env.sh
+
 export DATABASE_URL="$(python - <<'PY'
 import os
 url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./greenhouse.db")

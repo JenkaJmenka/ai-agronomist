@@ -1,10 +1,14 @@
-# Render blueprint — full app (API + Streamlit + Postgres)
-# Docs: https://render.com/docs/blueprint-spec
+# Render blueprint — full app (API + Dashboard + Worker + Postgres + Redis).
+#
+# NOTE: Production runs on Railway, which ignores this file and docker-compose.
+# See docs/deployment/railway.md + railway.{api,worker,dashboard}.json. This
+# blueprint is kept in sync for Render parity / local reference. Render has no
+# managed RabbitMQ — point RABBITMQ_URL at an external broker (e.g. CloudAMQP).
 services:
   - type: web
     name: ai-agronomist-api
     runtime: docker
-    plan: starter
+    plan: standard
     dockerfilePath: ./Dockerfile
     dockerCommand: /app/docker/start-api.sh
     healthCheckPath: /health
@@ -13,6 +17,41 @@ services:
         fromDatabase:
           name: ai-agronomist-db
           property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: ai-agronomist-redis
+          type: keyvalue
+          property: connectionString
+      - key: RABBITMQ_URL
+        sync: false  # set to an external broker URL (Render has no managed RabbitMQ)
+      - key: TORCH_NUM_THREADS
+        value: "4"
+      - key: LOG_LEVEL
+        value: INFO
+
+  - type: worker
+    name: ai-agronomist-worker
+    runtime: docker
+    plan: pro  # CPU LSTM training + portion scoring — give it the most cores
+    dockerfilePath: ./Dockerfile
+    dockerCommand: /app/docker/start-worker.sh
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-agronomist-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: ai-agronomist-redis
+          type: keyvalue
+          property: connectionString
+      - key: RABBITMQ_URL
+        sync: false
+      # Pin torch to the plan's vCPU count; one portion at a time per replica.
+      - key: TORCH_NUM_THREADS
+        value: "8"
+      - key: MQ_PREFETCH_COUNT
+        value: "1"
       - key: LOG_LEVEL
         value: INFO
 
@@ -28,11 +67,18 @@ services:
           name: ai-agronomist-api
           type: web
           envVarKey: RENDER_EXTERNAL_URL
+      - key: TORCH_NUM_THREADS
+        value: "2"
       - key: LOG_LEVEL
         value: INFO
 
+  - type: keyvalue
+    name: ai-agronomist-redis
+    plan: starter
+    ipAllowList: []
+
 databases:
   - name: ai-agronomist-db
-    plan: free
+    plan: basic-256mb
     databaseName: anomaly_db
     user: agronomist
