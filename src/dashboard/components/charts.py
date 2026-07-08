@@ -9,6 +9,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from src.dashboard.components.color_manager import ColorAssignmentManager, color_at_index
 from src.dashboard.constants import (
+    CACHE_MAX_ENTRIES_FRAME,
+    CACHE_MAX_ENTRIES_LIST,
     CACHE_TTL_MEDIUM,
     CACHE_TTL_SHORT,
     DEFAULT_ANOMALY_THRESHOLD,
@@ -35,14 +37,14 @@ def _rows_to_frame(rows: list) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def query_sensor_readings(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
     """Load the recent bounded window of sensor time-series (C2: no full-history load)."""
     payload = _client.get_readings_recent(tenant_id, greenhouse_id)
     return _rows_to_frame(payload["rows"])
 
 
-@st.cache_data(ttl=CACHE_TTL_MEDIUM)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def query_sensor_readings_window(
     tenant_id: str,
     greenhouse_id: str,
@@ -54,7 +56,7 @@ def query_sensor_readings_window(
     return _rows_to_frame(rows)
 
 
-@st.cache_data(ttl=CACHE_TTL_MEDIUM)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM, max_entries=CACHE_MAX_ENTRIES_LIST)
 def query_sensor_timestamp_bounds(
     tenant_id: str,
     greenhouse_id: str,
@@ -64,7 +66,7 @@ def query_sensor_timestamp_bounds(
     return bounds.get("min_timestamp"), bounds.get("max_timestamp")
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def query_incidents(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
     rows = _client.get_incidents(tenant_id, greenhouse_id)
     df = pd.DataFrame(rows)
@@ -73,7 +75,7 @@ def query_incidents(tenant_id: str, greenhouse_id: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def query_incidents_window(
     tenant_id: str,
     greenhouse_id: str,
@@ -90,7 +92,7 @@ def query_incidents_window(
     return df
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def get_data_date_bounds(tenant_id: str, greenhouse_id: str):
     """Return (min_date, max_date) for available readings, or (None, None)."""
     min_iso, max_iso = query_sensor_timestamp_bounds(tenant_id, greenhouse_id)
@@ -198,7 +200,7 @@ ANOMALY_RANGE_OPTIONS: dict = {
 ANOMALY_RANGE_DEFAULT: str = "Last 7 days"
 
 
-@st.cache_data(ttl=CACHE_TTL_MEDIUM)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def query_anomaly_readings(
     tenant_id: str,
     greenhouse_id: str,
@@ -223,7 +225,7 @@ def clear_anomaly_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=CACHE_TTL_MEDIUM)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def query_raw_readings(
     tenant_id: str,
     greenhouse_id: str,
@@ -246,7 +248,7 @@ def has_raw_readings_in_window(
     return _client.raw_readings_exist(tenant_id, greenhouse_id, hours_back=hours_back)
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def get_available_greenhouses(tenant_id: str) -> List[str]:
     """Return distinct greenhouse IDs that have any data for this tenant."""
     greenhouses = _client.get_greenhouses(tenant_id)

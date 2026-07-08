@@ -314,27 +314,36 @@ def get_recent_inference_results() -> dict | None:
 
 
 def build_sensor_dataframe_from_upload(results: dict) -> pd.DataFrame:
-    """Build a minimal timestamp + anomaly_score frame from cold-run upload results."""
+    """Build a minimal timestamp + anomaly_score frame from cold-run upload results.
+
+    Vectorized on purpose: this runs on the anomaly page and the Monitoring merge
+    path, over the full upload (~105k score/timestamp pairs). The previous per-row
+    ``pd.to_datetime`` loop paid that call's large fixed overhead once per row and
+    blocked the Streamlit script for minutes on a real upload. A single
+    ``to_datetime`` pass (mirroring bounds_from_upload_results) does the same work
+    in one shot. ``errors="coerce"`` maps ""/"unknown"/bad strings to NaT, which we
+    then drop as score/timestamp pairs — preserving the old row-level filtering.
+    """
     scores = results.get("anomaly_scores") or []
-    if not scores:
-        return pd.DataFrame()
-
     seq_ts = results.get("sequence_timestamps") or []
-    records: list[dict[str, object]] = []
-    for index, score in enumerate(scores):
-        if index >= len(seq_ts):
-            break
-        raw_ts = seq_ts[index]
-        if not raw_ts or raw_ts == "unknown":
-            continue
-        ts = pd.to_datetime(raw_ts, errors="coerce", utc=True)
-        if pd.isna(ts):
-            continue
-        records.append({"timestamp": ts, "anomaly_score": float(score)})
-
-    if not records:
+    pair_count = min(len(scores), len(seq_ts))
+    if pair_count == 0:
         return pd.DataFrame()
-    return pd.DataFrame(records)
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                pd.Series(seq_ts[:pair_count]), errors="coerce", utc=True
+            ),
+            "anomaly_score": pd.to_numeric(
+                pd.Series(scores[:pair_count]), errors="coerce"
+            ),
+        }
+    )
+    frame = frame[frame["timestamp"].notna() & frame["anomaly_score"].notna()]
+    if frame.empty:
+        return pd.DataFrame()
+    return frame.reset_index(drop=True)
 
 
 def get_inference_results() -> dict | None:

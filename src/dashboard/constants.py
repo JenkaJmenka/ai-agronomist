@@ -13,6 +13,14 @@ CACHE_TTL_SHORT: int = 60    # seconds — lists that change frequently (inciden
 CACHE_TTL_MEDIUM: int = 120  # seconds — sensor readings, anomaly windows
 CACHE_TTL_LONG: int = 300    # seconds — timestamp bounds, static upload frames
 
+# Max distinct entries retained per @st.cache_data function (LRU-evicted beyond
+# this). Without a bound, every new (tenant, greenhouse, window) combination
+# retains its DataFrame until TTL expiry, so panning the timeline accumulates
+# many large frames in RAM — a slow, steady dashboard memory climb. Bound the
+# entry count so only the few most-recent windows are held.
+CACHE_MAX_ENTRIES_FRAME: int = 8   # caches returning full sensor/score DataFrames
+CACHE_MAX_ENTRIES_LIST: int = 32   # caches returning small lists/scalars (incidents, bounds)
+
 FAULT_TYPES: list[str] = [
     "spike_fault",
     "calibration_drift",

@@ -5,7 +5,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.dashboard.constants import CACHE_TTL_LONG, CACHE_TTL_MEDIUM, CACHE_TTL_SHORT
+from src.dashboard.constants import (
+    CACHE_MAX_ENTRIES_FRAME,
+    CACHE_TTL_LONG,
+    CACHE_TTL_MEDIUM,
+    CACHE_TTL_SHORT,
+)
 
 from src.dashboard.components.charts import (
     apply_datetime_filter,
@@ -88,7 +93,7 @@ def _inf_cache_token(inf_results: dict | None) -> str:
     )
 
 
-@st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def load_scored_window(
     tenant_id: str,
     greenhouse_id: str,
@@ -114,7 +119,7 @@ def load_scored_window(
     )
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def resolve_window_dataframe(
     *,
     tenant_id: str,
@@ -204,7 +209,7 @@ def resolve_data_bounds(
     return upload_bounds
 
 
-@st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_LONG, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def load_upload_score_frame(
     tenant_id: str,
     greenhouse_id: str,
@@ -216,7 +221,7 @@ def load_upload_score_frame(
     return build_sensor_dataframe_from_upload(results)
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def enrich_anomalies_table(
     anomalies: pd.DataFrame,
     tenant_id: str,
@@ -289,7 +294,7 @@ def load_anomalies_for_window(
     return df_window, anomalies, using_fallback
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def load_enriched_top_anomalies(
     anomalies: pd.DataFrame,
     tenant_id: str,

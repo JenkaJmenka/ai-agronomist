@@ -6,13 +6,13 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
-from src.dashboard.constants import CACHE_TTL_SHORT
+from src.dashboard.constants import CACHE_MAX_ENTRIES_LIST, CACHE_TTL_SHORT
 from src.dashboard.services.api_client import DashboardApiClient
 
 _client = DashboardApiClient()
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def fetch_incidents_in_range(
     tenant_id: str,
     greenhouse_id: str,
