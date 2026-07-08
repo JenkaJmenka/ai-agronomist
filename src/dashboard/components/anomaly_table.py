@@ -15,10 +15,15 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+import logging
+
 from src.dashboard.components import sticky_table as _sticky_table
 from src.dashboard.components.monitoring_jump import queue_monitoring_jump
 from src.dashboard.constants import MONITORING_PAGE
 from src.dashboard.services.diagnosis_enricher import format_sensor_label
+from src.utils.profiling import profile_event
+
+logger = logging.getLogger("dashboard.anomaly_table")
 
 SENSOR_COLUMNS = ["temperature", "humidity", "co2", "light"]
 
@@ -333,8 +338,17 @@ def _monitor_jump(
             available_columns=available_columns,
             source_df=source_df,
         )
+        profile_event(
+            logger,
+            "dashboard.monitor.jump_click",
+            tenant=tenant,
+            ts=str(payload["monitor_row"].get("timestamp", ""))[:19],
+            has_prefetch=int(source_df is not None and not source_df.empty),
+            src_rows=len(source_df) if source_df is not None else 0,
+        )
         st.switch_page(MONITORING_PAGE)
     except ValueError as exc:
+        profile_event(logger, "dashboard.monitor.jump_click", ok=False, tenant=tenant)
         st.error(str(exc))
 
 

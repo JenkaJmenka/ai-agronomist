@@ -17,6 +17,8 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncIterator, Iterator
 
+from src.config import PROFILE_LOGGING_ENABLED
+
 # Distinctive prefix so a single grep isolates every timing record.
 PROFILE_PREFIX = "PROFILE"
 
@@ -25,6 +27,19 @@ def _format(phase: str, elapsed_ms: float, ok: bool, fields: dict[str, Any]) -> 
     parts = [f"phase={phase}", f"ok={int(ok)}", f"elapsed_ms={elapsed_ms:.1f}"]
     parts.extend(f"{key}={value}" for key, value in fields.items() if value is not None)
     return f"{PROFILE_PREFIX} " + " ".join(parts)
+
+
+def profile_enabled() -> bool:
+    """Whether PROFILE lines are emitted (gated by PROFILE_LOGGING_ENABLED)."""
+    return PROFILE_LOGGING_ENABLED
+
+
+def profile_event(logger: logging.Logger, phase: str, ok: bool = True, **fields: Any) -> None:
+    """Emit a single point-in-time PROFILE record (no timing). Gated by the flag."""
+    if PROFILE_LOGGING_ENABLED:
+        parts = [f"phase={phase}", f"ok={int(ok)}"]
+        parts.extend(f"{key}={value}" for key, value in fields.items() if value is not None)
+        logger.info(f"{PROFILE_PREFIX} " + " ".join(parts))
 
 
 @contextmanager
@@ -43,8 +58,9 @@ def timed(logger: logging.Logger, phase: str, **fields: Any) -> Iterator[dict[st
         ok = False
         raise
     finally:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        logger.info(_format(phase, elapsed_ms, ok, extra))
+        if PROFILE_LOGGING_ENABLED:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(_format(phase, elapsed_ms, ok, extra))
 
 
 @asynccontextmanager
@@ -61,5 +77,6 @@ async def atimed(
         ok = False
         raise
     finally:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        logger.info(_format(phase, elapsed_ms, ok, extra))
+        if PROFILE_LOGGING_ENABLED:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(_format(phase, elapsed_ms, ok, extra))

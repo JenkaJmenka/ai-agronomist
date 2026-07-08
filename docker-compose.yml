@@ -69,6 +69,8 @@ services:
       # One portion per worker at a time so each portion uses the full thread
       # pool; scale find-phase throughput with replicas, not prefetch.
       MQ_PREFETCH_COUNT: "1"
+      # Toggle PROFILE phase-timing logs on demand (restart applies the change).
+      PROFILE_LOGGING_ENABLED: "true"
     deploy:
       resources:
         limits:
