@@ -51,7 +51,7 @@ from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
 from src.dashboard.services.upload_validator import validate_csv_upload
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
-from src.dashboard.constants import CACHE_TTL_SHORT
+from src.dashboard.constants import CACHE_MAX_ENTRIES_LIST, CACHE_TTL_SHORT
 from src.dashboard.services.review_queue import (
     build_sequence_from_readings,
     register_anomaly_as_incident,
@@ -60,7 +60,7 @@ from src.dashboard.services.review_queue import (
 API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=CACHE_TTL_SHORT, max_entries=CACHE_MAX_ENTRIES_LIST)
 def _cached_active_model_version(tenant_id: str) -> str:
     """Short-TTL cache (C5) so renders don't pay an API hop per upload click."""
     return DashboardApiClient().get_active_model_version(tenant_id)
