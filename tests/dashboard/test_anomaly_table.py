@@ -5,6 +5,7 @@ import pandas as pd
 from src.dashboard.components.anomaly_table import (
     _cell_style,
     build_html_table,
+    enriched_to_export_df,
 )
 
 
@@ -64,3 +65,28 @@ def test_build_html_table_includes_red_background():
     assert "Spike" in html_out
     assert "temperature outside normal range" in html_out
     assert "45.0" in html_out
+
+
+def test_enriched_to_export_df_flattens_enrichment():
+    enriched = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-06-08T12:00:00",
+                "temperature": 45.0,
+                "humidity": 65.0,
+                "co2": 400.0,
+                "light": 500.0,
+                "anomaly_score": 0.95,
+                "detector": "statistical",
+                "_enrichment": {
+                    "fault_type": "spike_fault",
+                    "reasoning": "temperature outside normal range",
+                    "affected_sensors": ["temperature"],
+                },
+            }
+        ]
+    )
+    exported = enriched_to_export_df(enriched)
+    assert exported.iloc[0]["fault_type"] == "spike_fault"
+    assert exported.iloc[0]["sensors"] == "temperature"
+    assert exported.iloc[0]["temperature"] == 45.0

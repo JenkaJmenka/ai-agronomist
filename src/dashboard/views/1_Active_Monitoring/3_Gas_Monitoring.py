@@ -14,6 +14,7 @@ from src.dashboard.components.charts import (
     query_incidents,
 )
 from src.dashboard.components.color_manager import get_chart_color_manager
+from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.timeline import (
     init_monitoring_session_state,
@@ -247,7 +248,6 @@ if fig.data:
 else:
     st.info("No plottable gas sensor values in the selected date window.")
 
-st.markdown("### Anomaly events")
 
 if _filtered_incidents.empty:
     if active_filter:
@@ -271,10 +271,13 @@ else:
     
     df_display["Severity"] = df_display["root_cause_details"].apply(get_cluster_info)
     
-    st.dataframe(
+    render_data_table(
         df_display[["Time", "Fault Type", "Root Cause", "Anomaly Score", "Severity"]],
-        width="stretch",
-        hide_index=True,
+        title="Anomaly events",
+        table_key="gas_anomaly_events",
+        wrap_columns=("Root Cause",),
+        max_height=400,
+        export_file_name=f"gas_anomaly_events_{tenant}_{greenhouse}.csv",
     )
     
     # Add a diagnosis view for the most recent incident

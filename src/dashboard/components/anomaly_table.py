@@ -435,6 +435,42 @@ def _row_score(row: Any) -> float:
     return 0.0
 
 
+def enriched_to_export_df(enriched_df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten enriched anomaly rows for CSV export."""
+    rows: list[dict[str, Any]] = []
+    for _, row in enriched_df.iterrows():
+        enrichment = row.get("_enrichment")
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        affected = enrichment.get("affected_sensors", [])
+        if not affected and row.get("affected_sensors"):
+            raw_affected = row.get("affected_sensors")
+            affected = (
+                raw_affected.split(", ")
+                if isinstance(raw_affected, str)
+                else raw_affected
+            )
+        rows.append(
+            {
+                "timestamp": row.get("timestamp"),
+                "fault_type": enrichment.get("fault_type") or row.get("fault_type", ""),
+                "reasoning": enrichment.get("reasoning") or row.get("reasoning", ""),
+                "sensors": (
+                    ", ".join(str(item) for item in affected)
+                    if isinstance(affected, list)
+                    else str(affected or "")
+                ),
+                "temperature": row.get("temperature"),
+                "humidity": row.get("humidity"),
+                "co2": row.get("co2"),
+                "light": row.get("light"),
+                "anomaly_score": _row_score(row),
+                "detector": row.get("detector", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _monitor_row_from_payload(row: Any, ts_iso: str, enrichment: Dict[str, Any]) -> dict[str, Any]:
     cold = row.get("_cold_run") if hasattr(row, "get") else None
     if isinstance(cold, dict):
@@ -607,6 +643,8 @@ def render(
         _render_row,
         row_records=row_payloads,
         max_height=max_height,
+        export_df=enriched_to_export_df(enriched_df),
+        export_file_name=f"{table_key}.csv",
     )
 
     pending_action = pending_action_box[0]

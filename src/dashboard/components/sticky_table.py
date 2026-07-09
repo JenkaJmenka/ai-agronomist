@@ -6,7 +6,10 @@ import html
 from collections.abc import Callable, Sequence
 from typing import Any
 
+import pandas as pd
 import streamlit as st
+
+from src.dashboard.components.table_export import render_export_button
 
 _TABLE_ROWS_PREFIX = "_sticky_table_rows_"
 _DEFAULT_MAX_HEIGHT = 400
@@ -129,6 +132,9 @@ def render_streamlit_sticky_table(
     row_records: list[dict[str, Any]] | None = None,
     max_height: int = _DEFAULT_MAX_HEIGHT,
     empty_message: str = "No rows to display.",
+    export_df: pd.DataFrame | None = None,
+    export_file_name: str | None = None,
+    export_label: str = "Export CSV",
 ) -> None:
     """Header fixed above a scrollable body; column titles stay visible while rows scroll."""
     safe_key = table_key.replace("_", "-")
@@ -161,5 +167,13 @@ def render_streamlit_sticky_table(
                 for row_index, row_data in enumerate(rows):
                     cells = st.columns(widths)
                     render_row(row_index, row_data, cells)
+
+    if export_df is not None and not export_df.empty:
+        render_export_button(
+            export_df,
+            file_name=export_file_name or f"{table_key}.csv",
+            label=export_label,
+            key=f"export_{table_key}",
+        )
 
     st.markdown("</div>", unsafe_allow_html=True)

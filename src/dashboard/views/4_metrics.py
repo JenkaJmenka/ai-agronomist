@@ -1,6 +1,7 @@
 import streamlit as st
 from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
 from src.dashboard.components.data_availability import render_no_sensor_data_hint
+from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.timeline import (
     get_timeline_bounds,
@@ -47,22 +48,28 @@ with st.spinner("Loading pipeline metrics…"):
 
         patterns = pipeline_metrics.get("pattern_distribution") or {}
         if patterns:
-            st.markdown("**Pattern distribution**")
-            st.dataframe(
-                pd.DataFrame(
-                    [{"pattern": k, "count": v} for k, v in patterns.items()]
-                ),
-                width="stretch",
+            pattern_df = pd.DataFrame(
+                [{"pattern": k, "count": v} for k, v in patterns.items()]
+            )
+            render_data_table(
+                pattern_df,
+                title="Pattern distribution",
+                table_key="metrics_pattern_distribution",
+                max_height=240,
+                export_file_name=f"pattern_distribution_{tenant}_{greenhouse}.csv",
             )
 
         conf_dist = pipeline_metrics.get("confidence_distribution") or {}
         if conf_dist:
-            st.markdown("**Confidence distribution**")
-            st.dataframe(
-                pd.DataFrame(
-                    [{"bucket": k, "count": v} for k, v in conf_dist.items()]
-                ),
-                width="stretch",
+            confidence_df = pd.DataFrame(
+                [{"bucket": k, "count": v} for k, v in conf_dist.items()]
+            )
+            render_data_table(
+                confidence_df,
+                title="Confidence distribution",
+                table_key="metrics_confidence_distribution",
+                max_height=240,
+                export_file_name=f"confidence_distribution_{tenant}_{greenhouse}.csv",
             )
     except Exception as exc:
         st.warning(

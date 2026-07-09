@@ -119,6 +119,9 @@ def render_anomaly_table_with_monitoring_jump(
     row_records = [
         dict(row, _tenant_id=tenant_id, _greenhouse_id=greenhouse_id) for row in rows
     ]
+    export_df = pd.DataFrame(
+        [{col: row.get(col) for col in columns} for row in rows]
+    )
 
     def _render_row(row_index: int, row: dict[str, Any], cells: list[Any]) -> None:
         for col_index, column in enumerate(columns):
@@ -165,4 +168,6 @@ def render_anomaly_table_with_monitoring_jump(
         _render_row,
         row_records=row_records,
         max_height=_TABLE_MAX_HEIGHT,
+        export_df=export_df,
+        export_file_name=f"{table_key}.csv",
     )

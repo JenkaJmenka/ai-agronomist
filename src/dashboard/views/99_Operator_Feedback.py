@@ -4,6 +4,7 @@ import pandas as pd
 from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 
 from src.dashboard.components.diagnosis_card import render as render_diagnosis_card
+from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.learning_progress import render as render_learning_progress
 from src.dashboard.components.sequence_chart import render as render_sequence_chart
@@ -118,7 +119,13 @@ if not open_incidents and pending:
             for p in pending
         ]
     )
-    st.dataframe(pending_df, width="stretch")
+    render_data_table(
+        pending_df,
+        title="Pending anomalies",
+        table_key="operator_pending_anomalies",
+        max_height=360,
+        export_file_name=f"pending_anomalies_{tenant}_{greenhouse}.csv",
+    )
 
     if st.button("Register all for review", type="primary"):
         created = 0
@@ -207,9 +214,10 @@ else:
         return "—"
 
     queue_rows = []
-    for inc in open_incidents:
+    for row_num, inc in enumerate(open_incidents, start=1):
         sensor_type, sensor_value = _sensor_info(inc)
         queue_rows.append({
+            "#": row_num,
             "detected": _fmt_dt(inc.get("detected_at")),
             "score": _fmt_score(inc.get("anomaly_score")),
             "pattern": _humanize(
@@ -222,8 +230,14 @@ else:
             "sensor value": sensor_value,
         })
 
-    queue_df = pd.DataFrame(queue_rows, index=range(1, len(queue_rows) + 1))
-    st.dataframe(queue_df, width="stretch")
+    queue_df = pd.DataFrame(queue_rows)
+    render_data_table(
+        queue_df,
+        table_key="operator_review_queue",
+        wrap_columns=("description",),
+        max_height=420,
+        export_file_name=f"review_queue_{tenant}_{greenhouse}.csv",
+    )
 
     incident_ids = [inc["id"] for inc in open_incidents if inc.get("id")]
     # index_map keeps the #-number (1-based) in sync with the table row

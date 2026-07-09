@@ -29,6 +29,7 @@ from src.dashboard.services.anomaly_events import (
     count_events_for_column,
     event_affects_column,
 )
+from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.events_table import render_events_table
 from src.dashboard.services.diagnosis_enricher import format_sensor_label
 
@@ -234,7 +235,6 @@ st.plotly_chart(
     config={"scrollZoom": True, "displayModeBar": True},
 )
 
-st.markdown("### Anomaly events")
 
 if _filtered_events.empty:
     if active_filter:
@@ -262,7 +262,10 @@ else:
         df_display[
             ["Time", "Fault Type", "Reasoning", "Anomaly Score", "Source", "Sensors"]
         ],
+        title="Anomaly events",
         wrap_columns=("Reasoning",),
+        table_key="climate_anomaly_events",
+        export_file_name=f"climate_anomaly_events_{tenant}_{greenhouse}.csv",
     )
 
     if not df_display.empty:
@@ -285,10 +288,10 @@ with st.expander("Raw data table"):
         .reset_index(drop=True)
     )
     _table_df["timestamp"] = _table_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    st.dataframe(_table_df, width="stretch", height=320)
-    st.download_button(
-        "Download CSV",
-        data=_table_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"climate_sensors_{tenant}_{greenhouse}.csv",
-        mime="text/csv",
+    render_data_table(
+        _table_df,
+        title="Raw data table",
+        table_key="climate_raw_sensor_data",
+        max_height=320,
+        export_file_name=f"climate_sensors_{tenant}_{greenhouse}.csv",
     )

@@ -14,6 +14,7 @@ from src.dashboard.components.charts import (
     query_sensor_timestamp_bounds,
 )
 from src.dashboard.components.color_manager import get_chart_color_manager
+from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.data_availability import render_no_sensor_data_hint
 from src.dashboard.components.global_sidebar import render_global_sidebar
 from src.dashboard.components.monitoring_jump import (
@@ -298,7 +299,6 @@ if _highlights:
 st.plotly_chart(_fig, width="stretch", key="combined_chart", config=_CHART_CONFIG)
 
 st.markdown("---")
-st.subheader("Data table")
 
 _table_df = df[["timestamp"] + selected_cols].copy()
 _table_df["timestamp"] = pd.to_datetime(_table_df["timestamp"])
@@ -310,16 +310,15 @@ _n_dupes = _n_raw - len(_table_df)
 
 _table_df["timestamp"] = _table_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-st.dataframe(_table_df, width="stretch", height=320)
-
-_dl_col, _cap_col = st.columns([1, 4])
-_dl_col.download_button(
-    "Download CSV",
-    data=_table_df.to_csv(index=False).encode("utf-8"),
-    file_name=f"sensor_data_{tenant}_{greenhouse}.csv",
-    mime="text/csv",
+render_data_table(
+    _table_df,
+    title="Data table",
+    table_key="monitoring_sensor_data",
+    max_height=320,
+    export_file_name=f"sensor_data_{tenant}_{greenhouse}.csv",
 )
+
 _caption = f"{len(_table_df):,} rows in selected period"
 if _n_dupes:
     _caption += f" · {_n_dupes:,} duplicate timestamp{'s' if _n_dupes > 1 else ''} removed"
-_cap_col.caption(_caption)
+st.caption(_caption)
