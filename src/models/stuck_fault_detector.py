@@ -16,10 +16,11 @@ import numpy as np
 from src.config import SENSOR_NAMES, STUCK_FLAT_RANGE_THRESHOLD
 
 try:
-    from src.config import STUCK_WINDOW_K, STUCK_VARIANCE_THRESHOLD
+    from src.config import STUCK_EPSILON, STUCK_WINDOW_K, STUCK_VARIANCE_THRESHOLD
 except ImportError:  # pragma: no cover
     STUCK_WINDOW_K = 10
     STUCK_VARIANCE_THRESHOLD = 1e-4
+    STUCK_EPSILON = 1e-4
 
 _SENSOR_NAMES: list[str] = list(SENSOR_NAMES)
 
@@ -77,3 +78,37 @@ class StuckFaultDetector:
                 is_flat and variance < self._variance_threshold
             )
         return results
+
+    @staticmethod
+    def detect_series(
+        series: np.ndarray,
+        w: int = STUCK_WINDOW_K,
+        epsilon: float = STUCK_EPSILON,
+    ) -> list[bool]:
+        """Per-timestep stuck-at detection on a 1-D time series.
+
+        Uses rolling variance with Bessel's correction (``ddof=1``).
+
+        Args:
+            series: 1-D array of sensor readings.
+            w: Rolling window size.
+            epsilon: Minimum variance threshold.
+
+        Returns:
+            List of booleans; ``True`` when the rolling variance
+            falls below *epsilon*.  The first ``w-1`` entries are
+            always ``False`` (insufficient window).
+        """
+        series = np.asarray(series, dtype=float)
+        n = len(series)
+        flags: list[bool] = [False] * n
+
+        if n < w or w < 2:
+            return flags
+
+        for t in range(w - 1, n):
+            window = series[t - w + 1 : t + 1]
+            var = float(np.var(window, ddof=1))
+            flags[t] = var < epsilon
+
+        return flags

@@ -9,18 +9,24 @@ residuals from zero.
 
 The detector is stateful and serialisable so it can be persisted per
 tenant (e.g. in ``LearningState.state_json``).
+
+Also provides :class:`EMABaselineEstimator` — a lightweight helper that
+computes the predicted value ``x_hat_t`` and a rolling standard deviation
+so callers can produce the standardised residuals CUSUM expects.
 """
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Any
 
 try:
-    from src.config import CUSUM_H_SIGMA, CUSUM_K_SIGMA
+    from src.config import CUSUM_EMA_ALPHA, CUSUM_H_SIGMA, CUSUM_K_SIGMA
 except ImportError:  # pragma: no cover
     CUSUM_K_SIGMA = 0.5
     CUSUM_H_SIGMA = 5.0
+    CUSUM_EMA_ALPHA = 0.01
 
 
 class CUSUMDriftDetector:
@@ -146,4 +152,76 @@ class CUSUMDriftDetector:
             raise TypeError("s_neg must be a dictionary")
         obj._s_neg = defaultdict(float, {str(k): float(v) for k, v in s_neg_in.items()})
 
+        return obj
+
+
+class EMABaselineEstimator:
+    """Exponential Moving Average baseline for producing standardised residuals.
+
+    Maintains per-sensor EMA of the mean and variance so that the CUSUM
+    detector receives ``(observed - ema_mean) / ema_std`` at each step.
+
+    Args:
+        alpha: Smoothing factor in ``(0, 1]``.  Smaller values give a
+            longer memory (production default 0.01 ≈ 100-sample span).
+        min_std: Floor for the rolling standard deviation to prevent
+            division by zero during initial warm-up.
+    """
+
+    def __init__(
+        self,
+        alpha: float = CUSUM_EMA_ALPHA,
+        min_std: float = 1e-6,
+    ) -> None:
+        if not 0 < alpha <= 1:
+            raise ValueError(f"alpha must be in (0, 1], got {alpha}")
+        self._alpha = alpha
+        self._min_std = min_std
+        self._mean: dict[str, float] = {}
+        self._var: dict[str, float] = {}
+
+    def update(self, sensor: str, value: float) -> tuple[float, float]:
+        """Incorporate a new observation and return the standardised residual.
+
+        Args:
+            sensor: Sensor channel name.
+            value: Raw sensor reading.
+
+        Returns:
+            ``(standardised_residual, ema_mean)`` tuple.  On the very
+            first call for a sensor the residual is ``0.0``.
+        """
+        if sensor not in self._mean:
+            self._mean[sensor] = value
+            self._var[sensor] = 0.0
+            return 0.0, value
+
+        prev_mean = self._mean[sensor]
+        diff = value - prev_mean
+
+        self._mean[sensor] = prev_mean + self._alpha * diff
+        self._var[sensor] = (1 - self._alpha) * (self._var[sensor] + self._alpha * diff * diff)
+
+        std = max(math.sqrt(self._var[sensor]), self._min_std)
+        residual = (value - prev_mean) / std
+        return residual, self._mean[sensor]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise estimator state (JSON-safe)."""
+        return {
+            "alpha": self._alpha,
+            "min_std": self._min_std,
+            "mean": dict(self._mean),
+            "var": dict(self._var),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EMABaselineEstimator:
+        """Restore estimator from a previously exported dict."""
+        obj = cls(
+            alpha=float(d.get("alpha", CUSUM_EMA_ALPHA)),
+            min_std=float(d.get("min_std", 1e-6)),
+        )
+        obj._mean = {str(k): float(v) for k, v in d.get("mean", {}).items()}
+        obj._var = {str(k): float(v) for k, v in d.get("var", {}).items()}
         return obj

@@ -50,6 +50,7 @@ from src.api.routes import (
     learning,
     models,
     monitoring,
+    network_anomalies,
     readings,
     upload,
 )
@@ -286,6 +287,7 @@ app.include_router(monitoring.router)
 app.include_router(gas_anomalies.router)
 app.include_router(jobs.router)
 app.include_router(readings.router)
+app.include_router(network_anomalies.router)
 
 
 @app.get("/metrics", include_in_schema=False)

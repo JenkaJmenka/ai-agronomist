@@ -64,16 +64,18 @@ class TestDetection:
     def test_threshold_boundary(
         self, detector: NoiseDetector, rng: np.random.Generator
     ) -> None:
-        """Signal noise near boundary correctly triggers/ignores."""
+        """Signal noise near boundary correctly triggers/ignores.
+
+        The hybrid detector uses variance-ratio against baseline variance.
+        For temperature, baseline_variance=0.01 and ratio_threshold=10.0,
+        so alarm fires when filtered variance > 0.1 (i.e. filtered std > ~0.316).
+        """
         clean = np.linspace(20.0, 25.0, 100)
-        
-        # In src.config.py, temperature target = 0.05, NOISE_ALPHA = 3.0 -> threshold = 0.15.
-        # Add noise that results in a filtered std slightly below 0.15
+
         barely_fail_noise = rng.normal(0, 0.1, size=100)
         assert detector.detect(clean + barely_fail_noise, "temperature") is False
-        
-        # Add noise that results in a filtered std slightly above 0.15
-        barely_pass_noise = rng.normal(0, 0.3, size=100)
+
+        barely_pass_noise = rng.normal(0, 1.0, size=100)
         assert detector.detect(clean + barely_pass_noise, "temperature") is True
 
 

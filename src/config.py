@@ -758,6 +758,81 @@ SPIKE_DELTA_MAX: Dict[str, float] = {
     "light": 200.0,       # lux
 }
 
+# =============================================================================
+# SCADA Advanced Anomaly Detectors (Phase B)
+# =============================================================================
+
+# Spike / Transient Outlier — MAD-based detector.
+SPIKE_MAD_WINDOW_K: int = int(os.environ.get("SPIKE_MAD_WINDOW_K", "10"))
+SPIKE_MAD_TUNING_C: float = float(os.environ.get("SPIKE_MAD_TUNING_C", "3.0"))
+
+# Out-of-Bounds — hard physical / hardware limits per sensor.
+OOB_LIMITS: Dict[str, Tuple[float, float]] = {
+    "temperature": (-40.0, 80.0),
+    "humidity": (0.0, 100.0),
+    "co2": (0.0, 5000.0),
+    "light": (0.0, 200000.0),
+}
+
+# Stuck-at — 1-D series epsilon for the document-aligned detector.
+STUCK_EPSILON: float = float(os.environ.get("STUCK_EPSILON", "1e-4"))
+
+# CUSUM drift — EMA baseline estimator smoothing factor.
+CUSUM_EMA_ALPHA: float = float(os.environ.get("CUSUM_EMA_ALPHA", "0.01"))
+
+# Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
+NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
+NOISE_BASELINE_VARIANCE: Dict[str, float] = {
+    "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
+    "humidity": 0.04,      # (%)²
+    "co2": 25.0,           # (ppm)²
+    "light": 100.0,        # (lux)²
+}
+NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
+
+# Bias / Constant Offset — dual-sensor cross-difference.
+BIAS_DUAL_WINDOW: int = int(os.environ.get("BIAS_DUAL_WINDOW", "10"))
+BIAS_DUAL_THRESHOLD: float = float(os.environ.get("BIAS_DUAL_THRESHOLD", "0.5"))
+# Single-sensor EMA fallback.
+BIAS_EMA_SPAN: int = int(os.environ.get("BIAS_EMA_SPAN", "288"))
+BIAS_EMA_THRESHOLD: float = float(os.environ.get("BIAS_EMA_THRESHOLD", "2.0"))
+
+# Spatial Correlation Breakdown — rolling Pearson pair detector.
+CORR_BREAKDOWN_WINDOW: int = int(os.environ.get("CORR_BREAKDOWN_WINDOW", "12"))
+CORR_BREAKDOWN_THRESHOLD: float = float(os.environ.get("CORR_BREAKDOWN_THRESHOLD", "0.80"))
+
+# Diurnal Profile Deviation — hourly Z-score.
+DIURNAL_Z_THRESHOLD: float = float(os.environ.get("DIURNAL_Z_THRESHOLD", "2.5"))
+
+# =============================================================================
+# OT Network Security Detectors
+# =============================================================================
+
+# RTT / Jitter.
+RTT_BASELINE_MS: float = float(os.environ.get("RTT_BASELINE_MS", "2.0"))
+RTT_MULTIPLIER: float = float(os.environ.get("RTT_MULTIPLIER", "3.0"))
+JITTER_THRESHOLD_MS: float = float(os.environ.get("JITTER_THRESHOLD_MS", "20.0"))
+
+# Inter-Packet Interval variation (IAT CV).
+IAT_CV_WINDOW: int = int(os.environ.get("IAT_CV_WINDOW", "20"))
+IAT_CV_THRESHOLD: float = float(os.environ.get("IAT_CV_THRESHOLD", "1.0"))
+IAT_BASELINE_MEAN: float = float(os.environ.get("IAT_BASELINE_MEAN", "1.0"))
+IAT_SPACING_MULTIPLIER: float = float(os.environ.get("IAT_SPACING_MULTIPLIER", "2.5"))
+
+# TCP Handshake timing.
+TCP_BASELINE_MS: float = float(os.environ.get("TCP_BASELINE_MS", "5.0"))
+TCP_DELAY_FACTOR: float = float(os.environ.get("TCP_DELAY_FACTOR", "2.0"))
+
+# Service Response Duration.
+SERVICE_RESPONSE_WINDOW: int = int(os.environ.get("SERVICE_RESPONSE_WINDOW", "1000"))
+SERVICE_RESPONSE_PERCENTILE: float = float(os.environ.get("SERVICE_RESPONSE_PERCENTILE", "99.5"))
+SERVICE_RESPONSE_BASELINE_MS: float = float(os.environ.get("SERVICE_RESPONSE_BASELINE_MS", "120.0"))
+
+# Isolation Forest threat scoring (19-feature).
+THREAT_SCORE_THRESHOLD: float = float(os.environ.get("THREAT_SCORE_THRESHOLD", "65.0"))
+IF_THREAT_N_ESTIMATORS: int = int(os.environ.get("IF_THREAT_N_ESTIMATORS", "200"))
+IF_THREAT_CONTAMINATION: float = float(os.environ.get("IF_THREAT_CONTAMINATION", "0.01"))
+
 AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
     "1",
     "true",

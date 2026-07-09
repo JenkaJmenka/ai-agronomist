@@ -39,10 +39,13 @@ from src.db.models import LearningState
 from src.models.anomaly_attributor import AnomalyAttributor
 from src.models.confidence_scorer import ConfidenceScorer
 from src.models.data_utils import SENSOR_RANGES
-from src.models.cusum_drift_detector import CUSUMDriftDetector
+from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
+from src.models.diurnal_profile_detector import DiurnalProfileDetector
 from src.models.dropout_detector import DropoutDetector
 from src.models.ensemble_detector import EnsembleAnomalyDetector, LstmVaeDetector
 from src.models.noise_detector import NoiseDetector
+from src.models.out_of_bounds_detector import OutOfBoundsDetector
+from src.models.spike_mad_detector import SpikeMADDetector
 from src.models.ewma_tracker import EWMATracker
 from src.models.fault_classifier import FaultClassifier
 from src.models.inference import AnomalyDetector
@@ -182,6 +185,10 @@ class ComprehensiveInferencePipeline:
         self._noise_detector = NoiseDetector()
         # Per-tenant CUSUM drift detectors (stateful, persisted in LearningState).
         self._cusum_cache: dict[str, CUSUMDriftDetector] = {}
+        # Phase B SCADA detectors (stateless, shared).
+        self._spike_mad_detector = SpikeMADDetector()
+        self._oob_detector = OutOfBoundsDetector()
+        self._diurnal_detector = DiurnalProfileDetector()
         # Component caching
         self._default_baseline: Optional[np.ndarray] = None
         self._cached_baseline: Optional[np.ndarray] = None
@@ -356,6 +363,30 @@ class ComprehensiveInferencePipeline:
                 noise_alarmed,
             )
             return self._build_noise_result(noise_alarmed)
+
+        # 0b. Out-of-bounds check (hard physical limits).
+        oob_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(self._oob_detector.detect_series(_denormed_for_noise[:, s_idx], s_name)):
+                oob_alarmed.append(s_name)
+        if oob_alarmed:
+            logger.warning(
+                "Out-of-bounds readings for tenant %s — sensors: %s",
+                customer_id,
+                oob_alarmed,
+            )
+
+        # 0c. Spike (MAD) check — flag transient outliers per sensor.
+        spike_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(self._spike_mad_detector.detect(_denormed_for_noise[:, s_idx])):
+                spike_alarmed.append(s_name)
+        if spike_alarmed:
+            logger.info(
+                "MAD spike detected for tenant %s — sensors: %s",
+                customer_id,
+                spike_alarmed,
+            )
 
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
