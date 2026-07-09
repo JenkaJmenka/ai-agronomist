@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 
 from aio_pika import DeliveryMode, Message
@@ -72,7 +73,7 @@ async def publish_json(
     else:
         exchange = await channel.get_exchange("agronomist.jobs", ensure=False)
 
-    body, content_encoding = encode_message_body(payload)
+    body, content_encoding = await asyncio.to_thread(encode_message_body, payload)
     message = Message(
         body,
         content_type="application/json",

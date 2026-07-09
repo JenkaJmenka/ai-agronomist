@@ -164,8 +164,8 @@ async def _handle_message(binding: QueueBinding, message: aio_pika.abc.AbstractI
     attempt = int((message.headers or {}).get(ATTEMPT_HEADER, 0))
 
     try:
-        body = decode_message_body(message.body, message.content_encoding)
-        parsed = binding.schema.model_validate_json(body)
+        body = await asyncio.to_thread(decode_message_body, message.body, message.content_encoding)
+        parsed = await asyncio.to_thread(binding.schema.model_validate_json, body)
     except Exception:
         logger.exception(
             "Unparseable message on %s — moving raw body to DLQ", binding.queue_name

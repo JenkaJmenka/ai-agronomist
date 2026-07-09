@@ -13,16 +13,16 @@ from src.dashboard.services.upload_validator import validate_csv_upload
 
 API_URL = os.environ.get("API_URL", DEFAULT_API_URL)
 
-_TRAINING_POLL_SECONDS = 5
+_TRAINING_POLL_SECONDS = 2.0
 _MAX_POLL_ERRORS = 5
-_MAX_POLL_ATTEMPTS = 120  # 120 × 5 s ≈ 10 min ceiling
+_MAX_POLL_ATTEMPTS = 300  # More attempts since poll interval starts at 2s
 
 
 @st.fragment(run_every=timedelta(seconds=_TRAINING_POLL_SECONDS))
 def _render_training_status_poller() -> None:
     """Non-blocking training job poll (replaces sleep + full-page rerun)."""
     job = st.session_state.get("training_job")
-    if not job or job.get("status") != "running":
+    if not job or job.get("status") not in ("preparing", "running"):
         return
 
     _poll_errors = job.get("poll_errors", 0)
@@ -36,33 +36,64 @@ def _render_training_status_poller() -> None:
         st.session_state["training_job"] = None
         return
 
+    import time
+    now = time.time()
+    last_poll = job.setdefault("last_poll_time", 0.0)
+    interval = job.setdefault("current_interval", 2.0)
+    cached_status = job.get("cached_status")
+
     _current: dict | None = None
-    try:
-        res_status = api_get(
-            f"{API_URL}/api/models/{job['customer_id']}/training-status",
-            timeout=5,
-        )
-        _current = res_status.json() if res_status.ok else {"status": "running"}
-        _poll_errors = 0
-    except Exception as _poll_exc:
-        _poll_errors += 1
-        if _poll_errors >= _MAX_POLL_ERRORS:
-            st.warning(
-                f"Training status API is not responding ({_poll_errors} consecutive failures). "
-                f"Last error: {_poll_exc}"
+
+    if cached_status is not None and now - last_poll < interval:
+        # Use cached status
+        _current = cached_status
+    else:
+        # Time to poll!
+        try:
+            res_status = api_get(
+                f"{API_URL}/api/jobs/{job['job_id']}",
+                timeout=5,
             )
-            st.session_state["training_job"] = None
-            return
-        _current = {"status": "running"}
+            if res_status.ok:
+                _current = res_status.json()
+                _poll_errors = 0
+
+                status = _current.get("status", "preparing")
+                if status in ("preparing", "running"):
+                    if last_poll > 0.0:  # Only double after the first actual query has occurred
+                        job["current_interval"] = min(interval * 2.0, 16.0)
+                else:
+                    job["current_interval"] = 2.0
+
+                job["last_poll_time"] = now
+                job["cached_status"] = _current
+            else:
+                _current = cached_status or {"status": "preparing"}
+                _poll_errors += 1
+        except Exception as _poll_exc:
+            _poll_errors += 1
+            if _poll_errors >= _MAX_POLL_ERRORS:
+                st.warning(
+                    f"Training status API is not responding ({_poll_errors} consecutive failures). "
+                    f"Last error: {_poll_exc}"
+                )
+                st.session_state["training_job"] = None
+                return
+            _current = cached_status or {"status": "preparing"}
+
+    if _current is None:
+        _current = {"status": "preparing"}
 
     job["poll_errors"] = _poll_errors
     job["poll_attempts"] = _poll_attempts + 1
+    job["status"] = _current.get("status", "preparing")
     st.session_state["training_job"] = job
 
-    if _current["status"] == "running":
-        st.info("Training in progress…")
-    elif _current["status"] == "completed":
-        model_id = _current.get("model_id")
+    status = _current.get("status", "preparing")
+    if status in ("preparing", "running"):
+        st.info(f"Training in progress ({status})…")
+    elif status == "completed":
+        model_id = _current.get("result", {}).get("model_id") if _current.get("result") else _current.get("model_id")
         if model_id:
             st.success(f"Training complete. New model registered: `{model_id}`")
         else:
@@ -71,7 +102,7 @@ def _render_training_status_poller() -> None:
                 "(new model did not outperform the baseline)."
             )
         st.session_state["training_job"] = None
-    elif _current["status"] == "failed":
+    elif status == "failed":
         st.error(f"Training failed: {_current.get('error', 'unknown error')}")
         st.session_state["training_job"] = None
 
@@ -116,18 +147,24 @@ with tab1:
                     st.warning(_warn)
                 with st.spinner("Uploading data…"):
                     files = {"file": (uploaded_file_train.name, _file_bytes_train, "text/csv")}
-                    data = {"tenant_id": tenant_id_train, "greenhouse_id": greenhouse_id_train}
+                    data = {
+                        "tenant_id": tenant_id_train,
+                        "greenhouse_id": greenhouse_id_train,
+                        "persist_data": "True",
+                        "train_model": "True",
+                    }
                     try:
                         res_upload = api_post(
-                            f"{API_URL}/api/upload",
+                            f"{API_URL}/api/inference/upload-async",
                             files=files,
                             data=data,
                         )
-                        st.success(f"Uploaded {res_upload.json().get('uploaded', 0)} rows successfully.")
+                        job_id = res_upload.json().get("job_id")
+                        st.success(f"Upload job accepted. Job ID: `{job_id}`")
 
-                        res_train = api_post(f"{API_URL}/api/models/{tenant_id_train}/train")
                         st.session_state["training_job"] = {
-                            "status": "running",
+                            "status": "preparing",
+                            "job_id": job_id,
                             "customer_id": tenant_id_train,
                         }
                         st.rerun()

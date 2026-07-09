@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -181,87 +182,93 @@ async def persist_readings_chunk(
     """
     sensor_inserted = sensor_updated = raw_inserted = raw_updated = 0
 
-    if df is not None and not df.empty:
-        ts_norm = [normalize_persist_timestamp(v) for v in df["timestamp"]]
-        existing_keys = (
-            await _existing_timestamp_keys(
-                db, SensorReading, tenant_id, greenhouse_id, ts_norm
+    async def upsert_sensor():
+        nonlocal sensor_inserted, sensor_updated
+        if df is not None and not df.empty:
+            ts_norm = [normalize_persist_timestamp(v) for v in df["timestamp"]]
+            existing_keys = (
+                await _existing_timestamp_keys(
+                    db, SensorReading, tenant_id, greenhouse_id, ts_norm
+                )
+                if count_split
+                else set()
             )
-            if count_split
-            else set()
-        )
-        rows: list[dict[str, Any]] = []
-        for ts, temp, hum, co2, light in zip(
-            ts_norm, df["temperature"], df["humidity"], df["co2"], df["light"]
-        ):
-            rows.append(
-                {
-                    "tenant_id": tenant_id,
-                    "greenhouse_id": greenhouse_id,
-                    "timestamp": ts,
-                    "temperature": float(temp),
-                    "humidity": float(hum),
-                    "co2": float(co2),
-                    "light": float(light),
-                    "anomaly_score": lookup_anomaly_score(ts, anomaly_scores_by_timestamp),
-                }
+            rows: list[dict[str, Any]] = []
+            for ts, temp, hum, co2, light in zip(
+                ts_norm, df["temperature"], df["humidity"], df["co2"], df["light"]
+            ):
+                rows.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "greenhouse_id": greenhouse_id,
+                        "timestamp": ts,
+                        "temperature": float(temp),
+                        "humidity": float(hum),
+                        "co2": float(co2),
+                        "light": float(light),
+                        "anomaly_score": lookup_anomaly_score(ts, anomaly_scores_by_timestamp),
+                    }
+                )
+            with timed(logger, "persist.sensor_upsert", rows=len(rows), split=int(count_split)):
+                written = await bulk_upsert_rows(
+                    db,
+                    SensorReading,
+                    rows,
+                    update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
+                    preserve_when_null=("anomaly_score",),
+                )
+            sensor_updated = (
+                len({persist_timestamp_key(ts) for ts in ts_norm} & existing_keys)
+                if count_split
+                else 0
             )
-        with timed(logger, "persist.sensor_upsert", rows=len(rows), split=int(count_split)):
-            written = await bulk_upsert_rows(
-                db,
-                SensorReading,
-                rows,
-                update_cols=("temperature", "humidity", "co2", "light", "anomaly_score"),
-                preserve_when_null=("anomaly_score",),
-            )
-        sensor_updated = (
-            len({persist_timestamp_key(ts) for ts in ts_norm} & existing_keys)
-            if count_split
-            else 0
-        )
-        sensor_inserted = written - sensor_updated
+            sensor_inserted = written - sensor_updated
 
-    if raw_df is not None and not raw_df.empty:
-        sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
-        raw_rows: list[dict[str, Any]] = []
-        raw_ts_norm: list[datetime] = []
-        for record in raw_df.to_dict(orient="records"):
-            data_dict = _build_raw_data_dict(
-                record, sensor_cols, anomaly_metadata_by_timestamp
+    async def upsert_raw():
+        nonlocal raw_inserted, raw_updated
+        if raw_df is not None and not raw_df.empty:
+            sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
+            raw_rows: list[dict[str, Any]] = []
+            raw_ts_norm: list[datetime] = []
+            for record in raw_df.to_dict(orient="records"):
+                data_dict = _build_raw_data_dict(
+                    record, sensor_cols, anomaly_metadata_by_timestamp
+                )
+                if not data_dict:
+                    continue
+                ts = normalize_persist_timestamp(record["timestamp"])
+                raw_ts_norm.append(ts)
+                raw_rows.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "greenhouse_id": greenhouse_id,
+                        "timestamp": ts,
+                        "source": record.get("source") or None,
+                        "data": data_dict,
+                    }
+                )
+            existing_raw_keys = (
+                await _existing_timestamp_keys(
+                    db, RawReading, tenant_id, greenhouse_id, raw_ts_norm
+                )
+                if count_split
+                else set()
             )
-            if not data_dict:
-                continue
-            ts = normalize_persist_timestamp(record["timestamp"])
-            raw_ts_norm.append(ts)
-            raw_rows.append(
-                {
-                    "tenant_id": tenant_id,
-                    "greenhouse_id": greenhouse_id,
-                    "timestamp": ts,
-                    "source": record.get("source") or None,
-                    "data": data_dict,
-                }
+            with timed(logger, "persist.raw_upsert", rows=len(raw_rows), split=int(count_split)):
+                written = await bulk_upsert_rows(
+                    db,
+                    RawReading,
+                    raw_rows,
+                    update_cols=("source", "data"),
+                )
+            raw_updated = (
+                len({persist_timestamp_key(ts) for ts in raw_ts_norm} & existing_raw_keys)
+                if count_split
+                else 0
             )
-        existing_raw_keys = (
-            await _existing_timestamp_keys(
-                db, RawReading, tenant_id, greenhouse_id, raw_ts_norm
-            )
-            if count_split
-            else set()
-        )
-        with timed(logger, "persist.raw_upsert", rows=len(raw_rows), split=int(count_split)):
-            written = await bulk_upsert_rows(
-                db,
-                RawReading,
-                raw_rows,
-                update_cols=("source", "data"),
-            )
-        raw_updated = (
-            len({persist_timestamp_key(ts) for ts in raw_ts_norm} & existing_raw_keys)
-            if count_split
-            else 0
-        )
-        raw_inserted = written - raw_updated
+            raw_inserted = written - raw_updated
+
+    await asyncio.gather(upsert_sensor(), upsert_raw())
 
     return sensor_inserted, sensor_updated, raw_inserted, raw_updated
 

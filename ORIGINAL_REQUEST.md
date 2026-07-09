@@ -274,4 +274,31 @@ After each phase: `python3 -m pytest tests/ --tb=short -q` must pass with 0 fail
 - [ ] Full test suite passes with 0 failures after all work.
 - [ ] Two PRs are opened: one for Phases 1-3, one for Phase 4.
 
+## Follow-up — 2026-07-09T12:43:55Z
 
+Implement performance optimizations #4, #1, #3, and #6 from `perf_report.md` to improve ingest speed, backend training efficiency, and job polling.
+
+Working directory: /Users/eugenesidorov/Projects/ai-agronomist
+Integrity mode: development
+
+### Requirements
+
+#### R1. Optimize `produce_portions` (#1) and per-portion `persist` (#4)
+Improve the performance of `produce_portions` during the upload background job. Investigate and resolve the bottleneck caused by per-portion persistence (e.g., ~2s per portion). You are free to choose the best approach, such as upsert batching, connection pooling, or tuning database indexing.
+
+#### R2. Eliminate the Double Upload (#3)
+Resolve the issue where the CSV file is uploaded twice from the browser (from the Upload-Ops page and the async upload endpoint). Consolidate the upload path so the data is only transferred and stored once. You are free to determine the best architectural approach.
+
+#### R3. Optimize Job Polling (#6)
+Reduce the chattiness of frontend polling for `GET /api/jobs/{id}` (currently every 2s). You are free to choose the best mechanism (e.g., exponential backoff or Server-Sent Events) to make this more efficient while preserving timely updates.
+
+### Acceptance Criteria
+
+#### Performance Verification
+- [ ] A simple benchmarking script or profiling output is used to prove that the `produce_portions` phase time is significantly reduced.
+- [ ] The `persist` operation for portions is batched or optimized so that it no longer dominates the portion cost.
+
+#### Functional Verification
+- [ ] Uploading a CSV file works correctly end-to-end without duplicate network transfers or redundant database writes.
+- [ ] Job polling operates efficiently with reduced network chatter while still updating the frontend reliably.
+- [ ] The application remains fully functional and runs successfully without errors.

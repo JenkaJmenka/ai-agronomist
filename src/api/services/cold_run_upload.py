@@ -86,16 +86,16 @@ def _strip_raw_records(raw_df: pd.DataFrame) -> list[dict[str, Any]]:
     ts_iso = raw_df["timestamp"].map(
         lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
     )
+    dropped_df = raw_df.drop(columns=["timestamp", "source"], errors="ignore")
     records: list[dict[str, Any]] = []
-    for ts, row in zip(ts_iso, raw_df.to_dict(orient="records")):
+    for ts, row in zip(ts_iso, dropped_df.to_dict(orient="records")):
         records.append(
             {
                 "timestamp": ts,
                 **{
                     col: val
                     for col, val in row.items()
-                    if col not in ("timestamp", "source")
-                    and val is not None
+                    if val is not None
                     and not (isinstance(val, float) and pd.isna(val))
                 },
             }

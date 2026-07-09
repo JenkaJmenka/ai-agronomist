@@ -204,12 +204,36 @@ def _render_pending_upload_tracker_body() -> None:
     if not pending:
         return
 
+    now = time.time()
+    last_poll = pending.setdefault("last_poll_time", 0.0)
+    interval = pending.setdefault("current_interval", 2.0)
+    cached_job = pending.get("cached_status")
+
     client = DashboardApiClient(api_key=st.session_state.get("api_key"))
     job: dict | None = None
-    try:
-        job = client.get_job(pending["job_id"])
-    except Exception:
-        pass  # transient API/network hiccup — keep tracking on the next poll
+
+    if cached_job is not None and now - last_poll < interval:
+        # Use cached status
+        job = cached_job
+    else:
+        try:
+            job = client.get_job(pending["job_id"])
+            if job is not None:
+                pending["cached_status"] = job
+                pending["last_poll_time"] = now
+
+                status = job.get("status", "queued")
+                if status in ("preparing", "running"):
+                    if last_poll > 0.0:  # Only double after the first actual query has occurred
+                        pending["current_interval"] = min(interval * 2.0, 16.0)
+                else:
+                    pending["current_interval"] = 2.0
+        except Exception:
+            pass  # transient API/network hiccup — keep tracking on the next poll
+
+        # Fallback to cached status if the API call failed
+        if job is None and cached_job is not None:
+            job = cached_job
 
     if job is not None and job.get("status") in TERMINAL_JOB_STATUSES:
         st.session_state.pop(_PENDING_UPLOAD_KEY, None)
