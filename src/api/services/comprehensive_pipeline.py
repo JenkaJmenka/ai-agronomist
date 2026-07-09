@@ -367,7 +367,7 @@ class ComprehensiveInferencePipeline:
             )
             return self._build_noise_result(noise_alarmed)
 
-        # 0b. Out-of-bounds check (hard physical limits).
+        # 0b. Out-of-bounds check — short-circuit on hard physical limits.
         oob_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             if any(self._oob_detector.detect_series(_denormed_for_noise[:, s_idx], s_name)):
@@ -378,27 +378,28 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 oob_alarmed,
             )
+            return self._build_oob_result(oob_alarmed)
 
-        # 0c. Spike (MAD) check — flag transient outliers per sensor.
+        # 0c. Spike (MAD) check — short-circuit on transient outliers.
         spike_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             if any(self._spike_mad_detector.detect(_denormed_for_noise[:, s_idx])):
                 spike_alarmed.append(s_name)
         if spike_alarmed:
-            logger.info(
+            logger.warning(
                 "MAD spike detected for tenant %s — sensors: %s",
                 customer_id,
                 spike_alarmed,
             )
+            return self._build_spike_result(spike_alarmed)
 
         # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
-        # Uses the improved EMA-based single-sensor strategy instead of the
-        # legacy midpoint comparison.
         bias_ema_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             if any(BiasEMADetector.detect_ema(_denormed_for_noise[:, s_idx])):
                 bias_ema_alarmed.append(s_name)
-        if bias_ema_alarmed:
+        bias_ema_flag = len(bias_ema_alarmed) > 0
+        if bias_ema_flag:
             logger.info(
                 "Bias (EMA) detected for tenant %s — sensors: %s",
                 customer_id,
@@ -478,11 +479,14 @@ class ComprehensiveInferencePipeline:
             physics_result=physics_result,
         )
 
-        # 5a. CUSUM override: a confirmed drift alarm promotes fault_type to
-        # calibration_drift when the sequence is already flagged as anomalous.
-        # Physics-confirmed fault types take precedence over CUSUM.
-        if cusum_drift_alarm and is_anomaly and not physics_result.confirmed:
+        # 5a. CUSUM drift: promotes is_anomaly and overrides fault_type.
+        if cusum_drift_alarm and not physics_result.confirmed:
+            is_anomaly = True
             fault_type = "calibration_drift"
+
+        # 5b. Bias EMA: overrides fault_type when EMA-based bias was detected.
+        if bias_ema_flag and is_anomaly and not physics_result.confirmed:
+            fault_type = "bias_offset"
 
         # 6. Persist updated tracker scores.
         try:
@@ -699,6 +703,88 @@ class ComprehensiveInferencePipeline:
             ],
             requires_technician=True,
             estimated_resolution_minutes=60,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_oob_result(alarmed_sensors: List[str]) -> "PipelineResult":
+        """Result for an out-of-bounds hard-limit violation."""
+        reason = (
+            "Out-of-bounds sensor readings on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=1.0,
+            confidence_level="very_high",
+            pattern_type="spike",
+            fault_type="spike_fault",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="sensor_out_of_bounds",
+            root_cause_confidence=1.0,
+            reasoning=reason,
+            alternative_causes=["sensor_hardware_failure", "wiring_fault"],
+            severity="critical",
+            urgency="immediate",
+            immediate_actions=["isolate_sensor", "check_wiring", "inspect_sensor_hardware"],
+            follow_up_actions=["replace_sensor", "recalibrate"],
+            all_recommendations=[
+                "isolate_sensor", "check_wiring",
+                "inspect_sensor_hardware", "replace_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=30,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_spike_result(alarmed_sensors: List[str]) -> "PipelineResult":
+        """Result for a confirmed MAD spike anomaly."""
+        reason = (
+            "Transient spike (MAD) detected on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.95,
+            confidence_level="high",
+            pattern_type="spike",
+            fault_type="spike_fault",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="transient_spike",
+            root_cause_confidence=0.9,
+            reasoning=reason,
+            alternative_causes=["electromagnetic_interference", "loose_connection"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["verify_reading", "check_sensor_connections"],
+            follow_up_actions=["inspect_sensor_environment", "review_historical_data"],
+            all_recommendations=[
+                "verify_reading", "check_sensor_connections",
+                "inspect_sensor_environment",
+            ],
+            requires_technician=False,
+            estimated_resolution_minutes=15,
             incident_id=None,
             detector_scores={},
             ensemble_score=0.0,
