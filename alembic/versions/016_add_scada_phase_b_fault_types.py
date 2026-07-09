@@ -11,7 +11,7 @@ diurnal_deviation, thermodynamic_contradiction.
 from alembic import op
 
 revision = "016"
-down_revision = "015"
+down_revision = "419da3d53b22"
 branch_labels = None
 depends_on = None
 
