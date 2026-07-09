@@ -216,24 +216,35 @@ def load_upload_score_frame(
     greenhouse_id: str,
     sequences_processed: int,
     score_count: int,
-    results: dict,
+    _results: dict,
 ) -> pd.DataFrame:
+    # tenant_id, greenhouse_id, sequences_processed, score_count are cache-key
+    # differentiators only; _results is underscore-prefixed so Streamlit skips
+    # hashing the large inference dict (avoids pickling 100k+ score arrays on
+    # every rerun while the scalar args still uniquely identify the payload).
     del tenant_id, greenhouse_id, sequences_processed, score_count
-    return build_sensor_dataframe_from_upload(results)
+    return build_sensor_dataframe_from_upload(_results)
 
 
 @st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def enrich_anomalies_table(
-    anomalies: pd.DataFrame,
+    _anomalies: pd.DataFrame,
     tenant_id: str,
     greenhouse_id: str,
     start_iso: str,
     end_iso: str,
 ) -> pd.DataFrame:
-    if anomalies.empty:
-        return anomalies
+    # _anomalies is underscore-prefixed so Streamlit skips hashing the DataFrame.
+    # pandas cannot hash cells that contain lists or dicts (from RawReading.data
+    # JSON columns), which caused Streamlit to fall back to pickling the entire
+    # frame on every rerun.  The remaining scalar args (tenant/time range) already
+    # uniquely identify the incident set used for enrichment; start_iso/end_iso are
+    # computed from the top-anomaly timestamps in the caller, so they change
+    # whenever the relevant anomaly set changes (e.g. threshold slider move).
+    if _anomalies.empty:
+        return _anomalies
     incidents = fetch_incidents_in_range(tenant_id, greenhouse_id, start_iso, end_iso)
-    return enrich_dataframe(anomalies, incidents)
+    return enrich_dataframe(_anomalies, incidents)
 
 
 def bounds_from_upload_results(results: dict) -> tuple[pd.Timestamp, pd.Timestamp] | None:
@@ -317,15 +328,19 @@ def _effective_anomaly_threshold(
 
 @st.cache_data(ttl=CACHE_TTL_SHORT, show_spinner=False, max_entries=CACHE_MAX_ENTRIES_FRAME)
 def load_enriched_top_anomalies(
-    anomalies: pd.DataFrame,
+    _anomalies: pd.DataFrame,
     tenant_id: str,
     greenhouse_id: str,
     start_iso: str,
     end_iso: str,
 ) -> pd.DataFrame:
-    """Cache enriched anomaly rows for the Top Anomalies table."""
+    """Cache enriched anomaly rows for the Top Anomalies table.
+
+    _anomalies is underscore-prefixed so Streamlit skips hashing the DataFrame
+    (see enrich_anomalies_table for the full rationale).
+    """
     return enrich_anomalies_table(
-        anomalies, tenant_id, greenhouse_id, start_iso, end_iso
+        _anomalies, tenant_id, greenhouse_id, start_iso, end_iso
     )
 
 

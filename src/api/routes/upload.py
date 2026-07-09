@@ -172,17 +172,18 @@ async def upload_csv(
                     ranges[col]["max"] = max(ranges[col]["max"], float(df[col].max()))
 
                 from src.db.upsert import bulk_upsert_rows
-                records = []
-                for _, row in df.iterrows():
-                    records.append({
+                # Vectorized: convert timestamps once, build sensor dicts without iterrows
+                _py_timestamps = df["timestamp"].dt.to_pydatetime()
+                _sensor_rows = df[["temperature", "humidity", "co2", "light"]].to_dict("records")
+                records = [
+                    {
                         "tenant_id": tenant_id,
                         "greenhouse_id": greenhouse_id,
-                        "timestamp": row["timestamp"].to_pydatetime(),
-                        "temperature": row["temperature"],
-                        "humidity": row["humidity"],
-                        "co2": row["co2"],
-                        "light": row["light"],
-                    })
+                        "timestamp": ts,
+                        **sensor_row,
+                    }
+                    for ts, sensor_row in zip(_py_timestamps, _sensor_rows)
+                ]
 
                 try:
                     await bulk_upsert_rows(
@@ -218,21 +219,29 @@ async def upload_csv(
                 if not raw_df.empty:
                     sensor_cols = [c for c in raw_df.columns if c not in ("timestamp", "source")]
                     from src.db.upsert import bulk_upsert_rows
+                    # Vectorized: convert timestamps + source once; iterate dicts (no Series per row)
+                    _raw_py_ts = raw_df["timestamp"].dt.to_pydatetime()
+                    _raw_sources = raw_df["source"].tolist()
+                    _raw_row_dicts = (
+                        raw_df[sensor_cols].to_dict("records")
+                        if sensor_cols
+                        else [{} for _ in range(len(raw_df))]
+                    )
                     raw_records = []
-                    for _, row in raw_df.iterrows():
+                    for ts, source, row_dict in zip(_raw_py_ts, _raw_sources, _raw_row_dicts):
                         data_dict = {
-                            col: row[col]
+                            col: row_dict[col]
                             for col in sensor_cols
-                            if row[col] is not None
-                            and not (isinstance(row[col], float) and pd.isna(row[col]))
+                            if row_dict[col] is not None
+                            and not (isinstance(row_dict[col], float) and pd.isna(row_dict[col]))
                         }
                         if not data_dict:
                             continue
                         raw_records.append({
                             "tenant_id": tenant_id,
                             "greenhouse_id": greenhouse_id,
-                            "timestamp": row["timestamp"].to_pydatetime(),
-                            "source": row["source"] or None,
+                            "timestamp": ts,
+                            "source": source or None,
                             "data": data_dict,
                         })
                     if raw_records:

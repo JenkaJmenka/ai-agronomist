@@ -3,6 +3,29 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Fix 5 — Streamlit cache-hashing bug + checkbox session-state warning — COMPLETE (2026-07-09)**
+Agent: backend-engineer. Two-file fix (3 changes).
+
+Files modified:
+- `src/dashboard/services/anomalies_page_data.py`: Renamed `anomalies: pd.DataFrame` → `_anomalies`
+  in `enrich_anomalies_table` and `load_enriched_top_anomalies`; renamed `results: dict` → `_results`
+  in `load_upload_score_frame`. Underscore prefix tells Streamlit to skip hashing the unhashable
+  DataFrame (list/dict cells from RawReading.data JSON) and the large inf_results dict (100k+
+  anomaly_score/timestamp lists). Eliminates "Pandas DataFrame hash failed. Falling back to pickling
+  the object." on every monitoring-page rerun (~2 min overhead). Cache semantics preserved: the scalar
+  args (tenant_id, greenhouse_id, start_iso/end_iso, sequences_processed, score_count) remain in the
+  cache key and uniquely identify each entry.
+- `src/dashboard/views/1_Active_Monitoring/1_Monitoring.py`: Fixed Streamlit
+  check_session_state_rules warning on the sensor-channel checkboxes (~line 247). Replaced
+  `checkbox(..., value=(col in _default_checked), key=f"cb_{col}")` with a `setdefault` init loop
+  (seeds the key only when absent) + `checkbox(..., key=f"cb_{col}")` with no `value=`. Prevents the
+  warning that fired when apply_sensor_checkbox_selection had already written the `cb_*` session state
+  keys before the widget rendered.
+
+Result: 1805 passed, 12 skipped, 1 xfailed — no regressions. Done signal: tasks/done/fix5.json.
+Summary: tasks/fix5.summary.txt.
+
+Previous phase:
 **QA — Regression tests for "455 anomalies, empty tables" upload incident — COMPLETE (2026-07-07)**
 Agent: qa-engineer. Locked in coverage for the two just-landed fixes (not modified by this pass):
 `handle_upload_finalize` fail-loud guard (partially_failed + non-null error when persist_data=true,

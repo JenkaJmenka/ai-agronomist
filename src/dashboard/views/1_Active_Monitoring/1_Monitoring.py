@@ -241,10 +241,18 @@ st.markdown("### Sensor channels")
 
 _default_checked = set(_all_numeric[:2])
 
+# Seed checkbox session state with defaults only when the key is not already
+# present (e.g. set by apply_pending_jump_columns → apply_sensor_checkbox_selection).
+# Providing both `value=` and `key=` when the key already exists in session_state
+# raises Streamlit's check_session_state_rules warning and the `value=` arg is
+# silently ignored anyway, so we use setdefault here and omit `value=` below.
+for col in _all_numeric:
+    st.session_state.setdefault(f"cb_{col}", col in _default_checked)
+
 _sensor_cols = st.columns(6)
 selected_cols: List[str] = []
 for i, col in enumerate(_all_numeric):
-    if _sensor_cols[i % 6].checkbox(get_sensor_label(col), value=(col in _default_checked), key=f"cb_{col}"):
+    if _sensor_cols[i % 6].checkbox(get_sensor_label(col), key=f"cb_{col}"):
         selected_cols.append(col)
 
 if not selected_cols:
