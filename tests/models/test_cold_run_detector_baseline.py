@@ -112,7 +112,9 @@ class TestDetectRollingEdges:
 class TestHelpers:
     def test_effective_window_scaling(self):
         assert _effective_rolling_window(10, 288) == 0
-        assert _effective_rolling_window(100, 288) == 12
+        assert _effective_rolling_window(100, 288) == 50
+        assert _effective_rolling_window(576, 288) == 288
+        assert _effective_rolling_window(5000, 288) == 288
         assert _effective_rolling_window(100_000, 288) == 288
 
     def test_split_baseline_readings_fraction(self):

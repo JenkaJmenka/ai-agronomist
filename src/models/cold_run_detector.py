@@ -266,11 +266,22 @@ class ColdRunStatisticalDetector:
 
 
 def _effective_rolling_window(row_count: int, configured_window: int) -> int:
-    """Scale rolling window down for short files; keep long-file window unchanged."""
+    """Scale rolling window down for short files; keep long-file window unchanged.
+
+    Greenhouse climate data has strong 24-hour diurnal cycles (heating pipes,
+    ventilation, solar gain).  The window must cover at least one full cycle so
+    that recurring daily patterns (e.g. afternoon pipe activation) appear in the
+    rolling baseline and do not trigger false positives.  For 5-min data the
+    diurnal minimum is 288 samples.
+
+    The window is only reduced for genuinely short uploads (fewer rows than
+    2× configured_window) where a full-cycle baseline is physically impossible.
+    """
     if row_count < 24:
         return 0
-    adaptive = max(12, row_count // 20)
-    return min(configured_window, adaptive)
+    if row_count >= configured_window * 2:
+        return configured_window
+    return min(configured_window, row_count // 2)
 
 
 def split_baseline_readings(
