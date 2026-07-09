@@ -9,6 +9,14 @@ from pydantic import BaseModel, Field, field_validator
 from src.config import INPUT_DIM, SEQ_LEN
 
 
+class SensorPairSequence(BaseModel):
+    """A pair of redundant co-located sensor time series."""
+
+    variable: str = Field(..., description="Physical variable (e.g. 'temperature')")
+    sensor_a: List[float] = Field(..., description="Primary sensor readings")
+    sensor_b: List[float] = Field(..., description="Redundant sensor readings")
+
+
 class ComprehensiveInferenceRequest(BaseModel):
     """Request body for POST /api/inference/comprehensive."""
 
@@ -20,6 +28,14 @@ class ComprehensiveInferenceRequest(BaseModel):
     baseline_sequences: Optional[List[List[List[float]]]] = Field(
         None,
         description="Optional normal baseline sequences for pattern/attribution",
+    )
+    sensor_pairs: Optional[List[SensorPairSequence]] = Field(
+        None,
+        description="Optional redundant sensor pairs for cross-validation",
+    )
+    sequence_timestamp: Optional[str] = Field(
+        None,
+        description="ISO-8601 timestamp of the sequence for diurnal profile checks",
     )
 
     @field_validator("sequence")
