@@ -17,8 +17,8 @@ class TestConstruction:
 
     def test_default_parameters(self) -> None:
         detector = CUSUMDriftDetector()
-        assert detector.k == 0.5
-        assert detector.h == 5.0
+        assert detector.k == 0.25
+        assert detector.h == 4.0
 
     def test_custom_parameters(self) -> None:
         detector = CUSUMDriftDetector(k=1.0, h=10.0)
@@ -150,8 +150,8 @@ class TestSerialisation:
     def test_from_dict_with_defaults(self) -> None:
         """Missing fields in the dict should fall back to defaults."""
         restored = CUSUMDriftDetector.from_dict({})
-        assert restored.k == 0.5
-        assert restored.h == 5.0
+        assert restored.k == 0.25
+        assert restored.h == 4.0
         assert restored.alarmed_sensors() == []
 
     def test_from_dict_restores_alarm_state(self) -> None:

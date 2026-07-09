@@ -682,8 +682,8 @@ VELOCITY_LIMITS: dict[str, float] = {
 # CUSUM drift detector parameters (standardised-residual space).
 # Names include _SIGMA suffix to document that units are standard deviations,
 # not raw sensor units.
-CUSUM_K_SIGMA: float = 0.5   # allowance parameter — half the shift size to detect
-CUSUM_H_SIGMA: float = 5.0   # decision interval — alarm threshold
+CUSUM_K_SIGMA: float = float(os.environ.get("CUSUM_K_SIGMA", "0.25"))   # production-sensitive: detects 0.5σ shifts
+CUSUM_H_SIGMA: float = float(os.environ.get("CUSUM_H_SIGMA", "4.0"))   # ARL₀ ≈ 340 samples
 
 # Polling dropout: P consecutive steps with any null/NaN triggers alarm
 # (SCADA spec section 1.5 — consecutive-step formulation).

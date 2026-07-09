@@ -37,6 +37,7 @@ from src.config import (
 from src.db.incident_memory import IncidentMemory
 from src.db.models import LearningState
 from src.models.anomaly_attributor import AnomalyAttributor
+from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
 from src.models.confidence_scorer import ConfidenceScorer
 from src.models.data_utils import SENSOR_RANGES
 from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
@@ -185,6 +186,8 @@ class ComprehensiveInferencePipeline:
         self._noise_detector = NoiseDetector()
         # Per-tenant CUSUM drift detectors (stateful, persisted in LearningState).
         self._cusum_cache: dict[str, CUSUMDriftDetector] = {}
+        # Per-tenant EMA baseline estimators for CUSUM standardized residuals.
+        self._ema_cache: dict[str, EMABaselineEstimator] = {}
         # Phase B SCADA detectors (stateless, shared).
         self._spike_mad_detector = SpikeMADDetector()
         self._oob_detector = OutOfBoundsDetector()
@@ -388,34 +391,41 @@ class ComprehensiveInferencePipeline:
                 spike_alarmed,
             )
 
+        # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
+        # Uses the improved EMA-based single-sensor strategy instead of the
+        # legacy midpoint comparison.
+        bias_ema_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(BiasEMADetector.detect_ema(_denormed_for_noise[:, s_idx])):
+                bias_ema_alarmed.append(s_name)
+        if bias_ema_alarmed:
+            logger.info(
+                "Bias (EMA) detected for tenant %s — sensors: %s",
+                customer_id,
+                bias_ema_alarmed,
+            )
+
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
 
-        # 1a. CUSUM drift update — per-sensor standardised residuals.
-        # Baseline statistics are derived from the provided (or synthetic)
-        # baseline sequences so every tenant uses its own reference distribution.
+        # 1a. CUSUM drift update — EMA-derived standardised residuals.
+        # The EMABaselineEstimator tracks per-sensor running mean/variance and
+        # produces standardised residuals that feed into the two-sided CUSUM.
+        # Production-sensitive defaults: K=0.25, H=4.0 (detects 0.5σ shifts,
+        # ARL₀ ≈ 340 samples).
         cusum_drift_alarm = False
         cusum_alarmed_sensors: list[str] = []
-        _baseline_mean = baseline.mean(axis=(0, 1))            # shape (INPUT_DIM,)
-        _baseline_std = baseline.std(axis=(0, 1)).clip(        # shape (INPUT_DIM,)
-            min=NUMERICAL_EPSILON
-        )
         _cusum = self._cusum_cache.setdefault(
             customer_id, CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
         )
+        _ema = self._ema_cache.setdefault(
+            customer_id, EMABaselineEstimator()
+        )
         _seq_last = seq_array[-1]  # most-recent timestep for residual computation
-        # Minimum meaningful baseline std in normalised [0,1] units.
-        # When baseline is near-constant (e.g. synthetic midpoint baseline),
-        # standardised residuals blow up and CUSUM alarms spuriously.
-        _CUSUM_MIN_BASELINE_STD: float = 1e-3
         for _idx, _sensor in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            _std = float(_baseline_std[_idx])
-            if _std >= _CUSUM_MIN_BASELINE_STD:
-                _residual = (
-                    float(_seq_last[_idx]) - float(_baseline_mean[_idx])
-                ) / _std
-                if _cusum.update(_sensor, _residual):
-                    cusum_drift_alarm = True
+            _residual, _ = _ema.update(_sensor, float(_seq_last[_idx]))
+            if _cusum.update(_sensor, _residual):
+                cusum_drift_alarm = True
         if cusum_drift_alarm:
             cusum_alarmed_sensors = _cusum.alarmed_sensors()
             logger.info(
@@ -848,11 +858,16 @@ class ComprehensiveInferencePipeline:
                 if tracker_data is not None:
                     ewma = EWMATracker.from_dict(tracker_data["ewma"])
                     pot = POTThresholdFitter.from_dict(tracker_data["pot"])
-                    # Restore CUSUM state if persisted and not already in memory.
+                    # Restore CUSUM + EMA state if persisted and not already in memory.
                     cusum_data = state.get("cusum_state")
                     if cusum_data is not None and customer_id not in self._cusum_cache:
                         self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
                             cusum_data
+                        )
+                    ema_data = state.get("ema_baseline_state")
+                    if ema_data is not None and customer_id not in self._ema_cache:
+                        self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
+                            ema_data
                         )
                     self._tracker_cache[customer_id] = (ewma, pot)
                     return ewma, pot
@@ -876,6 +891,7 @@ class ComprehensiveInferencePipeline:
 
         tracker_payload = {"ewma": ewma.to_dict(), "pot": pot.to_dict()}
         _cusum = self._cusum_cache.get(customer_id)
+        _ema_bl = self._ema_cache.get(customer_id)
         try:
             async with db.begin_nested():
                 result = await db.execute(
@@ -888,6 +904,8 @@ class ComprehensiveInferencePipeline:
                     }
                     if _cusum is not None:
                         initial_state["cusum_state"] = _cusum.to_dict()
+                    if _ema_bl is not None:
+                        initial_state["ema_baseline_state"] = _ema_bl.to_dict()
                     db.add(LearningState(
                         customer_id=customer_id,
                         state_json=initial_state,
@@ -897,6 +915,8 @@ class ComprehensiveInferencePipeline:
                     current["ewma_pot_trackers"] = tracker_payload
                     if _cusum is not None:
                         current["cusum_state"] = _cusum.to_dict()
+                    if _ema_bl is not None:
+                        current["ema_baseline_state"] = _ema_bl.to_dict()
                     row.state_json = current
             # savepoint auto-commits on clean __aexit__
         except Exception:
