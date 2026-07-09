@@ -593,7 +593,9 @@ def _render_top_anomalies_section(
         st.warning(f"Could not enrich anomaly table: {exc}")
         enriched = top_anomalies
 
-    if selected_fault_types:
+    # "fault_type" only exists after successful enrichment; on the fallback path
+    # it is absent, so guard the column to avoid a KeyError when a filter is set.
+    if selected_fault_types and "fault_type" in enriched.columns:
         def _ft_match(ft: Optional[str]) -> bool:
             return ft in selected_fault_types or (
                 ft is None and "unknown" in selected_fault_types
@@ -650,7 +652,9 @@ def _render_table_view_section(
         st.warning(f"Could not enrich anomaly table: {exc}")
         enriched = ranked
 
-    if selected_fault_types:
+    # "fault_type" only exists after successful enrichment; on the fallback path
+    # it is absent, so guard the column to avoid a KeyError when a filter is set.
+    if selected_fault_types and "fault_type" in enriched.columns:
         def _ft_match(ft: Optional[str]) -> bool:
             return ft in selected_fault_types or (
                 ft is None and "unknown" in selected_fault_types

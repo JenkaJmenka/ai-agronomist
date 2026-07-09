@@ -24,14 +24,11 @@ from src.dashboard.components.anomaly_table import (
     _row_score,
     enriched_to_export_df,
 )
+from src.dashboard.components.anomaly_table_view_style import view_css
 from src.dashboard.components.monitoring_jump import queue_monitoring_jump
 from src.dashboard.components.sensor_columns import get_all_sensor_columns
 from src.dashboard.components.table_export import render_export_button
 from src.dashboard.constants import MONITORING_PAGE
-
-# One green accent shared with the standalone comparison design.
-_ACCENT = "rgba(47,125,79,0.90)"
-_ACCENT_SOFT = "rgba(47,125,79,0.14)"
 
 # Severity chip thresholds are relative to the anomalies visible in the window
 # (scores are squashed to [0,1] and a real day tops out ~0.2, so absolute cuts
@@ -47,61 +44,6 @@ _MAX_RECORDS = 300
 _GROUP_OPTIONS = ["Date", "Anomaly type", "Affected sensor"]
 _COL_WIDTHS = [1.35, 1.05, 0.95, 2.3, 1.5]
 _COL_HEADERS = ["Timestamp", "Type", "Severity", "Affected sensors", "Actions"]
-
-
-def _view_css() -> str:
-    """Scoped styling: green group accents and clean Material-icon action buttons."""
-    return f"""
-<style>
-/* Group accent bar on each collapsible section header */
-div[data-testid="stExpander"]:has(.atv-group) summary {{
-  border-left: 3px solid {_ACCENT};
-}}
-.atv-pill {{
-  border-radius: 5px; padding: 2px 8px; font-size: 0.76em;
-  white-space: nowrap; display: inline-block;
-}}
-.atv-count {{
-  background: {_ACCENT_SOFT}; border: 1px solid {_ACCENT};
-  color: inherit; border-radius: 20px; padding: 1px 9px;
-  font-size: 0.72em; font-variant-numeric: tabular-nums;
-}}
-.atv-ts {{ font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }}
-.atv-hdr {{
-  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
-  color: rgba(148,163,184,0.95); font-weight: 600;
-}}
-/* Compact, quiet action buttons — colour keyed by position (confirm/reject/monitor) */
-div[data-testid="column"]:has(.atv-actions) [data-testid="stButton"] button {{
-  min-width: 2.1rem !important; padding: 0.15rem 0.4rem !important;
-  border-radius: 6px !important; background: transparent !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(1) [data-testid="stButton"] button {{
-  color: rgb(47,125,79) !important; border-color: rgba(47,125,79,0.45) !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(1) [data-testid="stButton"] button:hover {{
-  background: rgba(47,125,79,0.12) !important; border-color: rgba(47,125,79,0.85) !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(2) [data-testid="stButton"] button {{
-  color: rgb(181,67,44) !important; border-color: rgba(181,67,44,0.40) !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(2) [data-testid="stButton"] button:hover {{
-  background: rgba(181,67,44,0.12) !important; border-color: rgba(181,67,44,0.85) !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(3) [data-testid="stButton"] button {{
-  color: rgb(100,116,139) !important; border-color: rgba(100,116,139,0.40) !important;
-}}
-div[data-testid="column"]:has(.atv-actions) [data-testid="stHorizontalBlock"]
-  [data-testid="column"]:nth-child(3) [data-testid="stButton"] button:hover {{
-  background: rgba(100,116,139,0.14) !important; border-color: rgba(100,116,139,0.85) !important;
-}}
-</style>
-"""
 
 
 def _severity_chip(score: float, hi_cut: float, mid_cut: float) -> str:
@@ -170,7 +112,7 @@ def _render_record_row(
         ts_label = str(ts)
 
     cells[0].markdown(f'<span class="atv-ts">{html.escape(ts_label)}</span>', unsafe_allow_html=True)
-    cells[1].markdown(_fault_badge_html(_enrichment_of(row).get("fault_type") or _fault_of(row, enrichment)), unsafe_allow_html=True)
+    cells[1].markdown(_fault_badge_html(_fault_of(row, enrichment)), unsafe_allow_html=True)
     cells[2].markdown(_severity_chip(_row_score(row), hi_cut, mid_cut), unsafe_allow_html=True)
     cells[3].markdown(_affected_sensors_label(row, enrichment))
 
@@ -234,7 +176,7 @@ def render(
     if feedback_state_key not in st.session_state:
         st.session_state[feedback_state_key] = {}
 
-    st.markdown(_view_css(), unsafe_allow_html=True)
+    st.markdown(view_css(), unsafe_allow_html=True)
 
     tenant = tenant_id or st.session_state.get("selected_tenant", "")
     greenhouse = greenhouse_id or st.session_state.get("selected_greenhouse", "")

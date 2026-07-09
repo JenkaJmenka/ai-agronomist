@@ -86,3 +86,28 @@ class TestLoadPageWindow:
         assert monitor.called
         assert not resolver.called
         assert len(out) == 5
+
+
+class TestAnomaliesPageRegression:
+    """The Thresholds/Metrics refactor must not remove resolve_window_dataframe
+    from the anomaly page's own data path (it still drives the scored window)."""
+
+    def test_load_scored_window_routes_through_resolve_window_dataframe(self):
+        from src.dashboard.services import anomalies_page_data as apd
+
+        df = _window_df()
+        with patch.object(
+            apd, "resolve_window_dataframe", return_value=(df, False)
+        ) as resolver:
+            out, fallback = apd.load_scored_window(
+                "tenant-regression",
+                "gh-regression",
+                df["timestamp"].min().isoformat(),
+                df["timestamp"].max().isoformat(),
+                None,
+                "token-regression",
+                None,
+            )
+        assert resolver.called
+        assert fallback is False
+        assert len(out) == 5

@@ -262,10 +262,17 @@ def _render_date_range_filters_body(
 
     _process_pending_widget_updates(key_prefix, past_select_key)
 
+    _span_seconds = (data_max - data_min).total_seconds()
+    if _span_seconds >= 86400:
+        _n = round(_span_seconds / 86400)
+        _span_txt = f"{_n} day{'s' if _n != 1 else ''}"
+    else:
+        _n = max(1, round(_span_seconds / 3600))
+        _span_txt = f"{_n} hour{'s' if _n != 1 else ''}"
     st.caption(
         f"Data available **{data_min.strftime('%d %b %Y %H:%M')}** → "
-        f"**{data_max.strftime('%d %b %Y %H:%M')}**. "
-        "Use **From/To** or a **preset**, then click **Apply**."
+        f"**{data_max.strftime('%d %b %Y %H:%M')}** ({_span_txt} of data). "
+        "Use a **custom range** or a **quick range**, then click **Apply**."
     )
 
     custom_active = mode == "custom"
@@ -277,9 +284,9 @@ def _render_date_range_filters_body(
     with from_to_col:
         with st.container(border=custom_active):
             st.markdown(
-                "**From / To — selected**"
+                "**Custom range — selected**"
                 if custom_active
-                else "**From / To**"
+                else "**Custom range**"
             )
             _ensure_picker_widgets(key_prefix, applied_start, applied_end)
             picker_col_from, picker_col_to = st.columns(2)
@@ -317,7 +324,7 @@ def _render_date_range_filters_body(
     with preset_col:
         with st.container(border=past_active):
             st.markdown(
-                "**Preset — selected**" if past_active else "**Preset**"
+                "**Quick range — selected**" if past_active else "**Quick range**"
             )
             st.selectbox(
                 "Preset",
@@ -339,8 +346,20 @@ def _render_date_range_filters_body(
                 help="Leave empty to show all fault types",
             )
 
+    _current_preset = st.session_state.get(past_select_key, PAST_PLACEHOLDER)
+    apply_disabled = past_active and _current_preset == PAST_PLACEHOLDER
     apply_col, _ = st.columns([1, 5])
-    if apply_col.button("Apply", type="primary", key=f"{key_prefix}_apply_range"):
+    if apply_col.button(
+        "Apply",
+        type="primary",
+        key=f"{key_prefix}_apply_range",
+        disabled=apply_disabled,
+        help=(
+            "Pick a quick range or fill in the custom range first."
+            if apply_disabled
+            else None
+        ),
+    ):
         use_past = st.session_state.get(_RANGE_MODE_KEY) == "past"
         if use_past:
             preset = st.session_state.get(past_select_key, PAST_PLACEHOLDER)
