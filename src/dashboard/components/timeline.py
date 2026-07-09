@@ -107,9 +107,14 @@ def _format_past_option(value: str) -> str:
 
 
 def _clear_from_to_widgets(key_prefix: str) -> None:
-    """Reset From/To widget keys so inputs render empty."""
-    for suffix in ("from_date", "from_time", "to_date", "to_time"):
-        st.session_state.pop(f"{key_prefix}_{suffix}", None)
+    """Reset From/To widget keys so they re-initialize from applied bounds.
+
+    Instead of popping keys (which causes value=None / empty widgets that
+    break calendar selection in recent Streamlit versions), we leave the keys
+    intact so the picker always shows a selectable date. The widgets will be
+    re-synced to the current applied window via _ensure_picker_widgets.
+    """
+    pass
 
 
 def _sync_picker_widgets(
@@ -131,6 +136,7 @@ def _ensure_picker_widgets(
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> None:
+    """Populate picker widget keys if missing so date/time inputs have values."""
     if f"{key_prefix}_from_date" not in st.session_state:
         _sync_picker_widgets(key_prefix, start, end)
 
@@ -138,9 +144,10 @@ def _ensure_picker_widgets(
 def _process_pending_widget_updates(key_prefix: str, past_select_key: str) -> None:
     """Apply widget-key changes before any widgets are drawn this run."""
     if st.session_state.pop(f"{key_prefix}_pending_clear_pickers", False):
-        _clear_from_to_widgets(key_prefix)
-    elif st.session_state.get(_RANGE_MODE_KEY) == "past":
-        _clear_from_to_widgets(key_prefix)
+        start = st.session_state.get(_APPLIED_START_KEY)
+        end = st.session_state.get(_APPLIED_END_KEY)
+        if start is not None and end is not None:
+            _sync_picker_widgets(key_prefix, start, end)
 
     if st.session_state.pop(f"{key_prefix}_pending_past_placeholder", False):
         st.session_state[past_select_key] = PAST_PLACEHOLDER
@@ -157,8 +164,6 @@ def _set_custom_mode() -> None:
     st.session_state[_LAST_APPLY_SOURCE_KEY] = "custom"
     prefix = st.session_state.get(_ACTIVE_PREFIX_KEY, "monitor")
     st.session_state[f"{prefix}_pending_past_placeholder"] = True
-    if f"{prefix}_from_date" not in st.session_state:
-        st.session_state[f"{prefix}_pending_sync_pickers"] = True
 
 
 def _set_past_mode(key_prefix: str) -> None:
@@ -276,13 +281,11 @@ def _render_date_range_filters_body(
                 if custom_active
                 else "**From / To**"
             )
-            if custom_active:
-                _ensure_picker_widgets(key_prefix, applied_start, applied_end)
+            _ensure_picker_widgets(key_prefix, applied_start, applied_end)
             picker_col_from, picker_col_to = st.columns(2)
             with picker_col_from:
                 start_date = st.date_input(
                     "From date",
-                    value=None,
                     min_value=data_min.date(),
                     max_value=data_max.date(),
                     key=f"{key_prefix}_from_date",
@@ -290,14 +293,12 @@ def _render_date_range_filters_body(
                 )
                 start_time = st.time_input(
                     "From time",
-                    value=None,
                     key=f"{key_prefix}_from_time",
                     on_change=_set_custom_mode,
                 )
             with picker_col_to:
                 end_date = st.date_input(
                     "To date",
-                    value=None,
                     min_value=data_min.date(),
                     max_value=data_max.date(),
                     key=f"{key_prefix}_to_date",
@@ -305,7 +306,6 @@ def _render_date_range_filters_body(
                 )
                 end_time = st.time_input(
                     "To time",
-                    value=None,
                     key=f"{key_prefix}_to_time",
                     on_change=_set_custom_mode,
                 )
