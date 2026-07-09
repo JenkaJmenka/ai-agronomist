@@ -38,7 +38,9 @@ from src.db.incident_memory import IncidentMemory
 from src.db.models import LearningState
 from src.models.anomaly_attributor import AnomalyAttributor
 from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
+from src.models.bias_dual_sensor_detector import BiasDualSensorDetector
 from src.models.confidence_scorer import ConfidenceScorer
+from src.models.correlation_breakdown_detector import CorrelationBreakdownDetector
 from src.models.data_utils import SENSOR_RANGES
 from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
 from src.models.diurnal_profile_detector import DiurnalProfileDetector
@@ -79,6 +81,34 @@ _DENORM_RANGES = np.array(
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
+
+
+def compute_hourly_stats(
+    timestamps: List[datetime],
+    values: List[float],
+) -> Dict[int, tuple]:
+    """Build per-hour (mean, std) from timestamped sensor readings.
+
+    Args:
+        timestamps: List of datetime objects.
+        values: Corresponding sensor values in physical units.
+
+    Returns:
+        Dict mapping hour (0-23) to ``(mean, std)`` tuple.
+        Hours with fewer than 5 samples are omitted.
+    """
+    from collections import defaultdict
+    buckets: Dict[int, List[float]] = defaultdict(list)
+    for ts, val in zip(timestamps, values):
+        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+            buckets[ts.hour].append(val)
+
+    result: Dict[int, tuple] = {}
+    for hour, vals in buckets.items():
+        if len(vals) >= 5:
+            arr = np.array(vals)
+            result[hour] = (float(np.mean(arr)), max(float(np.std(arr)), 1e-6))
+    return result
 
 
 def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
@@ -192,6 +222,10 @@ class ComprehensiveInferencePipeline:
         self._spike_mad_detector = SpikeMADDetector()
         self._oob_detector = OutOfBoundsDetector()
         self._diurnal_detector = DiurnalProfileDetector()
+        self._bias_dual_detector = BiasDualSensorDetector()
+        self._corr_breakdown_detector = CorrelationBreakdownDetector()
+        # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
+        self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
         # Component caching
         self._default_baseline: Optional[np.ndarray] = None
         self._cached_baseline: Optional[np.ndarray] = None
@@ -257,6 +291,8 @@ class ComprehensiveInferencePipeline:
         db: AsyncSession,
         greenhouse_id: str = "default",
         baseline_sequences: Optional[List[List[List[float]]]] = None,
+        sensor_pairs: Optional[List[Dict[str, Any]]] = None,
+        sequence_timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute the full pipeline for one sequence."""
         seq_array = np.asarray(sequence, dtype=np.float32)
@@ -278,6 +314,8 @@ class ComprehensiveInferencePipeline:
             baseline=baseline,
             attributor=attributor,
             pattern_detector=pattern_detector,
+            sensor_pairs=sensor_pairs,
+            sequence_timestamp=sequence_timestamp,
         )
 
     async def run_batch(
@@ -326,9 +364,17 @@ class ComprehensiveInferencePipeline:
         baseline: np.ndarray,
         attributor: AnomalyAttributor,
         pattern_detector: PatternDetector,
+        sensor_pairs: Optional[List[Dict[str, Any]]] = None,
+        sequence_timestamp: Optional[str] = None,
     ) -> "PipelineResult":
         """Core pipeline logic shared by ``run()`` and ``run_batch()``."""
         now = datetime.now(timezone.utc)
+        seq_ts = now
+        if sequence_timestamp:
+            try:
+                seq_ts = datetime.fromisoformat(sequence_timestamp)
+            except (ValueError, TypeError):
+                pass
 
         # 0. Polling dropout check — short-circuit before expensive forward pass.
         # Convert List[List[float]] to List[Dict[str, Any]] for DropoutDetector.
@@ -405,6 +451,49 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 bias_ema_alarmed,
             )
+
+        # 0e. Dual-sensor checks — bias cross-difference + correlation breakdown.
+        if sensor_pairs:
+            for pair in sensor_pairs:
+                a = np.asarray(pair["sensor_a"], dtype=float)
+                b = np.asarray(pair["sensor_b"], dtype=float)
+                if len(a) != len(b) or len(a) < 2:
+                    continue
+                var_name = pair.get("variable", "unknown")
+
+                bias_flags = self._bias_dual_detector.detect(a, b)
+                if any(bias_flags):
+                    logger.warning(
+                        "Dual-sensor bias on %s for tenant %s",
+                        var_name, customer_id,
+                    )
+                    return self._build_bias_dual_result(var_name)
+
+                corr_flags = self._corr_breakdown_detector.detect(a, b)
+                if any(corr_flags):
+                    logger.warning(
+                        "Correlation breakdown on %s for tenant %s",
+                        var_name, customer_id,
+                    )
+                    return self._build_correlation_breakdown_result(var_name)
+
+        # 0f. Diurnal profile check — hourly Z-score against historical stats.
+        _diurnal_profiles = self._load_diurnal_profiles(customer_id)
+        if _diurnal_profiles:
+            hour = seq_ts.hour
+            diurnal_alarmed: list[str] = []
+            for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+                profile = _diurnal_profiles.get(s_name)
+                if profile and self._diurnal_detector.detect(
+                    float(_denormed_for_noise[-1, s_idx]), hour, profile,
+                ):
+                    diurnal_alarmed.append(s_name)
+            if diurnal_alarmed:
+                logger.warning(
+                    "Diurnal profile deviation for tenant %s — sensors: %s",
+                    customer_id, diurnal_alarmed,
+                )
+                return self._build_diurnal_result(diurnal_alarmed, hour)
 
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
@@ -795,6 +884,137 @@ class ComprehensiveInferencePipeline:
             pipeline_version=PIPELINE_VERSION,
         )
 
+    @staticmethod
+    def _build_bias_dual_result(variable: str) -> "PipelineResult":
+        """Result for a confirmed dual-sensor bias offset."""
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.95,
+            confidence_level="high",
+            pattern_type="drift",
+            fault_type="bias_offset",
+            attribution={},
+            affected_sensors=[variable],
+            pattern_scores={},
+            root_cause="redundant_sensor_bias_offset",
+            root_cause_confidence=0.95,
+            reasoning=f"Dual-sensor cross-difference exceeded threshold on {variable}",
+            alternative_causes=["calibration_drift", "sensor_degradation"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["compare_sensor_readings", "recalibrate_sensors"],
+            follow_up_actions=["replace_degraded_sensor"],
+            all_recommendations=[
+                "compare_sensor_readings", "recalibrate_sensors",
+                "replace_degraded_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=45,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_correlation_breakdown_result(variable: str) -> "PipelineResult":
+        """Result for a confirmed spatial correlation breakdown."""
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.90,
+            confidence_level="high",
+            pattern_type="dependency",
+            fault_type="correlation_breakdown",
+            attribution={},
+            affected_sensors=[variable],
+            pattern_scores={},
+            root_cause="spatial_correlation_breakdown",
+            root_cause_confidence=0.90,
+            reasoning=f"Correlation between redundant sensors dropped below threshold on {variable}",
+            alternative_causes=["sensor_failure", "environmental_anomaly"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["inspect_sensor_hardware", "verify_sensor_placement"],
+            follow_up_actions=["replace_failed_sensor", "review_installation"],
+            all_recommendations=[
+                "inspect_sensor_hardware", "verify_sensor_placement",
+                "replace_failed_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=60,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_diurnal_result(alarmed_sensors: List[str], hour: int) -> "PipelineResult":
+        """Result for a confirmed diurnal profile deviation."""
+        reason = (
+            f"Diurnal profile deviation at hour {hour} on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=0.9,
+            confidence=0.85,
+            confidence_level="high",
+            pattern_type="cyclic",
+            fault_type="diurnal_deviation",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="diurnal_profile_violation",
+            root_cause_confidence=0.85,
+            reasoning=reason,
+            alternative_causes=["environmental_change", "control_system_fault"],
+            severity="medium",
+            urgency="scheduled",
+            immediate_actions=["verify_current_conditions", "check_control_setpoints"],
+            follow_up_actions=["review_climate_history", "inspect_control_loop"],
+            all_recommendations=[
+                "verify_current_conditions", "check_control_setpoints",
+                "review_climate_history",
+            ],
+            requires_technician=False,
+            estimated_resolution_minutes=30,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    def _load_diurnal_profiles(
+        self, customer_id: str,
+    ) -> Optional[Dict[str, Dict[int, tuple]]]:
+        """Load cached diurnal profiles for a customer.
+
+        Profiles are stored in LearningState.state_json under the key
+        ``diurnal_profiles``.  Format::
+
+            {"temperature": {0: [mean, std], 1: [mean, std], ...}, ...}
+
+        Returns None if no profiles are available.
+        """
+        # Profiles are populated by compute_and_store_diurnal_profiles()
+        # and cached in the diurnal_profiles_cache.
+        return self._diurnal_profiles_cache.get(customer_id)
+
     # ── Private helpers extracted from _run_with_components ───────────────────
 
     def _run_lstm_vae(
@@ -955,6 +1175,12 @@ class ComprehensiveInferencePipeline:
                         self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
                             ema_data
                         )
+                    diurnal_data = state.get("diurnal_profiles")
+                    if diurnal_data is not None and customer_id not in self._diurnal_profiles_cache:
+                        self._diurnal_profiles_cache[customer_id] = {
+                            sensor: {int(h): tuple(v) for h, v in hours.items()}
+                            for sensor, hours in diurnal_data.items()
+                        }
                     self._tracker_cache[customer_id] = (ewma, pot)
                     return ewma, pot
         except Exception:
