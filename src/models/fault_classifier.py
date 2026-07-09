@@ -22,6 +22,10 @@ class FaultType(str, Enum):
     ACCURACY_DECLINE = "accuracy_decline"
     SPIKE_FAULT = "spike_fault"
     POLLING_DROPOUT = "polling_dropout"
+    OUT_OF_BOUNDS = "out_of_bounds"
+    CORRELATION_BREAKDOWN = "correlation_breakdown"
+    DIURNAL_DEVIATION = "diurnal_deviation"
+    THERMODYNAMIC_CONTRADICTION = "thermodynamic_contradiction"
     UNKNOWN = "unknown"
 
 
@@ -57,6 +61,18 @@ class FaultClassifier:
             return FaultType.BIAS_OFFSET.value
 
         lowered = pattern_type.lower()
+
+        if "out_of_bounds" in lowered:
+            return FaultType.OUT_OF_BOUNDS.value
+
+        if "correlation_breakdown" in lowered:
+            return FaultType.CORRELATION_BREAKDOWN.value
+
+        if "diurnal" in lowered:
+            return FaultType.DIURNAL_DEVIATION.value
+
+        if "thermodynamic" in lowered:
+            return FaultType.THERMODYNAMIC_CONTRADICTION.value
 
         if "stuck" in lowered or "saturation" in lowered:
             return FaultType.STUCK_FAULT.value

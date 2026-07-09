@@ -37,12 +37,18 @@ from src.config import (
 from src.db.incident_memory import IncidentMemory
 from src.db.models import LearningState
 from src.models.anomaly_attributor import AnomalyAttributor
+from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
+from src.models.bias_dual_sensor_detector import BiasDualSensorDetector
 from src.models.confidence_scorer import ConfidenceScorer
+from src.models.correlation_breakdown_detector import CorrelationBreakdownDetector
 from src.models.data_utils import SENSOR_RANGES
-from src.models.cusum_drift_detector import CUSUMDriftDetector
+from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
+from src.models.diurnal_profile_detector import DiurnalProfileDetector
 from src.models.dropout_detector import DropoutDetector
 from src.models.ensemble_detector import EnsembleAnomalyDetector, LstmVaeDetector
 from src.models.noise_detector import NoiseDetector
+from src.models.out_of_bounds_detector import OutOfBoundsDetector
+from src.models.spike_mad_detector import SpikeMADDetector
 from src.models.ewma_tracker import EWMATracker
 from src.models.fault_classifier import FaultClassifier
 from src.models.inference import AnomalyDetector
@@ -75,6 +81,34 @@ _DENORM_RANGES = np.array(
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
+
+
+def compute_hourly_stats(
+    timestamps: List[datetime],
+    values: List[float],
+) -> Dict[int, tuple]:
+    """Build per-hour (mean, std) from timestamped sensor readings.
+
+    Args:
+        timestamps: List of datetime objects.
+        values: Corresponding sensor values in physical units.
+
+    Returns:
+        Dict mapping hour (0-23) to ``(mean, std)`` tuple.
+        Hours with fewer than 5 samples are omitted.
+    """
+    from collections import defaultdict
+    buckets: Dict[int, List[float]] = defaultdict(list)
+    for ts, val in zip(timestamps, values):
+        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+            buckets[ts.hour].append(val)
+
+    result: Dict[int, tuple] = {}
+    for hour, vals in buckets.items():
+        if len(vals) >= 5:
+            arr = np.array(vals)
+            result[hour] = (float(np.mean(arr)), max(float(np.std(arr)), 1e-6))
+    return result
 
 
 def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
@@ -182,6 +216,16 @@ class ComprehensiveInferencePipeline:
         self._noise_detector = NoiseDetector()
         # Per-tenant CUSUM drift detectors (stateful, persisted in LearningState).
         self._cusum_cache: dict[str, CUSUMDriftDetector] = {}
+        # Per-tenant EMA baseline estimators for CUSUM standardized residuals.
+        self._ema_cache: dict[str, EMABaselineEstimator] = {}
+        # Phase B SCADA detectors (stateless, shared).
+        self._spike_mad_detector = SpikeMADDetector()
+        self._oob_detector = OutOfBoundsDetector()
+        self._diurnal_detector = DiurnalProfileDetector()
+        self._bias_dual_detector = BiasDualSensorDetector()
+        self._corr_breakdown_detector = CorrelationBreakdownDetector()
+        # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
+        self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
         # Component caching
         self._default_baseline: Optional[np.ndarray] = None
         self._cached_baseline: Optional[np.ndarray] = None
@@ -247,6 +291,8 @@ class ComprehensiveInferencePipeline:
         db: AsyncSession,
         greenhouse_id: str = "default",
         baseline_sequences: Optional[List[List[List[float]]]] = None,
+        sensor_pairs: Optional[List[Dict[str, Any]]] = None,
+        sequence_timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute the full pipeline for one sequence."""
         seq_array = np.asarray(sequence, dtype=np.float32)
@@ -268,6 +314,8 @@ class ComprehensiveInferencePipeline:
             baseline=baseline,
             attributor=attributor,
             pattern_detector=pattern_detector,
+            sensor_pairs=sensor_pairs,
+            sequence_timestamp=sequence_timestamp,
         )
 
     async def run_batch(
@@ -316,9 +364,17 @@ class ComprehensiveInferencePipeline:
         baseline: np.ndarray,
         attributor: AnomalyAttributor,
         pattern_detector: PatternDetector,
+        sensor_pairs: Optional[List[Dict[str, Any]]] = None,
+        sequence_timestamp: Optional[str] = None,
     ) -> "PipelineResult":
         """Core pipeline logic shared by ``run()`` and ``run_batch()``."""
         now = datetime.now(timezone.utc)
+        seq_ts = now
+        if sequence_timestamp:
+            try:
+                seq_ts = datetime.fromisoformat(sequence_timestamp)
+            except (ValueError, TypeError):
+                pass
 
         # 0. Polling dropout check — short-circuit before expensive forward pass.
         # Convert List[List[float]] to List[Dict[str, Any]] for DropoutDetector.
@@ -357,34 +413,109 @@ class ComprehensiveInferencePipeline:
             )
             return self._build_noise_result(noise_alarmed)
 
+        # 0b. Out-of-bounds check — short-circuit on hard physical limits.
+        oob_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(self._oob_detector.detect_series(_denormed_for_noise[:, s_idx], s_name)):
+                oob_alarmed.append(s_name)
+        if oob_alarmed:
+            logger.warning(
+                "Out-of-bounds readings for tenant %s — sensors: %s",
+                customer_id,
+                oob_alarmed,
+            )
+            return self._build_oob_result(oob_alarmed)
+
+        # 0c. Spike (MAD) check — short-circuit on transient outliers.
+        spike_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(self._spike_mad_detector.detect(_denormed_for_noise[:, s_idx])):
+                spike_alarmed.append(s_name)
+        if spike_alarmed:
+            logger.warning(
+                "MAD spike detected for tenant %s — sensors: %s",
+                customer_id,
+                spike_alarmed,
+            )
+            return self._build_spike_result(spike_alarmed)
+
+        # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
+        bias_ema_alarmed: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if any(BiasEMADetector.detect_ema(_denormed_for_noise[:, s_idx])):
+                bias_ema_alarmed.append(s_name)
+        bias_ema_flag = len(bias_ema_alarmed) > 0
+        if bias_ema_flag:
+            logger.info(
+                "Bias (EMA) detected for tenant %s — sensors: %s",
+                customer_id,
+                bias_ema_alarmed,
+            )
+
+        # 0e. Dual-sensor checks — bias cross-difference + correlation breakdown.
+        if sensor_pairs:
+            for pair in sensor_pairs:
+                a = np.asarray(pair["sensor_a"], dtype=float)
+                b = np.asarray(pair["sensor_b"], dtype=float)
+                if len(a) != len(b) or len(a) < 2:
+                    continue
+                var_name = pair.get("variable", "unknown")
+
+                bias_flags = self._bias_dual_detector.detect(a, b)
+                if any(bias_flags):
+                    logger.warning(
+                        "Dual-sensor bias on %s for tenant %s",
+                        var_name, customer_id,
+                    )
+                    return self._build_bias_dual_result(var_name)
+
+                corr_flags = self._corr_breakdown_detector.detect(a, b)
+                if any(corr_flags):
+                    logger.warning(
+                        "Correlation breakdown on %s for tenant %s",
+                        var_name, customer_id,
+                    )
+                    return self._build_correlation_breakdown_result(var_name)
+
+        # 0f. Diurnal profile check — hourly Z-score against historical stats.
+        _diurnal_profiles = self._load_diurnal_profiles(customer_id)
+        if _diurnal_profiles:
+            hour = seq_ts.hour
+            diurnal_alarmed: list[str] = []
+            for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+                profile = _diurnal_profiles.get(s_name)
+                if profile and self._diurnal_detector.detect(
+                    float(_denormed_for_noise[-1, s_idx]), hour, profile,
+                ):
+                    diurnal_alarmed.append(s_name)
+            if diurnal_alarmed:
+                logger.warning(
+                    "Diurnal profile deviation for tenant %s — sensors: %s",
+                    customer_id, diurnal_alarmed,
+                )
+                return self._build_diurnal_result(diurnal_alarmed, hour)
+
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
 
-        # 1a. CUSUM drift update — per-sensor standardised residuals.
-        # Baseline statistics are derived from the provided (or synthetic)
-        # baseline sequences so every tenant uses its own reference distribution.
+        # 1a. CUSUM drift update — EMA-derived standardised residuals.
+        # The EMABaselineEstimator tracks per-sensor running mean/variance and
+        # produces standardised residuals that feed into the two-sided CUSUM.
+        # Production-sensitive defaults: K=0.25, H=4.0 (detects 0.5σ shifts,
+        # ARL₀ ≈ 340 samples).
         cusum_drift_alarm = False
         cusum_alarmed_sensors: list[str] = []
-        _baseline_mean = baseline.mean(axis=(0, 1))            # shape (INPUT_DIM,)
-        _baseline_std = baseline.std(axis=(0, 1)).clip(        # shape (INPUT_DIM,)
-            min=NUMERICAL_EPSILON
-        )
         _cusum = self._cusum_cache.setdefault(
             customer_id, CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
         )
+        _ema = self._ema_cache.setdefault(
+            customer_id, EMABaselineEstimator()
+        )
         _seq_last = seq_array[-1]  # most-recent timestep for residual computation
-        # Minimum meaningful baseline std in normalised [0,1] units.
-        # When baseline is near-constant (e.g. synthetic midpoint baseline),
-        # standardised residuals blow up and CUSUM alarms spuriously.
-        _CUSUM_MIN_BASELINE_STD: float = 1e-3
         for _idx, _sensor in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            _std = float(_baseline_std[_idx])
-            if _std >= _CUSUM_MIN_BASELINE_STD:
-                _residual = (
-                    float(_seq_last[_idx]) - float(_baseline_mean[_idx])
-                ) / _std
-                if _cusum.update(_sensor, _residual):
-                    cusum_drift_alarm = True
+            _residual, _ = _ema.update(_sensor, float(_seq_last[_idx]))
+            if _cusum.update(_sensor, _residual):
+                cusum_drift_alarm = True
         if cusum_drift_alarm:
             cusum_alarmed_sensors = _cusum.alarmed_sensors()
             logger.info(
@@ -437,11 +568,14 @@ class ComprehensiveInferencePipeline:
             physics_result=physics_result,
         )
 
-        # 5a. CUSUM override: a confirmed drift alarm promotes fault_type to
-        # calibration_drift when the sequence is already flagged as anomalous.
-        # Physics-confirmed fault types take precedence over CUSUM.
-        if cusum_drift_alarm and is_anomaly and not physics_result.confirmed:
+        # 5a. CUSUM drift: promotes is_anomaly and overrides fault_type.
+        if cusum_drift_alarm and not physics_result.confirmed:
+            is_anomaly = True
             fault_type = "calibration_drift"
+
+        # 5b. Bias EMA: overrides fault_type when EMA-based bias was detected.
+        if bias_ema_flag and is_anomaly and not physics_result.confirmed:
+            fault_type = "bias_offset"
 
         # 6. Persist updated tracker scores.
         try:
@@ -668,6 +802,219 @@ class ComprehensiveInferencePipeline:
             pipeline_version=PIPELINE_VERSION,
         )
 
+    @staticmethod
+    def _build_oob_result(alarmed_sensors: List[str]) -> "PipelineResult":
+        """Result for an out-of-bounds hard-limit violation."""
+        reason = (
+            "Out-of-bounds sensor readings on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=1.0,
+            confidence_level="very_high",
+            pattern_type="spike",
+            fault_type="spike_fault",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="sensor_out_of_bounds",
+            root_cause_confidence=1.0,
+            reasoning=reason,
+            alternative_causes=["sensor_hardware_failure", "wiring_fault"],
+            severity="critical",
+            urgency="immediate",
+            immediate_actions=["isolate_sensor", "check_wiring", "inspect_sensor_hardware"],
+            follow_up_actions=["replace_sensor", "recalibrate"],
+            all_recommendations=[
+                "isolate_sensor", "check_wiring",
+                "inspect_sensor_hardware", "replace_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=30,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_spike_result(alarmed_sensors: List[str]) -> "PipelineResult":
+        """Result for a confirmed MAD spike anomaly."""
+        reason = (
+            "Transient spike (MAD) detected on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.95,
+            confidence_level="high",
+            pattern_type="spike",
+            fault_type="spike_fault",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="transient_spike",
+            root_cause_confidence=0.9,
+            reasoning=reason,
+            alternative_causes=["electromagnetic_interference", "loose_connection"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["verify_reading", "check_sensor_connections"],
+            follow_up_actions=["inspect_sensor_environment", "review_historical_data"],
+            all_recommendations=[
+                "verify_reading", "check_sensor_connections",
+                "inspect_sensor_environment",
+            ],
+            requires_technician=False,
+            estimated_resolution_minutes=15,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_bias_dual_result(variable: str) -> "PipelineResult":
+        """Result for a confirmed dual-sensor bias offset."""
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.95,
+            confidence_level="high",
+            pattern_type="drift",
+            fault_type="bias_offset",
+            attribution={},
+            affected_sensors=[variable],
+            pattern_scores={},
+            root_cause="redundant_sensor_bias_offset",
+            root_cause_confidence=0.95,
+            reasoning=f"Dual-sensor cross-difference exceeded threshold on {variable}",
+            alternative_causes=["calibration_drift", "sensor_degradation"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["compare_sensor_readings", "recalibrate_sensors"],
+            follow_up_actions=["replace_degraded_sensor"],
+            all_recommendations=[
+                "compare_sensor_readings", "recalibrate_sensors",
+                "replace_degraded_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=45,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_correlation_breakdown_result(variable: str) -> "PipelineResult":
+        """Result for a confirmed spatial correlation breakdown."""
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=1.0,
+            confidence=0.90,
+            confidence_level="high",
+            pattern_type="dependency",
+            fault_type="correlation_breakdown",
+            attribution={},
+            affected_sensors=[variable],
+            pattern_scores={},
+            root_cause="spatial_correlation_breakdown",
+            root_cause_confidence=0.90,
+            reasoning=f"Correlation between redundant sensors dropped below threshold on {variable}",
+            alternative_causes=["sensor_failure", "environmental_anomaly"],
+            severity="high",
+            urgency="urgent",
+            immediate_actions=["inspect_sensor_hardware", "verify_sensor_placement"],
+            follow_up_actions=["replace_failed_sensor", "review_installation"],
+            all_recommendations=[
+                "inspect_sensor_hardware", "verify_sensor_placement",
+                "replace_failed_sensor",
+            ],
+            requires_technician=True,
+            estimated_resolution_minutes=60,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    @staticmethod
+    def _build_diurnal_result(alarmed_sensors: List[str], hour: int) -> "PipelineResult":
+        """Result for a confirmed diurnal profile deviation."""
+        reason = (
+            f"Diurnal profile deviation at hour {hour} on: "
+            + ", ".join(alarmed_sensors)
+        )
+        return PipelineResult(
+            is_anomaly=True,
+            anomaly_score=0.9,
+            confidence=0.85,
+            confidence_level="high",
+            pattern_type="cyclic",
+            fault_type="diurnal_deviation",
+            attribution={},
+            affected_sensors=alarmed_sensors,
+            pattern_scores={},
+            root_cause="diurnal_profile_violation",
+            root_cause_confidence=0.85,
+            reasoning=reason,
+            alternative_causes=["environmental_change", "control_system_fault"],
+            severity="medium",
+            urgency="scheduled",
+            immediate_actions=["verify_current_conditions", "check_control_setpoints"],
+            follow_up_actions=["review_climate_history", "inspect_control_loop"],
+            all_recommendations=[
+                "verify_current_conditions", "check_control_setpoints",
+                "review_climate_history",
+            ],
+            requires_technician=False,
+            estimated_resolution_minutes=30,
+            incident_id=None,
+            detector_scores={},
+            ensemble_score=0.0,
+            ensemble_agreement=0,
+            physics_validation=None,
+            learning_progress=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            pipeline_version=PIPELINE_VERSION,
+        )
+
+    def _load_diurnal_profiles(
+        self, customer_id: str,
+    ) -> Optional[Dict[str, Dict[int, tuple]]]:
+        """Load cached diurnal profiles for a customer.
+
+        Profiles are stored in LearningState.state_json under the key
+        ``diurnal_profiles``.  Format::
+
+            {"temperature": {0: [mean, std], 1: [mean, std], ...}, ...}
+
+        Returns None if no profiles are available.
+        """
+        # Profiles are populated by compute_and_store_diurnal_profiles()
+        # and cached in the diurnal_profiles_cache.
+        return self._diurnal_profiles_cache.get(customer_id)
+
     # ── Private helpers extracted from _run_with_components ───────────────────
 
     def _run_lstm_vae(
@@ -817,12 +1164,23 @@ class ComprehensiveInferencePipeline:
                 if tracker_data is not None:
                     ewma = EWMATracker.from_dict(tracker_data["ewma"])
                     pot = POTThresholdFitter.from_dict(tracker_data["pot"])
-                    # Restore CUSUM state if persisted and not already in memory.
+                    # Restore CUSUM + EMA state if persisted and not already in memory.
                     cusum_data = state.get("cusum_state")
                     if cusum_data is not None and customer_id not in self._cusum_cache:
                         self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
                             cusum_data
                         )
+                    ema_data = state.get("ema_baseline_state")
+                    if ema_data is not None and customer_id not in self._ema_cache:
+                        self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
+                            ema_data
+                        )
+                    diurnal_data = state.get("diurnal_profiles")
+                    if diurnal_data is not None and customer_id not in self._diurnal_profiles_cache:
+                        self._diurnal_profiles_cache[customer_id] = {
+                            sensor: {int(h): tuple(v) for h, v in hours.items()}
+                            for sensor, hours in diurnal_data.items()
+                        }
                     self._tracker_cache[customer_id] = (ewma, pot)
                     return ewma, pot
         except Exception:
@@ -845,6 +1203,7 @@ class ComprehensiveInferencePipeline:
 
         tracker_payload = {"ewma": ewma.to_dict(), "pot": pot.to_dict()}
         _cusum = self._cusum_cache.get(customer_id)
+        _ema_bl = self._ema_cache.get(customer_id)
         try:
             async with db.begin_nested():
                 result = await db.execute(
@@ -857,6 +1216,8 @@ class ComprehensiveInferencePipeline:
                     }
                     if _cusum is not None:
                         initial_state["cusum_state"] = _cusum.to_dict()
+                    if _ema_bl is not None:
+                        initial_state["ema_baseline_state"] = _ema_bl.to_dict()
                     db.add(LearningState(
                         customer_id=customer_id,
                         state_json=initial_state,
@@ -866,6 +1227,8 @@ class ComprehensiveInferencePipeline:
                     current["ewma_pot_trackers"] = tracker_payload
                     if _cusum is not None:
                         current["cusum_state"] = _cusum.to_dict()
+                    if _ema_bl is not None:
+                        current["ema_baseline_state"] = _ema_bl.to_dict()
                     row.state_json = current
             # savepoint auto-commits on clean __aexit__
         except Exception:

@@ -10,6 +10,10 @@ class AnomalyType(Enum):
     SPIKE = "spike"
     DRIFT = "drift"
     DROPOUT = "dropout"
+    STUCK = "stuck"
+    NOISE = "noise"
+    BIAS = "bias"
+    OUT_OF_BOUNDS = "out_of_bounds"
 
 @dataclass
 class AnomalyConfig:
@@ -115,8 +119,23 @@ class GreenhouseDataset(Dataset):
                 self.data[sample_idx, start:end, chan] += torch.from_numpy(drift_vals).float()
 
             elif anomaly.type == AnomalyType.DROPOUT:
-                # Replace with zero (sensor failure)
                 self.data[sample_idx, start:end, chan] = 0.0
+
+            elif anomaly.type == AnomalyType.STUCK:
+                stuck_val = float(self.data[sample_idx, start, chan])
+                self.data[sample_idx, start:end, chan] = stuck_val
+
+            elif anomaly.type == AnomalyType.NOISE:
+                noise = torch.from_numpy(
+                    self.rng.normal(0, anomaly.magnitude * 5, end - start)
+                ).float()
+                self.data[sample_idx, start:end, chan] += noise
+
+            elif anomaly.type == AnomalyType.BIAS:
+                self.data[sample_idx, start:end, chan] += anomaly.magnitude * 3
+
+            elif anomaly.type == AnomalyType.OUT_OF_BOUNDS:
+                self.data[sample_idx, start:end, chan] = anomaly.magnitude * 200
 
     def __len__(self) -> int:
         return self.num_samples

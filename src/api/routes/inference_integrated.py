@@ -113,12 +113,20 @@ async def comprehensive_inference(
     try:
         checkpoint = await _resolve_checkpoint(request.customer_id, db)
         pipeline = _get_pipeline(checkpoint)
+        sensor_pairs_raw = None
+        if request.sensor_pairs:
+            sensor_pairs_raw = [
+                {"variable": sp.variable, "sensor_a": sp.sensor_a, "sensor_b": sp.sensor_b}
+                for sp in request.sensor_pairs
+            ]
         result = await pipeline.run(
             customer_id=request.customer_id,
             sequence=request.sequence,
             db=db,
             greenhouse_id=request.greenhouse_id,
             baseline_sequences=request.baseline_sequences,
+            sensor_pairs=sensor_pairs_raw,
+            sequence_timestamp=request.sequence_timestamp,
         )
         return _to_response(result)
     except ValueError as exc:
