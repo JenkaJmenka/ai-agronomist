@@ -1,19 +1,39 @@
+"""System Metrics — data health for the selected greenhouse + pipeline activity.
+
+Check whether the platform is detecting anomalies reliably and whether the
+sensor data for this greenhouse is healthy in the selected period. Sensor data
+health is tenant/greenhouse-scoped; pipeline counts are process-wide (all
+tenants) and reset on server restart — both labelled honestly below.
+
+Data pattern matches Monitoring: full DB bounds → pick range → Apply → window fetch.
+"""
+
+import pandas as pd
 import streamlit as st
-from src.dashboard.components.charts import apply_datetime_filter, query_sensor_readings
+
 from src.dashboard.components.data_availability import render_no_sensor_data_hint
-from src.dashboard.components.data_table import render as render_data_table
 from src.dashboard.components.global_sidebar import render_global_sidebar
+from src.dashboard.components.inference_results import load_inference_results
 from src.dashboard.components.timeline import (
     get_timeline_bounds,
     init_monitoring_session_state,
     render_date_range_filters,
 )
+from src.dashboard.constants import OPERATOR_FEEDBACK_PAGE
+from src.dashboard.services.anomalies_page_data import resolve_data_bounds
 from src.dashboard.services.api_client import DashboardApiClient
-import pandas as pd
+from src.dashboard.services.window_data import (
+    load_page_window,
+    lookback_hours_for_window,
+)
 
 st.set_page_config(page_title="System Metrics", layout="wide")
 render_global_sidebar()
-st.title("System Metrics & Model Performance")
+st.title("System Metrics")
+st.caption(
+    "Check whether the platform is detecting anomalies reliably and whether "
+    "sensor data for this greenhouse is healthy in the selected period."
+)
 
 if "selected_tenant" not in st.session_state:
     st.warning("Please configure global settings in the sidebar.")
@@ -21,113 +41,140 @@ if "selected_tenant" not in st.session_state:
 
 tenant = st.session_state["selected_tenant"]
 greenhouse = st.session_state["selected_greenhouse"]
-api_key = st.session_state.get("api_key")
-client = DashboardApiClient(api_key=api_key)
+client = DashboardApiClient(api_key=st.session_state.get("api_key"))
 
-st.markdown("### Pipeline Metrics")
-hours = st.slider("Lookback (hours)", min_value=1, max_value=8760, value=24, step=24)
-with st.spinner("Loading pipeline metrics…"):
-    try:
-        pipeline_metrics = client.get_monitoring_metrics(hours=hours)
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Total detections", pipeline_metrics.get("total_detections", 0))
-        p2.metric(
-            "False positive rate",
-            f"{pipeline_metrics.get('false_positive_rate', 0.0):.1%}",
-        )
-        p3.metric("Avg confidence", f"{pipeline_metrics.get('avg_confidence', 0.0):.2f}")
-        p4.metric(
-            "Operator labels",
-            pipeline_metrics.get("true_positives", 0)
-            + pipeline_metrics.get("false_positives", 0),
-        )
+_saved_inf = load_inference_results(tenant, greenhouse)
+inf_results = _saved_inf["results"] if _saved_inf else None
 
-        col_tp, col_fp = st.columns(2)
-        col_tp.metric("True positives", pipeline_metrics.get("true_positives", 0))
-        col_fp.metric("False positives", pipeline_metrics.get("false_positives", 0))
+# Full DB bounds (unioned with upload bounds when upload-only) so the picker
+# spans all data — the same fix as the Thresholds page.
+try:
+    bounds = resolve_data_bounds(tenant, greenhouse, inf_results)
+except Exception as exc:
+    st.error(f"Could not load sensor data — is the API server running? Details: {exc}")
+    st.stop()
 
-        patterns = pipeline_metrics.get("pattern_distribution") or {}
-        if patterns:
-            pattern_df = pd.DataFrame(
-                [{"pattern": k, "count": v} for k, v in patterns.items()]
-            )
-            render_data_table(
-                pattern_df,
-                title="Pattern distribution",
-                table_key="metrics_pattern_distribution",
-                max_height=240,
-                export_file_name=f"pattern_distribution_{tenant}_{greenhouse}.csv",
-            )
+if bounds is None:
+    render_no_sensor_data_hint(tenant, greenhouse)
+    st.stop()
 
-        conf_dist = pipeline_metrics.get("confidence_distribution") or {}
-        if conf_dist:
-            confidence_df = pd.DataFrame(
-                [{"bucket": k, "count": v} for k, v in conf_dist.items()]
-            )
-            render_data_table(
-                confidence_df,
-                title="Confidence distribution",
-                table_key="metrics_confidence_distribution",
-                max_height=240,
-                export_file_name=f"confidence_distribution_{tenant}_{greenhouse}.csv",
-            )
-    except Exception as exc:
-        st.warning(
-            "Could not load pipeline metrics from the API. "
-            "Start the FastAPI server and ensure it is reachable."
-        )
-        st.caption(f"Details: {exc}")
-        st.caption("See docs/deployment/ops-runbook.md for startup steps.")
+data_min, data_max = bounds
+init_monitoring_session_state(tenant, greenhouse, data_min, data_max)
 
-st.markdown("---")
-st.markdown("### Sensor Coverage")
+# Section B — date filter (shared component; one control for the whole page)
+render_date_range_filters(data_min, data_max, key_prefix="metrics")
+window_start, window_end = get_timeline_bounds()
 
-with st.spinner("Compiling sensor coverage..."):
-    try:
-        df = query_sensor_readings(tenant, greenhouse)
-    except Exception as exc:
-        st.warning(f"Could not load sensor data for coverage metrics: {exc}")
-        df = pd.DataFrame()
+# Section A — context bar
+st.markdown(
+    f"**{tenant}** / Greenhouse **{greenhouse}** · Active window: "
+    f"**{window_start.strftime('%d %b %H:%M')} → {window_end.strftime('%d %b %H:%M')}**"
+)
+
+# ── Section C — Data health (selected tenant/greenhouse, selected window) ──────
+st.markdown("### Data health")
+try:
+    df, _using_fallback = load_page_window(
+        tenant, greenhouse, window_start, window_end, inf_results=inf_results
+    )
+except Exception as exc:
+    st.warning(f"Could not load sensor data for data health: {exc}")
+    df = pd.DataFrame()
 
 if df.empty:
-    render_no_sensor_data_hint(tenant, greenhouse)
-else:
-    _ts = pd.to_datetime(df["timestamp"])
-    init_monitoring_session_state(tenant, greenhouse, _ts.min(), _ts.max())
-    render_date_range_filters(_ts.min(), _ts.max(), key_prefix="metrics")
-    window_start, window_end = get_timeline_bounds()
-    df = apply_datetime_filter(df, window_start, window_end)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Data Points", f"{len(df):,}")
-    if not df.empty:
-        date_range_str = (
-            f"{df['timestamp'].min().strftime('%Y-%m-%d')} to "
-            f"{df['timestamp'].max().strftime('%Y-%m-%d')}"
-        )
-    else:
-        date_range_str = "—"
-    col2.metric("Date Range Covered", date_range_str)
-    col3.metric("Greenhouses Monitored", "1 (Selected)")
-    col4.metric("Sequences Processed", f"{len(df) // 20:,}")
-
-st.markdown("---")
-st.markdown("### Model Information")
-model_col1, model_col2 = st.columns(2)
-with model_col1:
-    st.info("**Model Architecture:** LSTM-VAE + ensemble detectors")
-    st.info("**Input Shape:** 4 sensors × 20 timesteps")
-with model_col2:
-    st.info("**Metrics source:** GET /api/monitoring/metrics")
-    st.info("**Config:** docs/deployment/monitoring-dashboard-config.yaml")
-
-st.markdown("---")
-st.markdown("### Export Data")
-if not df.empty:
-    csv = df.to_csv(index=False)
-    st.download_button(
-        label="Download CSV Extract",
-        data=csv,
-        file_name=f"export_{tenant}_{greenhouse}.csv",
-        mime="text/csv",
+    st.warning(
+        "No data in the selected window. "
+        f"Available: {data_min.strftime('%d %b %Y')} → {data_max.strftime('%d %b %Y')}."
     )
+else:
+    total = len(df)
+    scored = (
+        int(pd.to_numeric(df["anomaly_score"], errors="coerce").notna().sum())
+        if "anomaly_score" in df.columns
+        else 0
+    )
+    coverage = scored / total if total else 0.0
+    span_hours = (
+        pd.to_datetime(df["timestamp"]).max() - pd.to_datetime(df["timestamp"]).min()
+    ).total_seconds() / 3600
+
+    h1, h2, h3, h4, h5 = st.columns(5)
+    h1.metric("Total readings", f"{total:,}")
+    h2.metric("With anomaly score", f"{scored:,}")
+    h3.metric("Score coverage", f"{coverage:.0%}")
+    h4.metric("LSTM windows (20 readings each)", f"{total // 20:,}")
+    h5.metric("Window span", f"{span_hours:.1f} h")
+
+    if scored == 0:
+        st.info(
+            "Readings exist but none are scored. Run inference via the Anomaly "
+            "Detection upload, or wait for pipeline scoring."
+        )
+
+# ── Section D — Pipeline activity (process-wide) ──────────────────────────────
+st.markdown("---")
+st.markdown("### Pipeline activity")
+st.info(
+    "Pipeline counts reflect all detections on this API server (all tenants). "
+    "They reset when the server restarts."
+)
+
+# Single time control: derive the lookback from the selected window (no second slider).
+lookback_hours = lookback_hours_for_window(window_start, window_end)
+st.caption(f"Lookback derived from the selected window: {lookback_hours} h")
+
+try:
+    metrics = client.get_monitoring_metrics(hours=lookback_hours)
+except Exception as exc:
+    metrics = None
+    st.warning("Could not load pipeline metrics — start the FastAPI server.")
+    st.caption(f"Details: {exc}")
+
+if metrics is not None:
+    total_detections = int(metrics.get("total_detections", 0) or 0)
+    true_positives = int(metrics.get("true_positives", 0) or 0)
+    false_positives = int(metrics.get("false_positives", 0) or 0)
+
+    show_rates = total_detections > 0
+    cols = st.columns(4 if show_rates else 2)
+    cols[0].metric("Total detections", f"{total_detections:,}")
+    cols[1].metric("Operator labels", f"{true_positives + false_positives:,}")
+    if show_rates:
+        cols[2].metric(
+            "False positive rate (operator-marked / total detections)",
+            f"{metrics.get('false_positive_rate', 0.0):.1%}",
+        )
+        cols[3].metric("Avg confidence", f"{metrics.get('avg_confidence', 0.0):.2f}")
+
+    # Section E — operator feedback nudge
+    if true_positives + false_positives == 0:
+        st.info(
+            "No operator labels yet. Confirm or reject anomalies on Operator "
+            "Feedback to improve false-positive tracking."
+        )
+        st.page_link(
+            OPERATOR_FEEDBACK_PAGE, label="Go to Operator Feedback →", icon="📝"
+        )
+
+    patterns = metrics.get("pattern_distribution") or {}
+    conf_dist = metrics.get("confidence_distribution") or {}
+    if patterns or conf_dist:
+        with st.expander("Details", expanded=False):
+            if patterns:
+                st.markdown("**Pattern distribution**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"pattern": k, "count": v} for k, v in patterns.items()]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+            if conf_dist:
+                st.markdown("**Confidence distribution**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"bucket": k, "count": v} for k, v in conf_dist.items()]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )

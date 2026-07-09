@@ -10,6 +10,7 @@ import streamlit as st
 
 from src.dashboard.components.sensor_columns import get_all_sensor_columns
 from src.dashboard.components.anomaly_table import render as render_anomaly_table
+from src.dashboard.components.anomaly_table_view import render as render_anomaly_table_view
 from src.dashboard.components.charts import (
     clear_sensor_cache,
     get_available_greenhouses,
@@ -51,6 +52,7 @@ from src.dashboard.services.http_utils import api_post
 from src.dashboard.services.inference_cache import compute_file_hash, read_layer1, write_layer1
 from src.dashboard.services.upload_validator import validate_csv_upload
 from src.dashboard.services.incident_loader import fetch_incidents_in_range
+from src.dashboard.services.diagnosis_enricher import enrich_dataframe
 from src.dashboard.constants import CACHE_MAX_ENTRIES_LIST, CACHE_TTL_SHORT
 from src.dashboard.services.review_queue import (
     build_sequence_from_readings,
@@ -611,6 +613,62 @@ def _render_top_anomalies_section(
     )
 
 
+def _render_table_view_section(
+    *,
+    anomalies_df: pd.DataFrame,
+    df: pd.DataFrame,
+    source_df: pd.DataFrame,
+    tenant: str,
+    greenhouse: str,
+    threshold: float,
+    selected_fault_types: list[str],
+    handle_feedback: Callable[[Optional[str], bool, str, str], None],
+    feedback_state_key: str,
+) -> None:
+    """Grouped, action-enabled table of the window's anomalies (Table view)."""
+    if anomalies_df.empty:
+        st.info(
+            f"No anomalies detected above the {threshold} threshold in the selected range."
+        )
+        return
+
+    # Enrich the most severe records in the window (bounded so a wide date range
+    # stays responsive); the component groups and caps for display. Enrich
+    # directly rather than via load_enriched_top_anomalies: that helper's cache is
+    # keyed on time bounds only (DataFrame arg unhashed), so sharing it with the
+    # Top Anomalies section risks returning enrichment computed for a different
+    # row set when the bounds coincide.
+    ranked = anomalies_df.sort_values("anomaly_score", ascending=False).head(300)
+    ts_col = pd.to_datetime(ranked["timestamp"])
+    start_iso = ts_col.min().isoformat()
+    end_iso = (ts_col.max() + pd.Timedelta(days=1)).isoformat()
+
+    try:
+        incidents = fetch_incidents_in_range(tenant, greenhouse, start_iso, end_iso)
+        enriched = enrich_dataframe(ranked, incidents)
+    except Exception as exc:
+        st.warning(f"Could not enrich anomaly table: {exc}")
+        enriched = ranked
+
+    if selected_fault_types:
+        def _ft_match(ft: Optional[str]) -> bool:
+            return ft in selected_fault_types or (
+                ft is None and "unknown" in selected_fault_types
+            )
+
+        enriched = enriched[enriched["fault_type"].apply(_ft_match)]
+
+    render_anomaly_table_view(
+        enriched,
+        on_feedback=handle_feedback,
+        feedback_state_key=feedback_state_key,
+        tenant_id=tenant,
+        greenhouse_id=greenhouse,
+        available_columns=get_all_sensor_columns(source_df) if not source_df.empty else None,
+        source_df=source_df if not source_df.empty else df,
+    )
+
+
 if "selected_tenant" not in st.session_state:
     st.warning("Please configure global settings in the sidebar.")
     st.stop()
@@ -772,6 +830,32 @@ def _render_anomaly_dashboard(
         api=api,
         feedback_state_key=feedback_state_key,
     )
+
+    view_mode = st.segmented_control(
+        "View",
+        ["Graphical view", "Table view"],
+        default="Graphical view",
+        key="anomaly_view_mode",
+        help=(
+            "Graphical view shows the score timeline and top anomalies. "
+            "Table view groups anomalies (by date, type, or sensor) with "
+            "per-record actions."
+        ),
+    ) or "Graphical view"
+
+    if view_mode == "Table view":
+        _render_table_view_section(
+            anomalies_df=anomalies_df,
+            df=df,
+            source_df=df,
+            tenant=tenant,
+            greenhouse=greenhouse,
+            threshold=score_threshold,
+            selected_fault_types=selected_fault_types,
+            handle_feedback=handle_feedback,
+            feedback_state_key=feedback_state_key,
+        )
+        return
 
     st.markdown("### Anomaly Score Timeline")
     x_range = (

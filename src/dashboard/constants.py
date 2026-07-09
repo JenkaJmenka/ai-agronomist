@@ -45,3 +45,4 @@ LAYER1_CACHE_DIR: str = os.path.join(
 # st.navigation / st.switch_page paths (relative to app.py).
 MONITORING_PAGE: str = "views/1_Active_Monitoring/1_Monitoring.py"
 ANOMALIES_PAGE: str = "views/2_anomalies.py"
+OPERATOR_FEEDBACK_PAGE: str = "views/99_Operator_Feedback.py"
