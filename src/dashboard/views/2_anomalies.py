@@ -716,7 +716,8 @@ def _resolve_data_bounds(
     return resolve_data_bounds(tenant, greenhouse, inf_results)
 
 
-@st.fragment
+# Must NOT be @st.fragment: widgets inside (view toggle, Apply, date/time
+# pickers) stop triggering reruns when this function is wrapped in a fragment.
 def _render_anomaly_dashboard(
     *,
     tenant: str,
