@@ -3,6 +3,45 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Next.js FE Migration & Redesign Master Plan — COMPLETE (2026-07-10)**
+Agent: architect. Deliverable: docs/migration/nextjs_migration_plan.md (PLAN ONLY, no code).
+Task #5.
+
+Migrate frontend from Streamlit (src/dashboard/, ~50 modules, ~23 components, 9 pages) to
+Next.js 15 App Router; backend (src/api/) stays and is consumed via a BFF. Execution later on
+branch fe/nextjs-migration after user approval.
+
+Key decisions:
+- Rendering matrix: Home=RSC static; Monitoring/Climate/Gas=RSC shell + client uPlot chart
+  islands + CSR downsampled windows; Anomalies (flagship)=RSC shell + streaming Suspense +
+  client islands (upload/score-timeline/tables) + URL-driven filters; Thresholds=client slider
+  over fetched scores; Metrics=two independent CSR islands; Upload/Ops=CSR; Jobs=CSR+SSE;
+  Feedback=RSC shell + optimistic verdict islands.
+- Stack: Next 15 App Router, TS strict, Tailwind v4 + Radix, uPlot (large time-series; rejected
+  Recharts/ECharts/visx/Plotly), TanStack Query/Table/Virtual, nuqs (URL state), Zustand, RHF+Zod,
+  date-fns, Biome, Vitest+Playwright, pnpm.
+- Caching: server LTTB downsampling to ≤2k pts (preserve anomaly rows) = biggest perf lever;
+  TanStack staleTime per data type (bounds 5m, window 2m, anomalies 60s, jobs 0/SSE, metrics 30s);
+  Next revalidateTag for bounds/greenhouses; never cache jobs/mutations; key by tenant to prevent leak.
+- API gaps (backend, non-breaking): G1 max_points+include_scores on /window & /recent; G2
+  anomalies-in-window; G3 anomaly groups; G4 enriched anomalies; G5 GET /api/jobs/{id}/events (SSE);
+  G7 /api/auth/validate; G8 BFF-only (no CORS/key in browser); G9 OpenAPI types + fix
+  tenant_id/customer_id drift.
+- Perf targets: cold TTI <2s (was 10–12s), filter <500ms, channel toggle <300ms client-side,
+  50k-pt window <1s, zero state loss (URL-first fixes the interrupt-loses-state bug).
+- Roadmap on fe/nextjs-migration: P0 scaffold+design system, P1 Monitoring/Climate/Gas, P2 anomalies
+  flagship, P3 thresholds+metrics, P4 upload/jobs, P5 feedback+cutover (parallel run then Railway
+  hostname switch; rollback = flip route back to warm Streamlit).
+- Doc includes ready-to-paste orchestration prompts (CLAUDE.md dispatch/watcher pattern) and
+  engineer prompts (frontend/backend/qa/devops) with design tokens embedded.
+
+Design tokens: severity normal #16a34a / warning #f59e0b / lstm #ff8c00 / critical #ef4444;
+brand #16a34a; 4-pt spacing; Inter; dark+light via data-theme; uPlot Okabe-Ito palette.
+
+---
+</content>
+
+## Current Phase
 **Fix 5 — Streamlit cache-hashing bug + checkbox session-state warning — COMPLETE (2026-07-09)**
 Agent: backend-engineer. Two-file fix (3 changes).
 
