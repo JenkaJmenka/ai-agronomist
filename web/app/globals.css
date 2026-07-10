@@ -1,26 +1,70 @@
 @import "tailwindcss";
 
+/* Design tokens — MIGRATION_PLAN.md §7.1. Dark mode is first-class and flips
+   via [data-theme] so wall displays don't depend on OS settings. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #f8faf8;
+  --bg-elevated: #ffffff;
+  --border: #e2e8e2;
+  --text: #17211a;
+  --text-muted: #5d6b60;
+  --accent: #16a34a;
+
+  --sev-normal: #16a34a;
+  --sev-warning: #f59e0b;
+  --sev-lstm: #ff8c00;
+  --sev-critical: #ef4444;
+
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.08);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+[data-theme="dark"] {
+  --bg: #0e1310;
+  --bg-elevated: #171e19;
+  --border: #26302a;
+  --text: #e6ebe7;
+  --text-muted: #93a197;
+  --accent: #22c55e;
+  --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme]) {
+    --bg: #0e1310;
+    --bg-elevated: #171e19;
+    --border: #26302a;
+    --text: #e6ebe7;
+    --text-muted: #93a197;
+    --accent: #22c55e;
+    --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
   }
 }
 
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-sev-normal: var(--sev-normal);
+  --color-sev-warning: var(--sev-warning);
+  --color-sev-lstm: var(--sev-lstm);
+  --color-sev-critical: var(--sev-critical);
+  --radius-control: var(--radius-control);
+  --radius-card: var(--radius-card);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+
+/* Metrics and tables always align digits. */
+.tabular-nums,
+table {
+  font-variant-numeric: tabular-nums;
 }
