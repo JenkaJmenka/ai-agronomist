@@ -783,11 +783,14 @@ CUSUM_EMA_ALPHA: float = float(os.environ.get("CUSUM_EMA_ALPHA", "0.01"))
 # Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
 NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
 NOISE_BASELINE_VARIANCE: Dict[str, float] = {
+    # spec ref: sigma_baseline^2=0.02 (docs/anomaly_framework_spec.md §5).
     "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
     "humidity": 0.04,      # (%)²
     "co2": 25.0,           # (ppm)²
     "light": 100.0,        # (lux)²
 }
+# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
+# uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
 
 # Bias / Constant Offset — dual-sensor cross-difference.
@@ -824,11 +827,16 @@ TCP_BASELINE_MS: float = float(os.environ.get("TCP_BASELINE_MS", "5.0"))
 TCP_DELAY_FACTOR: float = float(os.environ.get("TCP_DELAY_FACTOR", "2.0"))
 
 # Service Response Duration.
+# spec ref: N=100 (docs/anomaly_framework_spec.md §14); production uses a
+# larger rolling window (1000) for a smoother dynamic P99 threshold.
 SERVICE_RESPONSE_WINDOW: int = int(os.environ.get("SERVICE_RESPONSE_WINDOW", "1000"))
+# spec ref: P99 (docs/anomaly_framework_spec.md §14); production uses P99.5.
 SERVICE_RESPONSE_PERCENTILE: float = float(os.environ.get("SERVICE_RESPONSE_PERCENTILE", "99.5"))
 SERVICE_RESPONSE_BASELINE_MS: float = float(os.environ.get("SERVICE_RESPONSE_BASELINE_MS", "120.0"))
 
 # Isolation Forest threat scoring (19-feature).
+# spec ref: theta_threat=70.0 (docs/anomaly_framework_spec.md §15); production
+# uses 65.0 (more sensitive).
 THREAT_SCORE_THRESHOLD: float = float(os.environ.get("THREAT_SCORE_THRESHOLD", "65.0"))
 IF_THREAT_N_ESTIMATORS: int = int(os.environ.get("IF_THREAT_N_ESTIMATORS", "200"))
 IF_THREAT_CONTAMINATION: float = float(os.environ.get("IF_THREAT_CONTAMINATION", "0.01"))
