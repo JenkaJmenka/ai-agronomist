@@ -29,7 +29,9 @@ scikit-learn>=1.3
 scipy>=1.11
 
 # Dashboard
-streamlit>=1.28
+# Pinned: streamlit >=1.59 has a fragment regression that froze all widgets
+# inside @st.fragment on the Anomaly page (view toggle, Apply, date pickers).
+streamlit==1.58.0
 plotly>=5.18
 
 # Logging
