@@ -1,6 +1,8 @@
-"""Precision degradation / noise fault detector (SCADA spec section 1.4).
+"""Precision degradation / noise fault detector (SCADA spec section 5).
 
-Hybrid algorithm (Butterworth HP filter + variance ratio):
+Two algorithm variants, selected by ``use_highpass``:
+
+Production (``use_highpass=True``, default) — hybrid algorithm:
     1. Pass signal through 2nd-order high-pass Butterworth filter to
        reject low-frequency trends (drift, diurnal cycles, setpoint
        changes).
@@ -8,8 +10,10 @@ Hybrid algorithm (Butterworth HP filter + variance ratio):
     3. Divide by calibrated baseline noise variance.
     4. Flag when the ratio exceeds the configured threshold.
 
-The hybrid approach combines trend immunity from the Butterworth filter
-with adaptive sensitivity from the variance ratio.
+Spec-faithful (``use_highpass=False``) — the framework spec §5 algorithm:
+    plain rolling variance of the RAW signal divided by baseline variance,
+    flag when the ratio exceeds ``theta_noise``.  No filtering step.  This
+    path reproduces the spec's Table 5 verification dataset exactly.
 
 Backward-compatible: the original ``detect(series, sensor)`` API still
 works (falls through to the fixed-threshold path when baseline variance
@@ -47,9 +51,27 @@ except ImportError:  # pragma: no cover
     }
     NOISE_RATIO_THRESHOLD: float = 10.0  # type: ignore[no-redef]
 
+# filtfilt with a 2nd-order Butterworth needs > 3 * max(len(a), len(b)) = 9
+# samples, so the high-pass path requires at least this many readings.
+_MIN_HIGHPASS_SAMPLES: int = 10
+
 
 class NoiseDetector:
-    """Detect precision degradation via HP-filtered rolling variance ratio."""
+    """Detect precision degradation via a rolling variance ratio.
+
+    Args:
+        hp_cutoff: High-pass Butterworth cutoff (only used when
+            ``use_highpass`` is True).
+        window: Rolling variance window ``w`` (spec §5: ``w = 5``).
+        baseline_variance: Per-sensor calibrated baseline noise variance
+            (spec §5: ``sigma_baseline^2 = 0.02``).
+        ratio_threshold: Variance-ratio alarm threshold ``theta_noise``
+            (spec §5: ``theta_noise = 50.0``).
+        use_highpass: When True (default) apply the Butterworth high-pass
+            filter before computing rolling variance (production behaviour).
+            When False, compute the ratio on the RAW series — the
+            spec-faithful path that reproduces Table 5.
+    """
 
     HP_CUTOFF: float = 0.1
 
@@ -59,11 +81,13 @@ class NoiseDetector:
         window: int = NOISE_HYBRID_WINDOW,
         baseline_variance: Dict[str, float] | None = None,
         ratio_threshold: float = NOISE_RATIO_THRESHOLD,
+        use_highpass: bool = True,
     ) -> None:
         self._hp_cutoff = hp_cutoff or self.HP_CUTOFF
         self._window = window
         self._baseline_var = dict(baseline_variance or NOISE_BASELINE_VARIANCE)
         self._ratio_threshold = ratio_threshold
+        self._use_highpass = use_highpass
 
     def detect(
         self,
@@ -83,21 +107,23 @@ class NoiseDetector:
         Returns:
             True if precision degradation detected.
         """
-        if len(series) < 10:
+        if len(series) < _MIN_HIGHPASS_SAMPLES:
             return False
 
-        filtered = self._highpass(series)
+        signal = self._highpass(series) if self._use_highpass else np.asarray(
+            series, dtype=float
+        )
 
         bv = self._baseline_var.get(sensor)
         if bv is not None and bv > 0:
-            filtered_var = float(np.var(filtered))
-            return filtered_var / bv > self._ratio_threshold
+            signal_var = float(np.var(signal))
+            return signal_var / bv > self._ratio_threshold
 
         target = SENSOR_NOISE_TARGETS.get(sensor)
         if target is None:
             return False
-        filtered_std = float(np.std(filtered))
-        return filtered_std > target * NOISE_ALPHA
+        signal_std = float(np.std(signal))
+        return signal_std > target * NOISE_ALPHA
 
     def detect_series(
         self,
@@ -107,6 +133,11 @@ class NoiseDetector:
     ) -> List[bool]:
         """Per-timestep noise detection using rolling variance ratio.
 
+        On the high-pass path the series must contain at least
+        ``_MIN_HIGHPASS_SAMPLES`` readings (a ``filtfilt`` requirement);
+        on the spec-faithful raw path only ``window`` readings are needed.
+        The first ``window - 1`` entries are always ``False`` (warm-up).
+
         Args:
             series: 1-D array of sensor readings.
             sensor: Sensor name key.
@@ -115,24 +146,29 @@ class NoiseDetector:
 
         Returns:
             List of booleans; ``True`` = noise anomaly at that timestep.
-            First ``max(window-1, 9)`` entries are ``False`` (warm-up).
         """
         series = np.asarray(series, dtype=float)
         n = len(series)
+        w = self._window
         flags: List[bool] = [False] * n
-
-        if n < 10:
-            return flags
 
         bv = baseline_variance or self._baseline_var.get(sensor)
         if bv is None or bv <= 0:
             return flags
 
-        filtered = self._highpass(series)
-        w = self._window
+        if self._use_highpass:
+            if n < _MIN_HIGHPASS_SAMPLES:
+                return flags
+            signal = self._highpass(series)
+        else:
+            if n < w:
+                return flags
+            signal = series
 
-        for t in range(max(w - 1, 9), n):
-            window = filtered[t - w + 1 : t + 1]
+        # Warm-up honours the actual window: the first evaluable index is
+        # w - 1 (the earliest timestep whose window is full).
+        for t in range(w - 1, n):
+            window = signal[t - w + 1 : t + 1]
             var = float(np.var(window, ddof=1))
             flags[t] = var / bv > self._ratio_threshold
 

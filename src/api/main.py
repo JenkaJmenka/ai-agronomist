@@ -38,6 +38,8 @@ from src.db.jobs import fail_stale_preparing_jobs
 from src.db.session import AsyncSessionLocal, engine, get_db, init_db
 from src.mq.connection import close_mq
 from src.api.routes import (
+    anomalies,
+    auth,
     bootstrap,
     feedback,
     feedback_integrated,
@@ -288,6 +290,8 @@ app.include_router(gas_anomalies.router)
 app.include_router(jobs.router)
 app.include_router(readings.router)
 app.include_router(network_anomalies.router)
+app.include_router(anomalies.router)
+app.include_router(auth.router)
 
 
 @app.get("/metrics", include_in_schema=False)

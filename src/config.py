@@ -682,6 +682,8 @@ VELOCITY_LIMITS: dict[str, float] = {
 # CUSUM drift detector parameters (standardised-residual space).
 # Names include _SIGMA suffix to document that units are standard deviations,
 # not raw sensor units.
+# spec ref: K=0.2, H=1.0 (docs/anomaly_framework_spec.md §4); production uses
+# K=0.25/H=4.0 for ARL0 ≈ 340 (fewer false drift alarms on live telemetry).
 CUSUM_K_SIGMA: float = float(os.environ.get("CUSUM_K_SIGMA", "0.25"))   # production-sensitive: detects 0.5σ shifts
 CUSUM_H_SIGMA: float = float(os.environ.get("CUSUM_H_SIGMA", "4.0"))   # ARL₀ ≈ 340 samples
 
@@ -783,11 +785,14 @@ CUSUM_EMA_ALPHA: float = float(os.environ.get("CUSUM_EMA_ALPHA", "0.01"))
 # Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
 NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
 NOISE_BASELINE_VARIANCE: Dict[str, float] = {
+    # spec ref: sigma_baseline^2=0.02 (docs/anomaly_framework_spec.md §5).
     "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
     "humidity": 0.04,      # (%)²
     "co2": 25.0,           # (ppm)²
     "light": 100.0,        # (lux)²
 }
+# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
+# uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
 
 # Bias / Constant Offset — dual-sensor cross-difference.
@@ -814,6 +819,8 @@ RTT_MULTIPLIER: float = float(os.environ.get("RTT_MULTIPLIER", "3.0"))
 JITTER_THRESHOLD_MS: float = float(os.environ.get("JITTER_THRESHOLD_MS", "20.0"))
 
 # Inter-Packet Interval variation (IAT CV).
+# spec ref: w=5 (docs/anomaly_framework_spec.md §11); production uses 20 for
+# a steadier CV estimate on jittery links.
 IAT_CV_WINDOW: int = int(os.environ.get("IAT_CV_WINDOW", "20"))
 IAT_CV_THRESHOLD: float = float(os.environ.get("IAT_CV_THRESHOLD", "1.0"))
 IAT_BASELINE_MEAN: float = float(os.environ.get("IAT_BASELINE_MEAN", "1.0"))
@@ -824,11 +831,16 @@ TCP_BASELINE_MS: float = float(os.environ.get("TCP_BASELINE_MS", "5.0"))
 TCP_DELAY_FACTOR: float = float(os.environ.get("TCP_DELAY_FACTOR", "2.0"))
 
 # Service Response Duration.
+# spec ref: N=100 (docs/anomaly_framework_spec.md §14); production uses a
+# larger rolling window (1000) for a smoother dynamic P99 threshold.
 SERVICE_RESPONSE_WINDOW: int = int(os.environ.get("SERVICE_RESPONSE_WINDOW", "1000"))
+# spec ref: P99 (docs/anomaly_framework_spec.md §14); production uses P99.5.
 SERVICE_RESPONSE_PERCENTILE: float = float(os.environ.get("SERVICE_RESPONSE_PERCENTILE", "99.5"))
 SERVICE_RESPONSE_BASELINE_MS: float = float(os.environ.get("SERVICE_RESPONSE_BASELINE_MS", "120.0"))
 
 # Isolation Forest threat scoring (19-feature).
+# spec ref: theta_threat=70.0 (docs/anomaly_framework_spec.md §15); production
+# uses 65.0 (more sensitive).
 THREAT_SCORE_THRESHOLD: float = float(os.environ.get("THREAT_SCORE_THRESHOLD", "65.0"))
 IF_THREAT_N_ESTIMATORS: int = int(os.environ.get("IF_THREAT_N_ESTIMATORS", "200"))
 IF_THREAT_CONTAMINATION: float = float(os.environ.get("IF_THREAT_CONTAMINATION", "0.01"))
@@ -840,3 +852,20 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
 )
 TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
 REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS", "300"))
+
+# Server-side downsampling (migration plan G1) — readings endpoints.
+DOWNSAMPLE_MAX_POINTS_FLOOR: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_FLOOR", "100"))
+DOWNSAMPLE_MAX_POINTS_CEIL: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_CEIL", "10000"))
+# Rows whose anomaly_score sits in this top quantile always survive downsampling.
+DOWNSAMPLE_ANOMALY_QUANTILE: float = float(os.environ.get("DOWNSAMPLE_ANOMALY_QUANTILE", "0.90"))
+
+# Anomaly aggregation endpoints (migration plan G3/G4).
+ANOMALY_ENRICHED_DEFAULT_LIMIT: int = int(
+    os.environ.get("ANOMALY_ENRICHED_DEFAULT_LIMIT", "50")
+)
+ANOMALY_ENRICHED_MAX_LIMIT: int = int(os.environ.get("ANOMALY_ENRICHED_MAX_LIMIT", "500"))
+ANOMALY_GROUP_SAMPLE_IDS: int = int(os.environ.get("ANOMALY_GROUP_SAMPLE_IDS", "5"))
+
+# Job progress SSE stream (migration plan G5).
+JOB_EVENTS_POLL_SECONDS: float = float(os.environ.get("JOB_EVENTS_POLL_SECONDS", "2.0"))
+JOB_EVENTS_MAX_SECONDS: float = float(os.environ.get("JOB_EVENTS_MAX_SECONDS", "3600"))

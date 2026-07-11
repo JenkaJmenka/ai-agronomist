@@ -72,20 +72,20 @@ async def mark_feedback(
 
 
 @router.get(
-    "/statistics/{customer_id}", response_model=StatisticsResponse
+    "/statistics/{tenant_id}", response_model=StatisticsResponse
 )
 async def feedback_statistics(
-    customer_id: str,
+    tenant_id: str,
     db: AsyncSession = Depends(get_db),
     auth_tenant: str | None = Depends(require_api_key),
 ) -> StatisticsResponse:
-    """Return feedback statistics and learning progress for a customer."""
-    enforce_tenant_access(auth_tenant, customer_id)
-    orch = await get_orchestrator(customer_id, db)
+    """Return feedback statistics and learning progress for a tenant."""
+    enforce_tenant_access(auth_tenant, tenant_id)
+    orch = await get_orchestrator(tenant_id, db)
     stats = orch.learner.get_statistics()
     if stats["total_feedback"] == 0:
         return StatisticsResponse(
-            customer_id=customer_id,
+            customer_id=tenant_id,
             total_feedback=0,
             high_quality_feedback=0,
             operator_count=0,
@@ -98,21 +98,21 @@ async def feedback_statistics(
 
 
 @router.get(
-    "/learning-progress/{customer_id}",
+    "/learning-progress/{tenant_id}",
     response_model=LearningProgressResponse,
 )
 async def learning_progress(
-    customer_id: str,
+    tenant_id: str,
     db: AsyncSession = Depends(get_db),
     auth_tenant: str | None = Depends(require_api_key),
 ) -> LearningProgressResponse:
     """Return detailed progress toward the next retrain trigger."""
-    enforce_tenant_access(auth_tenant, customer_id)
-    orch = await get_orchestrator(customer_id, db)
+    enforce_tenant_access(auth_tenant, tenant_id)
+    orch = await get_orchestrator(tenant_id, db)
     stats = orch.learner.get_statistics()
     if stats["total_feedback"] == 0:
         return LearningProgressResponse(
-            customer_id=customer_id,
+            customer_id=tenant_id,
             progress_percent=0.0,
             samples_needed=ACTIVE_LEARNING_MIN_QUALITY_LABELS,
             high_quality_count=0,

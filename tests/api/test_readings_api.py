@@ -170,3 +170,139 @@ def test_incidents_endpoint(test_client):
     payload = response.json()
     assert payload["count"] == 1
     assert payload["rows"][0]["fault_type"] == "spike_fault"
+
+
+class TestDownsamplingParams:
+    """G1: max_points/include_scores wiring on /window (route-level; the LTTB
+    algorithm itself is covered by tests/services/test_downsample.py)."""
+
+    def test_max_points_unset_is_byte_identical_to_pre_g1(self, test_client):
+        response = test_client.get(
+            "/api/readings/window",
+            params={"tenant_id": TENANT, "start": BASE_TS.isoformat(), "end": (
+                BASE_TS + datetime.timedelta(hours=ROWS)
+            ).isoformat()},
+        )
+        payload = response.json()
+        assert set(payload.keys()) == {"rows", "count"}
+        assert "downsampled" not in payload
+        assert "original_count" not in payload
+
+    def test_max_points_below_floor_rejected(self, test_client):
+        response = test_client.get(
+            "/api/readings/window",
+            params={
+                "tenant_id": TENANT,
+                "start": BASE_TS.isoformat(),
+                "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+                "max_points": 50,
+            },
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_max_points_above_ceiling_rejected(self, test_client):
+        response = test_client.get(
+            "/api/readings/window",
+            params={
+                "tenant_id": TENANT,
+                "start": BASE_TS.isoformat(),
+                "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+                "max_points": 20000,
+            },
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_max_points_over_row_count_is_a_noop(self, test_client):
+        # ROWS (48) is under the floor (100), so this row set can never
+        # actually exceed max_points; confirms the no-op path stays additive.
+        response = test_client.get(
+            "/api/readings/window",
+            params={
+                "tenant_id": TENANT,
+                "start": BASE_TS.isoformat(),
+                "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+                "max_points": 100,
+            },
+        )
+        payload = response.json()
+        assert payload["count"] == ROWS
+        assert "downsampled" not in payload
+
+    def test_include_scores_false_strips_anomaly_score(self, test_client):
+        response = test_client.get(
+            "/api/readings/window",
+            params={
+                "tenant_id": TENANT,
+                "start": BASE_TS.isoformat(),
+                "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+                "include_scores": False,
+            },
+        )
+        payload = response.json()
+        assert payload["rows"]
+        assert all("anomaly_score" not in r for r in payload["rows"])
+
+
+class TestAnomaliesInWindow:
+    """G2: /api/readings/anomalies-in-window (route-level; the filter itself
+    is covered by tests/services/test_anomaly_insights.py)."""
+
+    _WINDOW = {
+        "start": BASE_TS.isoformat(),
+        "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+    }
+
+    def test_returns_flagged_rows_and_counts(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, "threshold": 0.5, **self._WINDOW},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()
+        assert payload["anomaly_count"] == 1
+        assert payload["total_count"] == ROWS
+        assert len(payload["rows"]) == 1
+        assert payload["rows"][0]["anomaly_score"] == pytest.approx(0.9)
+
+    def test_threshold_above_all_scores_yields_empty(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, "threshold": 0.95, **self._WINDOW},
+        )
+        payload = response.json()
+        assert payload["rows"] == []
+        assert payload["anomaly_count"] == 0
+        assert payload["total_count"] == ROWS
+
+    def test_threshold_is_required(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, **self._WINDOW},
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_max_points_over_row_count_is_a_noop(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={
+                "tenant_id": TENANT,
+                "threshold": 0.5,
+                "max_points": 100,
+                **self._WINDOW,
+            },
+        )
+        payload = response.json()
+        assert payload["anomaly_count"] == 1
+        assert "downsampled" not in payload
+
+    def test_rejects_bad_timestamp(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={
+                "tenant_id": TENANT,
+                "threshold": 0.5,
+                "start": "not-a-date",
+                "end": "also-bad",
+            },
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
