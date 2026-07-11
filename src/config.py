@@ -858,3 +858,14 @@ DOWNSAMPLE_MAX_POINTS_FLOOR: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_FLO
 DOWNSAMPLE_MAX_POINTS_CEIL: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_CEIL", "10000"))
 # Rows whose anomaly_score sits in this top quantile always survive downsampling.
 DOWNSAMPLE_ANOMALY_QUANTILE: float = float(os.environ.get("DOWNSAMPLE_ANOMALY_QUANTILE", "0.90"))
+
+# Anomaly aggregation endpoints (migration plan G3/G4).
+ANOMALY_ENRICHED_DEFAULT_LIMIT: int = int(
+    os.environ.get("ANOMALY_ENRICHED_DEFAULT_LIMIT", "50")
+)
+ANOMALY_ENRICHED_MAX_LIMIT: int = int(os.environ.get("ANOMALY_ENRICHED_MAX_LIMIT", "500"))
+ANOMALY_GROUP_SAMPLE_IDS: int = int(os.environ.get("ANOMALY_GROUP_SAMPLE_IDS", "5"))
+
+# Job progress SSE stream (migration plan G5).
+JOB_EVENTS_POLL_SECONDS: float = float(os.environ.get("JOB_EVENTS_POLL_SECONDS", "2.0"))
+JOB_EVENTS_MAX_SECONDS: float = float(os.environ.get("JOB_EVENTS_MAX_SECONDS", "3600"))
