@@ -3,6 +3,49 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**FE Migration — Backend gaps G2–G5/G7/G9 + FE P4/P5 + deferred P1/P2 items — COMPLETE (2026-07-11)**
+Branches: main (backend, pushed to ec2659b+memory commit) and fe/nextjs-migration
+(pushed to fa3356e; worktree at ~/Projects/ai-agronomist-fe).
+
+Backend on main (additive, G1 pattern: pure service + route params + route tests; 36 new tests):
+- G2 GET /api/readings/anomalies-in-window (threshold filter + LTTB via downsample.py).
+- G3 /api/anomalies/groups + G4 /api/anomalies/enriched (new routes/anomalies.py; enrichment
+  reuses dashboard diagnosis_enricher so both FEs agree on fault types; sample_ids = ISO
+  timestamps of top rows — rows have no PK).
+- G5 GET /api/jobs/{id}/events SSE (emits on change, keep-alive comments, terminal close,
+  JOB_EVENTS_MAX_SECONDS guard; holds the request's db session with expire_all per poll).
+- G7 GET /api/auth/validate (always 200, {ok, tenant_scope}).
+- G9: renamed all 10 {customer_id} path params → {tenant_id} (wire-invisible; response keys
+  and body schema field names kept customer_id — renaming those WOULD break Streamlit).
+- New shared src/api/query_params.py (parse_iso_param), src/api/services/anomaly_insights.py.
+- Suite: identical 15 pre-existing failures before/after (state-dependent integration tests,
+  confirmed by worktree diff at 328dfd1); +36 tests all green. Known-ignore list unchanged.
+
+FE on fe/nextjs-migration (main merged in at 1ab3d5c so local e2e can hit new endpoints):
+- G9: web/openapi.json snapshot committed; gen:api now reads it (gen:api:live refreshes);
+  lib/api-types.gen.ts generated (biome-excluded).
+- P4: /operations (UploadPanel w/ lib/upload-validator.ts TS port + two-step confirm,
+  sync analyze vs async persist/train job; ModelRegistryPanel; InjectAnomaliesPanel;
+  ClearDataPanel; shared ui/TwoStepConfirm) + /jobs (SSE via BFF relay
+  app/api/bff/jobs/[id]/events/route.ts, 3s polling fallback, terminate, staleTime 0).
+- P2/P1 deferred: fault-type column from G4 (enrichment window = fetched envelope bounds);
+  grouped view switches to G3 server groups at ≥500 flagged rows; DataTable virtualized
+  (@tanstack/react-virtual, >100 rows, spacer-row technique) and 200-row cap lifted;
+  Monitoring jump carries ?channel= and pre-selects the toggle; turbopack.root pinned
+  (stray ~/package-lock.json broke workspace-root inference).
+- P5: /feedback (optimistic verdict via TanStack onMutate/rollback → mark-anomaly,
+  LearningProgressCard), .github/workflows/web-ci.yml (5 gates), test/e2e/perf.spec.ts
+  budgets FAIL CI when breached (cold<2s, filter<500ms, toggle<300ms + zero refetch),
+  web/railway.json + README deploy docs (config only — NO deploy, NO hostname switch).
+- Gates at push: biome clean, tsc clean, 22 vitest, build clean, 26/26 Playwright
+  (all BFF calls mocked in e2e — nothing touches production Railway).
+
+Left for cutover day: create the Railway web service (root=web, API_URL/API_KEY env),
+live parallel-run parity check, manual hostname switch (rollback = flip back to Streamlit).
+
+---
+
+## Previous Phase
 **Spec-Compliance Fix — Noise + Service-Response detectors + IF docstring — COMPLETE (2026-07-11)**
 Agent: ml-engineer. Files: src/models/noise_detector.py,
 src/models/network/service_response_detector.py,
