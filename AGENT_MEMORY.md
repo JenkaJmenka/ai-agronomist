@@ -3,6 +3,40 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Spec-Compliance Fix — Noise + Service-Response detectors + IF docstring — COMPLETE (2026-07-11)**
+Agent: ml-engineer. Files: src/models/noise_detector.py,
+src/models/network/service_response_detector.py,
+src/models/network/isolation_forest_threat_detector.py, src/config.py (comments only).
+
+Turned the noise + service-response xfails in tests/models/test_framework_spec_vectors.py
+into real passes without changing any production config default value (parameter policy).
+
+- NoiseDetector: added `use_highpass: bool = True` ctor flag. Default keeps the Butterworth
+  HP-filter hybrid (production, `.detect()` path used by comprehensive_pipeline). `use_highpass=False`
+  computes the ratio on the RAW series = spec §5 algorithm. Fixed the warm-up bug: loop is now
+  `range(w-1, n)` (was hardcoded `max(w-1, 9)`), so any window is honoured. Highpass path keeps the
+  n<10 filtfilt gate (`_MIN_HIGHPASS_SAMPLES`); raw path uses n<w. Spec-faithful path reproduces
+  Table 5 exactly (idx4 Normal ratio~32.6, idx5-9 Anomalous).
+- ServiceResponseDetector: implemented spec §14 Dynamic Quantile Filtering. New ctor params
+  `window=SERVICE_RESPONSE_WINDOW`, `percentile=SERVICE_RESPONSE_PERCENTILE` (config knobs were
+  UNUSED — now wired). Rolling deque; threshold = max(static 120ms floor, P99(window)) once >= window
+  samples, else the 120ms baseline (fallback). History ingested via new `update_baseline(d)` / `fit(iter)`;
+  `detect()` never mutates history so existing callers (network_anomalies route, no history) behave
+  exactly as before. `threshold_ms` now returns the dynamic value.
+- IsolationForestThreatDetector: threshold already ctor-configurable; documented the 19-feature
+  contract (ordered names) in the class docstring per audit §15 (indices 0-2 anchored by Table 16,
+  6-18 follow spec's partial enumeration). Left the exact-score xfail in place.
+- config.py: added spec-ref comments only (NOISE_RATIO_THRESHOLD, NOISE_BASELINE_VARIANCE[temperature],
+  SERVICE_RESPONSE_WINDOW/PERCENTILE, THREAT_SCORE_THRESHOLD). NO value changed.
+
+Tests: test_framework_spec_vectors.py 49 passed, 1 xfailed (only IF exact-score), 0 XPASS.
+tests/models + tests/dashboard: 1194 passed, 1 xfailed, 1 pre-existing failure
+(test_ensemble_fit_spy::test_pipeline_reuses_baseline_object_reference — unrelated, per task).
+Detector own tests (test_noise*, network/): 53 passed. Did NOT commit.
+
+---
+
+## Current Phase
 **Spec Verification Test Suite — COMPLETE (2026-07-10)**
 Agent: qa-engineer. Deliverable: tests/models/test_framework_spec_vectors.py. Task #4.
 
