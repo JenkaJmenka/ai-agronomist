@@ -60,11 +60,31 @@ test("anomalies threshold writes to the URL", async ({ page }) => {
 });
 
 test("thresholds page: preview slider updates flagged counts and URL", async ({ page }) => {
+  // The slider only renders over scored rows — mock the BFF so the test
+  // is backend-independent (CI has no API; never rely on live data).
+  const scoredRows = Array.from({ length: 48 }, (_, i) => ({
+    timestamp: new Date(Date.UTC(2026, 5, 1, i)).toISOString(),
+    temperature: 22,
+    anomaly_score: i % 8 === 0 ? 0.4 : 0.05,
+  }));
+  await page.route("**/api/bff/readings/recent**", (route) =>
+    route.fulfill({
+      json: {
+        rows: scoredRows,
+        count: scoredRows.length,
+        min_timestamp: scoredRows[0].timestamp,
+        max_timestamp: scoredRows.at(-1)?.timestamp,
+      },
+    }),
+  );
+
   await page.goto("/thresholds");
   await expect(page.getByRole("heading", { name: "Threshold Management" })).toBeVisible();
   const slider = page.getByTestId("threshold-control").locator("input[type=range]");
   await slider.fill("0.3");
   await expect(page).toHaveURL(/preview=0.3/);
+  // Slider preview recomputes flagged counts client-side over the mock data.
+  await expect(page.getByText("Flagged at preview (0.300)")).toBeVisible();
 });
 
 test("metrics page renders both islands", async ({ page }) => {
