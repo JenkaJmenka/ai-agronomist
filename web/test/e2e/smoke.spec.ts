@@ -40,3 +40,21 @@ test("quick range buttons write the window to the URL", async ({ page }) => {
   await page.getByRole("button", { name: "7 d" }).click();
   await expect(page).toHaveURL(/from=.+to=.+/);
 });
+
+test("anomalies page: threshold control and view toggle render", async ({ page }) => {
+  await page.goto("/anomalies");
+  await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
+  await expect(page.getByTestId("threshold-control")).toBeVisible();
+  await page.getByRole("tab", { name: "Table view" }).click();
+  await expect(page.getByRole("tab", { name: "Table view" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+test("anomalies threshold writes to the URL", async ({ page }) => {
+  await page.goto("/anomalies");
+  const slider = page.getByTestId("threshold-control").locator("input[type=range]");
+  await slider.fill("0.25");
+  await expect(page).toHaveURL(/threshold=0.25/);
+});
