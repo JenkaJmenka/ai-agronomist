@@ -3,6 +3,56 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Spec Verification Test Suite — COMPLETE (2026-07-10)**
+Agent: qa-engineer. Deliverable: tests/models/test_framework_spec_vectors.py. Task #4.
+
+Created a 50-test spec verification suite with one pytest class per anomaly type (15 classes).
+Each class feeds the exact Table-N dataset from docs/anomaly_framework_spec.md into the real
+detector with PARAMETER POLICY B (spec params passed explicitly; no config defaults relied upon).
+
+**Results: 46 passed, 3 xfailed, 1 xpassed — all 50 items clean.**
+
+Class-by-class results:
+| # | Class | Result | Notes |
+|---|-------|--------|-------|
+| 1 | TestSpec01SpikeMAD | 4 PASSED | Table 2: c=2.5, k=5 — all rows correct |
+| 2 | TestSpec02OutOfBounds | 3 PASSED | Table 7: humidity (0, 100) — full-series check |
+| 3 | TestSpec03StuckAt | 3 PASSED | Table 3: w=5, eps=0.001 — sample variance confirmed |
+| 4 | TestSpec04CUSUMDrift | 3 PASSED | Table 4: K=0.2, H=1.0 — raw residuals fed directly |
+| 5 | TestSpec05Noise | 1 XFAIL + 3 PASSED | DEVIATES: HP filter + warm-up bug (max(w-1,9) floor) suppresses indices 5-8; only index 9 evaluated |
+| 6 | TestSpec06BiasDualSensor | 3 PASSED | Table 6: w=3, theta=1.5 |
+| 7 | TestSpec07CorrelationBreakdown | 3 PASSED | Table 8: w=5, theta=0.70; rho drops far below 0.70 |
+| 8 | TestSpec08Thermodynamic | 3 PASSED | Table 9: 216.7 constant correct; spec prose (2166.7) is erroneous |
+| 9 | TestSpec09DiurnalProfile | 3 PASSED | Table 10: theta=3.0 |
+| 10 | TestSpec10RTTJitter | 3 PASSED | Table 11: baseline=2ms, mult=3, jitter=50ms |
+| 11 | TestSpec11IATCV | 4 PASSED | Table 12: spacing rule at 12:05; row 12:07 skipped (spec arithmetic error) |
+| 12 | TestSpec12TCPHandshake | 3 PASSED | Table 13: baseline=5ms, c=2.5 → 12.5ms threshold |
+| 13 | TestSpec13DHCPFingerprint | 3 PASSED | Table 14: SHA-256, no tunables |
+| 14 | TestSpec14ServiceResponse | 1 XFAIL + 1 XPASS + 2 PASSED | DEVIATES: static threshold, not dynamic P99; Table 15 passes because calibrated value matches |
+| 15 | TestSpec15IsolationForest | 3 PASSED + 1 XFAIL | Table 16: threshold contract pinned; exact TS values underspecified |
+
+**Detectors whose constructor cannot accept spec params (list for fix phase):**
+- psychrometric_validator: validate_row() uses global PSYCHROMETRIC_HD_TOLERANCE from config (no
+  tolerance param); test calls calculate_humidity_deficit() directly and applies theta=0.15 inline.
+- NoiseDetector: HP filter and hardcoded warm-up floor max(w-1,9) are structural (not configurable)
+  — test notes them in comments; warm_up_suppresses test documents the bug explicitly.
+- ServiceResponseDetector: no rolling-window P99 API; test_table15_dynamic_p99_api_exists asserts
+  for update_baseline/fit presence (XFAIL confirms API is absent).
+
+**Spec document errata found during test authoring:**
+1. Table 12 (IAT CV): sigma/CV values at rows 12:06 and 12:07 do not reproduce under ddof=0 or ddof=1
+   with the given IAT series — spec's arithmetic is internally inconsistent; row 12:07 assertion skipped.
+2. psychrometric_validator.py §8: spec prose states constant 2166.7 but worked Table 9 reproduces only
+   with 216.7 (code is correct; spec prose is erroneous).
+
+**Pre-existing failure (not introduced by this task):**
+tests/models/test_ensemble_fit_spy.py::test_pipeline_reuses_baseline_object_reference
+Confirmed pre-existing by stash+verify: fails on clean main before any new file added.
+
+No implementation files modified. No commits.
+
+
+## Current Phase
 **Next.js FE Migration & Redesign Master Plan — COMPLETE (2026-07-10)**
 Agent: architect. Deliverable: docs/migration/nextjs_migration_plan.md (PLAN ONLY, no code).
 Task #5.
