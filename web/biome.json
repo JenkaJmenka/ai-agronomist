@@ -1,7 +1,15 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
   "files": {
-    "includes": ["app/**", "components/**", "features/**", "lib/**", "test/**", "!**/*.css"]
+    "includes": [
+      "app/**",
+      "components/**",
+      "features/**",
+      "lib/**",
+      "test/**",
+      "!**/*.css",
+      "!lib/api-types.gen.ts"
+    ]
   },
   "formatter": {
     "enabled": true,
