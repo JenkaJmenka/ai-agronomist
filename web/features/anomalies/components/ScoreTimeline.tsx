@@ -25,28 +25,44 @@ export function ScoreTimeline({ rows, threshold }: ScoreTimelineProps) {
     return [xs, scores, thresholdLine] as uPlot.AlignedData;
   }, [rows, threshold]);
 
+  const peak = useMemo(() => {
+    let max = 0;
+    for (const row of rows) {
+      const score = row.anomaly_score;
+      if (typeof score === "number" && score > max) max = score;
+    }
+    return max;
+  }, [rows]);
+
   const options = useMemo(
     () => ({
       series: [
         {},
         {
           label: "Anomaly score",
-          stroke: "var(--sev-lstm)",
+          // Canvas rendering — CSS variables do not resolve here; use the
+          // literal severity hex values (tokens §7.1).
+          stroke: "#ff8c00",
           width: 1.5,
           points: { show: false },
         },
         {
           label: `Threshold ${threshold.toFixed(3)}`,
-          stroke: "var(--sev-critical)",
+          stroke: "#ef4444",
           width: 1,
           dash: [6, 4],
           points: { show: false },
         },
       ],
       legend: { show: false },
-      scales: { y: { range: [0, Math.max(threshold * 1.4, 0.25)] as [number, number] } },
+      scales: {
+        y: {
+          // Fit the data, never clip peaks; keep the threshold visible too.
+          range: [0, Math.max(peak * 1.1, threshold * 1.4, 0.25)] as [number, number],
+        },
+      },
     }),
-    [threshold],
+    [threshold, peak],
   );
 
   if (rows.length === 0) return null;
