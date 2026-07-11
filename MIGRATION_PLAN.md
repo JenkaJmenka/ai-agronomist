@@ -1,13 +1,59 @@
 # AI Agronomist — Frontend Migration & Redesign Master Plan
 
 **Streamlit → Next.js (App Router)**
-Author: Architect · Date: 2026-07-10 · Status: PLAN ONLY (no code written)
-Execution branch (later, after user approval): `fe/nextjs-migration`
+Author: Architect · Date: 2026-07-10 · Status: **EXECUTED — P0–P5 shipped, cutover pending**
+Execution branch: `fe/nextjs-migration` (updated 2026-07-11; see §0 for delivery state)
 
 > The FastAPI backend under `src/api/` **stays**. Next.js becomes a new frontend
 > that consumes it. Streamlit (`src/dashboard/`) stays alive during a parallel run
 > and is retired only at cutover (P5). This document is opinionated: one option is
 > chosen per decision, with rejected alternatives noted in one line.
+
+---
+
+## 0. Execution status (as of 2026-07-11)
+
+All build phases are **complete, gated, live-verified, and pushed**. What remains
+is the production cutover itself (§0.3).
+
+### 0.1 Delivered
+
+| Item | State |
+|---|---|
+| P0 scaffold + design system + BFF + Playwright smoke | ✅ shipped |
+| P1 Monitoring / Climate / Gas read views (G1 downsampled, uPlot, URL windows) | ✅ shipped |
+| P2 Anomaly Detection flagship (score timeline, tables, URL filters) | ✅ shipped |
+| P3 Thresholds preview slider + System Metrics islands | ✅ shipped |
+| P4 Upload & Operations (validated CSV upload w/ two-step confirm, model registry, inject/remove synthetic, clear data) + Job Monitoring (SSE via BFF relay, polling fallback, terminate) | ✅ shipped |
+| P5 Operator Feedback (optimistic verdict w/ rollback) | ✅ shipped |
+| P2/P1 follow-ups: G4 fault labels in tables, G3 server grouping ≥500 rows, virtualized DataTable (cap lifted), channel-aware Monitoring jump, lockfile-warning fix | ✅ shipped |
+| Backend gaps G1–G5, G7, G9 on `main` (additive; Streamlit untouched) | ✅ shipped |
+| OpenAPI snapshot (`web/openapi.json`) + generated types (`web/lib/api-types.gen.ts`) | ✅ committed |
+| CI: `.github/workflows/web-ci.yml` — lint / typecheck / vitest / build / Playwright | ✅ active on `web/**` |
+| §1.2 perf budgets asserted in CI (`web/test/e2e/perf.spec.ts`): cold < 2 s, filter < 500 ms, toggle < 300 ms + zero refetch | ✅ failing-gate |
+| Railway config as code (`web/railway.json`, README deploy section) | ✅ committed |
+
+### 0.2 Verification
+
+- Five gates green at every push; 26 Playwright e2e (all BFF calls mocked — e2e
+  never touches a real backend).
+- Live end-to-end verification (2026-07-11, local uvicorn + production build):
+  G2/G3/G4/G7 with real seeded data, G5 SSE stream (progress mid-stream,
+  keep-alives, terminal close) direct **and** through the BFF relay, browser pass
+  over all five migrated pages, multipart CSV upload through the BFF. Zero code
+  changes needed.
+
+### 0.3 Remaining for cutover (manual, dashboard-level)
+
+1. Redeploy `ai-agronomist-api` from `main` (it needs G2–G5/G7 before the web
+   service's anomalies/jobs pages work against prod).
+2. Railway `web` service **exists and is configured** (root directory `web`,
+   `API_URL` reference var → `ai-agronomist-api.railway.internal:8000`, `API_KEY`
+   placeholder). Last step: connect the GitHub repo (branch `fe/nextjs-migration`)
+   — this triggers the first deploy to the service's own domain.
+3. Set a real `API_KEY` when `AUTH_ENABLED` is turned on server-side.
+4. 1-week parallel run, error-rate parity check, then the hostname switch
+   (rollback = flip the route back to the still-warm Streamlit service).
 
 ---
 
@@ -178,6 +224,11 @@ mutations; the SSE job stream. These are always live or one-shot.
 
 ## 5. API gap analysis (FastAPI additions for the new FE)
 
+> **Status:** G1–G5, G7, G9 shipped on `main` (2026-07-11); G6 confirmed already
+> in place; G8 satisfied by the BFF-only design (no CORS opened, key server-side).
+> Path params now uniformly `tenant_id`; body fields keep the documented
+> `customer_id` name — renaming those would break live Streamlit callers.
+
 The backend already exposes a clean read surface (`/api/readings/*`, `/api/jobs/*`,
 `/api/inference/*`, `/api/feedback/*`, `/api/incidents/*`, `/api/models/*`,
 `/api/gas/*`, `/api/monitoring/metrics`, `/api/upload/*`). Gaps to close for the FE:
@@ -334,7 +385,7 @@ below-threshold→normal(green). Fault-type labels reuse `FAULT_LABELS`
 Each phase: **scope · deliverables · test gates · rollback.** Phases land behind the
 parallel run — Streamlit stays live until P5 cutover.
 
-### P0 — Scaffold + design system
+### P0 — Scaffold + design system ✅ DONE
 - **Scope:** Next 15 app, TS strict, Tailwind v4, Radix, TanStack Query provider,
   Biome, Vitest+Playwright, BFF proxy skeleton, design tokens, UI primitives
   (Button, Chip, Skeleton, Card, DataTable shell, DateRangeControls), app shell +
@@ -345,7 +396,7 @@ parallel run — Streamlit stays live until P5 cutover.
   Lighthouse TTI < 2 s on Home; visual snapshot of tokens/primitives.
 - **Rollback:** branch only; nothing user-facing.
 
-### P1 — Read-only pages (Monitoring / Climate / Gas)
+### P1 — Read-only pages (Monitoring / Climate / Gas) ✅ DONE
 - **Scope:** the three monitoring pages; windowed+downsampled reads (G1), uPlot
   charts, virtualized data tables, channel toggles client-side, URL-driven window.
 - **Deliverables:** feature-parity read views hitting the real API through the BFF.
@@ -353,7 +404,7 @@ parallel run — Streamlit stays live until P5 cutover.
   e2e: pick window → chart+table render; visual regression vs. design.
 - **Rollback:** feature-flag routes off; Streamlit remains primary.
 
-### P2 — Anomaly Detection (flagship)
+### P2 — Anomaly Detection (flagship) ✅ DONE
 - **Scope:** RSC shell + streaming; score-timeline chart island; top-anomalies +
   grouped table-view islands; upload panel (sync + async job via SSE); anomalies-in-
   window (G2), enriched (G4), groups (G3); URL filters (window/threshold/fault/view).
@@ -363,7 +414,7 @@ parallel run — Streamlit stays live until P5 cutover.
   results happy path e2e.
 - **Rollback:** flag off; Streamlit anomalies page stays.
 
-### P3 — Thresholds + Metrics
+### P3 — Thresholds + Metrics ✅ DONE
 - **Scope:** threshold preview (client slider over fetched scores), saved threshold in
   URL/localStorage; metrics data-health + pipeline islands.
 - **Deliverables:** both pages at parity.
@@ -371,7 +422,7 @@ parallel run — Streamlit stays live until P5 cutover.
   independent (one failing doesn't blank the other); e2e.
 - **Rollback:** flag off.
 
-### P4 — Upload / Jobs (async flows)
+### P4 — Upload / Jobs (async flows) ✅ DONE
 - **Scope:** Upload & Operations (train, inject/remove synthetic, clear data w/ two-
   step confirm, model registry) + Job Monitoring (SSE live progress, terminate).
 - **Deliverables:** all mutations wired with optimistic/confirm UX + SSE job stream.
@@ -379,7 +430,7 @@ parallel run — Streamlit stays live until P5 cutover.
   no fire-and-forget mutations (all have error handling); terminate job e2e.
 - **Rollback:** flag off; Streamlit ops page stays (mutations are backend-idempotent).
 
-### P5 — Feedback + cutover
+### P5 — Feedback + cutover ✅ DONE except the manual cutover switch (§0.3)
 - **Scope:** Operator Feedback (queue, incident detail, label form with optimistic
   verdict, learning progress, clear feedback/models); then **parallel run** both UIs,
   then **Railway routing switch** to Next as primary, Streamlit demoted to a fallback

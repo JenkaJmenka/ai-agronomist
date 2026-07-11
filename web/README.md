@@ -37,6 +37,12 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## Deploy on Railway (cutover P5)
 
+**State (2026-07-11):** the `web` service already exists in the `ai-agronomist`
+Railway project with root directory `web`, `API_URL` set as a reference variable
+to the API service's private domain (`:8000`), and an `API_KEY` placeholder.
+The only step left is connecting the GitHub repo (branch `fe/nextjs-migration`)
+to the service — that triggers the first deploy to the service's own domain.
+
 The service is configured as code in `railway.json`; the pieces set in the
 Railway dashboard are:
 
