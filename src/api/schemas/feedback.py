@@ -116,7 +116,7 @@ class OperatorReliability(BaseModel):
 
 
 class StatisticsResponse(BaseModel):
-    """Response body for GET /api/feedback/statistics/{customer_id}."""
+    """Response body for GET /api/feedback/statistics/{tenant_id}."""
 
     customer_id: str = Field(..., description="Customer identifier")
     total_feedback: int = Field(
@@ -141,7 +141,7 @@ class StatisticsResponse(BaseModel):
 
 
 class LearningProgressResponse(BaseModel):
-    """Response body for GET /api/feedback/learning-progress/{customer_id}."""
+    """Response body for GET /api/feedback/learning-progress/{tenant_id}."""
 
     customer_id: str = Field(..., description="Customer identifier")
     progress_percent: float = Field(
