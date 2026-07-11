@@ -682,6 +682,8 @@ VELOCITY_LIMITS: dict[str, float] = {
 # CUSUM drift detector parameters (standardised-residual space).
 # Names include _SIGMA suffix to document that units are standard deviations,
 # not raw sensor units.
+# spec ref: K=0.2, H=1.0 (docs/anomaly_framework_spec.md §4); production uses
+# K=0.25/H=4.0 for ARL0 ≈ 340 (fewer false drift alarms on live telemetry).
 CUSUM_K_SIGMA: float = float(os.environ.get("CUSUM_K_SIGMA", "0.25"))   # production-sensitive: detects 0.5σ shifts
 CUSUM_H_SIGMA: float = float(os.environ.get("CUSUM_H_SIGMA", "4.0"))   # ARL₀ ≈ 340 samples
 
@@ -817,6 +819,8 @@ RTT_MULTIPLIER: float = float(os.environ.get("RTT_MULTIPLIER", "3.0"))
 JITTER_THRESHOLD_MS: float = float(os.environ.get("JITTER_THRESHOLD_MS", "20.0"))
 
 # Inter-Packet Interval variation (IAT CV).
+# spec ref: w=5 (docs/anomaly_framework_spec.md §11); production uses 20 for
+# a steadier CV estimate on jittery links.
 IAT_CV_WINDOW: int = int(os.environ.get("IAT_CV_WINDOW", "20"))
 IAT_CV_THRESHOLD: float = float(os.environ.get("IAT_CV_THRESHOLD", "1.0"))
 IAT_BASELINE_MEAN: float = float(os.environ.get("IAT_BASELINE_MEAN", "1.0"))
