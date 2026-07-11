@@ -58,3 +58,18 @@ test("anomalies threshold writes to the URL", async ({ page }) => {
   await slider.fill("0.25");
   await expect(page).toHaveURL(/threshold=0.25/);
 });
+
+test("thresholds page: preview slider updates flagged counts and URL", async ({ page }) => {
+  await page.goto("/thresholds");
+  await expect(page.getByRole("heading", { name: "Threshold Management" })).toBeVisible();
+  const slider = page.getByTestId("threshold-control").locator("input[type=range]");
+  await slider.fill("0.3");
+  await expect(page).toHaveURL(/preview=0.3/);
+});
+
+test("metrics page renders both islands", async ({ page }) => {
+  await page.goto("/metrics");
+  await expect(page.getByRole("heading", { name: "System Metrics" })).toBeVisible();
+  await expect(page.getByText(/Detections \(last 24 h\)/i)).toBeVisible();
+  await expect(page.getByText("Pattern distribution", { exact: false })).toBeVisible();
+});
