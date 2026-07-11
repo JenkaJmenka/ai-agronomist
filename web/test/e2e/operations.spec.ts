@@ -116,7 +116,5 @@ test("model registry lists versions and activates an inactive one", async ({ pag
   await expect(page.getByText("active", { exact: true })).toBeVisible();
 
   await page.getByTestId("activate-model-b").click();
-  await expect
-    .poll(() => activateRequests, { message: "activate call reaches the BFF" })
-    .toBe(1);
+  await expect.poll(() => activateRequests, { message: "activate call reaches the BFF" }).toBe(1);
 });

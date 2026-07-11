@@ -8,7 +8,6 @@ import { DataTable } from "@/components/ui/DataTable";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { getSeverity } from "@/lib/severity";
 
-const TABLE_ROW_CAP = 200;
 const SCORE_THRESHOLD_FALLBACK = 0.15;
 
 interface ReadingsTableProps {
@@ -46,8 +45,8 @@ export function ReadingsTable({ rows, channels }: ReadingsTableProps) {
     return base;
   }, [channels]);
 
-  // Newest first; capped until virtualization (P1 follow-up) lands.
-  const recentRows = useMemo(() => rows.slice(-TABLE_ROW_CAP).reverse(), [rows]);
+  // Newest first; DataTable virtualizes, so the full window renders uncapped.
+  const recentRows = useMemo(() => [...rows].reverse(), [rows]);
 
   return <DataTable columns={columns} rows={recentRows} />;
 }

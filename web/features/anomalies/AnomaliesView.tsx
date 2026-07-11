@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
@@ -10,6 +10,7 @@ import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomali
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
+import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 
 type ViewMode = "graphical" | "table";
 
@@ -26,6 +27,16 @@ function AnomaliesBody() {
     downsampled,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
+
+  // Envelope bounds drive the G4/G3 queries — rows are timestamp-ordered.
+  const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
+  const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
+  const enrichment = useEnrichedAnomalies({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: anomalies.length > 0,
+  });
 
   if (isError) {
     throw error ?? new Error("Failed to load anomalies");
@@ -92,12 +103,17 @@ function AnomaliesBody() {
             <ScoreTimeline rows={rows} threshold={threshold} />
           </Card>
           <Card title="Top anomalies">
-            <AnomalyTable anomalies={anomalies} />
+            <AnomalyTable anomalies={anomalies} enrichment={enrichment.byTimestamp} />
           </Card>
         </>
       ) : (
         <Card title="Detected anomalies (grouped)">
-          <GroupedAnomalies anomalies={anomalies} />
+          <GroupedAnomalies
+            anomalies={anomalies}
+            windowStart={windowStart}
+            windowEnd={windowEnd}
+            threshold={threshold}
+          />
         </Card>
       )}
     </div>

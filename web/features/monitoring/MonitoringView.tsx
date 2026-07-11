@@ -1,5 +1,6 @@
 "use client";
 
+import { parseAsString, useQueryState } from "nuqs";
 import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
@@ -17,8 +18,16 @@ interface MonitoringViewProps {
   readonly channelFilter?: readonly string[];
 }
 
+function matchChannel(channels: string[], wanted: string): string[] {
+  const exact = channels.filter((ch) => ch === wanted);
+  if (exact.length > 0) return exact;
+  return channels.filter((ch) => ch.toLowerCase().includes(wanted.toLowerCase()));
+}
+
 function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   const { rows, isLoading, isError, error, windowLabel, downsampled } = useReadings();
+  // Anomaly-jump deep link: ?channel= pre-selects one trace (P2 follow-up).
+  const [channelParam] = useQueryState("channel", parseAsString);
 
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
@@ -28,15 +37,20 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
     );
   }, [rows, channelFilter]);
 
-  const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set());
-  const visible = useMemo(
-    () => new Set(channels.filter((ch) => !hidden.has(ch))),
-    [channels, hidden],
-  );
+  // null = untouched: the channel deep link applies until the first toggle.
+  const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
+  const visible = useMemo(() => {
+    if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
+    if (channelParam) {
+      const matched = matchChannel(channels, channelParam);
+      if (matched.length > 0) return new Set(matched);
+    }
+    return new Set(channels);
+  }, [channels, hidden, channelParam]);
 
   function toggleChannel(ch: string): void {
-    setHidden((prev) => {
-      const next = new Set(prev);
+    setHidden(() => {
+      const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
       if (next.has(ch)) next.delete(ch);
       else next.add(ch);
       return next;
@@ -80,7 +94,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
           <Card title="Time series">
             <SensorTimeSeriesChart rows={rows} channels={channels} visible={visible} />
           </Card>
-          <Card title={`Readings (latest ${Math.min(rows.length, 200)})`}>
+          <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>
             <ReadingsTable rows={rows} channels={channels} />
           </Card>
         </>

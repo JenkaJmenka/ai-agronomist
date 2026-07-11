@@ -7,6 +7,8 @@ import { Chip } from "@/components/ui/Chip";
 import { DataTable } from "@/components/ui/DataTable";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
+import type { AnomalyEnrichment } from "@/features/anomalies/hooks/useEnrichedAnomalies";
+import { FAULT_LABELS } from "@/lib/severity";
 
 const TOP_ANOMALIES_CAP = 50;
 
@@ -19,10 +21,17 @@ const SEVERITY_LABEL = {
 
 interface AnomalyTableProps {
   readonly anomalies: AnomalyRow[];
+  /** G4 enrichment keyed by row timestamp; absent while loading/unavailable. */
+  readonly enrichment?: ReadonlyMap<string, AnomalyEnrichment>;
 }
 
-/** Top anomalies, most severe first, with the Monitoring jump per row. */
-export function AnomalyTable({ anomalies }: AnomalyTableProps) {
+function faultLabel(faultType: string | null | undefined): string | null {
+  if (!faultType) return null;
+  return FAULT_LABELS[faultType] ?? faultType.replaceAll("_", " ");
+}
+
+/** Top anomalies, most severe first, with fault type + Monitoring jump. */
+export function AnomalyTable({ anomalies, enrichment }: AnomalyTableProps) {
   const columns = useMemo<ColumnDef<AnomalyRow, unknown>[]>(
     () => [
       {
@@ -50,12 +59,34 @@ export function AnomalyTable({ anomalies }: AnomalyTableProps) {
         },
       },
       {
+        header: "Fault type",
+        id: "fault_type",
+        cell: (ctx) => {
+          const detail = enrichment?.get(ctx.row.original.timestamp);
+          const label = faultLabel(detail?.faultType);
+          if (!label) return <span className="text-text-muted">—</span>;
+          return (
+            <span title={detail?.rootCause ?? undefined} data-testid="fault-type">
+              {label}
+            </span>
+          );
+        },
+      },
+      {
         header: "Actions",
         id: "actions",
-        cell: (ctx) => <MonitoringJumpLink timestamp={ctx.row.original.timestamp} />,
+        cell: (ctx) => {
+          const detail = enrichment?.get(ctx.row.original.timestamp);
+          return (
+            <MonitoringJumpLink
+              timestamp={ctx.row.original.timestamp}
+              channel={detail?.affectedSensors[0] ?? null}
+            />
+          );
+        },
       },
     ],
-    [],
+    [enrichment],
   );
 
   const top = useMemo(() => anomalies.slice(0, TOP_ANOMALIES_CAP), [anomalies]);

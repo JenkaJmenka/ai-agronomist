@@ -1,6 +1,14 @@
 "use client";
 
 import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useRef } from "react";
+
+/** Row count above which the body renders through the virtualizer. */
+const VIRTUALIZE_THRESHOLD = 100;
+const ESTIMATED_ROW_HEIGHT_PX = 37;
+const OVERSCAN_ROWS = 12;
+const VIRTUAL_VIEWPORT_MAX_HEIGHT = "max-h-[560px]";
 
 interface DataTableProps<T> {
   readonly columns: ColumnDef<T, unknown>[];
@@ -8,26 +16,56 @@ interface DataTableProps<T> {
   readonly emptyMessage?: string;
 }
 
-/** Sticky-header table shell (TanStack Table). Virtualization lands in P1. */
+/**
+ * Sticky-header table shell (TanStack Table). Large row sets render through
+ * TanStack Virtual so a 50k-row window stays smooth (plan §3) — only the
+ * visible slice plus overscan hits the DOM; spacer rows preserve scroll size.
+ */
 export function DataTable<T>({
   columns,
   rows,
   emptyMessage = "No records in the selected filters.",
 }: DataTableProps<T>) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const table = useReactTable({
     data: rows,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
 
+  const tableRows = table.getRowModel().rows;
+  const isVirtual = tableRows.length > VIRTUALIZE_THRESHOLD;
+
+  const virtualizer = useVirtualizer({
+    count: tableRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ESTIMATED_ROW_HEIGHT_PX,
+    overscan: OVERSCAN_ROWS,
+    enabled: isVirtual,
+  });
+
   if (rows.length === 0) {
     return <p className="py-8 text-center text-sm text-text-muted">{emptyMessage}</p>;
   }
 
+  const virtualItems = isVirtual ? virtualizer.getVirtualItems() : null;
+  const bodyRows = virtualItems ? virtualItems.map((item) => tableRows[item.index]) : tableRows;
+  const paddingTop = virtualItems?.[0]?.start ?? 0;
+  const paddingBottom = virtualItems
+    ? virtualizer.getTotalSize() - (virtualItems.at(-1)?.end ?? 0)
+    : 0;
+
   return (
-    <div className="overflow-x-auto rounded-[var(--radius-card)] border border-border">
+    <div
+      ref={scrollRef}
+      data-testid="data-table"
+      data-virtualized={isVirtual || undefined}
+      className={`overflow-auto rounded-[var(--radius-card)] border border-border ${
+        isVirtual ? VIRTUAL_VIEWPORT_MAX_HEIGHT : ""
+      }`}
+    >
       <table className="w-full text-sm">
-        <thead className="sticky top-0 bg-bg-elevated">
+        <thead className="sticky top-0 z-10 bg-bg-elevated">
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id} className="border-b border-border text-left">
               {hg.headers.map((h) => (
@@ -39,7 +77,12 @@ export function DataTable<T>({
           ))}
         </thead>
         <tbody>
-          {table.getRowModel().rows.map((row) => (
+          {paddingTop > 0 ? (
+            <tr>
+              <td colSpan={columns.length} style={{ height: paddingTop, padding: 0 }} />
+            </tr>
+          ) : null}
+          {bodyRows.map((row) => (
             <tr key={row.id} className="border-b border-border last:border-b-0">
               {row.getVisibleCells().map((cell) => (
                 <td key={cell.id} className="px-3 py-2">
@@ -48,6 +91,11 @@ export function DataTable<T>({
               ))}
             </tr>
           ))}
+          {paddingBottom > 0 ? (
+            <tr>
+              <td colSpan={columns.length} style={{ height: paddingBottom, padding: 0 }} />
+            </tr>
+          ) : null}
         </tbody>
       </table>
     </div>
