@@ -65,12 +65,23 @@ serviceConnect (repo JenkaJmenka/ai-agronomist, branch fe/nextjs-migration) was
 NOT executed — it triggers an immediate build+deploy and needs explicit user
 approval (permission classifier blocked it in auto mode).
 
+Post-delivery fixes (2026-07-11 evening):
+- CI-only e2e failure fixed: thresholds smoke test relied on live data from a
+  dev-machine API (slider only renders over scored rows) → timed out in CI.
+  Test now mocks the BFF; playwright.config webServer pins API_URL to a dead
+  port (E2E_API_URL to override) so local e2e is hermetic like CI.
+- Removed src/api/middleware/logging.py from main — committed file contained
+  conversational LLM text (not Python), broke compileall, imported nowhere.
+- Docs: MIGRATION_PLAN.md §0 = delivery status; web/AGENTS.md = agent guide
+  for web/; RAILWAY_HOSTING.md (FE branch root) = full hosting/cutover
+  runbook. NOTE: docs/ is GITIGNORED on this repo (local-only planning) —
+  committed docs go at the repo root.
+
 Left for cutover day (manual): (1) redeploy ai-agronomist-api from main (needs
 G2–G5/G7), (2) connect the repo to the web service (dashboard: Settings → Source,
 or re-run the serviceConnect mutation), (3) real API_KEY when auth is enabled,
 (4) 1-week parallel-run parity check, then the hostname switch (rollback = flip
-back to Streamlit). Docs: MIGRATION_PLAN.md §0 (FE branch) is the canonical
-delivery-status section; web/AGENTS.md is the agent guide for web/.
+back to Streamlit). Full runbook: RAILWAY_HOSTING.md on fe/nextjs-migration.
 
 ---
 
