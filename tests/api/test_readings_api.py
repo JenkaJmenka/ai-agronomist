@@ -241,3 +241,68 @@ class TestDownsamplingParams:
         payload = response.json()
         assert payload["rows"]
         assert all("anomaly_score" not in r for r in payload["rows"])
+
+
+class TestAnomaliesInWindow:
+    """G2: /api/readings/anomalies-in-window (route-level; the filter itself
+    is covered by tests/services/test_anomaly_insights.py)."""
+
+    _WINDOW = {
+        "start": BASE_TS.isoformat(),
+        "end": (BASE_TS + datetime.timedelta(hours=ROWS)).isoformat(),
+    }
+
+    def test_returns_flagged_rows_and_counts(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, "threshold": 0.5, **self._WINDOW},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()
+        assert payload["anomaly_count"] == 1
+        assert payload["total_count"] == ROWS
+        assert len(payload["rows"]) == 1
+        assert payload["rows"][0]["anomaly_score"] == pytest.approx(0.9)
+
+    def test_threshold_above_all_scores_yields_empty(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, "threshold": 0.95, **self._WINDOW},
+        )
+        payload = response.json()
+        assert payload["rows"] == []
+        assert payload["anomaly_count"] == 0
+        assert payload["total_count"] == ROWS
+
+    def test_threshold_is_required(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, **self._WINDOW},
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_max_points_over_row_count_is_a_noop(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={
+                "tenant_id": TENANT,
+                "threshold": 0.5,
+                "max_points": 100,
+                **self._WINDOW,
+            },
+        )
+        payload = response.json()
+        assert payload["anomaly_count"] == 1
+        assert "downsampled" not in payload
+
+    def test_rejects_bad_timestamp(self, test_client):
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={
+                "tenant_id": TENANT,
+                "threshold": 0.5,
+                "start": "not-a-date",
+                "end": "also-bad",
+            },
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST

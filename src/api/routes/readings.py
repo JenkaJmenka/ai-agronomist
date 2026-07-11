@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi_cache.decorator import cache
 
+from src.api.query_params import parse_iso_param
 from src.api.services import readings_service
+from src.api.services.anomaly_insights import filter_anomaly_rows
 from src.api.services.downsample import downsample_rows, strip_scores
 from src.config import (
     DOWNSAMPLE_MAX_POINTS_CEIL,
@@ -43,13 +45,7 @@ def _shape_rows(
     return rows, extras
 
 
-def _parse_iso(value: str, param: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid ISO timestamp for {param!r}: {value!r}"
-        ) from exc
+_parse_iso = parse_iso_param
 
 
 @router.get("/window")
@@ -124,6 +120,45 @@ async def get_readings_recent(
         "count": len(rows),
         "min_timestamp": min_iso,
         "max_timestamp": max_iso,
+        **extras,
+    }
+
+
+@router.get("/anomalies-in-window")
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
+async def get_anomalies_in_window(
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query(default="default"),
+    start: str = Query(...),
+    end: str = Query(...),
+    threshold: float = Query(..., ge=0.0, le=1.0),
+    max_points: Optional[int] = Query(
+        default=None, ge=DOWNSAMPLE_MAX_POINTS_FLOOR, le=DOWNSAMPLE_MAX_POINTS_CEIL
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Threshold-filtered anomaly rows for a window (migration plan G2).
+
+    Moves the dashboard's `load_anomalies_for_window` merge+filter
+    server-side: merged raw+canonical rows are score-filtered, and
+    `max_points` LTTB-downsamples the flagged rows. `total_count` is the
+    full window's row count, `anomaly_count` the flagged count before
+    downsampling.
+    """
+    window_rows = await readings_service.fetch_merged_readings(
+        db,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        start=_parse_iso(start, "start"),
+        end=_parse_iso(end, "end"),
+    )
+    anomaly_rows = filter_anomaly_rows(window_rows, threshold)
+    anomaly_count = len(anomaly_rows)
+    anomaly_rows, extras = _shape_rows(anomaly_rows, max_points, include_scores=True)
+    return {
+        "rows": anomaly_rows,
+        "anomaly_count": anomaly_count,
+        "total_count": len(window_rows),
         **extras,
     }
 
