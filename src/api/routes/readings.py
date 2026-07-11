@@ -10,10 +10,37 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi_cache.decorator import cache
 
 from src.api.services import readings_service
-from src.config import READINGS_RECENT_HOURS, REDIS_CACHE_EXPIRE_SECONDS
+from src.api.services.downsample import downsample_rows, strip_scores
+from src.config import (
+    DOWNSAMPLE_MAX_POINTS_CEIL,
+    DOWNSAMPLE_MAX_POINTS_FLOOR,
+    READINGS_RECENT_HOURS,
+    REDIS_CACHE_EXPIRE_SECONDS,
+)
 from src.db.session import get_db
 
 router = APIRouter(prefix="/api/readings", tags=["Readings"])
+
+
+def _shape_rows(
+    rows: list[dict[str, Any]],
+    max_points: Optional[int],
+    include_scores: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply G1 downsampling/score-stripping; extras are {} when a no-op.
+
+    Additive contract: with max_points unset and include_scores=True the
+    response is byte-identical to the pre-G1 behavior.
+    """
+    extras: dict[str, Any] = {}
+    if max_points is not None:
+        original_count = len(rows)
+        rows, downsampled = downsample_rows(rows, max_points)
+        if downsampled:
+            extras = {"downsampled": True, "original_count": original_count}
+    if not include_scores:
+        rows = strip_scores(rows)
+    return rows, extras
 
 
 def _parse_iso(value: str, param: str) -> datetime:
@@ -33,9 +60,17 @@ async def get_readings_window(
     start: str = Query(...),
     end: str = Query(...),
     limit: Optional[int] = Query(default=None, ge=1),
+    max_points: Optional[int] = Query(
+        default=None, ge=DOWNSAMPLE_MAX_POINTS_FLOOR, le=DOWNSAMPLE_MAX_POINTS_CEIL
+    ),
+    include_scores: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Merged raw+canonical rows for an inclusive window (hard row cap applies)."""
+    """Merged raw+canonical rows for an inclusive window (hard row cap applies).
+
+    G1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);
+    `include_scores=false` trims anomaly_score from the payload.
+    """
     rows = await readings_service.fetch_merged_readings(
         db,
         tenant_id=tenant_id,
@@ -44,7 +79,8 @@ async def get_readings_window(
         end=_parse_iso(end, "end"),
         limit=limit,
     )
-    return {"rows": rows, "count": len(rows)}
+    rows, extras = _shape_rows(rows, max_points, include_scores)
+    return {"rows": rows, "count": len(rows), **extras}
 
 
 @router.get("/recent")
@@ -54,6 +90,10 @@ async def get_readings_recent(
     greenhouse_id: str = Query(default="default"),
     hours: int = Query(default=READINGS_RECENT_HOURS, ge=1),
     limit: Optional[int] = Query(default=None, ge=1),
+    max_points: Optional[int] = Query(
+        default=None, ge=DOWNSAMPLE_MAX_POINTS_FLOOR, le=DOWNSAMPLE_MAX_POINTS_CEIL
+    ),
+    include_scores: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Bounded landing-page load: the most recent `hours` of merged readings.
@@ -78,11 +118,13 @@ async def get_readings_recent(
         end=end,
         limit=limit,
     )
+    rows, extras = _shape_rows(rows, max_points, include_scores)
     return {
         "rows": rows,
         "count": len(rows),
         "min_timestamp": min_iso,
         "max_timestamp": max_iso,
+        **extras,
     }
 
 

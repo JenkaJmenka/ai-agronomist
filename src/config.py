@@ -848,3 +848,9 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
 )
 TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
 REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS", "300"))
+
+# Server-side downsampling (migration plan G1) — readings endpoints.
+DOWNSAMPLE_MAX_POINTS_FLOOR: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_FLOOR", "100"))
+DOWNSAMPLE_MAX_POINTS_CEIL: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_CEIL", "10000"))
+# Rows whose anomaly_score sits in this top quantile always survive downsampling.
+DOWNSAMPLE_ANOMALY_QUANTILE: float = float(os.environ.get("DOWNSAMPLE_ANOMALY_QUANTILE", "0.90"))
