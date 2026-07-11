@@ -53,10 +53,24 @@ always check lsof before local verification. Stray synthetic rows accidentally i
 into the :8000 server's DB were fully removed via the unfiltered inject-test-anomalies
 DELETE (210/210 accounted for).
 
-Left for cutover day (dashboard-only actions): create the Railway web service
-(root=web, API_URL/API_KEY env — config already in web/railway.json + README),
-1-week parallel-run parity check in prod, manual hostname switch (rollback = flip
-back to Streamlit).
+Railway web service CREATED (2026-07-11, via CLI + GraphQL, no deploy):
+project ai-agronomist / env production / service `web`
+(id b0d43998-851e-4715-8723-f2c87ed89fd8). rootDirectory=web set via
+serviceInstanceUpdate; API_URL is a REFERENCE var
+`http://${{ai-agronomist-api.RAILWAY_PRIVATE_DOMAIN}}:8000` (resolves to
+ai-agronomist-api.railway.internal:8000 — port 8000 = start-api.sh default);
+API_KEY=CHANGE_ME_WHEN_AUTH_ENABLED placeholder (existing service variables were
+deliberately NOT read — set a real tenant key when AUTH_ENABLED goes on).
+serviceConnect (repo JenkaJmenka/ai-agronomist, branch fe/nextjs-migration) was
+NOT executed — it triggers an immediate build+deploy and needs explicit user
+approval (permission classifier blocked it in auto mode).
+
+Left for cutover day (manual): (1) redeploy ai-agronomist-api from main (needs
+G2–G5/G7), (2) connect the repo to the web service (dashboard: Settings → Source,
+or re-run the serviceConnect mutation), (3) real API_KEY when auth is enabled,
+(4) 1-week parallel-run parity check, then the hostname switch (rollback = flip
+back to Streamlit). Docs: MIGRATION_PLAN.md §0 (FE branch) is the canonical
+delivery-status section; web/AGENTS.md is the agent guide for web/.
 
 ---
 
