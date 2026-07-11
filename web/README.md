@@ -37,6 +37,9 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## Deploy on Railway (cutover P5)
 
+> **Full runbook:** [RAILWAY_HOSTING.md](../RAILWAY_HOSTING.md) — service topology,
+> first deploy, cutover, rollback, troubleshooting.
+
 **State (2026-07-11):** the `web` service already exists in the `ai-agronomist`
 Railway project with root directory `web`, `API_URL` set as a reference variable
 to the API service's private domain (`:8000`), and an `API_KEY` placeholder.

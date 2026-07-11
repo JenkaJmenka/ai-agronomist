@@ -45,6 +45,8 @@ is the production cutover itself (§0.3).
 
 ### 0.3 Remaining for cutover (manual, dashboard-level)
 
+> Step-by-step runbook: `RAILWAY_HOSTING.md` (repo root).
+
 1. Redeploy `ai-agronomist-api` from `main` (it needs G2–G5/G7 before the web
    service's anomalies/jobs pages work against prod).
 2. Railway `web` service **exists and is configured** (root directory `web`,
