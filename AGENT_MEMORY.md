@@ -40,8 +40,23 @@ FE on fe/nextjs-migration (main merged in at 1ab3d5c so local e2e can hit new en
 - Gates at push: biome clean, tsc clean, 22 vitest, build clean, 26/26 Playwright
   (all BFF calls mocked in e2e — nothing touches production Railway).
 
-Left for cutover day: create the Railway web service (root=web, API_URL/API_KEY env),
-live parallel-run parity check, manual hostname switch (rollback = flip back to Streamlit).
+Live verification (2026-07-11, local stack: uvicorn on :8010 w/ scratch sqlite + built
+web/ on :3200 w/ API_URL=:8010): all new endpoints verified with real seeded data —
+G2 (10/210 counts), G3 all three group_by modes, G4 (spike_fault + affected_sensors),
+G7, G5 SSE end-to-end (initial event → keep-alive → mid-stream progress via expire_all →
+terminal close) both direct AND through the BFF relay; browser pass over
+/anomalies (live fault labels + channel jump), /monitoring, /jobs (live job card),
+/operations, /feedback; multipart CSV upload through the BFF sync path (101 sequences,
+spike detected, sub-second). Zero code changes needed. Gotchas hit: stale uvicorn on
+:8000 and stale next-server on :3200 from earlier sessions shadowed the new code —
+always check lsof before local verification. Stray synthetic rows accidentally injected
+into the :8000 server's DB were fully removed via the unfiltered inject-test-anomalies
+DELETE (210/210 accounted for).
+
+Left for cutover day (dashboard-only actions): create the Railway web service
+(root=web, API_URL/API_KEY env — config already in web/railway.json + README),
+1-week parallel-run parity check in prod, manual hostname switch (rollback = flip
+back to Streamlit).
 
 ---
 
