@@ -5,10 +5,7 @@ import { useMemo } from "react";
 
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
-import { getSeverity, type Severity } from "@/lib/severity";
-
-/** Matches the model's calibrated cutoff scale (scores top out ~0.2). */
-const DEFAULT_THRESHOLD = 0.15;
+import { DEFAULT_SCORE_THRESHOLD, getSeverity, type Severity } from "@/lib/severity";
 
 export interface AnomalyRow extends SensorRow {
   readonly score: number;
@@ -36,7 +33,7 @@ export function useAnomalies(): AnomaliesState {
   const readings = useReadings();
   const [threshold, setThresholdRaw] = useQueryState(
     "threshold",
-    parseAsFloat.withDefault(DEFAULT_THRESHOLD),
+    parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   );
 
   const anomalies = useMemo<AnomalyRow[]>(() => {

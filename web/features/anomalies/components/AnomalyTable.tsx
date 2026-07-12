@@ -80,7 +80,7 @@ export function AnomalyTable({ anomalies, enrichment }: AnomalyTableProps) {
           return (
             <MonitoringJumpLink
               timestamp={ctx.row.original.timestamp}
-              channel={detail?.affectedSensors[0] ?? null}
+              channels={detail?.affectedSensors ?? null}
             />
           );
         },

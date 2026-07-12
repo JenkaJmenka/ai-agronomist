@@ -13,3 +13,6 @@ export const CHART_PALETTE = [
 export function channelColor(index: number): string {
   return CHART_PALETTE[index % CHART_PALETTE.length];
 }
+
+/** Translucent --sev-critical (#ef4444) — anomaly band overlay on charts. */
+export const ANOMALY_BAND_FILL = "rgba(239, 68, 68, 0.15)";

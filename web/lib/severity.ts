@@ -2,6 +2,9 @@
 
 export type Severity = "normal" | "warning" | "lstm" | "critical";
 
+/** Matches the model's calibrated cutoff scale (scores top out ~0.2). */
+export const DEFAULT_SCORE_THRESHOLD = 0.15;
+
 export const FAULT_LABELS: Readonly<Record<string, string>> = {
   spike_fault: "Spike fault",
   calibration_drift: "Calibration drift",

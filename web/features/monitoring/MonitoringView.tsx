@@ -1,6 +1,6 @@
 "use client";
 
-import { parseAsString, useQueryState } from "nuqs";
+import { parseAsFloat, parseAsString, useQueryState } from "nuqs";
 import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
@@ -11,6 +11,7 @@ import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles"
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
+import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 
 interface MonitoringViewProps {
   readonly title: string;
@@ -24,10 +25,22 @@ function matchChannel(channels: string[], wanted: string): string[] {
   return channels.filter((ch) => ch.toLowerCase().includes(wanted.toLowerCase()));
 }
 
+/** `channel=` carries a comma-separated list when an anomaly touches several sensors. */
+function matchChannelParam(channels: string[], param: string): string[] {
+  const wantedList = param
+    .split(",")
+    .map((w) => w.trim())
+    .filter(Boolean);
+  const matched = new Set(wantedList.flatMap((wanted) => matchChannel(channels, wanted)));
+  return [...matched];
+}
+
 function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   const { rows, isLoading, isError, error, windowLabel, downsampled } = useReadings();
-  // Anomaly-jump deep link: ?channel= pre-selects one trace (P2 follow-up).
+  // Anomaly-jump deep link: ?channel= pre-selects the affected traces and
+  // ?threshold= keeps highlighting consistent with the Anomalies page.
   const [channelParam] = useQueryState("channel", parseAsString);
+  const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
 
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
@@ -42,7 +55,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   const visible = useMemo(() => {
     if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
     if (channelParam) {
-      const matched = matchChannel(channels, channelParam);
+      const matched = matchChannelParam(channels, channelParam);
       if (matched.length > 0) return new Set(matched);
     }
     return new Set(channels);
@@ -92,10 +105,15 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
             <ChannelToggles channels={channels} visible={visible} onToggle={toggleChannel} />
           </Card>
           <Card title="Time series">
-            <SensorTimeSeriesChart rows={rows} channels={channels} visible={visible} />
+            <SensorTimeSeriesChart
+              rows={rows}
+              channels={channels}
+              visible={visible}
+              threshold={threshold}
+            />
           </Card>
           <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>
-            <ReadingsTable rows={rows} channels={channels} />
+            <ReadingsTable rows={rows} channels={channels} threshold={threshold} />
           </Card>
         </>
       )}

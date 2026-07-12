@@ -155,7 +155,7 @@ export function GroupedAnomalies({
                     <span className="ml-auto">
                       <MonitoringJumpLink
                         timestamp={sampleTimestamp}
-                        channel={serverGroupBy === "sensor" ? group.key : null}
+                        channels={serverGroupBy === "sensor" ? [group.key] : null}
                       />
                     </span>
                   </li>

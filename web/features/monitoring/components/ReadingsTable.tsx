@@ -8,14 +8,18 @@ import { DataTable } from "@/components/ui/DataTable";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { getSeverity } from "@/lib/severity";
 
-const SCORE_THRESHOLD_FALLBACK = 0.15;
-
 interface ReadingsTableProps {
   readonly rows: SensorRow[];
   readonly channels: string[];
+  /** Rows scoring at/above this are highlighted as anomalies. */
+  readonly threshold: number;
 }
 
-export function ReadingsTable({ rows, channels }: ReadingsTableProps) {
+function isAnomalousRow(row: SensorRow, threshold: number): boolean {
+  return typeof row.anomaly_score === "number" && row.anomaly_score >= threshold;
+}
+
+export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps) {
   const columns = useMemo<ColumnDef<SensorRow, unknown>[]>(() => {
     const base: ColumnDef<SensorRow, unknown>[] = [
       {
@@ -37,16 +41,22 @@ export function ReadingsTable({ rows, channels }: ReadingsTableProps) {
         cell: (ctx) => {
           const v = ctx.getValue();
           if (typeof v !== "number") return "—";
-          const severity = getSeverity({ score: v, threshold: SCORE_THRESHOLD_FALLBACK });
+          const severity = getSeverity({ score: v, threshold });
           return <Chip severity={severity}>{v.toFixed(3)}</Chip>;
         },
       },
     ];
     return base;
-  }, [channels]);
+  }, [channels, threshold]);
 
   // Newest first; DataTable virtualizes, so the full window renders uncapped.
   const recentRows = useMemo(() => [...rows].reverse(), [rows]);
 
-  return <DataTable columns={columns} rows={recentRows} />;
+  return (
+    <DataTable
+      columns={columns}
+      rows={recentRows}
+      rowClassName={(row) => (isAnomalousRow(row, threshold) ? "bg-sev-critical/10" : undefined)}
+    />
+  );
 }

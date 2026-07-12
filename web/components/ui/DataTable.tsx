@@ -14,6 +14,8 @@ interface DataTableProps<T> {
   readonly columns: ColumnDef<T, unknown>[];
   readonly rows: T[];
   readonly emptyMessage?: string;
+  /** Extra classes for a body row (e.g. anomaly highlighting). */
+  readonly rowClassName?: (row: T) => string | undefined;
 }
 
 /**
@@ -25,6 +27,7 @@ export function DataTable<T>({
   columns,
   rows,
   emptyMessage = "No records in the selected filters.",
+  rowClassName,
 }: DataTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const table = useReactTable({
@@ -83,7 +86,12 @@ export function DataTable<T>({
             </tr>
           ) : null}
           {bodyRows.map((row) => (
-            <tr key={row.id} className="border-b border-border last:border-b-0">
+            <tr
+              key={row.id}
+              className={`border-b border-border last:border-b-0 ${
+                rowClassName?.(row.original) ?? ""
+              }`}
+            >
               {row.getVisibleCells().map((cell) => (
                 <td key={cell.id} className="px-3 py-2">
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
