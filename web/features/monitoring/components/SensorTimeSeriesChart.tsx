@@ -3,6 +3,11 @@
 import { useMemo } from "react";
 import type uPlot from "uplot";
 
+import {
+  createRangeSelectHook,
+  type RangeSelectHandler,
+  SELECT_ONLY_CURSOR,
+} from "@/components/charts/rangeSelect";
 import { UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { type AnomalyBand, computeAnomalyBands } from "@/features/monitoring/lib/anomalyBands";
@@ -15,6 +20,8 @@ interface SensorTimeSeriesChartProps {
   readonly visible: ReadonlySet<string>;
   /** Rows scoring at/above this get a red background band on the chart. */
   readonly threshold: number;
+  /** Drag-selection on the x-axis reports a [from, to] window. */
+  readonly onRangeSelect?: RangeSelectHandler;
 }
 
 /** Paints translucent bands behind the series over anomalous time spans. */
@@ -35,6 +42,7 @@ export function SensorTimeSeriesChart({
   channels,
   visible,
   threshold,
+  onRangeSelect,
 }: SensorTimeSeriesChartProps) {
   const data = useMemo(() => {
     const xs = rows.map((r) => new Date(r.timestamp).getTime() / 1000);
@@ -61,13 +69,15 @@ export function SensorTimeSeriesChart({
         })),
       ],
       legend: { show: false },
+      ...(onRangeSelect ? { cursor: SELECT_ONLY_CURSOR } : {}),
       // drawClear runs after the canvas reset and before series strokes,
       // so bands sit behind the traces.
       hooks: {
         drawClear: [(u: uPlot) => drawAnomalyBands(u, bands)],
+        ...(onRangeSelect ? { setSelect: [createRangeSelectHook(onRangeSelect)] } : {}),
       },
     }),
-    [channels, visible, bands],
+    [channels, visible, bands, onRangeSelect],
   );
 
   if (rows.length === 0) return null;

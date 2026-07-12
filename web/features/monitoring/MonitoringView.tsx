@@ -12,6 +12,7 @@ import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
+import { useDateRange } from "@/lib/useDateRange";
 
 interface MonitoringViewProps {
   readonly title: string;
@@ -41,6 +42,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   // ?threshold= keeps highlighting consistent with the Anomalies page.
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
+  const [, setRange] = useDateRange();
 
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
@@ -110,6 +112,9 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
               channels={channels}
               visible={visible}
               threshold={threshold}
+              // Drag-selecting a span narrows the URL window, so the
+              // readings table below filters to the same range.
+              onRangeSelect={(from, to) => void setRange({ from, to })}
             />
           </Card>
           <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>

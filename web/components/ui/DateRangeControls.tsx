@@ -1,10 +1,10 @@
 "use client";
 
-import { parseAsIsoDateTime, useQueryStates } from "nuqs";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
+import { useDateRange } from "@/lib/useDateRange";
 
 const QUICK_RANGES = [
   { label: "24 h", hours: 24 },
@@ -19,10 +19,7 @@ const QUICK_RANGES = [
  * Streamlit state-loss bug.
  */
 export function DateRangeControls() {
-  const [{ from, to }, setRange] = useQueryStates({
-    from: parseAsIsoDateTime,
-    to: parseAsIsoDateTime,
-  });
+  const [{ from, to }, setRange] = useDateRange();
   const [isCustomOpen, setIsCustomOpen] = useState(false);
 
   function applyQuickRange(hours: number): void {
@@ -37,7 +34,7 @@ export function DateRangeControls() {
   }
 
   return (
-    <div className="flex flex-col gap-2" data-testid="date-range-controls">
+    <div className="relative flex flex-col items-end gap-1" data-testid="date-range-controls">
       <div className="flex flex-wrap items-center gap-2">
         {QUICK_RANGES.map((r) => (
           <Button
@@ -58,13 +55,19 @@ export function DateRangeControls() {
         >
           Custom
         </Button>
-        <span className="text-xs text-text-muted tabular-nums">
-          {from && to
-            ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
-            : "No window selected"}
-        </span>
       </div>
-      {isCustomOpen && <CustomDateRangeForm from={from} to={to} onApply={applyCustomRange} />}
+      <span className="text-xs text-text-muted tabular-nums">
+        {from && to
+          ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
+          : "No window selected"}
+      </span>
+      {isCustomOpen && (
+        // Anchored dropdown: opening, typing, or applying never reflows the
+        // header row, so the picker can't drift from right to left.
+        <div className="absolute right-0 top-full z-20 mt-1 w-max">
+          <CustomDateRangeForm from={from} to={to} onApply={applyCustomRange} />
+        </div>
+      )}
     </div>
   );
 }

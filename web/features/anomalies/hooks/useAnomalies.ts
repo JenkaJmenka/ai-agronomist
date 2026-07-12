@@ -22,6 +22,8 @@ export interface AnomaliesState {
   readonly error: Error | null;
   readonly windowLabel: string;
   readonly downsampled: boolean;
+  /** Pre-downsampling row count of the window (equals rows.length otherwise). */
+  readonly originalCount: number;
 }
 
 /**

@@ -2,16 +2,23 @@
 
 import { useMemo } from "react";
 
+import {
+  createRangeSelectHook,
+  type RangeSelectHandler,
+  SELECT_ONLY_CURSOR,
+} from "@/components/charts/rangeSelect";
 import { UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 
 interface ScoreTimelineProps {
   readonly rows: SensorRow[];
   readonly threshold: number;
+  /** Drag-selection on the x-axis reports a [from, to] window. */
+  readonly onRangeSelect?: RangeSelectHandler;
 }
 
 /** Anomaly-score series with the threshold as a reference line. */
-export function ScoreTimeline({ rows, threshold }: ScoreTimelineProps) {
+export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineProps) {
   const data = useMemo(() => {
     const xs: number[] = [];
     const scores: (number | null)[] = [];
@@ -55,6 +62,8 @@ export function ScoreTimeline({ rows, threshold }: ScoreTimelineProps) {
         },
       ],
       legend: { show: false },
+      ...(onRangeSelect ? { cursor: SELECT_ONLY_CURSOR } : {}),
+      ...(onRangeSelect ? { hooks: { setSelect: [createRangeSelectHook(onRangeSelect)] } } : {}),
       scales: {
         y: {
           // Fit the data, never clip peaks; keep the threshold visible too.
@@ -62,7 +71,7 @@ export function ScoreTimeline({ rows, threshold }: ScoreTimelineProps) {
         },
       },
     }),
-    [threshold, peak],
+    [threshold, peak, onRangeSelect],
   );
 
   if (rows.length === 0) return null;

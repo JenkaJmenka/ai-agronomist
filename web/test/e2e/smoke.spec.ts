@@ -1,4 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
+
+/** Fill the segmented DateTimeField from an ISO-like "YYYY-MM-DDTHH:mm". */
+async function fillDateTimeField(page: Page, testId: string, value: string): Promise<void> {
+  const [datePart, timePart] = value.split("T");
+  const [year, month, day] = datePart.split("-");
+  const [hour, minute] = timePart.split(":");
+  const segments = { day, month, year, hour, minute };
+  for (const [segment, digits] of Object.entries(segments)) {
+    await page.getByTestId(`${testId}-${segment}`).fill(digits);
+  }
+}
 
 const NAV_TARGETS = [
   { label: "Monitoring", path: "/monitoring" },
@@ -44,11 +55,11 @@ test("quick range buttons write the window to the URL", async ({ page }) => {
 test("custom range form writes an explicit window to the URL", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("custom-range-toggle").click();
-  await page.getByTestId("custom-range-from").fill("2026-06-01T12:00");
-  await page.getByTestId("custom-range-to").fill("2026-06-15T12:30");
+  await fillDateTimeField(page, "custom-range-from", "2026-06-01T12:00");
+  await fillDateTimeField(page, "custom-range-to", "2026-06-15T12:30");
   await page.getByTestId("custom-range-apply").click();
   await expect(page).toHaveURL(/from=.+to=.+/);
-  // datetime-local values are local time; compare instants, not strings.
+  // Segment values are local time; compare instants, not strings.
   const params = new URL(page.url()).searchParams;
   expect(new Date(params.get("from") ?? "").getTime()).toBe(new Date("2026-06-01T12:00").getTime());
   expect(new Date(params.get("to") ?? "").getTime()).toBe(new Date("2026-06-15T12:30").getTime());
@@ -57,13 +68,25 @@ test("custom range form writes an explicit window to the URL", async ({ page }) 
 test("custom range apply is disabled when from is not before to", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("custom-range-toggle").click();
-  await page.getByTestId("custom-range-from").fill("2026-06-15T12:00");
-  await page.getByTestId("custom-range-to").fill("2026-06-01T12:00");
+  await fillDateTimeField(page, "custom-range-from", "2026-06-15T12:00");
+  await fillDateTimeField(page, "custom-range-to", "2026-06-01T12:00");
   await expect(page.getByTestId("custom-range-apply")).toBeDisabled();
   // Scoped to the form — Next's route announcer is also role="alert".
   await expect(page.getByTestId("custom-range-form").getByRole("alert")).toContainText(
     "must be before",
   );
+});
+
+test("custom range year segment caps at 4 digits and advances to hours", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("custom-range-toggle").click();
+  const year = page.getByTestId("custom-range-from-year");
+  await year.click();
+  await year.pressSequentially("20261");
+  // 5th digit never lands in the year — the caret has moved on to hours.
+  await expect(year).toHaveValue("2026");
+  await expect(page.getByTestId("custom-range-from-hour")).toBeFocused();
+  await expect(page.getByTestId("custom-range-from-hour")).toHaveValue("1");
 });
 
 test("anomalies page: threshold control and view toggle render", async ({ page }) => {
@@ -110,6 +133,17 @@ test("thresholds page: preview slider updates flagged counts and URL", async ({ 
   await expect(page).toHaveURL(/preview=0.3/);
   // Slider preview recomputes flagged counts client-side over the mock data.
   await expect(page.getByText("Flagged at preview (0.300)")).toBeVisible();
+});
+
+test("theme toggle flips to dark and persists across reload", async ({ page }) => {
+  await page.goto("/");
+  // Playwright defaults to a light color scheme, so the first flip is → dark.
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
 test("metrics page renders both islands", async ({ page }) => {

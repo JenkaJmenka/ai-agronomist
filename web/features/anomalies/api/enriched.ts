@@ -43,16 +43,24 @@ function windowQuery(params: AnomalyWindowParams): URLSearchParams {
   });
 }
 
+export interface EnrichedAnomaliesResult {
+  readonly rows: EnrichedAnomalyRow[];
+  /** Full-window flagged count — the source of truth for anomaly totals
+   * (client rows are downsampled, so counting them drifts per range). */
+  readonly anomalyCount: number;
+}
+
 export async function fetchEnrichedAnomalies(
   params: AnomalyWindowParams & { limit?: number },
-): Promise<EnrichedAnomalyRow[]> {
+): Promise<EnrichedAnomaliesResult> {
   const query = windowQuery(params);
   if (params.limit) query.set("limit", String(params.limit));
   const res = await fetch(`/api/bff/anomalies/enriched?${query}`);
   if (!res.ok) {
     throw new Error(`Enriched anomalies request failed (${res.status})`);
   }
-  return enrichedResponseSchema.parse(await res.json()).rows;
+  const body = enrichedResponseSchema.parse(await res.json());
+  return { rows: body.rows, anomalyCount: body.anomaly_count };
 }
 
 export const SERVER_GROUP_BY = ["date", "type", "sensor"] as const;

@@ -3,7 +3,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { type EnrichedAnomalyRow, fetchEnrichedAnomalies } from "@/features/anomalies/api/enriched";
+import {
+  type EnrichedAnomaliesResult,
+  fetchEnrichedAnomalies,
+} from "@/features/anomalies/api/enriched";
 import { STALE_TIME_MS } from "@/lib/query";
 import { useScope } from "@/lib/useScope";
 
@@ -19,6 +22,8 @@ export interface AnomalyEnrichment {
 export interface EnrichedAnomaliesState {
   /** Enrichment keyed by the row's ISO timestamp (rows carry no id). */
   readonly byTimestamp: ReadonlyMap<string, AnomalyEnrichment>;
+  /** Full-window flagged count from the server; null until loaded. */
+  readonly anomalyCount: number | null;
   readonly isLoading: boolean;
 }
 
@@ -37,7 +42,7 @@ export function useEnrichedAnomalies(params: {
   const { tenant, gh } = useScope();
   const { windowStart, windowEnd, threshold, enabled } = params;
 
-  const query = useQuery<EnrichedAnomalyRow[], Error>({
+  const query = useQuery<EnrichedAnomaliesResult, Error>({
     queryKey: ["anomalies-enriched", tenant, gh, windowStart, windowEnd, threshold],
     queryFn: () =>
       fetchEnrichedAnomalies({
@@ -55,7 +60,7 @@ export function useEnrichedAnomalies(params: {
 
   const byTimestamp = useMemo(() => {
     const map = new Map<string, AnomalyEnrichment>();
-    for (const row of query.data ?? []) {
+    for (const row of query.data?.rows ?? []) {
       map.set(row.timestamp, {
         faultType: row.fault_type ?? null,
         affectedSensors: row.affected_sensors,
@@ -65,5 +70,9 @@ export function useEnrichedAnomalies(params: {
     return map;
   }, [query.data]);
 
-  return { byTimestamp, isLoading: query.isPending && query.isFetching };
+  return {
+    byTimestamp,
+    anomalyCount: query.data?.anomalyCount ?? null,
+    isLoading: query.isPending && query.isFetching,
+  };
 }

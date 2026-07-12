@@ -11,6 +11,7 @@ import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
+import { useDateRange } from "@/lib/useDateRange";
 
 type ViewMode = "graphical" | "table";
 
@@ -25,18 +26,24 @@ function AnomaliesBody() {
     error,
     windowLabel,
     downsampled,
+    originalCount,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
+  const [, setRange] = useDateRange();
 
   // Envelope bounds drive the G4/G3 queries — rows are timestamp-ordered.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
   const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
+  // Enabled whenever the window has rows (not just flagged ones): the server
+  // count is the total's source of truth, since client rows are downsampled
+  // and switching ranges would otherwise drift the number.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: anomalies.length > 0,
+    enabled: rows.length > 0,
   });
+  const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
 
   if (isError) {
     throw error ?? new Error("Failed to load anomalies");
@@ -77,9 +84,9 @@ function AnomaliesBody() {
             ))}
           </div>
           <p className="text-sm tabular-nums">
-            <span className="font-semibold">{anomalies.length}</span>
+            <span className="font-semibold">{anomalyTotal}</span>
             <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} in </span>
-            <span className="font-semibold">{rows.length.toLocaleString()}</span>
+            <span className="font-semibold">{originalCount.toLocaleString()}</span>
             <span className="text-text-muted"> points</span>
           </p>
         </div>
@@ -100,7 +107,13 @@ function AnomaliesBody() {
       ) : view === "graphical" ? (
         <>
           <Card title="Anomaly score timeline">
-            <ScoreTimeline rows={rows} threshold={threshold} />
+            <ScoreTimeline
+              rows={rows}
+              threshold={threshold}
+              // Drag-selecting a span narrows the URL window, so the anomaly
+              // tables below filter to the same range.
+              onRangeSelect={(from, to) => void setRange({ from, to })}
+            />
           </Card>
           <Card title="Top anomalies">
             <AnomalyTable anomalies={anomalies} enrichment={enrichment.byTimestamp} />

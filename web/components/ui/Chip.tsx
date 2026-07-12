@@ -19,7 +19,9 @@ export function Chip({ severity = "normal", children }: ChipProps) {
   return (
     <span
       data-severity={severity}
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${SEVERITY_CLASSES[severity]}`}
+      // h-5 (≤ the text-sm line box) so chip rows match plain rows' height —
+      // uneven rows make the virtualized table jump while scrolling.
+      className={`inline-flex h-5 items-center rounded-full px-2.5 text-xs font-semibold ${SEVERITY_CLASSES[severity]}`}
     >
       {children}
     </span>

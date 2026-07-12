@@ -3,4 +3,5 @@ export { Card } from "./Card";
 export { Chip } from "./Chip";
 export { DataTable } from "./DataTable";
 export { DateRangeControls } from "./DateRangeControls";
+export { DateTimeField } from "./DateTimeField";
 export { Skeleton } from "./Skeleton";

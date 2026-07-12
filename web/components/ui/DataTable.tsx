@@ -52,7 +52,6 @@ export function DataTable<T>({
   }
 
   const virtualItems = isVirtual ? virtualizer.getVirtualItems() : null;
-  const bodyRows = virtualItems ? virtualItems.map((item) => tableRows[item.index]) : tableRows;
   const paddingTop = virtualItems?.[0]?.start ?? 0;
   const paddingBottom = virtualItems
     ? virtualizer.getTotalSize() - (virtualItems.at(-1)?.end ?? 0)
@@ -85,20 +84,29 @@ export function DataTable<T>({
               <td colSpan={columns.length} style={{ height: paddingTop, padding: 0 }} />
             </tr>
           ) : null}
-          {bodyRows.map((row) => (
-            <tr
-              key={row.id}
-              className={`border-b border-border last:border-b-0 ${
-                rowClassName?.(row.original) ?? ""
-              }`}
-            >
-              {row.getVisibleCells().map((cell) => (
-                <td key={cell.id} className="px-3 py-2">
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {(virtualItems ?? tableRows.map((_, index) => ({ index }))).map(({ index }) => {
+            const row = tableRows[index];
+            return (
+              <tr
+                key={row.id}
+                // Measured (not estimated) heights: anomaly rows with chips
+                // run taller than 37px, and estimate drift makes rows jump
+                // while scrolling. data-index + measureElement keep the
+                // virtualizer's offsets exact.
+                data-index={index}
+                ref={isVirtual ? virtualizer.measureElement : undefined}
+                className={`border-b border-border last:border-b-0 ${
+                  rowClassName?.(row.original) ?? ""
+                }`}
+              >
+                {row.getVisibleCells().map((cell) => (
+                  <td key={cell.id} className="px-3 py-2">
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
           {paddingBottom > 0 ? (
             <tr>
               <td colSpan={columns.length} style={{ height: paddingBottom, padding: 0 }} />

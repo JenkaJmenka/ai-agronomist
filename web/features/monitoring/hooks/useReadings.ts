@@ -21,6 +21,8 @@ export interface ReadingsState {
   readonly isError: boolean;
   readonly error: Error | null;
   readonly downsampled: boolean;
+  /** Pre-downsampling row count of the window (equals rows.length otherwise). */
+  readonly originalCount: number;
   readonly windowLabel: string;
 }
 
@@ -49,12 +51,15 @@ export function useReadings(): ReadingsState {
     placeholderData: keepPreviousData,
   });
 
+  const rows = query.data?.rows ?? [];
   return {
-    rows: query.data?.rows ?? [],
+    rows,
     isLoading: query.isPending,
     isError: query.isError,
     error: query.error,
     downsampled: Boolean((query.data as { downsampled?: boolean } | undefined)?.downsampled),
+    originalCount:
+      (query.data as { original_count?: number } | undefined)?.original_count ?? rows.length,
     windowLabel: hasWindow
       ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
       : "Most recent data (7 days)",

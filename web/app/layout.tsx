@@ -12,6 +12,17 @@ export const metadata: Metadata = {
   description: "Greenhouse monitoring and anomaly detection",
 };
 
+// Static literal (no user input): restores the persisted theme before first
+// paint so a dark-mode reload never flashes light. Key matches ThemeToggle.
+const THEME_INIT_SCRIPT = `(function () {
+  try {
+    var theme = localStorage.getItem("theme");
+    if (theme === "dark" || theme === "light") {
+      document.documentElement.dataset.theme = theme;
+    }
+  } catch (e) {}
+})();`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -20,6 +31,8 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} h-full antialiased`}>
       <body className="min-h-full">
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static theme-restore literal */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <Providers>
           <div className="flex">
             <Sidebar />

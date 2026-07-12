@@ -6,6 +6,7 @@ import { Suspense } from "react";
 
 import { NAV_SECTIONS } from "@/features/shell/nav";
 import { TenantSelector } from "@/features/shell/TenantSelector";
+import { ThemeToggle } from "@/features/shell/ThemeToggle";
 
 function NavLinks() {
   const pathname = usePathname();
@@ -51,8 +52,9 @@ function NavLinks() {
 export function Sidebar() {
   return (
     <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-bg-elevated">
-      <div className="px-4 py-4">
+      <div className="flex items-center justify-between px-4 py-4">
         <p className="text-sm font-bold text-accent">AI Agronomist</p>
+        <ThemeToggle />
       </div>
       <Suspense>
         <NavLinks />
