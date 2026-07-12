@@ -135,6 +135,20 @@ test("thresholds page: preview slider updates flagged counts and URL", async ({ 
   await expect(page.getByText("Flagged at preview (0.300)")).toBeVisible();
 });
 
+test("calendar dropdown picks a day into the segmented field", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("custom-range-toggle").click();
+  await fillDateTimeField(page, "custom-range-from", "2026-06-01T09:30");
+  await page.getByTestId("custom-range-from-calendar-toggle").click();
+  const calendar = page.getByTestId("custom-range-from-calendar");
+  await expect(calendar).toBeVisible();
+  await calendar.getByRole("button", { name: "15", exact: true }).click();
+  // Picking a day updates the date segments, keeps the typed time, and closes.
+  await expect(page.getByTestId("custom-range-from-day")).toHaveValue("15");
+  await expect(page.getByTestId("custom-range-from-hour")).toHaveValue("09");
+  await expect(calendar).not.toBeVisible();
+});
+
 test("theme toggle flips to dark and persists across reload", async ({ page }) => {
   await page.goto("/");
   // Playwright defaults to a light color scheme, so the first flip is → dark.
