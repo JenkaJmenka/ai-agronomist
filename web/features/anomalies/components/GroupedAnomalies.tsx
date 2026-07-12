@@ -5,13 +5,13 @@ import { useMemo, useState } from "react";
 import { Chip } from "@/components/ui/Chip";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { ServerGroupBy } from "@/features/anomalies/api/enriched";
+import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import { useAnomalyGroups } from "@/features/anomalies/hooks/useAnomalyGroups";
+import { useFlaggedWindow } from "@/features/anomalies/hooks/useFlaggedWindow";
 import { FAULT_LABELS } from "@/lib/severity";
 
-/** Above this many flagged rows, grouping moves server-side (G3). */
-export const SERVER_GROUPING_THRESHOLD = 500;
 const CLIENT_GROUP_ROW_PREVIEW = 20;
 const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
   date: "Date",
@@ -22,7 +22,8 @@ const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
 type ClientGroupBy = "date" | "severity";
 
 interface GroupedAnomaliesProps {
-  readonly anomalies: AnomalyRow[];
+  /** Full-window flagged total (server-side) — decides client vs G3 grouping. */
+  readonly anomalyCount: number;
   readonly windowStart: string | null;
   readonly windowEnd: string | null;
   readonly threshold: number;
@@ -74,19 +75,20 @@ function GroupModeButton(props: {
 
 /**
  * Grouped table view (plan §6.2 AnomalyGroupedTable). Under
- * SERVER_GROUPING_THRESHOLD flagged rows grouping is pure client compute
- * (instant regroup); above it the G3 endpoint aggregates server-side so
- * huge windows never ship every row.
+ * SERVER_GROUPING_THRESHOLD flagged rows grouping is client compute over the
+ * exact G2 flagged rows (never the downsampled chart rows, which drop
+ * anomalies unevenly per range); above it the G3 endpoint aggregates
+ * server-side so huge windows never ship every row.
  */
 export function GroupedAnomalies({
-  anomalies,
+  anomalyCount,
   windowStart,
   windowEnd,
   threshold,
 }: GroupedAnomaliesProps) {
   const [clientGroupBy, setClientGroupBy] = useState<ClientGroupBy>("date");
   const [serverGroupBy, setServerGroupBy] = useState<ServerGroupBy>("date");
-  const useServer = anomalies.length >= SERVER_GROUPING_THRESHOLD;
+  const useServer = anomalyCount >= SERVER_GROUPING_THRESHOLD;
 
   const serverState = useAnomalyGroups({
     windowStart,
@@ -95,12 +97,30 @@ export function GroupedAnomalies({
     groupBy: serverGroupBy,
     enabled: useServer,
   });
+  const flagged = useFlaggedWindow({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: !useServer,
+  });
   const clientGroups = useMemo(
-    () => (useServer ? [] : groupClientSide(anomalies, clientGroupBy)),
-    [anomalies, clientGroupBy, useServer],
+    () => (useServer ? [] : groupClientSide(flagged.anomalies, clientGroupBy)),
+    [flagged.anomalies, clientGroupBy, useServer],
   );
 
-  if (anomalies.length === 0) {
+  if (!useServer && flagged.isLoading) {
+    return <Skeleton className="h-40 w-full" />;
+  }
+
+  if (!useServer && flagged.isError) {
+    return (
+      <p role="alert" className="py-4 text-center text-sm text-sev-critical">
+        Could not load the window’s anomalies — narrow the window or retry.
+      </p>
+    );
+  }
+
+  if (!useServer && flagged.anomalies.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-text-muted">
         No anomalies to group in this window.
@@ -122,7 +142,7 @@ export function GroupedAnomalies({
             />
           ))}
           <span className="ml-auto text-xs text-text-muted tabular-nums">
-            {anomalies.length.toLocaleString()} anomalies · grouped server-side
+            {anomalyCount.toLocaleString()} anomalies · grouped server-side
           </span>
         </div>
 
@@ -181,7 +201,7 @@ export function GroupedAnomalies({
           />
         ))}
         <span className="ml-auto text-xs text-text-muted tabular-nums">
-          {anomalies.length} anomalies · {clientGroups.length} groups
+          {flagged.anomalies.length} anomalies · {clientGroups.length} groups
         </span>
       </div>
 

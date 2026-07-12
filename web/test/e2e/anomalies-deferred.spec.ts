@@ -112,6 +112,30 @@ test("grouped view switches to G3 server groups at 500+ anomalies", async ({ pag
   expect(requestedGroupBy).toBe("type");
 });
 
+test("grouped view counts exact G2 flagged rows, not downsampled chart rows", async ({ page }) => {
+  // Chart payload carries only 2 scored rows (downsampling artifact) …
+  const rows = makeRows(48, 24);
+  await page.route("**/api/bff/readings/recent**", (route) =>
+    route.fulfill({ json: mockRecent(rows) }),
+  );
+  await page.route("**/api/bff/anomalies/enriched**", (route) =>
+    route.fulfill({ json: { rows: [], count: 0, anomaly_count: 5 } }),
+  );
+  // … but the window truly holds 5 flagged rows across 3 dates (G2).
+  const flaggedRows = [0, 1, 25, 26, 50].map((hour) => ({
+    timestamp: isoAtHour(hour),
+    temperature: 30,
+    anomaly_score: 0.9,
+  }));
+  await page.route("**/api/bff/readings/anomalies-in-window**", (route) =>
+    route.fulfill({ json: { rows: flaggedRows, anomaly_count: 5, total_count: 48 } }),
+  );
+
+  await page.goto("/anomalies");
+  await page.getByRole("tab", { name: "Table view" }).click();
+  await expect(page.getByText("5 anomalies · 3 groups")).toBeVisible();
+});
+
 test("large readings table renders virtualized without a row cap", async ({ page }) => {
   const rows = makeRows(600, 100);
   await page.route("**/api/bff/readings/recent**", (route) =>

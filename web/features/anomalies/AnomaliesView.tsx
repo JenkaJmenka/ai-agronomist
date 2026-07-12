@@ -122,7 +122,7 @@ function AnomaliesBody() {
       ) : (
         <Card title="Detected anomalies (grouped)">
           <GroupedAnomalies
-            anomalies={anomalies}
+            anomalyCount={anomalyTotal}
             windowStart={windowStart}
             windowEnd={windowEnd}
             threshold={threshold}

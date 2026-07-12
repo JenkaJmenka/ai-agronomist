@@ -33,7 +33,7 @@ export interface AnomalyWindowParams {
   readonly threshold: number;
 }
 
-function windowQuery(params: AnomalyWindowParams): URLSearchParams {
+export function windowQuery(params: AnomalyWindowParams): URLSearchParams {
   return new URLSearchParams({
     tenant_id: params.tenant,
     greenhouse_id: params.gh,
