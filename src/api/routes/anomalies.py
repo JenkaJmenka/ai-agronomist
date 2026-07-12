@@ -12,7 +12,6 @@ from src.api.query_params import parse_iso_param
 from src.api.services import readings_service
 from src.api.services.anomaly_insights import (
     enrich_anomaly_rows,
-    filter_anomaly_rows,
     group_anomaly_rows,
     top_anomalies,
 )
@@ -38,15 +37,18 @@ async def _load_flagged_window(
     start: str,
     end: str,
     threshold: float,
-) -> list[dict[str, Any]]:
-    window_rows = await readings_service.fetch_merged_readings(
-        db,
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        start=_parse_iso(start, "start"),
-        end=_parse_iso(end, "end"),
+) -> tuple[list[dict[str, Any]], int]:
+    """(flagged rows, exact count) — SQL-side filter/count so wide windows
+    never lose flagged rows to the READINGS_MAX_ROWS merge cap."""
+    scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
+    flagged = await readings_service.fetch_flagged_window(
+        db, **scope, **window, threshold=threshold
     )
-    return filter_anomaly_rows(window_rows, threshold)
+    anomaly_count = await readings_service.count_flagged_rows(
+        db, **scope, **window, threshold=threshold
+    )
+    return flagged, anomaly_count
 
 
 async def _load_incidents(
@@ -83,7 +85,7 @@ async def get_anomaly_groups(
     have no stable primary key); `type`/`sensor` grouping runs the same
     incident-join enrichment as /enriched so fault labels agree everywhere.
     """
-    flagged = await _load_flagged_window(
+    flagged, anomaly_count = await _load_flagged_window(
         db,
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -99,7 +101,7 @@ async def get_anomaly_groups(
     groups = group_anomaly_rows(
         flagged, group_by, sample_limit=ANOMALY_GROUP_SAMPLE_IDS
     )
-    return {"groups": groups, "group_by": group_by, "anomaly_count": len(flagged)}
+    return {"groups": groups, "group_by": group_by, "anomaly_count": anomaly_count}
 
 
 @router.get("/enriched")
@@ -120,7 +122,7 @@ async def get_enriched_anomalies(
     Highest-scoring flagged rows with fault_type / root_cause / reasoning
     from the incident join, ready for the FE Top Anomalies table.
     """
-    flagged = await _load_flagged_window(
+    flagged, anomaly_count = await _load_flagged_window(
         db,
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -133,4 +135,4 @@ async def get_enriched_anomalies(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, start=start, end=end
     )
     rows = enrich_anomaly_rows(ranked, incidents)
-    return {"rows": rows, "count": len(rows), "anomaly_count": len(flagged)}
+    return {"rows": rows, "count": len(rows), "anomaly_count": anomaly_count}

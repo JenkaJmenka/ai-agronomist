@@ -29,6 +29,21 @@ def _iso(value: Any) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
+def _window_filters(
+    model: Any,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> list[Any]:
+    conditions = [model.tenant_id == tenant_id, model.greenhouse_id == greenhouse_id]
+    if start is not None:
+        conditions.append(model.timestamp >= start)
+    if end is not None:
+        conditions.append(model.timestamp <= end)
+    return conditions
+
+
 def merge_anomaly_scores_into_readings(
     readings_df: pd.DataFrame,
     scores_df: pd.DataFrame,
@@ -123,28 +138,30 @@ async def fetch_merged_readings(
     end: Optional[datetime] = None,
     limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    """Raw rows (full CSV fidelity) merged with canonical anomaly scores."""
+    """Raw rows (full CSV fidelity) merged with canonical anomaly scores.
+
+    When the window exceeds the row cap, the NEWEST rows win: a monitoring
+    window must drop history, never the most recent days (ascending
+    LIMIT used to silently cut the tail of wide windows).
+    """
     cap = _cap(limit)
 
-    raw_stmt = select(RawReading).where(
-        RawReading.tenant_id == tenant_id,
-        RawReading.greenhouse_id == greenhouse_id,
+    raw_stmt = (
+        select(RawReading)
+        .where(*_window_filters(RawReading, tenant_id, greenhouse_id, start, end))
+        .order_by(RawReading.timestamp.desc())
+        .limit(cap)
     )
-    canon_stmt = select(SensorReading).where(
-        SensorReading.tenant_id == tenant_id,
-        SensorReading.greenhouse_id == greenhouse_id,
+    canon_stmt = (
+        select(SensorReading)
+        .where(*_window_filters(SensorReading, tenant_id, greenhouse_id, start, end))
+        .order_by(SensorReading.timestamp.desc())
+        .limit(cap)
     )
-    if start is not None:
-        raw_stmt = raw_stmt.where(RawReading.timestamp >= start)
-        canon_stmt = canon_stmt.where(SensorReading.timestamp >= start)
-    if end is not None:
-        raw_stmt = raw_stmt.where(RawReading.timestamp <= end)
-        canon_stmt = canon_stmt.where(SensorReading.timestamp <= end)
-    raw_stmt = raw_stmt.order_by(RawReading.timestamp).limit(cap)
-    canon_stmt = canon_stmt.order_by(SensorReading.timestamp).limit(cap)
 
-    raw_records = (await db.execute(raw_stmt)).scalars().all()
-    canon_records = (await db.execute(canon_stmt)).scalars().all()
+    # Downstream merge/LTTB expect ascending time — restore it post-cap.
+    raw_records = list(reversed((await db.execute(raw_stmt)).scalars().all()))
+    canon_records = list(reversed((await db.execute(canon_stmt)).scalars().all()))
 
     raw_df = pd.DataFrame(_raw_records_to_rows(raw_records))
     scores_df = pd.DataFrame(_canonical_records_to_rows(canon_records))
@@ -155,6 +172,80 @@ async def fetch_merged_readings(
     else:
         merged = scores_df
     return _df_to_json_rows(merged)
+
+
+async def fetch_flagged_window(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+    threshold: float,
+    limit: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Canonical rows scoring ≥ threshold, filtered in SQL (G2).
+
+    The score filter runs BEFORE any row cap, so wide windows keep every
+    flagged row. Filtering the capped merged window instead dropped the
+    newest anomalies once a window passed READINGS_MAX_ROWS — a 6-month
+    count could come out smaller than its own 1-month subset.
+    """
+    stmt = (
+        select(SensorReading)
+        .where(
+            *_window_filters(SensorReading, tenant_id, greenhouse_id, start, end),
+            SensorReading.anomaly_score >= threshold,
+        )
+        .order_by(SensorReading.timestamp)
+        .limit(_cap(limit))
+    )
+    records = (await db.execute(stmt)).scalars().all()
+    # Merge parity: duplicate upload timestamps keep the max score.
+    best: dict[str, dict[str, Any]] = {}
+    for row in _canonical_records_to_rows(records):
+        key = _iso(row["timestamp"])
+        row["timestamp"] = key
+        prev = best.get(key)
+        if prev is None or (row["anomaly_score"] or 0.0) > (prev["anomaly_score"] or 0.0):
+            best[key] = row
+    return [best[key] for key in sorted(best)]
+
+
+async def count_flagged_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+    threshold: float,
+) -> int:
+    """Exact flagged count for a window — COUNT(DISTINCT ts), never capped."""
+    stmt = select(func.count(distinct(SensorReading.timestamp))).where(
+        *_window_filters(SensorReading, tenant_id, greenhouse_id, start, end),
+        SensorReading.anomaly_score >= threshold,
+    )
+    return int((await db.execute(stmt)).scalar() or 0)
+
+
+async def count_window_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+) -> int:
+    """Full-window row count (distinct timestamps; raw preferred), never capped."""
+    for model in (RawReading, SensorReading):
+        stmt = select(func.count(distinct(model.timestamp))).where(
+            *_window_filters(model, tenant_id, greenhouse_id, start, end)
+        )
+        count = int((await db.execute(stmt)).scalar() or 0)
+        if count:
+            return count
+    return 0
 
 
 async def fetch_canonical_window(

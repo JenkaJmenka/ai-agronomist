@@ -11,7 +11,6 @@ from fastapi_cache.decorator import cache
 
 from src.api.query_params import parse_iso_param
 from src.api.services import readings_service
-from src.api.services.anomaly_insights import filter_anomaly_rows
 from src.api.services.downsample import downsample_rows, strip_scores
 from src.config import (
     DOWNSAMPLE_MAX_POINTS_CEIL,
@@ -139,26 +138,27 @@ async def get_anomalies_in_window(
 ) -> dict[str, Any]:
     """Threshold-filtered anomaly rows for a window (migration plan G2).
 
-    Moves the dashboard's `load_anomalies_for_window` merge+filter
-    server-side: merged raw+canonical rows are score-filtered, and
-    `max_points` LTTB-downsamples the flagged rows. `total_count` is the
-    full window's row count, `anomaly_count` the flagged count before
-    downsampling.
+    Score filtering and counting run in SQL over the FULL window (never the
+    row-capped merged rows, which silently dropped flagged rows on wide
+    windows); `max_points` LTTB-downsamples the flagged rows.
     """
-    window_rows = await readings_service.fetch_merged_readings(
-        db,
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        start=_parse_iso(start, "start"),
-        end=_parse_iso(end, "end"),
+    window_start = _parse_iso(start, "start")
+    window_end = _parse_iso(end, "end")
+    scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    anomaly_rows = await readings_service.fetch_flagged_window(
+        db, **scope, start=window_start, end=window_end, threshold=threshold
     )
-    anomaly_rows = filter_anomaly_rows(window_rows, threshold)
-    anomaly_count = len(anomaly_rows)
+    anomaly_count = await readings_service.count_flagged_rows(
+        db, **scope, start=window_start, end=window_end, threshold=threshold
+    )
+    total_count = await readings_service.count_window_rows(
+        db, **scope, start=window_start, end=window_end
+    )
     anomaly_rows, extras = _shape_rows(anomaly_rows, max_points, include_scores=True)
     return {
         "rows": anomaly_rows,
         "anomaly_count": anomaly_count,
-        "total_count": len(window_rows),
+        "total_count": total_count,
         **extras,
     }
 

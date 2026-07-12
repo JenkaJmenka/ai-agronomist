@@ -306,3 +306,35 @@ class TestAnomaliesInWindow:
             },
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_counts_survive_the_row_cap(self, test_client, monkeypatch):
+        """Regression: windows wider than READINGS_MAX_ROWS must not lose
+        flagged rows — a 6-month count once came out smaller than its own
+        1-month subset because filtering ran on the truncated merge."""
+        from src.api.services import readings_service
+
+        # Cap far below the 48-row window; the flagged row (hour 10) would
+        # be dropped by a truncated merge but must still be found and counted.
+        monkeypatch.setattr(readings_service, "READINGS_MAX_ROWS", 5)
+        response = test_client.get(
+            "/api/readings/anomalies-in-window",
+            params={"tenant_id": TENANT, "threshold": 0.5, **self._WINDOW},
+        )
+        payload = response.json()
+        assert payload["anomaly_count"] == 1
+        assert payload["total_count"] == ROWS
+        assert len(payload["rows"]) == 1
+
+    def test_capped_window_keeps_newest_rows(self, test_client, monkeypatch):
+        """When /window truncates, the most recent rows must survive."""
+        from src.api.services import readings_service
+
+        monkeypatch.setattr(readings_service, "READINGS_MAX_ROWS", 5)
+        response = test_client.get(
+            "/api/readings/window",
+            params={"tenant_id": TENANT, **self._WINDOW},
+        )
+        rows = response.json()["rows"]
+        assert len(rows) == 5
+        newest = (BASE_TS + datetime.timedelta(hours=ROWS - 1)).isoformat()
+        assert rows[-1]["timestamp"][:16] == newest[:16]
