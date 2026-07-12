@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { Chip } from "@/components/ui/Chip";
+import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { ServerGroupBy } from "@/features/anomalies/api/enriched";
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
@@ -153,36 +154,38 @@ export function GroupedAnomalies({
             Could not load server groups — narrow the window or retry.
           </p>
         ) : (
-          serverState.groups.map((group) => (
-            <details
-              key={group.key}
-              className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
-            >
-              <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
-                {serverGroupBy === "type" ? (FAULT_LABELS[group.key] ?? group.key) : group.key} ·{" "}
-                {group.count.toLocaleString()} record{group.count === 1 ? "" : "s"} · peak{" "}
-                <span className="tabular-nums">{group.top_score.toFixed(3)}</span>
-              </summary>
-              <ul className="divide-y divide-border border-t border-border">
-                {group.sample_ids.map((sampleTimestamp) => (
-                  <li
-                    key={sampleTimestamp}
-                    className="flex flex-wrap items-center gap-3 px-4 py-2 text-sm"
-                  >
-                    <span className="tabular-nums">
-                      {sampleTimestamp.replace("T", " ").slice(0, 19)}
-                    </span>
-                    <span className="ml-auto">
-                      <MonitoringJumpLink
-                        timestamp={sampleTimestamp}
-                        channels={serverGroupBy === "sensor" ? [group.key] : null}
-                      />
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ))
+          <RefetchingBlock isRefetching={serverState.isRefetching} className="space-y-3">
+            {serverState.groups.map((group) => (
+              <details
+                key={group.key}
+                className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
+              >
+                <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
+                  {serverGroupBy === "type" ? (FAULT_LABELS[group.key] ?? group.key) : group.key} ·{" "}
+                  {group.count.toLocaleString()} record{group.count === 1 ? "" : "s"} · peak{" "}
+                  <span className="tabular-nums">{group.top_score.toFixed(3)}</span>
+                </summary>
+                <ul className="divide-y divide-border border-t border-border">
+                  {group.sample_ids.map((sampleTimestamp) => (
+                    <li
+                      key={sampleTimestamp}
+                      className="flex flex-wrap items-center gap-3 px-4 py-2 text-sm"
+                    >
+                      <span className="tabular-nums">
+                        {sampleTimestamp.replace("T", " ").slice(0, 19)}
+                      </span>
+                      <span className="ml-auto">
+                        <MonitoringJumpLink
+                          timestamp={sampleTimestamp}
+                          channels={serverGroupBy === "sensor" ? [group.key] : null}
+                        />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ))}
+          </RefetchingBlock>
         )}
       </div>
     );
@@ -205,32 +208,36 @@ export function GroupedAnomalies({
         </span>
       </div>
 
-      {clientGroups.map((group) => (
-        <details
-          key={group.key}
-          className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
-          open={clientGroups.length <= 3}
-        >
-          <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
-            {group.key} · {group.rows.length} record{group.rows.length === 1 ? "" : "s"} · peak{" "}
-            <span className="tabular-nums">{group.peak.toFixed(3)}</span>
-          </summary>
-          <ul className="divide-y divide-border border-t border-border">
-            {group.rows.slice(0, CLIENT_GROUP_ROW_PREVIEW).map((row) => (
-              <li
-                key={row.timestamp}
-                className="flex flex-wrap items-center gap-3 px-4 py-2 text-sm"
-              >
-                <span className="tabular-nums">{row.timestamp.replace("T", " ").slice(0, 19)}</span>
-                <Chip severity={row.severity}>{row.score.toFixed(3)}</Chip>
-                <span className="ml-auto">
-                  <MonitoringJumpLink timestamp={row.timestamp} />
-                </span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ))}
+      <RefetchingBlock isRefetching={flagged.isRefetching} className="space-y-3">
+        {clientGroups.map((group) => (
+          <details
+            key={group.key}
+            className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
+            open={clientGroups.length <= 3}
+          >
+            <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
+              {group.key} · {group.rows.length} record{group.rows.length === 1 ? "" : "s"} · peak{" "}
+              <span className="tabular-nums">{group.peak.toFixed(3)}</span>
+            </summary>
+            <ul className="divide-y divide-border border-t border-border">
+              {group.rows.slice(0, CLIENT_GROUP_ROW_PREVIEW).map((row) => (
+                <li
+                  key={row.timestamp}
+                  className="flex flex-wrap items-center gap-3 px-4 py-2 text-sm"
+                >
+                  <span className="tabular-nums">
+                    {row.timestamp.replace("T", " ").slice(0, 19)}
+                  </span>
+                  <Chip severity={row.severity}>{row.score.toFixed(3)}</Chip>
+                  <span className="ml-auto">
+                    <MonitoringJumpLink timestamp={row.timestamp} />
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ))}
+      </RefetchingBlock>
     </div>
   );
 }

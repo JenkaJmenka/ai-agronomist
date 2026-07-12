@@ -16,6 +16,8 @@ export interface FlaggedWindowState {
   /** Exact flagged rows of the full window, most severe first. */
   readonly anomalies: AnomalyRow[];
   readonly isLoading: boolean;
+  /** Threshold/window changed; stale rows stay on screen while loading. */
+  readonly isRefetching: boolean;
   readonly isError: boolean;
 }
 
@@ -63,6 +65,7 @@ export function useFlaggedWindow(params: {
   return {
     anomalies,
     isLoading: query.isPending && query.isFetching,
+    isRefetching: query.isFetching && !query.isPending,
     isError: query.isError,
   };
 }

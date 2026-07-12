@@ -18,6 +18,8 @@ const DEFAULT_MAX_POINTS = 2000;
 export interface ReadingsState {
   readonly rows: SensorRow[];
   readonly isLoading: boolean;
+  /** A new window/scope is loading while stale rows stay on screen. */
+  readonly isRefetching: boolean;
   readonly isError: boolean;
   readonly error: Error | null;
   readonly downsampled: boolean;
@@ -55,6 +57,7 @@ export function useReadings(): ReadingsState {
   return {
     rows,
     isLoading: query.isPending,
+    isRefetching: query.isFetching && !query.isPending,
     isError: query.isError,
     error: query.error,
     downsampled: Boolean((query.data as { downsampled?: boolean } | undefined)?.downsampled),

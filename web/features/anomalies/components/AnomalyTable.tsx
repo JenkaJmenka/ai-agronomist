@@ -5,6 +5,7 @@ import { useMemo } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { DataTable } from "@/components/ui/DataTable";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import type { AnomalyEnrichment } from "@/features/anomalies/hooks/useEnrichedAnomalies";
@@ -23,6 +24,8 @@ interface AnomalyTableProps {
   readonly anomalies: AnomalyRow[];
   /** G4 enrichment keyed by row timestamp; absent while loading/unavailable. */
   readonly enrichment?: ReadonlyMap<string, AnomalyEnrichment>;
+  /** Fault-type cells show skeletons instead of "—" while enrichment loads. */
+  readonly isEnrichmentLoading?: boolean;
 }
 
 function faultLabel(faultType: string | null | undefined): string | null {
@@ -31,7 +34,11 @@ function faultLabel(faultType: string | null | undefined): string | null {
 }
 
 /** Top anomalies, most severe first, with fault type + Monitoring jump. */
-export function AnomalyTable({ anomalies, enrichment }: AnomalyTableProps) {
+export function AnomalyTable({
+  anomalies,
+  enrichment,
+  isEnrichmentLoading = false,
+}: AnomalyTableProps) {
   const columns = useMemo<ColumnDef<AnomalyRow, unknown>[]>(
     () => [
       {
@@ -64,7 +71,10 @@ export function AnomalyTable({ anomalies, enrichment }: AnomalyTableProps) {
         cell: (ctx) => {
           const detail = enrichment?.get(ctx.row.original.timestamp);
           const label = faultLabel(detail?.faultType);
-          if (!label) return <span className="text-text-muted">—</span>;
+          if (!label) {
+            if (isEnrichmentLoading) return <Skeleton className="h-4 w-24" />;
+            return <span className="text-text-muted">—</span>;
+          }
           return (
             <span title={detail?.rootCause ?? undefined} data-testid="fault-type">
               {label}
@@ -86,7 +96,7 @@ export function AnomalyTable({ anomalies, enrichment }: AnomalyTableProps) {
         },
       },
     ],
-    [enrichment],
+    [enrichment, isEnrichmentLoading],
   );
 
   const top = useMemo(() => anomalies.slice(0, TOP_ANOMALIES_CAP), [anomalies]);

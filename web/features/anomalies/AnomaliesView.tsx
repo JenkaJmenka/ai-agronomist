@@ -4,6 +4,7 @@ import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
+import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
 import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomalies";
@@ -22,6 +23,7 @@ function AnomaliesBody() {
     threshold,
     setThreshold,
     isLoading,
+    isRefetching,
     isError,
     error,
     windowLabel,
@@ -105,7 +107,7 @@ function AnomaliesBody() {
           </p>
         </Card>
       ) : view === "graphical" ? (
-        <>
+        <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
           <Card title="Anomaly score timeline">
             <ScoreTimeline
               rows={rows}
@@ -116,18 +118,24 @@ function AnomaliesBody() {
             />
           </Card>
           <Card title="Top anomalies">
-            <AnomalyTable anomalies={anomalies} enrichment={enrichment.byTimestamp} />
+            <AnomalyTable
+              anomalies={anomalies}
+              enrichment={enrichment.byTimestamp}
+              isEnrichmentLoading={enrichment.isLoading}
+            />
           </Card>
-        </>
+        </RefetchingBlock>
       ) : (
-        <Card title="Detected anomalies (grouped)">
-          <GroupedAnomalies
-            anomalyCount={anomalyTotal}
-            windowStart={windowStart}
-            windowEnd={windowEnd}
-            threshold={threshold}
-          />
-        </Card>
+        <RefetchingBlock isRefetching={isRefetching}>
+          <Card title="Detected anomalies (grouped)">
+            <GroupedAnomalies
+              anomalyCount={anomalyTotal}
+              windowStart={windowStart}
+              windowEnd={windowEnd}
+              threshold={threshold}
+            />
+          </Card>
+        </RefetchingBlock>
       )}
     </div>
   );

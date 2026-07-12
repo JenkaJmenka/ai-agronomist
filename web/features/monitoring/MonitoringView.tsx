@@ -5,6 +5,7 @@ import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
+import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { discoverChannels } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
@@ -37,7 +38,7 @@ function matchChannelParam(channels: string[], param: string): string[] {
 }
 
 function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
-  const { rows, isLoading, isError, error, windowLabel, downsampled } = useReadings();
+  const { rows, isLoading, isRefetching, isError, error, windowLabel, downsampled } = useReadings();
   // Anomaly-jump deep link: ?channel= pre-selects the affected traces and
   // ?threshold= keeps highlighting consistent with the Anomalies page.
   const [channelParam] = useQueryState("channel", parseAsString);
@@ -102,7 +103,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
           </p>
         </Card>
       ) : (
-        <>
+        <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
           <Card title="Sensor channels">
             <ChannelToggles channels={channels} visible={visible} onToggle={toggleChannel} />
           </Card>
@@ -120,7 +121,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
           <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>
             <ReadingsTable rows={rows} channels={channels} threshold={threshold} />
           </Card>
-        </>
+        </RefetchingBlock>
       )}
     </div>
   );

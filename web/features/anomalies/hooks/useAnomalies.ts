@@ -18,6 +18,8 @@ export interface AnomaliesState {
   readonly threshold: number;
   readonly setThreshold: (value: number) => void;
   readonly isLoading: boolean;
+  /** A new window/scope is loading while stale rows stay on screen. */
+  readonly isRefetching: boolean;
   readonly isError: boolean;
   readonly error: Error | null;
   readonly windowLabel: string;

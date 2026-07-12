@@ -6,6 +6,7 @@ import { Suspense, useMemo } from "react";
 import { Card } from "@/components/ui/Card";
 import { Chip } from "@/components/ui/Chip";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
+import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
@@ -25,7 +26,7 @@ function quantile(sorted: number[], q: number): number {
 }
 
 function ThresholdsBody() {
-  const { rows, isLoading, isError, error, windowLabel } = useReadings();
+  const { rows, isLoading, isRefetching, isError, error, windowLabel } = useReadings();
   // "preview" is the slider; "saved" mirrors the persisted dashboard cutoff.
   const [preview, setPreview] = useQueryState(
     "preview",
@@ -66,7 +67,7 @@ function ThresholdsBody() {
           </p>
         </Card>
       ) : (
-        <>
+        <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
           <Card title="Preview threshold">
             <ThresholdControl threshold={preview} onChange={(v) => void setPreview(v)} />
             <p className="mt-3 text-sm text-text-muted tabular-nums">
@@ -92,7 +93,7 @@ function ThresholdsBody() {
               </Chip>
             </Card>
           </div>
-        </>
+        </RefetchingBlock>
       )}
     </div>
   );

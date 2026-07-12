@@ -13,6 +13,8 @@ import { useScope } from "@/lib/useScope";
 export interface AnomalyGroupsState {
   readonly groups: AnomalyGroupsResult["groups"];
   readonly isLoading: boolean;
+  /** Group-by/threshold changed; stale groups stay on screen while loading. */
+  readonly isRefetching: boolean;
   readonly isError: boolean;
 }
 
@@ -50,6 +52,7 @@ export function useAnomalyGroups(params: {
   return {
     groups: query.data?.groups ?? [],
     isLoading: query.isPending && query.isFetching,
+    isRefetching: query.isFetching && !query.isPending,
     isError: query.isError,
   };
 }
