@@ -1,0 +1,93 @@
+import { expect, test } from "@playwright/test";
+
+/**
+ * Performance budgets from MIGRATION_PLAN.md §1.2, asserted in CI — the
+ * suite FAILS when a budget is breached. Data is mocked at the BFF at the
+ * downsampling contract's ceiling (2k rows) so numbers reflect render
+ * cost, not backend latency.
+ */
+
+const COLD_TTI_BUDGET_MS = 2000;
+const FILTER_APPLY_BUDGET_MS = 500;
+const CHANNEL_TOGGLE_BUDGET_MS = 300;
+const DOWNSAMPLED_ROWS = 2000;
+
+function isoAtMinute(minute: number): string {
+  const base = new Date("2026-06-01T00:00:00Z").getTime();
+  return new Date(base + minute * 60_000).toISOString().replace(".000Z", "+00:00");
+}
+
+const ROWS = Array.from({ length: DOWNSAMPLED_ROWS }, (_, i) => ({
+  timestamp: isoAtMinute(i),
+  temperature: 21 + Math.sin(i / 60) * 2,
+  humidity: 60 + Math.cos(i / 90) * 5,
+  co2: 400 + (i % 50),
+  light: 500 + (i % 100),
+  anomaly_score: i % 200 === 0 ? 0.9 : null,
+}));
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/bff/readings/recent**", (route) =>
+    route.fulfill({
+      json: {
+        rows: ROWS,
+        count: ROWS.length,
+        min_timestamp: ROWS[0].timestamp,
+        max_timestamp: ROWS.at(-1)?.timestamp,
+        downsampled: true,
+        original_count: 50_000,
+      },
+    }),
+  );
+  await page.route("**/api/bff/readings/window**", (route) =>
+    route.fulfill({ json: { rows: ROWS, count: ROWS.length, downsampled: true } }),
+  );
+  await page.route("**/api/bff/anomalies/**", (route) =>
+    route.fulfill({ json: { rows: [], count: 0, anomaly_count: 0, groups: [] } }),
+  );
+});
+
+test(`anomalies cold load paints content under ${COLD_TTI_BUDGET_MS} ms`, async ({ page }) => {
+  const startedAt = Date.now();
+  await page.goto("/anomalies");
+  await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
+  await expect(page.getByText(/anomalies ≥/)).toBeVisible();
+  const elapsed = Date.now() - startedAt;
+  expect(elapsed, `cold TTI ${elapsed} ms`).toBeLessThan(COLD_TTI_BUDGET_MS);
+});
+
+test(`filter apply updates the view under ${FILTER_APPLY_BUDGET_MS} ms`, async ({ page }) => {
+  await page.goto("/anomalies");
+  await expect(page.getByText(/anomalies ≥/)).toBeVisible();
+
+  const startedAt = Date.now();
+  await page.getByRole("button", { name: "7 d" }).click();
+  // URL-driven window applied and the (mock-instant) refetch rendered.
+  await expect(page).toHaveURL(/from=/);
+  await expect(page.getByTestId("date-range-controls").getByText(/→/)).toBeVisible();
+  const elapsed = Date.now() - startedAt;
+  expect(elapsed, `filter apply ${elapsed} ms`).toBeLessThan(FILTER_APPLY_BUDGET_MS);
+});
+
+test(`channel toggle re-renders client-side under ${CHANNEL_TOGGLE_BUDGET_MS} ms`, async ({
+  page,
+}) => {
+  await page.goto("/monitoring");
+  const toggles = page.getByTestId("channel-toggles");
+  const temperature = toggles.getByRole("checkbox", { name: "temperature" });
+  await expect(temperature).toBeChecked();
+
+  let readingsRefetches = 0;
+  await page.route("**/api/bff/readings/**", (route) => {
+    readingsRefetches += 1;
+    return route.continue();
+  });
+
+  const startedAt = Date.now();
+  await temperature.uncheck();
+  await expect(temperature).not.toBeChecked();
+  const elapsed = Date.now() - startedAt;
+  expect(elapsed, `channel toggle ${elapsed} ms`).toBeLessThan(CHANNEL_TOGGLE_BUDGET_MS);
+  // The §1.2 contract: toggling never refetches — pure client state.
+  expect(readingsRefetches).toBe(0);
+});
