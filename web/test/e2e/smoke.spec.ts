@@ -41,6 +41,31 @@ test("quick range buttons write the window to the URL", async ({ page }) => {
   await expect(page).toHaveURL(/from=.+to=.+/);
 });
 
+test("custom range form writes an explicit window to the URL", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("custom-range-from").fill("2026-06-01T12:00");
+  await page.getByTestId("custom-range-to").fill("2026-06-15T12:30");
+  await page.getByTestId("custom-range-apply").click();
+  await expect(page).toHaveURL(/from=.+to=.+/);
+  // datetime-local values are local time; compare instants, not strings.
+  const params = new URL(page.url()).searchParams;
+  expect(new Date(params.get("from") ?? "").getTime()).toBe(new Date("2026-06-01T12:00").getTime());
+  expect(new Date(params.get("to") ?? "").getTime()).toBe(new Date("2026-06-15T12:30").getTime());
+});
+
+test("custom range apply is disabled when from is not before to", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("custom-range-from").fill("2026-06-15T12:00");
+  await page.getByTestId("custom-range-to").fill("2026-06-01T12:00");
+  await expect(page.getByTestId("custom-range-apply")).toBeDisabled();
+  // Scoped to the form — Next's route announcer is also role="alert".
+  await expect(page.getByTestId("custom-range-form").getByRole("alert")).toContainText(
+    "must be before",
+  );
+});
+
 test("anomalies page: threshold control and view toggle render", async ({ page }) => {
   await page.goto("/anomalies");
   await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();

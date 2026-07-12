@@ -1,8 +1,10 @@
 "use client";
 
 import { parseAsIsoDateTime, useQueryStates } from "nuqs";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
 
 const QUICK_RANGES = [
   { label: "24 h", hours: 24 },
@@ -21,30 +23,48 @@ export function DateRangeControls() {
     from: parseAsIsoDateTime,
     to: parseAsIsoDateTime,
   });
+  const [isCustomOpen, setIsCustomOpen] = useState(false);
 
   function applyQuickRange(hours: number): void {
     const end = new Date();
     const start = new Date(end.getTime() - hours * 3_600_000);
+    setIsCustomOpen(false);
+    void setRange({ from: start, to: end });
+  }
+
+  function applyCustomRange(start: Date, end: Date): void {
     void setRange({ from: start, to: end });
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2" data-testid="date-range-controls">
-      {QUICK_RANGES.map((r) => (
+    <div className="flex flex-col gap-2" data-testid="date-range-controls">
+      <div className="flex flex-wrap items-center gap-2">
+        {QUICK_RANGES.map((r) => (
+          <Button
+            key={r.label}
+            variant="secondary"
+            size="sm"
+            onClick={() => applyQuickRange(r.hours)}
+          >
+            {r.label}
+          </Button>
+        ))}
         <Button
-          key={r.label}
-          variant="secondary"
+          variant={isCustomOpen ? "primary" : "secondary"}
           size="sm"
-          onClick={() => applyQuickRange(r.hours)}
+          aria-expanded={isCustomOpen}
+          onClick={() => setIsCustomOpen((open) => !open)}
+          data-testid="custom-range-toggle"
         >
-          {r.label}
+          Custom
         </Button>
-      ))}
-      <span className="text-xs text-text-muted tabular-nums">
-        {from && to
-          ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
-          : "No window selected"}
-      </span>
+        <span className="text-xs text-text-muted tabular-nums">
+          {from && to
+            ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
+            : "No window selected"}
+        </span>
+      </div>
+      {isCustomOpen && <CustomDateRangeForm from={from} to={to} onApply={applyCustomRange} />}
     </div>
   );
 }
