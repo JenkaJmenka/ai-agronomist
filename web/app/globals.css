@@ -3,6 +3,8 @@
 /* Design tokens — MIGRATION_PLAN.md §7.1. Dark mode is first-class and flips
    via [data-theme] so wall displays don't depend on OS settings. */
 :root {
+  /* Native widgets (date pickers, scrollbars) follow the active theme. */
+  color-scheme: light;
   --bg: #f8faf8;
   --bg-elevated: #ffffff;
   --border: #e2e8e2;
@@ -21,6 +23,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0e1310;
   --bg-elevated: #171e19;
   --border: #26302a;
@@ -32,6 +35,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
+    color-scheme: dark;
     --bg: #0e1310;
     --bg-elevated: #171e19;
     --border: #26302a;
