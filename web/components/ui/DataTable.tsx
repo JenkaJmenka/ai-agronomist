@@ -16,6 +16,10 @@ interface DataTableProps<T> {
   readonly emptyMessage?: string;
   /** Extra classes for a body row (e.g. anomaly highlighting). */
   readonly rowClassName?: (row: T) => string | undefined;
+  /** Top-align cells so rows with wrapping content (e.g. multi-line "Why") read cleanly. */
+  readonly alignTop?: boolean;
+  /** Keep columns at their natural width (no wrap) so wide tables scroll horizontally. */
+  readonly scrollX?: boolean;
 }
 
 /**
@@ -28,6 +32,8 @@ export function DataTable<T>({
   rows,
   emptyMessage = "No records in the selected filters.",
   rowClassName,
+  alignTop = false,
+  scrollX = false,
 }: DataTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const table = useReactTable({
@@ -66,12 +72,17 @@ export function DataTable<T>({
         isVirtual ? VIRTUAL_VIEWPORT_MAX_HEIGHT : ""
       }`}
     >
-      <table className="w-full text-sm">
+      <table className={`${scrollX ? "min-w-full" : "w-full"} text-sm`}>
         <thead className="sticky top-0 z-10 bg-bg-elevated">
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id} className="border-b border-border text-left">
               {hg.headers.map((h) => (
-                <th key={h.id} className="px-3 py-2 font-semibold text-text-muted">
+                <th
+                  key={h.id}
+                  className={`px-3 py-2 font-semibold text-text-muted ${
+                    scrollX ? "whitespace-nowrap" : ""
+                  }`}
+                >
                   {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
                 </th>
               ))}
@@ -100,7 +111,12 @@ export function DataTable<T>({
                 }`}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-3 py-2">
+                  <td
+                    key={cell.id}
+                    className={`px-3 py-2 ${alignTop ? "align-top" : ""} ${
+                      scrollX ? "whitespace-nowrap" : ""
+                    }`}
+                  >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
