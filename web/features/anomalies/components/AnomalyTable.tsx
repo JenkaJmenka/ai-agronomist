@@ -94,7 +94,7 @@ export function AnomalyTable({
           }
           return (
             <span
-              className="block max-w-xs truncate text-text-muted"
+              className="block max-w-xs whitespace-pre-line break-words text-text-muted"
               title={reasoning}
               data-testid="reasoning"
             >
@@ -126,6 +126,7 @@ export function AnomalyTable({
     <DataTable
       columns={columns}
       rows={top}
+      alignTop
       emptyMessage="No anomalies above the threshold in this window. Widen the range or lower the threshold."
     />
   );
