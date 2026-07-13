@@ -3,19 +3,33 @@
 Provides REST endpoints for real-time network telemetry checks
 (RTT/jitter, IAT CV, TCP handshake, DHCP fingerprint, service
 response, and Isolation Forest threat scoring).
+
+RTT/jitter, service-response, and threat scoring keep per-tenant state
+(previous RTT, rolling P99 window, fitted forest) via
+``network_detector_registry`` — a fresh detector per request would reset
+those mechanisms.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from fastapi import APIRouter
+import numpy as np
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from src.api.services.network_detector_registry import (
+    get_rtt_detector,
+    get_service_detector,
+    get_threat_detector,
+    set_threat_detector,
+)
 from src.models.network.dhcp_fingerprint_detector import DHCPFingerprintDetector
-from src.models.network.rtt_jitter_detector import RTTJitterDetector
-from src.models.network.service_response_detector import ServiceResponseDetector
+from src.models.network.iat_cv_detector import IATCVDetector
+from src.models.network.isolation_forest_threat_detector import (
+    IsolationForestThreatDetector,
+)
 from src.models.network.tcp_handshake_detector import TCPHandshakeDetector
 
 logger = logging.getLogger(__name__)
@@ -26,6 +40,7 @@ router = APIRouter(prefix="/api/network", tags=["network-anomalies"])
 class RTTCheckRequest(BaseModel):
     rtt_ms: float = Field(..., description="Current round-trip time in ms")
     previous_rtt_ms: Optional[float] = Field(None, description="Previous RTT for jitter")
+    tenant_id: str = Field("default", description="Tenant whose RTT stream this is")
 
 
 class RTTCheckResponse(BaseModel):
@@ -48,6 +63,39 @@ class DHCPCheckRequest(BaseModel):
 class ServiceCheckRequest(BaseModel):
     duration_ms: float = Field(..., description="Response time in ms")
     baseline_threshold_ms: Optional[float] = Field(None, description="Override threshold")
+    tenant_id: str = Field("default", description="Tenant whose latency stream this is")
+
+
+class IATCheckRequest(BaseModel):
+    iat_series: List[float] = Field(
+        ..., min_length=1, description="Inter-packet arrival intervals in seconds"
+    )
+
+
+class IATCheckResponse(BaseModel):
+    is_anomaly: bool
+    flags: List[bool]
+
+
+class ThreatFitRequest(BaseModel):
+    tenant_id: str = Field("default")
+    vectors: List[List[float]] = Field(
+        ..., min_length=2, description="Normal-traffic feature vectors (n x 19)"
+    )
+
+
+class ThreatFitResponse(BaseModel):
+    fitted_samples: int
+
+
+class ThreatScoreRequest(BaseModel):
+    tenant_id: str = Field("default")
+    vector: List[float] = Field(..., description="Current feature vector (19 features)")
+
+
+class ThreatScoreResponse(BaseModel):
+    threat_score: float
+    is_anomaly: bool
 
 
 class AnomalyFlagResponse(BaseModel):
@@ -57,8 +105,12 @@ class AnomalyFlagResponse(BaseModel):
 
 @router.post("/rtt-jitter", response_model=RTTCheckResponse)
 def check_rtt_jitter(req: RTTCheckRequest) -> RTTCheckResponse:
-    """Check a single RTT measurement for latency and jitter anomalies."""
-    detector = RTTJitterDetector()
+    """Check a single RTT measurement for latency and jitter anomalies.
+
+    The per-tenant detector remembers the previous RTT, so jitter works
+    across consecutive requests; ``previous_rtt_ms`` overrides it.
+    """
+    detector = get_rtt_detector(req.tenant_id)
     result = detector.detect(req.rtt_ms, req.previous_rtt_ms)
     return RTTCheckResponse(
         is_anomaly=result.is_anomaly,
@@ -67,6 +119,13 @@ def check_rtt_jitter(req: RTTCheckRequest) -> RTTCheckResponse:
         rtt_ms=result.rtt_ms,
         jitter_ms=result.jitter_ms,
     )
+
+
+@router.post("/iat", response_model=IATCheckResponse)
+def check_iat(req: IATCheckRequest) -> IATCheckResponse:
+    """Check an inter-packet interval series for CV / spacing anomalies."""
+    flags = IATCVDetector().detect(np.asarray(req.iat_series, dtype=float))
+    return IATCheckResponse(is_anomaly=any(flags), flags=flags)
 
 
 @router.post("/tcp-handshake", response_model=AnomalyFlagResponse)
@@ -97,12 +156,52 @@ def check_dhcp_fingerprint(req: DHCPCheckRequest) -> AnomalyFlagResponse:
 
 @router.post("/service-response", response_model=AnomalyFlagResponse)
 def check_service_response(req: ServiceCheckRequest) -> AnomalyFlagResponse:
-    """Check a service response duration against threshold."""
-    detector = ServiceResponseDetector()
+    """Check a service response duration against the dynamic P99 threshold.
+
+    Every observed duration feeds the per-tenant rolling window (after
+    detection, so a sample never softens its own check); the threshold is
+    P99 of that window with the static baseline as a floor.
+    """
+    detector = get_service_detector(req.tenant_id)
     flagged = detector.detect(req.duration_ms, req.baseline_threshold_ms)
+    detector.update_baseline(req.duration_ms)
     return AnomalyFlagResponse(
         is_anomaly=flagged,
-        detail=f"Duration {req.duration_ms}ms exceeds threshold"
+        detail=(
+            f"Duration {req.duration_ms}ms exceeds threshold "
+            f"{detector.threshold_ms:.1f}ms"
+        )
         if flagged
         else None,
     )
+
+
+@router.post("/threat/fit", response_model=ThreatFitResponse)
+def fit_threat_detector(req: ThreatFitRequest) -> ThreatFitResponse:
+    """Fit the per-tenant Isolation Forest on normal-traffic vectors."""
+    vectors = np.asarray(req.vectors, dtype=float)
+    if vectors.ndim != 2:
+        raise HTTPException(
+            status_code=422, detail="vectors must be a 2-D array (n_samples x n_features)"
+        )
+    detector = IsolationForestThreatDetector()
+    detector.fit(vectors)
+    set_threat_detector(req.tenant_id, detector)
+    logger.info(
+        "Fitted threat detector for tenant %s on %d vectors", req.tenant_id, len(vectors)
+    )
+    return ThreatFitResponse(fitted_samples=len(vectors))
+
+
+@router.post("/threat/score", response_model=ThreatScoreResponse)
+def score_threat(req: ThreatScoreRequest) -> ThreatScoreResponse:
+    """Score a feature vector against the tenant's fitted Isolation Forest."""
+    detector = get_threat_detector(req.tenant_id)
+    if detector is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No fitted threat detector for tenant {req.tenant_id!r} — "
+            "POST /api/network/threat/fit first",
+        )
+    threat_score, is_anomaly = detector.detect(np.asarray(req.vector, dtype=float))
+    return ThreatScoreResponse(threat_score=threat_score, is_anomaly=is_anomaly)

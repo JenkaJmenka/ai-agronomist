@@ -54,8 +54,17 @@ from src.models.pot_threshold import POTThresholdFitter
 
 
 def _sample_sequence(seed: int = RANDOM_SEED) -> List[List[float]]:
+    """Nominal mid-range readings with small jitter.
+
+    Uniform-random normalized values denormalize to physically wild swings
+    (e.g. light jumping across 0-1000 lux) and legitimately trip the
+    pipeline's rule gates (spike/noise). These tests target the full
+    LSTM/ensemble path, so the input must read as genuinely normal.
+    """
     rng = np.random.default_rng(seed)
-    return rng.random((SEQ_LEN, INPUT_DIM)).astype(np.float32).tolist()
+    mids = np.full((SEQ_LEN, INPUT_DIM), 0.5, dtype=np.float32)
+    jitter = rng.normal(0.0, 0.002, (SEQ_LEN, INPUT_DIM)).astype(np.float32)
+    return np.clip(mids + jitter, 0.0, 1.0).tolist()
 
 
 def _make_enriched_side_effect(raw_score: float = 0.1):
@@ -199,6 +208,75 @@ class TestA1StoreIncidentGating:
         assert result["is_anomaly"] is False
 
 
+class TestGateIncidentPersistence:
+    """Rule-gate detections must persist incidents.
+
+    P1 regression guard: the short-circuit gates previously returned
+    incident_id=None, so rule-detected anomalies never reached incident
+    memory, operator feedback, or fault-type enrichment.
+    """
+
+    @pytest.mark.asyncio
+    async def test_spike_gate_stores_incident(self, pipeline, db_session):
+        """A MAD-spike gate result carries a stored incident id."""
+        sequence = np.asarray(_sample_sequence(), dtype=np.float32)
+        sequence[-1, 0] = 0.95  # ~+4.5°C temperature jump at the last step
+
+        result = await pipeline.run(
+            customer_id="gate_incident",
+            sequence=sequence.tolist(),
+            db=db_session,
+        )
+
+        assert result["is_anomaly"] is True
+        assert result["fault_type"] == "spike_fault"
+        assert result["incident_id"] is not None
+
+        from src.db.models import Incident
+
+        row = await db_session.get(Incident, result["incident_id"])
+        assert row is not None
+        assert row.fault_type == "spike_fault"
+        assert row.tenant_id == "gate_incident"
+
+
+class TestRuleVoteFusion:
+    """Rule detectors vote instead of short-circuiting (P2 fusion).
+
+    A fired rule must confirm the anomaly and pin the fault type while the
+    full LSTM/ensemble path still runs — attribution, pattern scores, and
+    recommendations must all be present alongside the rule's vote.
+    """
+
+    @pytest.mark.asyncio
+    async def test_spike_vote_keeps_full_pipeline_output(
+        self, pipeline, db_session, patch_physics_neutral
+    ):
+        """Physics is patched neutral: a confirmed physics fault deliberately
+        outranks rule votes, and the light channel trips nocturnal-light
+        confirmation whenever the suite runs at night."""
+        sequence = np.asarray(_sample_sequence(), dtype=np.float32)
+        sequence[-1, 0] = 0.95  # ~+4.5°C temperature jump at the last step
+
+        result = await pipeline.run(
+            customer_id="fusion_spike",
+            sequence=sequence.tolist(),
+            db=db_session,
+        )
+
+        assert result["is_anomaly"] is True
+        assert result["fault_type"] == "spike_fault"
+        assert result["root_cause"] == "transient_spike"
+        # Rule vote is visible as detector evidence …
+        assert result["detector_scores"].get("spike_mad") == 1.0
+        # … and the affected sensor leads the merged list.
+        assert result["affected_sensors"][0] == "temperature"
+        # Full pipeline output survives fusion (pre-fusion gates returned
+        # empty pattern scores and no recommendations).
+        assert result["pattern_scores"], "pattern detection must run"
+        assert result["all_recommendations"], "recommendations must run"
+
+
 # ---------------------------------------------------------------------------
 # Sprint A2 – _tracker_cache is a plain dict
 # ---------------------------------------------------------------------------
@@ -223,8 +301,14 @@ class TestA2TrackerCacheDict:
         assert dynamic_attrs == [], f"Dynamic cache attrs found: {dynamic_attrs}"
 
     @pytest.mark.asyncio
-    async def test_tracker_cache_populated_by_load(self, pipeline, db_session):
-        """After a pipeline.run(), _tracker_cache has an entry for the tenant."""
+    async def test_tracker_cache_populated_by_load(
+        self, pipeline, db_session, patch_physics_neutral
+    ):
+        """After a pipeline.run(), _tracker_cache has an entry for the tenant.
+
+        Physics is patched neutral: suppression short-circuits before the
+        tracker load, and the nocturnal-light rule is wall-clock-dependent.
+        """
         await pipeline.run(
             customer_id="a2_load",
             sequence=_sample_sequence(),
@@ -236,7 +320,9 @@ class TestA2TrackerCacheDict:
         assert isinstance(pot, POTThresholdFitter)
 
     @pytest.mark.asyncio
-    async def test_tracker_cache_hit_skips_db(self, pipeline, db_session):
+    async def test_tracker_cache_hit_skips_db(
+        self, pipeline, db_session, patch_physics_neutral
+    ):
         """Second call for same tenant uses cached trackers (no extra DB execute)."""
         customer_id = "a2_cache_hit"
 

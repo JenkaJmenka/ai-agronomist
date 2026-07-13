@@ -24,8 +24,17 @@ from src.monitoring.anomaly_metrics import reset_anomaly_metrics
 
 
 def sample_sequence(seed: int = RANDOM_SEED) -> List[List[float]]:
+    """Nominal mid-range readings with small jitter.
+
+    Uniform-random normalized values denormalize to physically wild swings
+    (e.g. light jumping across 0-1000 lux) and legitimately trip the
+    pipeline's rule gates (spike/noise). These tests target the full
+    LSTM/ensemble path, so the input must read as genuinely normal.
+    """
     rng = np.random.default_rng(seed)
-    return rng.random((SEQ_LEN, INPUT_DIM)).astype(np.float32).tolist()
+    mids = np.full((SEQ_LEN, INPUT_DIM), 0.5, dtype=np.float32)
+    jitter = rng.normal(0.0, 0.002, (SEQ_LEN, INPUT_DIM)).astype(np.float32)
+    return np.clip(mids + jitter, 0.0, 1.0).tolist()
 
 
 def baseline_sequences(count: int = 10) -> List[List[List[float]]]:

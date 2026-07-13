@@ -222,6 +222,15 @@ class TestAnomalyBuffer:
         assert list(buffer.anomaly_scores) == [pytest.approx(0.77)]
         assert len(buffer) == 1
 
+    def test_inherited_add_keeps_scores_aligned(self) -> None:
+        """P4 desync guard: mixing plain add() with add_anomaly() must keep
+        anomaly_scores index-aligned with the sequence deque."""
+        buffer = AnomalyBuffer(capacity=10)
+        buffer.add(make_sequence(), loss=0.1)  # inherited add, no aux append pre-fix
+        buffer.add_anomaly(make_sequence(), anomaly_score=0.9)
+        assert len(buffer.anomaly_scores) == len(buffer)
+        assert list(buffer.anomaly_scores) == [pytest.approx(0.1), pytest.approx(0.9)]
+
 
 # ---------------------------------------------------------------------------
 # SeasonalBuffer
@@ -257,3 +266,16 @@ class TestSeasonalBuffer:
         buffer = SeasonalBuffer(capacity=10)
         buffer.add_seasonal(make_sequence(), season="summer")
         assert buffer.sample_season("autumn") is None
+
+    def test_inherited_add_does_not_misalign_seasons(self) -> None:
+        """P4 desync guard: a plain add() between seasonal adds must not shift
+        season indices, or sample_season would return the wrong sequences."""
+        buffer = SeasonalBuffer(capacity=10)
+        buffer.add_seasonal(make_sequence(1.0), season="spring")
+        buffer.add(make_sequence(2.0))  # untagged — must not steal 'spring'
+        buffer.add_seasonal(make_sequence(3.0), season="spring")
+        assert len(buffer.seasons) == len(buffer)
+        batch = buffer.sample_season("spring", batch_size=10)
+        assert batch is not None
+        # Only the two genuinely-spring sequences, never the untagged one.
+        assert set(batch[:, 0, 0].tolist()) == {1.0, 3.0}

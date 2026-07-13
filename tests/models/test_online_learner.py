@@ -127,6 +127,40 @@ class TestOnlineLearnerObserve:
     def test_ewc_enabled_by_default(self, learner: OnlineLearner) -> None:
         assert learner.ewc is not None
 
+    def test_ewc_fisher_computed_after_warmup(self, model: LSTMVAE) -> None:
+        """EWC penalty is inert until the Fisher is computed at warm-up.
+
+        Guards the P4 fix: the learner constructed EWC but never called
+        compute_fisher, so penalty() was always 0.
+        """
+        from src.config import EWC_FISHER_WARMUP_SAMPLES
+
+        learner = OnlineLearner(
+            model=model, tenant_id="tenant_ewc", **FAST_LEARNER_KWARGS
+        )
+        assert learner.ewc.fisher is None
+        assert learner.ewc.penalty().item() == 0.0
+
+        for i in range(EWC_FISHER_WARMUP_SAMPLES + 1):
+            learner.observe(make_sequence(i))
+
+        assert learner._ewc_fisher_ready is True
+        assert learner.ewc.fisher is not None
+        # After some drift from the anchor, the penalty is strictly positive.
+        assert learner.ewc.penalty().item() > 0.0
+
+    def test_ewc_fisher_not_recomputed(self, model: LSTMVAE) -> None:
+        from src.config import EWC_FISHER_WARMUP_SAMPLES
+
+        learner = OnlineLearner(
+            model=model, tenant_id="tenant_ewc2", **FAST_LEARNER_KWARGS
+        )
+        for i in range(EWC_FISHER_WARMUP_SAMPLES + 1):
+            learner.observe(make_sequence(i))
+        fisher_ref = learner.ewc.fisher
+        learner.observe(make_sequence(9999))
+        assert learner.ewc.fisher is fisher_ref  # same object, not recomputed
+
     def test_periodic_update_logging_after_many_updates(
         self, model: LSTMVAE, caplog
     ) -> None:

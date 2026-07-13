@@ -280,6 +280,15 @@ ONLINE_BATCH_SIZE: int = 32
 # Elastic Weight Consolidation regularization strength (lambda).
 EWC_LAMBDA: float = 0.4
 
+# EWC activation: sequences an online learner must observe before its Fisher
+# information is computed (once) from the replay buffer, and how many
+# mini-batches to average over. Until then the penalty is 0 — forgetting
+# protection then rests only on the small LR, grad clipping, and replay mix.
+EWC_FISHER_WARMUP_SAMPLES: int = int(
+    os.environ.get("EWC_FISHER_WARMUP_SAMPLES", "200")
+)
+EWC_FISHER_BATCHES: int = int(os.environ.get("EWC_FISHER_BATCHES", "10"))
+
 # Synaptic Intelligence regularization strength (lambda).
 SI_LAMBDA: float = 0.4
 
@@ -692,6 +701,8 @@ CUSUM_H_SIGMA: float = float(os.environ.get("CUSUM_H_SIGMA", "4.0"))   # ARL₀ 
 DROPOUT_CONSECUTIVE_P: int = 5
 
 # Stuck-fault rolling window size (SCADA spec section 1.3).
+# spec ref: w=5, epsilon=1e-3 (docs/anomaly_framework_spec.md §3); production
+# uses a longer window and a 10x stricter epsilon (requires near-exact flatness).
 STUCK_WINDOW_K: int = 10
 STUCK_VARIANCE_THRESHOLD: float = 1e-4
 # Normalized-space range below which a window is treated as truly flat (stuck).
@@ -750,6 +761,8 @@ BOOTSTRAP_MAX_TRAIN_SEQUENCES: int = int(
 
 # Psychrometric validation (Tetens equation): max allowable absolute error
 # between measured humidity deficit and the value computed from T_air + RH.
+# spec ref: theta_thermo=0.15 g/m³ (docs/anomaly_framework_spec.md §8);
+# production uses 0.05 (3x stricter cross-validation).
 PSYCHROMETRIC_HD_TOLERANCE: float = 0.05  # g/m³
 
 # Spike detector velocity limits per sensor (physical units per 5-min step).
@@ -765,8 +778,20 @@ SPIKE_DELTA_MAX: Dict[str, float] = {
 # =============================================================================
 
 # Spike / Transient Outlier — MAD-based detector.
+# spec ref: k=5, c>=2.5 (docs/anomaly_framework_spec.md §1); production uses a
+# longer window for a steadier rolling median on live telemetry.
 SPIKE_MAD_WINDOW_K: int = int(os.environ.get("SPIKE_MAD_WINDOW_K", "10"))
 SPIKE_MAD_TUNING_C: float = float(os.environ.get("SPIKE_MAD_TUNING_C", "3.0"))
+# Per-sensor MAD noise floor (physical units). The rolling MAD is clamped to
+# at least this value before thresholding: on a near-constant series the MAD
+# collapses to ~0 and `delta > c*MAD` flags ordinary measurement noise.
+# Floors sit at ~2x the SENSOR_NOISE_TARGETS RMS values.
+SPIKE_MAD_FLOOR: Dict[str, float] = {
+    "temperature": 0.1,   # °C
+    "humidity": 0.2,      # %
+    "co2": 10.0,          # ppm
+    "light": 4.0,         # lux
+}
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
 OOB_LIMITS: Dict[str, Tuple[float, float]] = {
@@ -796,24 +821,70 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
 
 # Bias / Constant Offset — dual-sensor cross-difference.
+# spec ref: w=3, theta_bias=1.5°C (docs/anomaly_framework_spec.md §6);
+# production uses a longer window and a tighter threshold (3x more sensitive).
 BIAS_DUAL_WINDOW: int = int(os.environ.get("BIAS_DUAL_WINDOW", "10"))
 BIAS_DUAL_THRESHOLD: float = float(os.environ.get("BIAS_DUAL_THRESHOLD", "0.5"))
 # Single-sensor EMA fallback.
 BIAS_EMA_SPAN: int = int(os.environ.get("BIAS_EMA_SPAN", "288"))
 BIAS_EMA_THRESHOLD: float = float(os.environ.get("BIAS_EMA_THRESHOLD", "2.0"))
+# Per-sensor absolute deviation limits for the EMA bias check. A single
+# absolute threshold cannot serve sensors whose scales differ by orders of
+# magnitude: 2 lux of light jitter is measurement noise, while a 2°C
+# temperature offset is a real calibration fault.
+BIAS_EMA_THRESHOLD_BY_SENSOR: Dict[str, float] = {
+    "temperature": 2.0,   # °C
+    "humidity": 5.0,      # %
+    "co2": 50.0,          # ppm
+    "light": 100.0,       # lux
+}
 
 # Spatial Correlation Breakdown — rolling Pearson pair detector.
+# spec ref: w=5, theta_corr=0.70 (docs/anomaly_framework_spec.md §7);
+# production uses a longer window and a stricter correlation floor.
 CORR_BREAKDOWN_WINDOW: int = int(os.environ.get("CORR_BREAKDOWN_WINDOW", "12"))
 CORR_BREAKDOWN_THRESHOLD: float = float(os.environ.get("CORR_BREAKDOWN_THRESHOLD", "0.80"))
 
 # Diurnal Profile Deviation — hourly Z-score.
+# spec ref: theta_diurnal=3.0 (docs/anomaly_framework_spec.md §9); production
+# uses 2.5 (more sensitive) for earlier profile-deviation alerts.
 DIURNAL_Z_THRESHOLD: float = float(os.environ.get("DIURNAL_Z_THRESHOLD", "2.5"))
+# Auto-built hourly profiles: trailing history window and the minimum reading
+# count below which a tenant is considered too new for diurnal baselines.
+DIURNAL_PROFILE_HISTORY_DAYS: int = int(
+    os.environ.get("DIURNAL_PROFILE_HISTORY_DAYS", "14")
+)
+DIURNAL_PROFILE_MIN_ROWS: int = int(
+    os.environ.get("DIURNAL_PROFILE_MIN_ROWS", "288")
+)
+
+# Multivariate joint-implausibility check (rolling-window Mahalanobis).
+# 18.47 = chi-square df=4 at p=0.999 — flags only strong joint outliers.
+MAHALANOBIS_CHI2_THRESHOLD: float = float(
+    os.environ.get("MAHALANOBIS_CHI2_THRESHOLD", "18.47")
+)
+
+# Bayesian online change-point detection (level shifts beside CUSUM).
+# hazard_lambda = expected run length between changes; min_run = stable
+# steps required before a run-length collapse counts as a change-point.
+BOCPD_HAZARD_LAMBDA: float = float(os.environ.get("BOCPD_HAZARD_LAMBDA", "250.0"))
+BOCPD_MIN_RUN: int = int(os.environ.get("BOCPD_MIN_RUN", "8"))
+# A change-point must appear on at least this many sensors simultaneously
+# to vote (a single channel's level shift is usually a control action).
+BOCPD_MIN_SENSORS: int = int(os.environ.get("BOCPD_MIN_SENSORS", "2"))
 
 # =============================================================================
 # OT Network Security Detectors
 # =============================================================================
 
+# Max tenants kept in the per-tenant network detector registries (LRU).
+NETWORK_REGISTRY_MAX_TENANTS: int = int(
+    os.environ.get("NETWORK_REGISTRY_MAX_TENANTS", "500")
+)
+
 # RTT / Jitter.
+# spec ref: theta_jitter=50ms (docs/anomaly_framework_spec.md §10); production
+# uses 20ms (2.5x more sensitive). RTT baseline/multiplier match spec exactly.
 RTT_BASELINE_MS: float = float(os.environ.get("RTT_BASELINE_MS", "2.0"))
 RTT_MULTIPLIER: float = float(os.environ.get("RTT_MULTIPLIER", "3.0"))
 JITTER_THRESHOLD_MS: float = float(os.environ.get("JITTER_THRESHOLD_MS", "20.0"))
@@ -822,11 +893,15 @@ JITTER_THRESHOLD_MS: float = float(os.environ.get("JITTER_THRESHOLD_MS", "20.0")
 # spec ref: w=5 (docs/anomaly_framework_spec.md §11); production uses 20 for
 # a steadier CV estimate on jittery links.
 IAT_CV_WINDOW: int = int(os.environ.get("IAT_CV_WINDOW", "20"))
+# spec ref: theta_CV=1.5, spacing multiplier=3.0 (docs/anomaly_framework_spec.md
+# §11); production is more sensitive on both (CV 1.0, spacing 2.5x).
 IAT_CV_THRESHOLD: float = float(os.environ.get("IAT_CV_THRESHOLD", "1.0"))
 IAT_BASELINE_MEAN: float = float(os.environ.get("IAT_BASELINE_MEAN", "1.0"))
 IAT_SPACING_MULTIPLIER: float = float(os.environ.get("IAT_SPACING_MULTIPLIER", "2.5"))
 
 # TCP Handshake timing.
+# spec ref: c=2.5 → 12.5ms limit (docs/anomaly_framework_spec.md §12);
+# production uses 2.0 → 10ms limit (more sensitive).
 TCP_BASELINE_MS: float = float(os.environ.get("TCP_BASELINE_MS", "5.0"))
 TCP_DELAY_FACTOR: float = float(os.environ.get("TCP_DELAY_FACTOR", "2.0"))
 

@@ -61,5 +61,7 @@ def test_split_baseline_readings():
 
 
 def test_effective_window_scales_for_short_files():
-    assert _effective_rolling_window(150, 288) == 12
+    # Short files scale to half the row count (diurnal-cycle rationale in
+    # _effective_rolling_window); long files keep the configured window.
+    assert _effective_rolling_window(150, 288) == 75
     assert _effective_rolling_window(100_000, 288) == 288
