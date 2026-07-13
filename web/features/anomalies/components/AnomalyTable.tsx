@@ -83,6 +83,27 @@ export function AnomalyTable({
         },
       },
       {
+        header: "Why",
+        id: "reasoning",
+        cell: (ctx) => {
+          const detail = enrichment?.get(ctx.row.original.timestamp);
+          const reasoning = detail?.reasoning;
+          if (!reasoning) {
+            if (isEnrichmentLoading) return <Skeleton className="h-4 w-32" />;
+            return <span className="text-text-muted">—</span>;
+          }
+          return (
+            <span
+              className="block max-w-xs truncate text-text-muted"
+              title={reasoning}
+              data-testid="reasoning"
+            >
+              {reasoning}
+            </span>
+          );
+        },
+      },
+      {
         header: "Actions",
         id: "actions",
         cell: (ctx) => {

@@ -80,6 +80,14 @@ def enrich_anomaly_rows(
         shaped["affected_sensors"] = list(enrichment.get("affected_sensors") or [])
         shaped["incident_id"] = enrichment.get("incident_id")
         shaped["root_cause"] = (incident or {}).get("root_cause")
+        # When the pipeline persisted a reasoning on the matched incident,
+        # it is authoritative: it names the exact algorithm that fired
+        # (including the newer Mahalanobis / change-point detectors the
+        # z-score-based regeneration in enrich_dataframe cannot know about).
+        details = (incident or {}).get("root_cause_details") or {}
+        persisted_reasoning = details.get("reasoning")
+        if persisted_reasoning:
+            shaped["reasoning"] = persisted_reasoning
         out.append(shaped)
     return out
 

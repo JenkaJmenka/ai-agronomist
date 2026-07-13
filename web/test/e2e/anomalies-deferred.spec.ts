@@ -40,6 +40,7 @@ test("top anomalies show G4 fault labels and channel-aware jump", async ({ page 
             anomaly_score: 0.9,
             fault_type: "spike_fault",
             root_cause: "Fan failure",
+            reasoning: "Transient spike: temperature deviated beyond the rolling MAD threshold",
             affected_sensors: ["temperature"],
             incident_id: "inc-1",
           },
@@ -52,6 +53,7 @@ test("top anomalies show G4 fault labels and channel-aware jump", async ({ page 
 
   await page.goto("/anomalies");
   await expect(page.getByTestId("fault-type").first()).toHaveText("Spike fault");
+  await expect(page.getByTestId("reasoning").first()).toContainText("Transient spike");
 
   const jump = page.getByRole("link", { name: `Open ${rows[0].timestamp} in Monitoring` });
   await expect(jump).toHaveAttribute("href", /channel=temperature/);
