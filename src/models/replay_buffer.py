@@ -205,6 +205,23 @@ class AnomalyBuffer(ReplayBuffer):
         super().__init__(capacity)
         self.anomaly_scores: deque = deque(maxlen=capacity)
 
+    def add(
+        self,
+        sequence: np.ndarray,
+        loss: Optional[float] = None,
+        timestamp: Optional[float] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Add one sequence, keeping ``anomaly_scores`` index-aligned.
+
+        Overriding the base ``add`` (rather than only appending in
+        ``add_anomaly``) means a caller mixing plain ``add`` with
+        ``add_anomaly`` can never desync the parallel deque — the score
+        defaults to ``loss`` (0.0 when unlabeled).
+        """
+        super().add(sequence, loss=loss, timestamp=timestamp, label=label)
+        self.anomaly_scores.append(loss if loss is not None else 0.0)
+
     def add_anomaly(
         self,
         sequence: np.ndarray,
@@ -227,20 +244,37 @@ class AnomalyBuffer(ReplayBuffer):
             label = "false_positive"
 
         self.add(sequence, loss=anomaly_score, label=label)
-        self.anomaly_scores.append(anomaly_score)
 
 
 class SeasonalBuffer(ReplayBuffer):
     """Buffer organized by season, enabling seasonal baseline sampling."""
 
+    _UNTAGGED_SEASON = "__untagged__"
+
     def __init__(self, capacity: int = REPLAY_BUFFER_CAPACITY) -> None:
         super().__init__(capacity)
         self.seasons: deque = deque(maxlen=capacity)
 
+    def add(
+        self,
+        sequence: np.ndarray,
+        loss: Optional[float] = None,
+        timestamp: Optional[float] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Add one sequence, keeping ``seasons`` index-aligned.
+
+        A plain ``add`` (no season) records a sentinel season so mixing it
+        with ``add_seasonal`` cannot misalign the parallel deque and make
+        ``sample_season`` return sequences from the wrong season.
+        """
+        super().add(sequence, loss=loss, timestamp=timestamp, label=label)
+        self.seasons.append(self._UNTAGGED_SEASON)
+
     def add_seasonal(self, sequence: np.ndarray, season: str, **kwargs: Any) -> None:
         """Add a sequence tagged with a season (e.g. 'spring', 'summer')."""
         self.add(sequence, **kwargs)
-        self.seasons.append(season)
+        self.seasons[-1] = season
 
     def sample_season(
         self, season: str, batch_size: int = ONLINE_BATCH_SIZE

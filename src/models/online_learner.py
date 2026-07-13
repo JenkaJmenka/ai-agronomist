@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from src.config import (
     DEVICE,
     DRIFT_THRESHOLD,
+    EWC_FISHER_BATCHES,
+    EWC_FISHER_WARMUP_SAMPLES,
     EWC_LAMBDA,
     GRAD_CLIP_NORM,
     NUMERICAL_EPSILON,
@@ -96,9 +98,13 @@ class OnlineLearner:
         )
 
         self.ewc: Optional[ElasticWeightConsolidation] = None
+        self._ewc_fisher_ready = False
         if use_ewc:
             self.ewc = ElasticWeightConsolidation(self.model, ewc_lambda, device)
-            logger.info("EWC enabled for catastrophic forgetting prevention")
+            logger.info(
+                "EWC enabled; Fisher computed after %d observed sequences",
+                EWC_FISHER_WARMUP_SAMPLES,
+            )
 
         self.step_count = 0
         self.update_count = 0
@@ -126,11 +132,49 @@ class OnlineLearner:
         self.buffer.add(sequence, loss=loss)
 
         self.step_count += 1
+        self._maybe_compute_fisher()
         if self.step_count % self.update_interval == 0:
             self._update_step()
 
         self.losses.append(loss)
         return loss
+
+    def _maybe_compute_fisher(self) -> None:
+        """Compute the EWC Fisher once, after the warm-up window.
+
+        The Fisher is estimated from the tenant's own early sequences (before
+        much adaptation has happened), so it marks the parameters that matter
+        for reconstructing this tenant's *normal* manifold. Anchoring EWC to
+        those parameters is what actually makes ``penalty()`` non-zero — until
+        this runs, forgetting protection is only the small LR + replay mixing.
+        """
+        if (
+            self.ewc is None
+            or self._ewc_fisher_ready
+            or self.step_count < EWC_FISHER_WARMUP_SAMPLES
+            or len(self.buffer) < self.batch_size
+        ):
+            return
+
+        batches = [
+            self.buffer.sample(batch_size=self.batch_size)
+            for _ in range(EWC_FISHER_BATCHES)
+        ]
+        loader = [
+            torch.as_tensor(batch, dtype=torch.float32).to(self.device)
+            for batch in batches
+            if len(batch) > 0
+        ]
+        if not loader:
+            return
+        self.ewc.compute_fisher(loader)
+        self.model.eval()
+        self._ewc_fisher_ready = True
+        logger.info(
+            "[%s] EWC Fisher computed after %d sequences — forgetting penalty active",
+            self.tenant_id,
+            self.step_count,
+        )
 
     def _per_sample_loss(
         self,

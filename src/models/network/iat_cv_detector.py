@@ -38,31 +38,31 @@ class IATCVDetector:
     def detect(self, iat_series: np.ndarray) -> List[bool]:
         """Per-timestep anomaly detection on an IAT series.
 
+        The absolute spacing rule is a per-sample check and applies from
+        the first sample; only the CV rule needs a filled window (first
+        ``w-1`` entries can never be CV violations).
+
         Args:
             iat_series: 1-D array of inter-packet intervals (seconds).
 
         Returns:
-            List of booleans; ``True`` = anomaly.  First ``w-1``
-            entries are ``False``.
+            List of booleans; ``True`` = anomaly.
         """
         iat = np.asarray(iat_series, dtype=float)
         n = len(iat)
         w = self._window
         flags: List[bool] = [False] * n
 
-        if n < w:
-            return flags
-
-        for t in range(w - 1, n):
-            window = iat[t - w + 1 : t + 1]
-            mu = float(np.mean(window))
-            sigma = float(np.std(window, ddof=1))
-
+        for t in range(n):
             spacing_violation = iat[t] > self._spacing_limit
+
             cv_violation = False
-            if mu > 0:
-                cv = sigma / mu
-                cv_violation = cv > self._cv_threshold
+            if t >= w - 1:
+                window = iat[t - w + 1 : t + 1]
+                mu = float(np.mean(window))
+                sigma = float(np.std(window, ddof=1))
+                if mu > 0:
+                    cv_violation = sigma / mu > self._cv_threshold
 
             flags[t] = bool(spacing_violation or cv_violation)
 

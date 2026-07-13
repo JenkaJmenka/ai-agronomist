@@ -8,7 +8,12 @@ to outliers contaminating the reference window.
 Algorithm:
     median_t = median(x[t-k+1 : t+1])
     MAD_t    = median(|x[t-k+1 : t+1] - median_t|)
-    flag     = |x_t - median_t| > c * MAD_t
+    flag     = |x_t - median_t| > c * max(MAD_t, mad_floor)
+
+The optional ``mad_floor`` clamps the rolling MAD from below: on a
+near-constant series the MAD collapses toward zero and ``delta > c * MAD``
+flags ordinary measurement noise. Callers pass the sensor's noise floor in
+the same physical units as the series (see ``SPIKE_MAD_FLOOR`` in config).
 """
 
 from __future__ import annotations
@@ -35,11 +40,14 @@ class SpikeMADDetector:
         self._k = window_k
         self._c = tuning_c
 
-    def detect(self, series: np.ndarray) -> List[bool]:
+    def detect(self, series: np.ndarray, mad_floor: float = 0.0) -> List[bool]:
         """Flag each timestep as anomalous (spike) or normal.
 
         Args:
             series: 1-D array of sensor readings.
+            mad_floor: Minimum MAD (physical units) used for thresholding;
+                guards against false positives when the window is
+                near-constant and the rolling MAD collapses to ~0.
 
         Returns:
             List of booleans, one per timestep.  ``True`` = spike detected.
@@ -57,8 +65,9 @@ class SpikeMADDetector:
             window = series[t - self._k + 1 : t + 1]
             median = float(np.median(window))
             mad = float(np.median(np.abs(window - median)))
+            effective_mad = max(mad, mad_floor)
             delta = abs(series[t] - median)
-            if mad > 0 and delta > self._c * mad:
+            if effective_mad > 0 and delta > self._c * effective_mad:
                 flags[t] = True
 
         return flags

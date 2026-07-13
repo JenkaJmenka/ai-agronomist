@@ -18,6 +18,9 @@ from src.config import (
     ACTIVE_LEARNING_MIN_QUALITY_LABELS,
     ANOMALY_SCALING_FACTOR,
     ANOMALY_THRESHOLD,
+    BIAS_EMA_THRESHOLD,
+    BIAS_EMA_THRESHOLD_BY_SENSOR,
+    BOCPD_MIN_SENSORS,
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     EWMA_ALPHA,
@@ -29,6 +32,7 @@ from src.config import (
     POT_Q,
     SEQ_LEN,
     SENSOR_NAMES,
+    SPIKE_MAD_FLOOR,
     TEMP_RANGE,
     HUMIDITY_RANGE,
     CO2_RANGE,
@@ -39,6 +43,10 @@ from src.db.models import LearningState
 from src.models.anomaly_attributor import AnomalyAttributor
 from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
 from src.models.bias_dual_sensor_detector import BiasDualSensorDetector
+from src.models.bocpd_detector import BOCPDDetector
+from src.models.multivariate_mahalanobis_detector import (
+    MultivariateMahalanobisDetector,
+)
 from src.models.confidence_scorer import ConfidenceScorer
 from src.models.correlation_breakdown_detector import CorrelationBreakdownDetector
 from src.models.data_utils import SENSOR_RANGES
@@ -73,6 +81,56 @@ _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
     "temperature_out_of_range": "spike_fault",
 }
 
+# Fault profile per rule detector (fusion, plan P2). Rule detectors vote
+# instead of short-circuiting: the full LSTM/ensemble path still runs, and
+# the FIRST fired rule (dict/gate order) takes fault-type precedence over
+# model-derived classification. Values mirror the former short-circuit
+# result builders so alert semantics stay stable.
+_RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
+    "noise": {
+        "fault_type": "accuracy_decline",
+        "root_cause": "sensor_noise_floor_exceeded",
+        "severity": "high",
+        "urgency": "urgent",
+    },
+    "spike_mad": {
+        "fault_type": "spike_fault",
+        "root_cause": "transient_spike",
+        "severity": "high",
+        "urgency": "urgent",
+    },
+    "bias_dual": {
+        "fault_type": "bias_offset",
+        "root_cause": "redundant_sensor_bias_offset",
+        "severity": "high",
+        "urgency": "urgent",
+    },
+    "correlation_breakdown": {
+        "fault_type": "correlation_breakdown",
+        "root_cause": "spatial_correlation_breakdown",
+        "severity": "high",
+        "urgency": "urgent",
+    },
+    "diurnal": {
+        "fault_type": "diurnal_deviation",
+        "root_cause": "diurnal_profile_violation",
+        "severity": "medium",
+        "urgency": "scheduled",
+    },
+    "multivariate": {
+        "fault_type": "accuracy_decline",
+        "root_cause": "multivariate_implausibility",
+        "severity": "high",
+        "urgency": "urgent",
+    },
+    "change_point": {
+        "fault_type": "calibration_drift",
+        "root_cause": "level_shift_change_point",
+        "severity": "medium",
+        "urgency": "scheduled",
+    },
+}
+
 # Sensor ranges in physical units for denormalization.
 _DENORM_RANGES = np.array(
     [TEMP_RANGE, HUMIDITY_RANGE, CO2_RANGE, LIGHT_RANGE],
@@ -81,34 +139,6 @@ _DENORM_RANGES = np.array(
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
-
-
-def compute_hourly_stats(
-    timestamps: List[datetime],
-    values: List[float],
-) -> Dict[int, tuple]:
-    """Build per-hour (mean, std) from timestamped sensor readings.
-
-    Args:
-        timestamps: List of datetime objects.
-        values: Corresponding sensor values in physical units.
-
-    Returns:
-        Dict mapping hour (0-23) to ``(mean, std)`` tuple.
-        Hours with fewer than 5 samples are omitted.
-    """
-    from collections import defaultdict
-    buckets: Dict[int, List[float]] = defaultdict(list)
-    for ts, val in zip(timestamps, values):
-        if val is not None and not (isinstance(val, float) and np.isnan(val)):
-            buckets[ts.hour].append(val)
-
-    result: Dict[int, tuple] = {}
-    for hour, vals in buckets.items():
-        if len(vals) >= 5:
-            arr = np.array(vals)
-            result[hour] = (float(np.mean(arr)), max(float(np.std(arr)), 1e-6))
-    return result
 
 
 def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
@@ -224,6 +254,10 @@ class ComprehensiveInferencePipeline:
         self._diurnal_detector = DiurnalProfileDetector()
         self._bias_dual_detector = BiasDualSensorDetector()
         self._corr_breakdown_detector = CorrelationBreakdownDetector()
+        # Sensitivity layer (plan P3): joint-implausibility + change-point,
+        # both stateless and shared. They run on the physical-unit window.
+        self._mahalanobis_detector = MultivariateMahalanobisDetector()
+        self._bocpd_detector = BOCPDDetector()
         # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
         self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
         # Component caching
@@ -395,7 +429,21 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 _dropout_reason,
             )
-            return self._dropout_result(reason=_dropout_reason)
+            return await self._persist_gate_result(
+                self._dropout_result(reason=_dropout_reason),
+                customer_id=customer_id,
+                greenhouse_id=greenhouse_id,
+                seq_array=seq_array,
+                sequence_raw=sequence_raw,
+                db=db,
+            )
+
+        # Rule-detector votes (fusion, plan P2). Fired rules no longer
+        # short-circuit: they confirm the anomaly and steer fault typing
+        # while the LSTM/ensemble path still runs, so multi-fault sequences
+        # keep full attribution, pattern scores, and recommendations.
+        # Keyed by _RULE_VOTE_PROFILES name → affected sensors/variables.
+        rule_votes: dict[str, list[str]] = {}
 
         # 0a. Noise / precision degradation check (SCADA spec 1.4).
         # Denormalize so per-sensor detection uses physical units (°C, %, ppm,
@@ -411,7 +459,7 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 noise_alarmed,
             )
-            return self._build_noise_result(noise_alarmed)
+            rule_votes["noise"] = noise_alarmed
 
         # 0b. Out-of-bounds check — short-circuit on hard physical limits.
         oob_alarmed: list[str] = []
@@ -424,12 +472,25 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 oob_alarmed,
             )
-            return self._build_oob_result(oob_alarmed)
+            return await self._persist_gate_result(
+                self._build_oob_result(oob_alarmed),
+                customer_id=customer_id,
+                greenhouse_id=greenhouse_id,
+                seq_array=seq_array,
+                sequence_raw=sequence_raw,
+                db=db,
+            )
 
         # 0c. Spike (MAD) check — short-circuit on transient outliers.
+        # The per-sensor MAD floor keeps near-constant series (rolling MAD ~ 0)
+        # from alarming on ordinary measurement noise.
         spike_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if any(self._spike_mad_detector.detect(_denormed_for_noise[:, s_idx])):
+            spike_flags = self._spike_mad_detector.detect(
+                _denormed_for_noise[:, s_idx],
+                mad_floor=SPIKE_MAD_FLOOR.get(s_name, 0.0),
+            )
+            if any(spike_flags):
                 spike_alarmed.append(s_name)
         if spike_alarmed:
             logger.warning(
@@ -437,12 +498,18 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 spike_alarmed,
             )
-            return self._build_spike_result(spike_alarmed)
+            rule_votes["spike_mad"] = spike_alarmed
 
         # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
+        # Thresholds are per sensor: the physical scales differ by orders of
+        # magnitude, so a shared absolute limit over-flags lux/ppm channels.
         bias_ema_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if any(BiasEMADetector.detect_ema(_denormed_for_noise[:, s_idx])):
+            bias_flags_ema = BiasEMADetector.detect_ema(
+                _denormed_for_noise[:, s_idx],
+                threshold=BIAS_EMA_THRESHOLD_BY_SENSOR.get(s_name, BIAS_EMA_THRESHOLD),
+            )
+            if any(bias_flags_ema):
                 bias_ema_alarmed.append(s_name)
         bias_ema_flag = len(bias_ema_alarmed) > 0
         if bias_ema_flag:
@@ -467,7 +534,7 @@ class ComprehensiveInferencePipeline:
                         "Dual-sensor bias on %s for tenant %s",
                         var_name, customer_id,
                     )
-                    return self._build_bias_dual_result(var_name)
+                    rule_votes.setdefault("bias_dual", []).append(var_name)
 
                 corr_flags = self._corr_breakdown_detector.detect(a, b)
                 if any(corr_flags):
@@ -475,10 +542,13 @@ class ComprehensiveInferencePipeline:
                         "Correlation breakdown on %s for tenant %s",
                         var_name, customer_id,
                     )
-                    return self._build_correlation_breakdown_result(var_name)
+                    rule_votes.setdefault("correlation_breakdown", []).append(var_name)
 
         # 0f. Diurnal profile check — hourly Z-score against historical stats.
-        _diurnal_profiles = self._load_diurnal_profiles(customer_id)
+        # Profiles auto-build from the tenant's stored history on first use.
+        _diurnal_profiles = await self._ensure_diurnal_profiles(
+            customer_id, greenhouse_id, db
+        )
         if _diurnal_profiles:
             hour = seq_ts.hour
             diurnal_alarmed: list[str] = []
@@ -493,7 +563,33 @@ class ComprehensiveInferencePipeline:
                     "Diurnal profile deviation for tenant %s — sensors: %s",
                     customer_id, diurnal_alarmed,
                 )
-                return self._build_diurnal_result(diurnal_alarmed, hour)
+                rule_votes["diurnal"] = diurnal_alarmed
+
+        # 0g. Multivariate joint-implausibility (rolling Mahalanobis) — catches
+        # in-range readings that are jointly impossible (plan P3). The last
+        # timestep is the current reading under evaluation.
+        mahal_flags = self._mahalanobis_detector.detect(_denormed_for_noise)
+        if mahal_flags and mahal_flags[-1]:
+            logger.warning(
+                "Multivariate implausibility for tenant %s at current reading",
+                customer_id,
+            )
+            rule_votes["multivariate"] = list(SENSOR_NAMES[: seq_array.shape[1]])
+
+        # 0h. Change-point (BOCPD) — level shifts CUSUM's fixed K/H may miss.
+        # A shift is only credible on multiple channels at once; a single
+        # channel's step is usually a control action, not a fault.
+        cp_sensors: list[str] = []
+        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            cp_flags = self._bocpd_detector.detect(_denormed_for_noise[:, s_idx])
+            if cp_flags and cp_flags[-1]:
+                cp_sensors.append(s_name)
+        if len(cp_sensors) >= BOCPD_MIN_SENSORS:
+            logger.warning(
+                "Change-point detected for tenant %s — sensors: %s",
+                customer_id, cp_sensors,
+            )
+            rule_votes["change_point"] = cp_sensors
 
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
@@ -524,15 +620,28 @@ class ComprehensiveInferencePipeline:
                 cusum_alarmed_sensors,
             )
 
-        # 2. Physics validation — may short-circuit the pipeline.
+        # 2. Physics validation — may short-circuit the pipeline. Suppression
+        # only quiets the model signal: a fired rule detector is direct
+        # evidence of a sensor fault, so rule votes survive suppression
+        # (pre-fusion, gates returned before physics ever ran).
         physics_result = self._run_physics_check(seq_array, now)
         if physics_result.suppressed:
-            logger.info(
-                "Physically suppressed anomaly for tenant %s: %s",
-                customer_id,
-                physics_result.reason,
-            )
-            return self._suppressed_result(anomaly_score=anomaly_score, reason=physics_result.reason)
+            if rule_votes:
+                logger.info(
+                    "Physics suppression (%s) overridden by rule votes %s for tenant %s",
+                    physics_result.reason,
+                    sorted(rule_votes),
+                    customer_id,
+                )
+            else:
+                logger.info(
+                    "Physically suppressed anomaly for tenant %s: %s",
+                    customer_id,
+                    physics_result.reason,
+                )
+                return self._suppressed_result(
+                    anomaly_score=anomaly_score, reason=physics_result.reason
+                )
         if physics_result.confirmed:
             logger.info(
                 "Physics confirmed anomaly for tenant %s: %s -> %s",
@@ -577,6 +686,17 @@ class ComprehensiveInferencePipeline:
         if bias_ema_flag and is_anomaly and not physics_result.confirmed:
             fault_type = "bias_offset"
 
+        # 5c. Rule-detector votes confirm the anomaly; the first fired rule
+        # (gate order) takes fault-type precedence unless physics already
+        # confirmed a specific fault.
+        rule_profile: Optional[Dict[str, str]] = None
+        if rule_votes:
+            is_anomaly = True
+            if not physics_result.confirmed:
+                first_rule = next(iter(rule_votes))
+                rule_profile = _RULE_VOTE_PROFILES[first_rule]
+                fault_type = rule_profile["fault_type"]
+
         # 6. Persist updated tracker scores.
         try:
             if _ewma_tracker is not None and _pot_fitter is not None:
@@ -595,27 +715,51 @@ class ComprehensiveInferencePipeline:
         )
         confidence_level = self.confidence_scorer.confidence_level(confidence)
 
-        # 8. Root cause + recommendations.
+        # 8. Root cause + recommendations. A fired rule pins the root cause,
+        # severity, and urgency (mirroring the former short-circuit results)
+        # so recommendations key off the confirmed fault, not the model's
+        # pattern guess; the analyzer's reasoning is kept for context.
         root_cause_result = self.root_cause_analyzer.analyze(
             pattern_type=pattern_type,
             attribution=attribution_result["attribution"],
             sequence=seq_array,
         )
+        if rule_profile is not None:
+            root_cause_result = {
+                **root_cause_result,
+                "root_cause": rule_profile["root_cause"],
+                "severity": rule_profile["severity"],
+                "urgency": rule_profile["urgency"],
+            }
         recommendation_result = self.recommendation_engine.recommend(
             root_cause=root_cause_result["root_cause"],
             severity=root_cause_result.get("severity", "medium"),
         )
+
+        # Merge rule-vote evidence into the reported detector scores and
+        # affected sensors (rule sensors first — they are direct evidence).
+        detector_scores = dict(ensemble_result.detector_scores)
+        affected_sensors = list(attribution_result["affected_sensors"])
+        if rule_votes:
+            for rule_name, rule_sensors in rule_votes.items():
+                detector_scores[rule_name] = 1.0
+                affected_sensors = [
+                    *rule_sensors,
+                    *(s for s in affected_sensors if s not in rule_sensors),
+                ]
+
         root_cause_details = {
             "attribution": attribution_result["attribution"],
-            "affected_sensors": attribution_result["affected_sensors"],
+            "affected_sensors": affected_sensors,
             "pattern_type": pattern_type,
             "pattern_explanation": pattern_result.get("explanation", ""),
             "sensor_values_at_peak": self._peak_sensor_values(seq_array),
-            "detector_scores": ensemble_result.detector_scores,
+            "detector_scores": detector_scores,
             "ensemble_score": ensemble_result.ensemble_score,
             "ensemble_agreement": ensemble_result.agreement_count,
             "fault_type": fault_type,
             "physics_validation": physics_result.reason,
+            "rule_votes": rule_votes,
         }
 
         # 9. Incident storage + online learner observation.
@@ -651,7 +795,7 @@ class ComprehensiveInferencePipeline:
             pattern_type=pattern_type,
             fault_type=fault_type,
             attribution=attribution_result["attribution"],
-            affected_sensors=attribution_result["affected_sensors"],
+            affected_sensors=affected_sensors,
             pattern_scores=pattern_result["pattern_scores"],
             root_cause=root_cause_result["root_cause"],
             root_cause_confidence=root_cause_result.get("confidence", 0.5),
@@ -665,7 +809,7 @@ class ComprehensiveInferencePipeline:
             requires_technician=recommendation_result.get("requires_technician", False),
             estimated_resolution_minutes=recommendation_result.get("estimated_downtime_minutes", 30),
             incident_id=incident_id,
-            detector_scores=ensemble_result.detector_scores,
+            detector_scores=detector_scores,
             ensemble_score=ensemble_result.ensemble_score,
             ensemble_agreement=ensemble_result.agreement_count,
             physics_validation=physics_result.reason,
@@ -755,54 +899,6 @@ class ComprehensiveInferencePipeline:
         )
 
     @staticmethod
-    def _build_noise_result(alarmed_sensors: List[str]) -> "PipelineResult":
-        """Result for a confirmed noise / precision degradation event.
-
-        Returned before the LSTM-VAE forward pass.  anomaly_score is 1.0 as a
-        maximum sentinel — the fault is confirmed by the noise detector, not by
-        reconstruction error.
-        """
-        reason = (
-            "Precision degradation detected on: "
-            + ", ".join(alarmed_sensors)
-        )
-        return PipelineResult(
-            is_anomaly=True,
-            anomaly_score=1.0,
-            confidence=1.0,
-            confidence_level="very_high",
-            pattern_type="accuracy_decline",
-            fault_type="accuracy_decline",
-            attribution={},
-            affected_sensors=alarmed_sensors,
-            pattern_scores={},
-            root_cause="sensor_noise_floor_exceeded",
-            root_cause_confidence=1.0,
-            reasoning=reason,
-            alternative_causes=[],
-            severity="high",
-            urgency="urgent",
-            immediate_actions=["inspect_sensor_calibration", "check_sensor_hardware"],
-            follow_up_actions=["replace_sensor_if_degraded", "recalibrate_sensor"],
-            all_recommendations=[
-                "inspect_sensor_calibration",
-                "check_sensor_hardware",
-                "replace_sensor_if_degraded",
-                "recalibrate_sensor",
-            ],
-            requires_technician=True,
-            estimated_resolution_minutes=60,
-            incident_id=None,
-            detector_scores={},
-            ensemble_score=0.0,
-            ensemble_agreement=0,
-            physics_validation=None,
-            learning_progress=None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            pipeline_version=PIPELINE_VERSION,
-        )
-
-    @staticmethod
     def _build_oob_result(alarmed_sensors: List[str]) -> "PipelineResult":
         """Result for an out-of-bounds hard-limit violation."""
         reason = (
@@ -843,177 +939,58 @@ class ComprehensiveInferencePipeline:
             pipeline_version=PIPELINE_VERSION,
         )
 
-    @staticmethod
-    def _build_spike_result(alarmed_sensors: List[str]) -> "PipelineResult":
-        """Result for a confirmed MAD spike anomaly."""
-        reason = (
-            "Transient spike (MAD) detected on: "
-            + ", ".join(alarmed_sensors)
-        )
-        return PipelineResult(
-            is_anomaly=True,
-            anomaly_score=1.0,
-            confidence=0.95,
-            confidence_level="high",
-            pattern_type="spike",
-            fault_type="spike_fault",
-            attribution={},
-            affected_sensors=alarmed_sensors,
-            pattern_scores={},
-            root_cause="transient_spike",
-            root_cause_confidence=0.9,
-            reasoning=reason,
-            alternative_causes=["electromagnetic_interference", "loose_connection"],
-            severity="high",
-            urgency="urgent",
-            immediate_actions=["verify_reading", "check_sensor_connections"],
-            follow_up_actions=["inspect_sensor_environment", "review_historical_data"],
-            all_recommendations=[
-                "verify_reading", "check_sensor_connections",
-                "inspect_sensor_environment",
-            ],
-            requires_technician=False,
-            estimated_resolution_minutes=15,
-            incident_id=None,
-            detector_scores={},
-            ensemble_score=0.0,
-            ensemble_agreement=0,
-            physics_validation=None,
-            learning_progress=None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            pipeline_version=PIPELINE_VERSION,
-        )
+    async def _ensure_diurnal_profiles(
+        self,
+        customer_id: str,
+        greenhouse_id: str,
+        db: AsyncSession,
+    ) -> Dict[str, Dict[int, tuple]]:
+        """Cached diurnal profiles, auto-built from stored history on miss.
 
-    @staticmethod
-    def _build_bias_dual_result(variable: str) -> "PipelineResult":
-        """Result for a confirmed dual-sensor bias offset."""
-        return PipelineResult(
-            is_anomaly=True,
-            anomaly_score=1.0,
-            confidence=0.95,
-            confidence_level="high",
-            pattern_type="drift",
-            fault_type="bias_offset",
-            attribution={},
-            affected_sensors=[variable],
-            pattern_scores={},
-            root_cause="redundant_sensor_bias_offset",
-            root_cause_confidence=0.95,
-            reasoning=f"Dual-sensor cross-difference exceeded threshold on {variable}",
-            alternative_causes=["calibration_drift", "sensor_degradation"],
-            severity="high",
-            urgency="urgent",
-            immediate_actions=["compare_sensor_readings", "recalibrate_sensors"],
-            follow_up_actions=["replace_degraded_sensor"],
-            all_recommendations=[
-                "compare_sensor_readings", "recalibrate_sensors",
-                "replace_degraded_sensor",
-            ],
-            requires_technician=True,
-            estimated_resolution_minutes=45,
-            incident_id=None,
-            detector_scores={},
-            ensemble_score=0.0,
-            ensemble_agreement=0,
-            physics_validation=None,
-            learning_progress=None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            pipeline_version=PIPELINE_VERSION,
-        )
-
-    @staticmethod
-    def _build_correlation_breakdown_result(variable: str) -> "PipelineResult":
-        """Result for a confirmed spatial correlation breakdown."""
-        return PipelineResult(
-            is_anomaly=True,
-            anomaly_score=1.0,
-            confidence=0.90,
-            confidence_level="high",
-            pattern_type="dependency",
-            fault_type="correlation_breakdown",
-            attribution={},
-            affected_sensors=[variable],
-            pattern_scores={},
-            root_cause="spatial_correlation_breakdown",
-            root_cause_confidence=0.90,
-            reasoning=f"Correlation between redundant sensors dropped below threshold on {variable}",
-            alternative_causes=["sensor_failure", "environmental_anomaly"],
-            severity="high",
-            urgency="urgent",
-            immediate_actions=["inspect_sensor_hardware", "verify_sensor_placement"],
-            follow_up_actions=["replace_failed_sensor", "review_installation"],
-            all_recommendations=[
-                "inspect_sensor_hardware", "verify_sensor_placement",
-                "replace_failed_sensor",
-            ],
-            requires_technician=True,
-            estimated_resolution_minutes=60,
-            incident_id=None,
-            detector_scores={},
-            ensemble_score=0.0,
-            ensemble_agreement=0,
-            physics_validation=None,
-            learning_progress=None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            pipeline_version=PIPELINE_VERSION,
-        )
-
-    @staticmethod
-    def _build_diurnal_result(alarmed_sensors: List[str], hour: int) -> "PipelineResult":
-        """Result for a confirmed diurnal profile deviation."""
-        reason = (
-            f"Diurnal profile deviation at hour {hour} on: "
-            + ", ".join(alarmed_sensors)
-        )
-        return PipelineResult(
-            is_anomaly=True,
-            anomaly_score=0.9,
-            confidence=0.85,
-            confidence_level="high",
-            pattern_type="cyclic",
-            fault_type="diurnal_deviation",
-            attribution={},
-            affected_sensors=alarmed_sensors,
-            pattern_scores={},
-            root_cause="diurnal_profile_violation",
-            root_cause_confidence=0.85,
-            reasoning=reason,
-            alternative_causes=["environmental_change", "control_system_fault"],
-            severity="medium",
-            urgency="scheduled",
-            immediate_actions=["verify_current_conditions", "check_control_setpoints"],
-            follow_up_actions=["review_climate_history", "inspect_control_loop"],
-            all_recommendations=[
-                "verify_current_conditions", "check_control_setpoints",
-                "review_climate_history",
-            ],
-            requires_technician=False,
-            estimated_resolution_minutes=30,
-            incident_id=None,
-            detector_scores={},
-            ensemble_score=0.0,
-            ensemble_agreement=0,
-            physics_validation=None,
-            learning_progress=None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            pipeline_version=PIPELINE_VERSION,
-        )
-
-    def _load_diurnal_profiles(
-        self, customer_id: str,
-    ) -> Optional[Dict[str, Dict[int, tuple]]]:
-        """Load cached diurnal profiles for a customer.
-
-        Profiles are stored in LearningState.state_json under the key
-        ``diurnal_profiles``.  Format::
-
-            {"temperature": {0: [mean, std], 1: [mean, std], ...}, ...}
-
-        Returns None if no profiles are available.
+        Format: ``{"temperature": {0: (mean, std), ...}, ...}``. An empty
+        dict is cached for tenants without enough history so the build
+        query runs at most once per tenant per process; profiles restored
+        from LearningState by ``_load_trackers`` take the same cache slot.
+        Failures never block the pipeline — the diurnal check is skipped.
         """
-        # Profiles are populated by compute_and_store_diurnal_profiles()
-        # and cached in the diurnal_profiles_cache.
-        return self._diurnal_profiles_cache.get(customer_id)
+        cached = self._diurnal_profiles_cache.get(customer_id)
+        if cached is not None:
+            return cached
+
+        from src.api.services.diurnal_profile_service import (  # noqa: PLC0415
+            build_diurnal_profiles,
+            persist_diurnal_profiles,
+        )
+
+        profiles: Dict[str, Dict[int, tuple]] = {}
+        try:
+            profiles = await build_diurnal_profiles(
+                db, tenant_id=customer_id, greenhouse_id=greenhouse_id
+            )
+        except Exception:
+            logger.warning(
+                "Diurnal profile build failed for tenant %s (non-critical)",
+                customer_id,
+                exc_info=True,
+            )
+        self._diurnal_profiles_cache[customer_id] = profiles
+        if profiles:
+            logger.info(
+                "Auto-built diurnal profiles for tenant %s (%d sensors)",
+                customer_id,
+                len(profiles),
+            )
+            try:
+                await persist_diurnal_profiles(
+                    db, tenant_id=customer_id, profiles=profiles
+                )
+            except Exception:
+                logger.warning(
+                    "Diurnal profile persist failed for tenant %s (non-critical)",
+                    customer_id,
+                    exc_info=True,
+                )
+        return profiles
 
     # ── Private helpers extracted from _run_with_components ───────────────────
 
@@ -1094,6 +1071,69 @@ class ComprehensiveInferencePipeline:
                 bias_flag=ensemble_result.bias_flag,
             )
         return is_anomaly, fault_type, ensemble_result
+
+    async def _persist_gate_result(
+        self,
+        result: "PipelineResult",
+        *,
+        customer_id: str,
+        greenhouse_id: str,
+        seq_array: np.ndarray,
+        sequence_raw: List[List[float]],
+        db: AsyncSession,
+    ) -> "PipelineResult":
+        """Persist an incident for a hard short-circuit detection (dropout/OOB).
+
+        These gates fire before the LSTM forward pass, so the embedding is
+        computed here on demand — they fire rarely, so the extra pass is
+        negligible. Persistence failing must never block the detection
+        result: the operator still needs the alarm even if the incident
+        row could not be written. (Soft rule detectors fuse into the main
+        pipeline via ``rule_votes`` and persist through the normal path.)
+        """
+        embedding: list = []
+        uncertainty = 0.0
+        # Dropout sequences may carry NaNs the model can't embed.
+        if np.isfinite(seq_array).all():
+            try:
+                _, _, embedding, uncertainty = self._run_lstm_vae(seq_array)
+            except Exception:
+                logger.warning(
+                    "Gate incident embedding failed (non-critical)", exc_info=True
+                )
+        root_cause_details = {
+            "attribution": result["attribution"],
+            "affected_sensors": result["affected_sensors"],
+            "pattern_type": result["pattern_type"],
+            "fault_type": result["fault_type"],
+            "detector_scores": result["detector_scores"],
+            "reasoning": result["reasoning"],
+        }
+        try:
+            incident_id = await self._store_and_observe(
+                customer_id=customer_id,
+                greenhouse_id=greenhouse_id,
+                is_anomaly=result["is_anomaly"],
+                embedding=embedding,
+                anomaly_score=result["anomaly_score"],
+                sequence_raw=sequence_raw,
+                uncertainty=uncertainty,
+                root_cause_result={"root_cause": result["root_cause"]},
+                root_cause_details=root_cause_details,
+                fault_type=result["fault_type"],
+                db=db,
+            )
+            result["incident_id"] = incident_id
+        except Exception:
+            logger.exception("Gate incident persistence failed (non-critical)")
+        if self.metrics is not None:
+            self.metrics.record_detection(
+                anomaly_score=result["anomaly_score"],
+                confidence=result["confidence"],
+                pattern_type=result["pattern_type"],
+                customer_id=customer_id,
+            )
+        return result
 
     async def _store_and_observe(
         self,
