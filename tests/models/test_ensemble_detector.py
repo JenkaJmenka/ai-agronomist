@@ -114,6 +114,15 @@ class TestCorrelationDetector:
         d = CorrelationDetector()
         assert d.score(normal_sequence, baseline) < 0.5
 
+    def test_zero_variance_sequence_scores_finite(self, baseline):
+        """A constant (zero-variance) window makes np.corrcoef emit NaN; the
+        score must stay finite so it can never poison the ensemble vote or
+        reach a Postgres JSON column (which rejects the token 'NaN')."""
+        constant = np.full((SEQ_LEN, INPUT_DIM), 25.0, dtype=np.float32)
+        score = CorrelationDetector().score(constant, baseline)
+        assert np.isfinite(score)
+        assert 0.0 <= score <= 1.0
+
 
 class TestEnsembleAnomalyDetector:
     def test_returns_all_detector_scores(

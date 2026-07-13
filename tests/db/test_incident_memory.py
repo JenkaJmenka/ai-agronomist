@@ -77,6 +77,35 @@ async def test_store_incident_returns_uuid(memory: IncidentMemory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_incident_sanitizes_non_finite_details(
+    memory: IncidentMemory, memory_session: AsyncSession
+) -> None:
+    """Non-finite floats in root_cause_details must be replaced with None
+    before hitting the JSON column: PostgreSQL/asyncpg rejects the token
+    'NaN', and a detector emitting NaN (e.g. correlation on a zero-variance
+    window) would otherwise 500 the whole inference on Postgres."""
+    incident_id = await memory.store_incident(
+        tenant_id="tenant_a",
+        embedding=unit_embedding(0),
+        anomaly_score=0.9,
+        sequence=sample_sequence(),
+        embedding_uncertainty=0.1,
+        root_cause_details={
+            "ensemble_score": float("nan"),
+            "detector_scores": {"correlation": float("nan"), "lstm": 0.7},
+            "affected_sensors": ["temperature"],
+        },
+    )
+    stored = await memory_session.get(Incident, incident_id)
+    assert stored is not None
+    details = stored.root_cause_details
+    assert details["ensemble_score"] is None
+    assert details["detector_scores"]["correlation"] is None
+    assert details["detector_scores"]["lstm"] == 0.7
+    assert details["affected_sensors"] == ["temperature"]
+
+
+@pytest.mark.asyncio
 async def test_find_similar_orders_by_cosine_distance(memory: IncidentMemory) -> None:
     query = unit_embedding(0)
     opposite = unit_embedding(0, sign=-1.0)

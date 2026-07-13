@@ -13,6 +13,7 @@ All methods are async (SQLAlchemy 2.x AsyncSession) and tenant-scoped.
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -61,6 +62,23 @@ def _to_float_list(values: Sequence[float]) -> List[float]:
     return [float(component) for component in values]
 
 
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats (NaN/±Inf) with None, recursing into containers.
+
+    PostgreSQL's JSON type cannot represent NaN/Infinity — asyncpg raises
+    InvalidTextRepresentationError ('Token "NaN" is invalid') on insert. SQLite
+    silently stores them as text, so this must guard at the persistence boundary
+    regardless of which detector produced the value.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 class IncidentMemory:
     """Semantic search over past incidents, backed by an AsyncSession."""
 
@@ -93,7 +111,7 @@ class IncidentMemory:
             sequence_length=len(sequence_payload),
             embedding_uncertainty=float(embedding_uncertainty),
             root_cause=root_cause,
-            root_cause_details=root_cause_details,
+            root_cause_details=_json_safe(root_cause_details),
             fault_type=fault_type,
             detected_at=datetime.now(timezone.utc),
             tags=list(tags) if tags else [],

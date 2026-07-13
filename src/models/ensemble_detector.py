@@ -72,6 +72,11 @@ class EnsembleResult:
 
 
 def _clip_unit(value: float) -> float:
+    # Non-finite inputs (e.g. NaN from a zero-variance correlation matrix) must
+    # collapse to 0.0, not propagate: a NaN score poisons the ensemble vote and
+    # cannot be serialized into a Postgres JSON column (asyncpg rejects "NaN").
+    if not np.isfinite(value):
+        return 0.0
     return float(np.clip(value, 0.0, 1.0))
 
 
