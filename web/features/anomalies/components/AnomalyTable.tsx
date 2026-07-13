@@ -21,7 +21,7 @@ const SEVERITY_LABEL = {
 } as const;
 
 interface AnomalyTableProps {
-  readonly anomalies: AnomalyRow[];
+  readonly anomalies: readonly AnomalyRow[];
   /** G4 enrichment keyed by row timestamp; absent while loading/unavailable. */
   readonly enrichment?: ReadonlyMap<string, AnomalyEnrichment>;
   /** Fault-type cells show skeletons instead of "—" while enrichment loads. */

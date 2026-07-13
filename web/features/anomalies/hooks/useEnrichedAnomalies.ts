@@ -7,7 +7,9 @@ import {
   type EnrichedAnomaliesResult,
   fetchEnrichedAnomalies,
 } from "@/features/anomalies/api/enriched";
+import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import { STALE_TIME_MS } from "@/lib/query";
+import { getSeverity } from "@/lib/severity";
 import { useScope } from "@/lib/useScope";
 
 /** Matches the Top Anomalies table cap in AnomalyTable. */
@@ -22,6 +24,11 @@ export interface AnomalyEnrichment {
 export interface EnrichedAnomaliesState {
   /** Enrichment keyed by the row's ISO timestamp (rows carry no id). */
   readonly byTimestamp: ReadonlyMap<string, AnomalyEnrichment>;
+  /** Server-ranked top anomalies for the window; null until loaded. The
+   * Top Anomalies table must render these, not the downsampled chart rows:
+   * chart rows can flag timestamps outside the server's top set, which
+   * would render with no fault type (their enrichment lookup misses). */
+  readonly topRows: readonly AnomalyRow[] | null;
   /** Full-window flagged count from the server; null until loaded. */
   readonly anomalyCount: number | null;
   readonly isLoading: boolean;
@@ -70,8 +77,25 @@ export function useEnrichedAnomalies(params: {
     return map;
   }, [query.data]);
 
+  const topRows = useMemo<readonly AnomalyRow[] | null>(() => {
+    if (!query.data) return null;
+    const flagged: AnomalyRow[] = [];
+    for (const row of query.data.rows) {
+      const score = row.anomaly_score;
+      if (typeof score !== "number") continue;
+      flagged.push({
+        timestamp: row.timestamp,
+        anomaly_score: score,
+        score,
+        severity: getSeverity({ score, threshold }),
+      });
+    }
+    return flagged.sort((a, b) => b.score - a.score);
+  }, [query.data, threshold]);
+
   return {
     byTimestamp,
+    topRows,
     anomalyCount: query.data?.anomalyCount ?? null,
     isLoading: query.isPending && query.isFetching,
   };

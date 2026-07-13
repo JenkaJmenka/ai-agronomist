@@ -118,8 +118,10 @@ function AnomaliesBody() {
             />
           </Card>
           <Card title="Top anomalies">
+            {/* Server-ranked rows once loaded — chart rows are downsampled and
+                can show anomalies the enrichment payload doesn't cover. */}
             <AnomalyTable
-              anomalies={anomalies}
+              anomalies={enrichment.topRows ?? anomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
             />
