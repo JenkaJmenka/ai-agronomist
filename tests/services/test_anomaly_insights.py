@@ -128,6 +128,31 @@ class TestEnrichAnomalyRows:
         assert row["affected_sensors"] == ["temperature"]
         assert "reasoning" in row and row["reasoning"]
 
+    def test_persisted_incident_reasoning_is_authoritative(self):
+        """A reasoning stored by the pipeline (naming the algorithm that
+        fired) overrides the z-score-based regeneration, so /enriched stays
+        consistent with the pipeline's fault decision."""
+        rows = [_row("2026-06-01T10:00:00", 0.9)]
+        persisted = (
+            "Multivariate implausibility: the joint temperature reading "
+            "exceeded the Mahalanobis distance cutoff"
+        )
+        incidents = [
+            {
+                "id": "inc-mv",
+                "detected_at": "2026-06-01T10:05:00",
+                "anomaly_score": 0.95,
+                "fault_type": "accuracy_decline",
+                "root_cause": "multivariate_implausibility",
+                "root_cause_details": {
+                    "affected_sensors": ["temperature"],
+                    "reasoning": persisted,
+                },
+            }
+        ]
+        row = enrich_anomaly_rows(rows, incidents)[0]
+        assert row["reasoning"] == persisted
+
     def test_no_incident_still_produces_fault_type_and_list_sensors(self):
         rows = [_row("2026-06-01T10:00:00", 0.9, temperature=45.0)]
         enriched = enrich_anomaly_rows(rows, [])

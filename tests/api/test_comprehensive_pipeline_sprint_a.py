@@ -276,6 +276,35 @@ class TestRuleVoteFusion:
         assert result["pattern_scores"], "pattern detection must run"
         assert result["all_recommendations"], "recommendations must run"
 
+    @pytest.mark.asyncio
+    async def test_reasoning_names_the_algorithm_that_fired(
+        self, pipeline, db_session, patch_physics_neutral
+    ):
+        """Reasoning must describe the detection algorithm, not the model's
+        pattern guess. Regression for the P2 gap where root_cause was
+        overridden but reasoning kept the RootCauseAnalyzer's unrelated text.
+        """
+        sequence = np.asarray(_sample_sequence(), dtype=np.float32)
+        sequence[-1, 0] = 0.95  # temperature spike → spike-MAD rule fires
+
+        result = await pipeline.run(
+            customer_id="fusion_reason",
+            sequence=sequence.tolist(),
+            db=db_session,
+        )
+
+        assert result["fault_type"] == "spike_fault"
+        reasoning = result["reasoning"]
+        assert "MAD" in reasoning and "temperature" in reasoning, reasoning
+
+        # Reasoning is persisted on the incident so the feedback UI can show it
+        # (the fused path previously omitted it, blanking the review queue).
+        from src.db.models import Incident
+
+        row = await db_session.get(Incident, result["incident_id"])
+        assert row.root_cause_details["reasoning"] == reasoning
+        assert row.root_cause_details["hint_summary"]
+
 
 # ---------------------------------------------------------------------------
 # Sprint A2 – _tracker_cache is a plain dict

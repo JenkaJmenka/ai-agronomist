@@ -85,49 +85,81 @@ _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
 # instead of short-circuiting: the full LSTM/ensemble path still runs, and
 # the FIRST fired rule (dict/gate order) takes fault-type precedence over
 # model-derived classification. Values mirror the former short-circuit
-# result builders so alert semantics stay stable.
+# result builders so alert semantics stay stable. ``reasoning`` names the
+# algorithm that fired ({sensors} is filled with the flagged channels) so
+# the explanation always matches the detection method, not the model's
+# pattern guess.
 _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
     "noise": {
         "fault_type": "accuracy_decline",
         "root_cause": "sensor_noise_floor_exceeded",
         "severity": "high",
         "urgency": "urgent",
+        "reasoning": (
+            "Precision degradation: rolling variance on {sensors} exceeded the "
+            "calibrated noise-floor ratio"
+        ),
     },
     "spike_mad": {
         "fault_type": "spike_fault",
         "root_cause": "transient_spike",
         "severity": "high",
         "urgency": "urgent",
+        "reasoning": (
+            "Transient spike: {sensors} deviated beyond the rolling "
+            "median-absolute-deviation (MAD) threshold"
+        ),
     },
     "bias_dual": {
         "fault_type": "bias_offset",
         "root_cause": "redundant_sensor_bias_offset",
         "severity": "high",
         "urgency": "urgent",
+        "reasoning": (
+            "Dual-sensor bias: cross-difference between redundant {sensors} "
+            "sensors exceeded the calibration tolerance"
+        ),
     },
     "correlation_breakdown": {
         "fault_type": "correlation_breakdown",
         "root_cause": "spatial_correlation_breakdown",
         "severity": "high",
         "urgency": "urgent",
+        "reasoning": (
+            "Spatial correlation breakdown: rolling Pearson correlation on "
+            "{sensors} fell below the expected floor"
+        ),
     },
     "diurnal": {
         "fault_type": "diurnal_deviation",
         "root_cause": "diurnal_profile_violation",
         "severity": "medium",
         "urgency": "scheduled",
+        "reasoning": (
+            "Diurnal profile deviation: {sensors} exceeded the historical "
+            "hourly Z-score for this hour of day"
+        ),
     },
     "multivariate": {
         "fault_type": "accuracy_decline",
         "root_cause": "multivariate_implausibility",
         "severity": "high",
         "urgency": "urgent",
+        "reasoning": (
+            "Multivariate implausibility: the joint {sensors} reading exceeded "
+            "the Mahalanobis distance cutoff — each channel is in range but "
+            "the combination is inconsistent"
+        ),
     },
     "change_point": {
         "fault_type": "calibration_drift",
         "root_cause": "level_shift_change_point",
         "severity": "medium",
         "urgency": "scheduled",
+        "reasoning": (
+            "Change-point: Bayesian online change-point detection (BOCPD) "
+            "flagged a level shift on {sensors}"
+        ),
     },
 }
 
@@ -139,6 +171,34 @@ _DENORM_RANGES = np.array(
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
+
+
+def _humanize_sensors(sensors: List[str]) -> str:
+    """Readable sensor list for reasoning text ('temperature, humidity')."""
+    return ", ".join(s.replace("_", " ") for s in sensors) or "sensor channels"
+
+
+def build_rule_reasoning(rule_votes: Dict[str, List[str]]) -> str:
+    """Human-readable reasoning that names the algorithm(s) that fired.
+
+    Keeps the explanation consistent with the fault type: the primary
+    (first-fired) rule leads, and any co-firing rules are appended so the
+    operator sees every algorithm that agreed. Empty when no rule fired
+    (the caller then keeps the model's pattern-based reasoning).
+    """
+    if not rule_votes:
+        return ""
+    items = list(rule_votes.items())
+    primary_name, primary_sensors = items[0]
+    template = _RULE_VOTE_PROFILES[primary_name]["reasoning"]
+    reasoning = template.format(sensors=_humanize_sensors(primary_sensors))
+    if len(items) > 1:
+        others = ", ".join(
+            _RULE_VOTE_PROFILES[name]["root_cause"].replace("_", " ")
+            for name, _ in items[1:]
+        )
+        reasoning = f"{reasoning}; also flagged by: {others}"
+    return reasoning
 
 
 def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
@@ -716,9 +776,9 @@ class ComprehensiveInferencePipeline:
         confidence_level = self.confidence_scorer.confidence_level(confidence)
 
         # 8. Root cause + recommendations. A fired rule pins the root cause,
-        # severity, and urgency (mirroring the former short-circuit results)
-        # so recommendations key off the confirmed fault, not the model's
-        # pattern guess; the analyzer's reasoning is kept for context.
+        # severity, urgency, AND reasoning (the analyzer's pattern-based text
+        # describes the model, not the algorithm that actually flagged the
+        # fault), so the explanation always matches the detection method.
         root_cause_result = self.root_cause_analyzer.analyze(
             pattern_type=pattern_type,
             attribution=attribution_result["attribution"],
@@ -730,11 +790,13 @@ class ComprehensiveInferencePipeline:
                 "root_cause": rule_profile["root_cause"],
                 "severity": rule_profile["severity"],
                 "urgency": rule_profile["urgency"],
+                "reasoning": build_rule_reasoning(rule_votes),
             }
         recommendation_result = self.recommendation_engine.recommend(
             root_cause=root_cause_result["root_cause"],
             severity=root_cause_result.get("severity", "medium"),
         )
+        reasoning = root_cause_result.get("reasoning", "")
 
         # Merge rule-vote evidence into the reported detector scores and
         # affected sensors (rule sensors first — they are direct evidence).
@@ -760,6 +822,10 @@ class ComprehensiveInferencePipeline:
             "fault_type": fault_type,
             "physics_validation": physics_result.reason,
             "rule_votes": rule_votes,
+            # Persisted so the feedback UI can show the explanation; the fused
+            # path previously omitted both, leaving the review queue blank.
+            "reasoning": reasoning,
+            "hint_summary": reasoning[:120],
         }
 
         # 9. Incident storage + online learner observation.
@@ -799,7 +865,7 @@ class ComprehensiveInferencePipeline:
             pattern_scores=pattern_result["pattern_scores"],
             root_cause=root_cause_result["root_cause"],
             root_cause_confidence=root_cause_result.get("confidence", 0.5),
-            reasoning=root_cause_result.get("reasoning", ""),
+            reasoning=reasoning,
             alternative_causes=root_cause_result.get("alternative_causes", []),
             severity=root_cause_result.get("severity", "medium"),
             urgency=root_cause_result.get("urgency", "normal"),

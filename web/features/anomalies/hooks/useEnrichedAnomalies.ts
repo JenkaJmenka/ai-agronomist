@@ -19,6 +19,8 @@ export interface AnomalyEnrichment {
   readonly faultType: string | null;
   readonly affectedSensors: readonly string[];
   readonly rootCause: string | null;
+  /** Human-readable explanation naming the algorithm that flagged the row. */
+  readonly reasoning: string | null;
 }
 
 export interface EnrichedAnomaliesState {
@@ -72,6 +74,7 @@ export function useEnrichedAnomalies(params: {
         faultType: row.fault_type ?? null,
         affectedSensors: row.affected_sensors,
         rootCause: row.root_cause ?? null,
+        reasoning: row.reasoning ?? null,
       });
     }
     return map;
