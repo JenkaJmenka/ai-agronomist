@@ -20,6 +20,8 @@ interface DataTableProps<T> {
   readonly alignTop?: boolean;
   /** Keep columns at their natural width (no wrap) so wide tables scroll horizontally. */
   readonly scrollX?: boolean;
+  /** Cap the body height so short (non-virtualized) tables scroll vertically too. */
+  readonly scrollY?: boolean;
 }
 
 /**
@@ -34,6 +36,7 @@ export function DataTable<T>({
   rowClassName,
   alignTop = false,
   scrollX = false,
+  scrollY = false,
 }: DataTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const table = useReactTable({
@@ -69,7 +72,7 @@ export function DataTable<T>({
       data-testid="data-table"
       data-virtualized={isVirtual || undefined}
       className={`overflow-auto rounded-[var(--radius-card)] border border-border ${
-        isVirtual ? VIRTUAL_VIEWPORT_MAX_HEIGHT : ""
+        isVirtual || scrollY ? VIRTUAL_VIEWPORT_MAX_HEIGHT : ""
       }`}
     >
       <table className={`${scrollX ? "min-w-full" : "w-full"} text-sm`}>

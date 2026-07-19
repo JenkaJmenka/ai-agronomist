@@ -33,13 +33,14 @@ You plan, decompose, delegate, analyze outcomes, and decide next steps.
 
 | Agent | Model | Reason |
 |-------|-------|--------|
-| architect | claude-opus-4-6 | Complex design decisions |
+| architect | claude-fable-5 | Complex design decisions; co-runs final reviews (user directive) |
 | ml-engineer | claude-opus-4-6 | Complex PyTorch, LSTM-VAE |
 | backend-engineer | claude-sonnet-4-6 | Well-defined API patterns |
-| qa-engineer | claude-sonnet-4-6 | Well-defined test patterns |
+| qa-engineer | claude-opus-4-6 | User directive: stronger test quality — never Sonnet, never Fable inline |
 | code-reviewer | claude-opus-4-6 | Deep security/correctness analysis |
 | devops-lead | claude-sonnet-4-6 | Well-defined Docker patterns |
-| tech-lead | claude-opus-4-6 | Complex refactoring decisions |
+| frontend-engineer | claude-sonnet-4-6 | Next.js/React work under web/ per web/AGENTS.md |
+| tech-lead | claude-fable-5 | Complex refactoring decisions; co-runs final reviews (user directive) |
 
 ---
 

@@ -50,6 +50,7 @@ from src.api.routes import (
     inference_integrated,
     jobs,
     learning,
+    live,
     models,
     monitoring,
     network_anomalies,
@@ -110,9 +111,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
     logger.info("Redis cache initialized.")
 
+    # Live runtime — resilient: API boots normally even if Redis / scoring
+    # are unavailable.  Same try/except pattern as the RabbitMQ init below.
+    app.state.live_runtime = None
+    try:
+        from src.api.services.live_hub_provider import get_live_hub
+        from src.live.runtime import LiveRuntime
+
+        hub = get_live_hub()
+        runtime = LiveRuntime.build_from_config(hub)
+        await runtime.start()
+        app.state.live_runtime = runtime
+        logger.info("Live runtime started.")
+    except Exception as exc:
+        logger.warning(
+            "Live runtime failed to start — live monitoring unavailable: %s", exc
+        )
+        app.state.live_runtime = None
+
     yield
 
     logger.info("Shutting down FastAPI application...")
+
+    # Stop live runtime before MQ / DB teardown so the final batcher flush
+    # can still reach the database.
+    live_rt = getattr(app.state, "live_runtime", None)
+    if live_rt is not None:
+        try:
+            await live_rt.stop()
+            logger.info("Live runtime stopped.")
+        except Exception as exc:
+            logger.error("Failed to stop live runtime: %s", exc, exc_info=True)
+
+    # Close the hub's memoized publisher Redis client.
+    try:
+        from src.api.services.live_hub_provider import get_live_hub
+        hub = get_live_hub()
+        await hub.aclose()
+    except Exception as exc:
+        logger.debug("Hub aclose skipped: %s", exc)
+
     try:
         await redis.close()
         logger.info("Redis connection closed.")
@@ -288,6 +326,7 @@ app.include_router(feedback_integrated.router)
 app.include_router(monitoring.router)
 app.include_router(gas_anomalies.router)
 app.include_router(jobs.router)
+app.include_router(live.router)
 app.include_router(readings.router)
 app.include_router(network_anomalies.router)
 app.include_router(anomalies.router)

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/Button";
 import { Chip } from "@/components/ui/Chip";
 import { isActiveJobStatus, type JobSummary } from "@/features/jobs/api/jobs";
 import { useJobProgress } from "@/features/jobs/hooks/useJobProgress";
+import { formatTimestamp } from "@/lib/formatTime";
 import type { Severity } from "@/lib/severity";
 
 interface JobCardProps {
@@ -17,11 +18,6 @@ function statusSeverity(status: string): Severity {
   if (status === "failed") return "critical";
   if (status === "partially_failed") return "warning";
   return "lstm"; // in-flight
-}
-
-function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return iso.replace("T", " ").slice(0, 19);
 }
 
 /** One job row: live progress (SSE with polling fallback) + terminate. */

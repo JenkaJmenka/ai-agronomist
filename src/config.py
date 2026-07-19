@@ -944,3 +944,51 @@ ANOMALY_GROUP_SAMPLE_IDS: int = int(os.environ.get("ANOMALY_GROUP_SAMPLE_IDS", "
 # Job progress SSE stream (migration plan G5).
 JOB_EVENTS_POLL_SECONDS: float = float(os.environ.get("JOB_EVENTS_POLL_SECONDS", "2.0"))
 JOB_EVENTS_MAX_SECONDS: float = float(os.environ.get("JOB_EVENTS_MAX_SECONDS", "3600"))
+
+# === Live Monitoring (SSE) ===
+# Mock SCADA data source for development and testing.
+MOCK_SCADA_ENABLED: bool = _env_flag("MOCK_SCADA_ENABLED", True)
+MOCK_SCADA_SCOPES: str = os.environ.get("MOCK_SCADA_SCOPES", "tenant_1:gh_A")
+MOCK_SCADA_INTERVAL_SECONDS: float = float(os.environ.get("MOCK_SCADA_INTERVAL_SECONDS", "2.0"))
+MOCK_SCADA_ANOMALY_RATE: float = float(os.environ.get("MOCK_SCADA_ANOMALY_RATE", "0.02"))
+
+# Merge grace period: wait this long for all sources to report before
+# emitting a merged reading (handles clock skew between vendors).
+LIVE_MERGE_GRACE_SECONDS: float = float(os.environ.get("LIVE_MERGE_GRACE_SECONDS", "1.0"))
+
+# Maximum entries retained in each Redis stream (approximate XADD trimming).
+LIVE_REPLAY_BUFFER_SIZE: int = int(os.environ.get("LIVE_REPLAY_BUFFER_SIZE", "1200"))
+
+# SSE heartbeat interval; the hub yields idle ticks at this cadence.
+LIVE_HEARTBEAT_SECONDS: float = float(os.environ.get("LIVE_HEARTBEAT_SECONDS", "15.0"))
+
+# Hard cap on a single SSE stream connection.
+LIVE_MAX_STREAM_SECONDS: float = float(os.environ.get("LIVE_MAX_STREAM_SECONDS", "3600.0"))
+
+# Whether to persist live readings to the database (disable for dry-run).
+LIVE_PERSIST_ENABLED: bool = _env_flag("LIVE_PERSIST_ENABLED", True)
+
+# Flush cadence for the live-to-DB persistence writer.
+LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SECONDS", "10.0"))
+
+# Anomaly threshold for the live scoring path (defaults to the global threshold).
+LIVE_ANOMALY_THRESHOLD: float = float(
+    os.environ.get("LIVE_ANOMALY_THRESHOLD", str(ANOMALY_THRESHOLD))
+)
+
+# Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly
+# episode persists (debounce to avoid flooding the SSE stream).
+LIVE_ANOMALY_REEMIT_SECONDS: float = float(
+    os.environ.get("LIVE_ANOMALY_REEMIT_SECONDS", "60.0")
+)
+
+# JSON list of external data-source definitions (parsed at startup).
+LIVE_SOURCES_JSON: str = os.environ.get("LIVE_SOURCES_JSON", "")
+
+# XREAD block timeout in milliseconds (Redis Streams consumer loop).
+LIVE_HUB_BLOCK_MS: int = int(os.environ.get("LIVE_HUB_BLOCK_MS", "5000"))
+
+# Forward-fill staleness: if a channel hasn't reported in this many ticks
+# (multiples of the scorer's emit_interval), the window is treated as not-warm
+# and scoring pauses until the channel returns.
+LIVE_FORWARD_FILL_MAX_TICKS: int = int(os.environ.get("LIVE_FORWARD_FILL_MAX_TICKS", "5"))

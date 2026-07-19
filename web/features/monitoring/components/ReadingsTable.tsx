@@ -69,7 +69,7 @@ export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps)
     return base;
   }, [channels, threshold]);
 
-  // Newest first; DataTable virtualizes, so the full window renders uncapped.
+  // Newest first; DataTable caps body height (scrollY) and virtualizes large windows.
   const recentRows = useMemo(() => [...rows].reverse(), [rows]);
 
   return (
@@ -77,6 +77,7 @@ export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps)
       columns={columns}
       rows={recentRows}
       scrollX
+      scrollY
       rowClassName={(row) => (isAnomalousRow(row, threshold) ? "bg-sev-critical/10" : undefined)}
     />
   );
