@@ -3,6 +3,245 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Live Monitoring Phase 7 — Review-Fix (runtime/persistence/connectors + docs) — COMPLETE (2026-07-19)**
+Agent: backend-engineer. Task: fix tech-lead (#3,#4,#5,#10,#11) and architect (N1,N4,N5,N6)
+findings from final review. 274 tests green (267 pre-existing + 7 new).
+
+Fixes delivered:
+
+**Fix 1 — status endpoint missing vendor (N6):**
+- `src/live/merge.py`: Added `full_statuses()` method returning `[{source_id, vendor, status, last_seen}]`
+  using existing `_source_vendors` and `_last_seen_dt` dicts.
+- `src/live/runtime.py`: `source_statuses()` now delegates to `merger.full_statuses()`.
+- Tests updated: `test_runtime.py` and `test_runtime_smoke.py` assert `vendor` + `last_seen` in
+  each entry; `test_live_events.py` status mock includes vendor field.
+
+**Fix 2 — connector close leaks (#3, #4):**
+- `src/live/runtime.py` `stop()`: After cancelling tasks, iterates all scope connectors and calls
+  `connector.close()` with try/except-log each.
+- `src/live/sources/priva.py` `connect()`: Added guard `if self._client is not None: aclose()` before
+  creating new httpx.AsyncClient (prevents leak on supervised restart).
+- `src/live/sources/hoogendoorn.py` `connect()`: Same guard.
+- New tests: `TestConnectorCloseOnReconnect` (verifies first_client.aclose() called before second
+  connect) and `TestRuntimeStopClosesConnectors` (verifies stop() calls close on every connector).
+
+**Fix 3 — per-scope emit interval (#5 / N4):**
+- `src/live/merge.py` `ChannelMerger.__init__`: Added `grace_seconds: float = LIVE_MERGE_GRACE_SECONDS`
+  parameter; stored as `self._grace_seconds`; replaced `LIVE_MERGE_GRACE_SECONDS` module-level refs in
+  `_ingest` and `_flush_ready_buckets` with `self._grace_seconds`.
+- `src/live/runtime.py` `_build_scope()`: Imports `LIVE_MERGE_GRACE_SECONDS`. Derives per-scope
+  `emit_interval = min(poll_interval_seconds)` and `grace_seconds = max(LIVE_MERGE_GRACE_SECONDS,
+  max(poll_interval_seconds))` from source_configs. For mock scopes, min([0.05, 0.075])=0.05 =
+  MOCK_SCADA_INTERVAL_SECONDS (behavior unchanged). Passes both to ChannelMerger.
+- Tests patched `src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS` in `_mock_config` fixture so
+  build_mock_sources_for_scope creates configs with the patched interval (needed because runtime now
+  derives emit_interval from source_configs not module-level constant).
+- New tests: `TestPerScopeEmitInterval.test_emit_interval_derived_from_source_configs` (verifies
+  emit_interval == min(0.02, 0.06) = 0.02 for a two-source LIVE_SOURCES_JSON scope) and
+  `test_slow_source_channels_not_dropped` (two-source 0.02/0.06 scope, verifies slow channel not late).
+
+**Fix 4 — persisted 0.0 sentinel (N5):**
+- `src/live/persistence.py`: Added `_CANONICAL_CHANNELS = frozenset({temperature, humidity, co2, light})`.
+  `_event_to_row()` now returns `Optional[dict]`: checks completeness on `event.channels.keys()` BEFORE
+  `sanitize_channels`, returns `None` if any canonical channel absent. NaN-in-present-channel still
+  sanitized to 0.0 via `.get(key, 0.0)` after strip. Added `_skipped_incomplete_count` counter on batcher.
+  `_flush()` filters None rows, logs warning when rows are skipped.
+  Module docstring documents the "Incomplete-row policy".
+- Tests: renamed `test_missing_channel_defaults_to_zero` → `test_incomplete_event_returns_none`;
+  updated NaN tests to use all-4-channel events; added `test_incomplete_event_skipped_not_written`.
+
+**Fix 5 — silent close + Retry-After parse (#10, #11):**
+- `src/live/persistence.py` `close()`: Only `pass` on CancelledError; log other exceptions at ERROR level.
+- `src/live/sources/priva.py` `_request()`: Defensive Retry-After parse: `float(raw)` in try/except
+  (ValueError/TypeError), falls back to `_DEFAULT_RETRY_AFTER` on HTTP-date form.
+- `src/live/sources/hoogendoorn.py` `_request()`: Same defensive parse.
+
+**Fix 6 — deployment constraints docs (N1, N4):**
+- `docs/live_scada_connectors.md`: Appended section 8 "Deployment constraints" covering:
+  (a) Single-worker requirement for live generation (per-process runtime), with future options
+  (Redis leader lock / src/workers/ pattern); (b) Mixed-cadence scope guidance with per-scope
+  emit_interval/grace formula table and example (Priva 30s + Hoogendoorn 120s).
+
+Done signal: tasks/done/live-p7-infra-fixes.json.
+
+---
+
+## Previous Phase
+**Live Monitoring Phase 5B — SCADA Connector Documentation — COMPLETE (2026-07-18)**
+Agent: backend-engineer. Task: write `docs/live_scada_connectors.md` — integration guide for
+PrivaConnector and HoogendoornConnector (Phase 5 production connectors, 257 tests green).
+
+Deliverable: `docs/live_scada_connectors.md` (7 sections):
+1. Architecture overview — connector → merger → hub → SSE; per-scope multi-source model.
+2. `LIVE_SOURCES_JSON` registration — complete copy-pasteable examples for Priva, Hoogendoorn,
+   and a multi-source greenhouse (Priva climate + Hoogendoorn CO2) with priority explained.
+3. Credential handling — `client_secret_env` (Priva) and `api_key_env` (Hoogendoorn) param
+   names verified against source code; required env vars listed per vendor.
+4. Channel mapping tables — Priva `_FIELD_MAP` (hardcoded, 4 raw fields → canonical) and
+   Hoogendoorn `DEFAULT_CHANNEL_MAP` (4 tags → canonical) with override instructions.
+5. Source health + priority semantics — `_DEGRADED_MULTIPLIER=3.0` / `_OFFLINE_MULTIPLIER=10.0`
+   from `merge.py`; per-channel lowest-wins rule; connector backoff caps (300 s polling,
+   60 s supervisor); `LIVE_MERGE_GRACE_SECONDS` default 1.0 s.
+6. Go-live checklist — one per vendor: credentials → env vars → LIVE_SOURCES_JSON →
+   sandbox poll → channel map verification → priority tuning → `/api/live/status`.
+7. Future OPC-UA note — Hoogendoorn on-prem push-mode maps to `stream()` interface;
+   LetsGrow REST is the current path.
+
+Done signal: tasks/done/live-p5b-docs.json.
+
+---
+
+## Previous Phase
+**Live Monitoring Phase 5C — MockScadaSource seeded determinism fix — COMPLETE (2026-07-18)**
+Agent: ml-engineer. Task: make seeded MockScadaSource runs fully deterministic by eliminating
+wall-clock dependency in `stream()`.
+
+Bug: `test_seeded_determinism` flaky because `stream()` stamped `datetime.now(timezone.utc)` per
+reading — two same-seed sources read sequentially got slightly different timestamps → different
+diurnal sine values → float equality failed.
+
+Fix (2 files, minimal change):
+- `src/live/sources/mock.py`: Added optional `params["start_time"]` (ISO string or datetime).
+  When set, `stream()` advances timestamps logically (`start_time + tick * interval`) instead of
+  reading the wall clock. Default behavior (no `start_time`) unchanged — still uses real
+  `datetime.now(timezone.utc)`. Added `_parse_start_time()` static method and `_tick_count` counter.
+- `tests/live/test_mock_source_smoke.py`: Updated `_make_source()` to accept and pass through
+  `start_time`. Fixed `test_seeded_determinism` to pin the clock via `start_time=datetime(2026,7,18,12,0,0)`.
+
+No changes to base.py, priva.py, hoogendoorn.py, __init__.py, or any other file.
+
+Tests: full `tests/live/` suite 201 passed. Determinism test 5/5 stable (was flaky before fix).
+Done signal: tasks/done/live-p5-mockfix.json.
+
+---
+
+## Previous Phase
+**Live Monitoring SSE Phase 3B — Persistence batcher + live runtime + lifespan wiring + status endpoint — COMPLETE (2026-07-18)**
+Agent: backend-engineer. Task: persistence batcher, runtime supervisor, main.py lifespan wiring, live status endpoint.
+
+New files (4 production, 2 test):
+- `src/live/persistence.py` (175 lines): `PersistenceBatcher` with `add()`, `run()` (cancellation-safe),
+  `close()`, `_flush()`. Buffer bounded at 10_000 events (drop-oldest with counter). Flush opens its own
+  `AsyncSessionLocal()` per cycle; dialect-aware `INSERT ... ON CONFLICT DO NOTHING` via
+  `sqlalchemy.dialects.{postgresql,sqlite}.insert`. NaN channels stripped by `sanitize_channels` with 0.0
+  fallback. Flush failures log with context and keep rows for retry. Optional `session_factory` ctor param
+  for hermetic test injection.
+- `src/live/runtime.py` (262 lines): `LiveRuntime` + `_ScopeContext` dataclass. `build_from_config(hub)`
+  classmethod: scopes from `MOCK_SCADA_SCOPES` (when `MOCK_SCADA_ENABLED`); per scope builds connectors
+  via `build_mock_sources_for_scope`, one `ChannelMerger`, one scorer (lazy import — ImportError -> log +
+  passthrough), one shared `PersistenceBatcher` (when `LIVE_PERSIST_ENABLED`). `LIVE_SOURCES_JSON` parsed
+  for additional connectors (unknown vendor -> log + skip). All tasks wrapped in `_supervised()` restart
+  loop with exponential backoff capped at 60 s. `start()` spawns all tasks; `stop()` cancels all, closes
+  scorers, closes batcher. `source_statuses(tenant, gh)` -> list of `{source_id, status}` dicts from
+  merger.current_statuses(); unknown scope -> [].
+
+Modified files (2):
+- `src/api/main.py`: lifespan wiring added after Redis cache init — sets `app.state.live_runtime = None`,
+  builds hub via `get_live_hub()`, builds runtime, calls `await runtime.start()`. Whole block in
+  try/except: any failure logs a warning and sets `live_runtime = None` (API boots without live runtime).
+  Shutdown path stops live runtime (before MQ close) so batcher final flush can reach the DB.
+- `src/api/routes/live.py`: added `GET /api/live/status?tenant_id=&greenhouse_id=default` before events
+  route. Same `require_api_key` + `enforce_tenant_access` auth pattern. Returns
+  `{"sources": [...]}` (200) when runtime present; `{"sources": []}` (200, graceful) when absent.
+
+Test results:
+- `tests/live/test_persistence_smoke.py`: 7 tests — flush writes rows, duplicate no-op, NaN sanitized,
+  anomaly_score persisted, close() flushes remaining, buffer cap drops oldest, run loop flushes on interval.
+- `tests/live/test_runtime_smoke.py`: 7 tests — build creates scope, readings published to hub, stop
+  cancels cleanly, source_statuses returns list, unknown scope returns [], scorer passthrough, no pending
+  tasks after stop.
+- Full `tests/live/` suite: 46 passed (15 hub + 6 merge + 11 mock source + 7 persistence + 7 runtime).
+  `tests/api/test_live_events_smoke.py`: 6 passed. Done signal: tasks/done/live-p3-backend-engineer.json.
+
+---
+
+## Previous Phase
+**Live Monitoring SSE Phase 2B — SSE streaming endpoint — COMPLETE (2026-07-18)**
+Agent: backend-engineer. Task: wire LiveHub (from Phase 2A) to a FastAPI SSE endpoint.
+
+New files (3 production, 1 test):
+- `src/api/services/live_hub_provider.py` (50 lines): `get_live_hub() -> LiveHub` FastAPI
+  dependency returning a lazily-constructed module-level singleton. Hub is built with
+  `redis_factory=_make_redis_client` (zero-arg factory using `aioredis.from_url` from env
+  `REDIS_URL`, same default as `src/api/main.py`). Import-safe when Redis is down — no
+  connection is opened at import time; connections happen per `subscribe()` call. Override
+  in tests via `app.dependency_overrides[get_live_hub] = lambda: hub`.
+- `src/api/routes/live.py` (102 lines): `router = APIRouter(prefix="/api/live", tags=["Live"])`.
+  `GET /api/live/events?tenant_id=...&greenhouse_id=default`:
+  - Auth: `Depends(require_api_key)` + `enforce_tenant_access(auth_tenant, tenant_id)` —
+    identical pattern to feedback/incidents routes.
+  - Resume: `Last-Event-ID` request header (SSE protocol) takes precedence over `?last_event_id=`
+    query param (curl testing fallback).
+  - Returns `StreamingResponse(media_type="text/event-stream")` over `hub.subscribe(...)`.
+  - Normal events → `id: {id}\nevent: {type}\ndata: {json}\n\n`.
+  - Idle ticks: heartbeat frame at most once per `LIVE_HEARTBEAT_SECONDS`; otherwise
+    `: keep-alive\n\n` SSE comment.
+  - Reset events → `event: reset\ndata: {...}\n\n`.
+  - Hard deadline: `LIVE_MAX_STREAM_SECONDS` (monotonic clock), checked after each frame.
+    Deadline check is AFTER emit (not before) so replay events and first idle heartbeat
+    are always delivered even with a tiny override in tests.
+  - Headers: `Cache-Control: no-store`, `X-Accel-Buffering: no`, `Connection: keep-alive`.
+  - NO database session dependency.
+  - Redis unreachable → propagates as 5xx via standard exception handlers.
+- `src/api/main.py`: added `from src.api.routes import ... live ...` import and
+  `app.include_router(live.router)` between jobs and readings routers.
+- `tests/api/test_live_events_smoke.py` (6 tests, all green):
+  - Strategy: monkeypatch `src.api.routes.live.LIVE_MAX_STREAM_SECONDS=0.05` and
+    `LIVE_HEARTBEAT_SECONDS=0.0` so the stream terminates naturally; use `AsyncClient.get()`
+    (non-streaming) for a finite response body. fakeredis with `block_ms=10`.
+  - Covers: published events arrive with `id:` field; heartbeat JSON with `ts` key on first
+    idle; keep-alive comment when heartbeat interval hasn't elapsed; Last-Event-ID header
+    replay; 401 on missing key (auth enabled); 403 on wrong tenant (auth enabled).
+
+Suite: `python3 -m pytest tests/api/test_live_events_smoke.py tests/live/ -x -q` →
+38 passed in 4.45s. Done signal: tasks/done/live-p2-backend-engineer.json.
+
+---
+
+## Previous Phase
+**Live Monitoring SSE Phase 2A — Source connector interface + mock SCADA + multi-source merger — COMPLETE (2026-07-18)**
+Agent: ml-engineer. Task: implement source connector ABC, mock SCADA source, and channel merger.
+
+New files (5 production, 2 test):
+- `src/live/sources/base.py` (97 lines): `SourceConfig(BaseModel)` with source_id/vendor/tenant_id/
+  greenhouse_id/channels/priority/poll_interval_seconds/params; `LiveSourceConnector(ABC)` with
+  `vendor: ClassVar[str]`, `connect()`, `stream() -> AsyncIterator[SourceReading]`, `close()`.
+  Connection errors use `DataSourceConnectionError` from `src/vendors/base.py`.
+- `src/live/sources/__init__.py` (22 lines): `CONNECTOR_TYPES` registry mapping vendor string ->
+  class. Currently registers `"mock" -> MockScadaSource`.
+- `src/live/sources/mock.py` (284 lines): `MockScadaSource(LiveSourceConnector)`, vendor="mock".
+  Deterministic when `SourceConfig.params["seed"]` set (per-instance `random.Random`).
+  Signal model: diurnal sine keyed to UTC wall-clock hour — temp peaks mid-day (amp from
+  AMPLITUDE_DIVISOR), humidity inversely coupled (HUMIDITY_COUPLING_FACTOR), CO2 dips during
+  light hours, light ≈ 0 at night (truncated sine, LIGHT_AMPLITUDE). Gaussian noise from
+  config (TEMP_NOISE_STD, etc.). Anomaly episodes: spike (5-8σ, 3-6 ticks), drift (slow ramp
+  ~60 ticks), stuck (frozen ~30 ticks), dropout (channel omitted 5-15 ticks). One episode at
+  a time per source. Values clamped to CHANNEL_BOUNDS, always finite.
+  `build_mock_sources_for_scope(tenant_id, greenhouse_id)` returns two sources: mock_climate
+  (temp/humidity/light, priority 10, MOCK_SCADA_INTERVAL_SECONDS) and mock_co2 (co2 only,
+  priority 20, 1.5x interval).
+- `src/live/merge.py` (260 lines): `ChannelMerger` — one per (tenant_id, greenhouse_id).
+  `inbox: asyncio.Queue[SourceReading]` with `submit()` coroutine. Bucket-align + grace
+  watermark: bucket = floor(ts / emit_interval), emits when now >= bucket_end +
+  LIVE_MERGE_GRACE_SECONDS. Per-channel conflict: lowest priority wins, equal → last-write-wins.
+  Provenance in `LiveReadingEvent.sources`. `seq=""` (Redis entry ID set by SSE layer).
+  Late arrivals for emitted buckets dropped and counted (`dropped_late_count`).
+  Source health: 3x interval → degraded, 10x → offline, recovery → online. Emits
+  `SourceStatusEvent` on transitions only. `current_statuses()` returns dict.
+  `run()` is cancellation-safe (final flush on cancel). Callbacks `on_reading` and `on_status`
+  are async — runtime wires them to hub/scorer (no hub import here).
+- `tests/live/test_mock_source_smoke.py` (11 tests): bounds/finite, seeded determinism,
+  divergent seeds, metadata, dropout/stuck/spike episode, build_mock_sources factory shape.
+- `tests/live/test_merge_smoke.py` (6 tests): priority conflict, equal-priority last-write-wins,
+  late reading drop, degraded fires exactly once, recovery transition, seq="" and scope.
+
+All 32 tests/live/ tests pass (15 pre-existing hub + 17 new). No config.py changes; all
+range/noise/coupling constants reused from existing config. No files outside src/models/ and
+src/config.py touched (except tests/live/ for smoke tests per task spec).
+
+---
+
+## Previous Phase
 **FE Migration — Backend gaps G2–G5/G7/G9 + FE P4/P5 + deferred P1/P2 items — COMPLETE (2026-07-11)**
 Branches: main (backend, pushed to ec2659b+memory commit) and fe/nextjs-migration
 (pushed to fa3356e; worktree at ~/Projects/ai-agronomist-fe).

@@ -1,16 +1,20 @@
 "use client";
 
-import { parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useMemo, useState } from "react";
+import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { discoverChannels } from "@/features/monitoring/api/readings";
+import { discoverChannels, type SensorRow } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
+import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
+import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
+import { LiveToggle } from "@/features/monitoring/components/LiveToggle";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
+import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
@@ -37,13 +41,48 @@ function matchChannelParam(channels: string[], param: string): string[] {
   return [...matched];
 }
 
+/**
+ * Merge historical + live rows; live wins on duplicate timestamp.
+ * Result is sorted chronologically (oldest → newest) for uPlot.
+ */
+function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRow[] {
+  const map = new Map<string, SensorRow>();
+  for (const row of historical) map.set(row.timestamp, row);
+  for (const row of live) map.set(row.timestamp, row);
+  return Array.from(map.values()).sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
+}
+
 function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
-  const { rows, isLoading, isRefetching, isError, error, windowLabel, downsampled } = useReadings();
-  // Anomaly-jump deep link: ?channel= pre-selects the affected traces and
-  // ?threshold= keeps highlighting consistent with the Anomalies page.
+  const {
+    rows: historicalRows,
+    isLoading,
+    isRefetching,
+    isError,
+    error,
+    windowLabel,
+    downsampled,
+  } = useReadings();
+
+  const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
-  const [, setRange] = useDateRange();
+  const [range, setRange] = useDateRange();
+
+  // Setting a date window while live → force live off.
+  useEffect(() => {
+    if (live && range.from !== null && range.to !== null) {
+      void setLive(false);
+    }
+  }, [live, range.from, range.to, setLive]);
+
+  const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
+
+  const rows = useMemo(
+    () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
+    [live, historicalRows, liveRows],
+  );
 
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
@@ -53,7 +92,6 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
     );
   }, [rows, channelFilter]);
 
-  // null = untouched: the channel deep link applies until the first toggle.
   const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
   const visible = useMemo(() => {
     if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
@@ -87,7 +125,13 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
             {downsampled ? " · downsampled" : ""}
           </p>
         </div>
-        <DateRangeControls />
+        <div className="flex items-center gap-2">
+          <LiveToggle />
+          {live && (
+            <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
+          )}
+          <DateRangeControls />
+        </div>
       </div>
 
       {isLoading ? (
@@ -98,8 +142,9 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
       ) : rows.length === 0 ? (
         <Card>
           <p className="py-8 text-center text-sm text-text-muted">
-            No sensor readings in the selected window. Widen the range or pick another
-            tenant/greenhouse.
+            {live
+              ? "Waiting for live data — streaming started."
+              : "No sensor readings in the selected window. Widen the range or pick another tenant/greenhouse."}
           </p>
         </Card>
       ) : (
@@ -107,14 +152,17 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
           <Card title="Sensor channels">
             <ChannelToggles channels={channels} visible={visible} onToggle={toggleChannel} />
           </Card>
+
+          {live && anomalies.length > 0 && (
+            <LiveAnomalyStrip anomalies={anomalies} threshold={threshold} />
+          )}
+
           <Card title="Time series">
             <SensorTimeSeriesChart
               rows={rows}
               channels={channels}
               visible={visible}
               threshold={threshold}
-              // Drag-selecting a span narrows the URL window, so the
-              // readings table below filters to the same range.
               onRangeSelect={(from, to) => void setRange({ from, to })}
             />
           </Card>

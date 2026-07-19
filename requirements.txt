@@ -55,5 +55,7 @@ pytest>=7.4
 pytest-asyncio>=0.23
 pytest-cov>=4.1
 coverage>=7.3
+fakeredis>=2.21,<3              # in-process Redis for stream tests (redis-py 4.x compat)
 redis>=4.2.0,<5.0.0
 fastapi-cache2[redis]==0.2.1
+respx>=0.20                     # httpx mock transport for SCADA connector tests
