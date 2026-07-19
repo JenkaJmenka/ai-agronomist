@@ -189,9 +189,12 @@ class MockScadaSource(LiveSourceConnector):
                 now = self._start_time + timedelta(
                     seconds=self._tick_count * interval,
                 )
-                self._tick_count += 1
             else:
                 now = datetime.now(timezone.utc)
+            # Tick advances in BOTH clock modes: demo-episode scheduling is
+            # tick-based, and wall-clock mode previously froze at tick 0,
+            # silently disabling guaranteed demo anomalies in production.
+            self._tick_count += 1
             channels = self._generate_channels(now)
             if channels:  # dropout episode may empty the dict
                 yield SourceReading(
