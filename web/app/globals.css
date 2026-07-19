@@ -72,3 +72,20 @@ body {
 table {
   font-variant-numeric: tabular-nums;
 }
+
+/* Sensor tile overlay — one-shot glow pulse when a live value updates. */
+@keyframes tile-flash {
+  0% {
+    background: rgba(22, 163, 74, 0.2);
+  }
+  100% {
+    background: rgba(22, 163, 74, 0);
+  }
+}
+
+/* Only run the animation when the user hasn't requested reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .tile-flash {
+    animation: tile-flash 0.7s ease-out forwards;
+  }
+}

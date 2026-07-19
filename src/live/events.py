@@ -27,6 +27,10 @@ CHANNEL_BOUNDS: Dict[str, Tuple[float, float]] = {
     "humidity": (0.0, 100.0),
     "co2": (0.0, 1000.0),
     "light": (0.0, 2000.0),
+    # Fertigation / environmental channels (not used by ML scorer).
+    "soil_moisture": (0.0, 100.0),       # %
+    "root_zone_temp": (0.0, 45.0),       # °C
+    "vpd": (0.0, 4.0),                   # kPa
 }
 
 

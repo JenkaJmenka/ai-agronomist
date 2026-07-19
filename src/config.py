@@ -992,3 +992,15 @@ LIVE_HUB_BLOCK_MS: int = int(os.environ.get("LIVE_HUB_BLOCK_MS", "5000"))
 # (multiples of the scorer's emit_interval), the window is treated as not-warm
 # and scoring pauses until the channel returns.
 LIVE_FORWARD_FILL_MAX_TICKS: int = int(os.environ.get("LIVE_FORWARD_FILL_MAX_TICKS", "5"))
+
+# --- Demo mode: guaranteed anomaly injection ---
+# When enabled, the mock climate source (which carries ML-scored channels)
+# will schedule guaranteed episodes at random intervals to ensure the demo
+# always shows anomaly activity.  Does not affect non-ML sources.
+MOCK_SCADA_DEMO_MODE: bool = _env_flag("MOCK_SCADA_DEMO_MODE", True)
+MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS: float = float(
+    os.environ.get("MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", "60.0")
+)
+MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS: float = float(
+    os.environ.get("MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", "120.0")
+)

@@ -1,7 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 /**
- * Live monitoring SSE integration — Phase 5A.
+ * Live monitoring SSE integration — Phase 5A + Phase 8 (sensor tiles, setpoints).
  * All BFF calls are mocked (page.route). No real backend needed.
  */
 
@@ -20,18 +20,43 @@ function makeHistoricalRows(count: number) {
   }));
 }
 
+/**
+ * Historical rows that include the new Phase 8 channels so tiles render in
+ * both live and historical modes.
+ */
+function makeHistoricalRowsV2(count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    timestamp: isoAtMinute(i),
+    temperature: 22.0 + (i % 5) * 0.1,
+    humidity: 60.0,
+    co2: 400.0,
+    soil_moisture: 70.0,
+    root_zone_temp: 20.0,
+    vpd: 0.9,
+    anomaly_score: null,
+  }));
+}
+
 function sseEvent(type: string, data: unknown, id?: string): string {
   const idLine = id ? `id: ${id}\n` : "";
   return `event: ${type}\n${idLine}data: ${JSON.stringify(data)}\n\n`;
 }
 
 const HISTORICAL_ROWS = makeHistoricalRows(10);
+const HISTORICAL_ROWS_V2 = makeHistoricalRowsV2(10);
 
 const MOCK_RECENT = {
   rows: HISTORICAL_ROWS,
   count: HISTORICAL_ROWS.length,
   min_timestamp: HISTORICAL_ROWS[0]?.timestamp ?? null,
   max_timestamp: HISTORICAL_ROWS.at(-1)?.timestamp ?? null,
+};
+
+const MOCK_RECENT_V2 = {
+  rows: HISTORICAL_ROWS_V2,
+  count: HISTORICAL_ROWS_V2.length,
+  min_timestamp: HISTORICAL_ROWS_V2[0]?.timestamp ?? null,
+  max_timestamp: HISTORICAL_ROWS_V2.at(-1)?.timestamp ?? null,
 };
 
 const LIVE_READING = {
@@ -42,6 +67,42 @@ const LIVE_READING = {
   channels: { temperature: 25.0, humidity: 70.0, co2: 450.0 },
   sources: { temperature: "src_1", humidity: "src_1", co2: "src_2" },
   anomaly_score: null,
+};
+
+/** Live reading that includes Phase 8 channels including derived vpd. */
+const LIVE_READING_V2 = {
+  seq: "",
+  timestamp: isoAtMinute(20),
+  tenant_id: "tenant_1",
+  greenhouse_id: "gh_A",
+  channels: {
+    temperature: 25.0,
+    humidity: 70.0,
+    co2: 450.0,
+    soil_moisture: 72.0,
+    root_zone_temp: 21.0,
+    vpd: 0.95,
+  },
+  sources: {
+    temperature: "src_1",
+    humidity: "src_1",
+    co2: "src_2",
+    soil_moisture: "src_3",
+    root_zone_temp: "src_3",
+    vpd: "derived",
+  },
+  anomaly_score: null,
+};
+
+/** Live reading with a critically high temperature to test tile status coloring. */
+const LIVE_READING_CRITICAL = {
+  ...LIVE_READING_V2,
+  timestamp: isoAtMinute(21),
+  channels: {
+    ...LIVE_READING_V2.channels,
+    // temperature > 28.8 (warnMax for [20,28] range) → critical
+    temperature: 35.0,
+  },
 };
 
 const LIVE_ANOMALY = {
@@ -61,6 +122,11 @@ const SSE_BODY =
   sseEvent("reading", LIVE_READING, "1-0") +
   sseEvent("anomaly", LIVE_ANOMALY, "2-0") +
   sseEvent("heartbeat", {}, "3-0");
+
+const SSE_BODY_V2 = sseEvent("reading", LIVE_READING_V2, "1-0") + sseEvent("heartbeat", {}, "2-0");
+
+const SSE_BODY_CRITICAL =
+  sseEvent("reading", LIVE_READING_CRITICAL, "1-0") + sseEvent("heartbeat", {}, "2-0");
 
 // ---------------------------------------------------------------------------
 // Mocking helpers
@@ -83,8 +149,31 @@ async function mockAllRoutes(page: Page) {
   );
 }
 
+/** Mock routes with Phase 8 channels (v2 rows + vpd). */
+async function mockAllRoutesV2(page: Page, sseBody = SSE_BODY_V2) {
+  await page.route("**/api/bff/readings/recent**", (route) =>
+    route.fulfill({ json: MOCK_RECENT_V2 }),
+  );
+  await page.route("**/api/bff/live/status**", (route) =>
+    route.fulfill({
+      json: {
+        sources: [
+          { source_id: "src_1", vendor: "acme", status: "online" },
+          { source_id: "src_3", vendor: "soilsense", status: "online" },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/bff/live/events**", (route) =>
+    route.fulfill({
+      contentType: "text/event-stream",
+      body: sseBody,
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// Original Phase 5A tests — no regressions
 // ---------------------------------------------------------------------------
 
 test("live mode is OFF by default — badge and strip not visible", async ({ page }) => {
@@ -178,4 +267,117 @@ test("Go Live button is disabled when a date window is set", async ({ page }) =>
 
   await expect(page.getByTestId("live-toggle")).toBeVisible();
   await expect(page.getByTestId("live-toggle")).toBeDisabled();
+});
+
+// ---------------------------------------------------------------------------
+// Phase 8 — Sensor tiles
+// ---------------------------------------------------------------------------
+
+test("sensor tiles render for all discovered channels (historical)", async ({ page }) => {
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring");
+
+  await expect(page.getByTestId("sensor-tiles")).toBeVisible({ timeout: 5000 });
+
+  // All Phase 8 channels must have a tile.
+  await expect(page.getByTestId("sensor-tile-temperature")).toBeVisible();
+  await expect(page.getByTestId("sensor-tile-humidity")).toBeVisible();
+  await expect(page.getByTestId("sensor-tile-co2")).toBeVisible();
+  await expect(page.getByTestId("sensor-tile-soil_moisture")).toBeVisible();
+  await expect(page.getByTestId("sensor-tile-root_zone_temp")).toBeVisible();
+  await expect(page.getByTestId("sensor-tile-vpd")).toBeVisible();
+});
+
+test("sensor tiles render with live values from SSE", async ({ page }) => {
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring?live=true");
+
+  await expect(page.getByTestId("sensor-tiles")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByTestId("sensor-tile-vpd")).toBeVisible();
+
+  // vpd tile shows the value from the live reading (0.95 kPa)
+  // After flush interval (500 ms) the tile should update.
+  await expect(page.getByTestId("sensor-tile-vpd")).toContainText("kPa", {
+    timeout: 3000,
+  });
+});
+
+test("vpd tile shows derived provenance badge", async ({ page }) => {
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring");
+
+  await expect(page.getByTestId("sensor-tile-vpd")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByTestId("sensor-tile-vpd")).toContainText("derived");
+});
+
+test("critical temperature value colors its tile with sev-critical border", async ({ page }) => {
+  await mockAllRoutesV2(page, SSE_BODY_CRITICAL);
+  await page.goto("/monitoring?live=true");
+
+  // Wait for the live data flush (500 ms) and tile render.
+  await expect(page.getByTestId("sensor-tile-temperature")).toBeVisible({ timeout: 5000 });
+
+  // Allow the flush interval (up to 1 s) for the critical reading to propagate.
+  await page.waitForTimeout(1000);
+
+  const tile = page.getByTestId("sensor-tile-temperature");
+  const className = await tile.getAttribute("class");
+  expect(className).toContain("border-l-sev-critical");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 8 — Setpoint controls
+// ---------------------------------------------------------------------------
+
+test("Setpoints button is visible in the header", async ({ page }) => {
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring");
+
+  await expect(page.getByTestId("setpoints-trigger")).toBeVisible({ timeout: 5000 });
+});
+
+test("Setpoints panel opens and shows channel inputs", async ({ page }) => {
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring");
+
+  await expect(page.getByTestId("sensor-tiles")).toBeVisible({ timeout: 5000 });
+
+  // Open the panel.
+  await page.getByTestId("setpoints-trigger").click();
+  await expect(page.getByTestId("setpoints-dropdown")).toBeVisible();
+
+  // Should show at least the temperature min/max inputs.
+  await expect(page.getByTestId("setpoint-min-temperature")).toBeVisible();
+  await expect(page.getByTestId("setpoint-max-temperature")).toBeVisible();
+});
+
+test("editing a setpoint changes tile status when value crosses new threshold", async ({
+  page,
+}) => {
+  // Historical rows have temperature=22. Default optimal is [20,28] → ok.
+  // After narrowing to [23,28] the value 22 will be below min → warning/critical.
+  await mockAllRoutesV2(page);
+  await page.goto("/monitoring");
+
+  await expect(page.getByTestId("sensor-tile-temperature")).toBeVisible({ timeout: 5000 });
+
+  // Confirm tile is ok initially (no sev-critical border).
+  const tile = page.getByTestId("sensor-tile-temperature");
+  let className = await tile.getAttribute("class");
+  expect(className).not.toContain("border-l-sev-critical");
+
+  // Open setpoints panel and raise the min above 22.
+  await page.getByTestId("setpoints-trigger").click();
+  await expect(page.getByTestId("setpoint-min-temperature")).toBeVisible();
+
+  await page.getByTestId("setpoint-min-temperature").fill("25");
+  await page.getByTestId("setpoint-max-temperature").fill("30");
+
+  // Close panel and check that the tile now shows a non-ok color.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("setpoints-dropdown")).not.toBeVisible();
+
+  // The tile's value (22) is now critically below the new min (25 - 10%*5=0.5 = warnMin 24.5)
+  className = await tile.getAttribute("class");
+  expect(className).toContain("border-l-sev-critical");
 });

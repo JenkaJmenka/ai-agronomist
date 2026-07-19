@@ -3,6 +3,42 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Live Monitoring Phase 8 — Demo v2 QA (fertigation/VPD/demo-anomaly tests) — COMPLETE (2026-07-19)**
+Agent: qa-engineer. Task: add comprehensive tests for the new fertigation, VPD, and demo-anomaly
+functionality shipped without dedicated tests.
+
+New test files (5 files, 60 tests total):
+- `tests/live/test_derived.py` (17 tests): `compute_vpd` known values (Magnus formula at 25°C/60%
+  ≈ 1.27 kPa, 20°C/80% ≈ 0.47 kPa), RH=100→0, clamping at negative, non-finite inputs→0.0.
+- `tests/live/test_fertigation.py` (16 tests): `FertigationSignalState` soil moisture bounds +
+  sawtooth depletion/refill, root_zone_temp bounds + determinism + diurnal variation, mock source
+  with fertigation channels, anomaly episodes on fertigation channels (spike/dropout/stuck).
+- `tests/live/test_demo_mode.py` (10 tests): demo scheduling within [MIN,MAX] window with
+  ANOMALY_RATE=0, episodes target only ML channels, score-visible types only (no dropout),
+  fertigation-only source never gets demo episodes, rescheduling after episode, defer when
+  episode already active.
+- `tests/live/test_vpd_wiring.py` (10 tests): `_attach_derived_vpd` unit tests (present when
+  temp+humidity, absent when either missing, source="derived"), scorer ignores vpd/soil channels
+  (_extract_vector length, identical scores with/without extras), runtime publishes vpd to hub.
+- `tests/live/test_persistence_extra_channels.py` (7 tests): extra channels (vpd/soil_moisture/
+  root_zone_temp) not persisted, canonical-only rows, flush with extras succeeds, missing canonical
+  still rejected even with extras present.
+
+Updated: `docs/coverage/live-monitoring-qa.md` with "Demo v2 addendum" section.
+
+Coverage for new modules:
+- `src/live/derived.py`: 85.71% (line 41 = defensive non-finite-after-compute guard)
+- `src/live/sources/fertigation.py`: 100%
+- `src/live/sources/mock.py`: 96% (existing coverage + new tests)
+- `src/live/runtime.py`: 88.56%
+
+Bugs found: **0** — all implementations correct.
+Regression: 334 live tests passed (was 274), 2424 full repo passed, 12 skipped, 2 xfailed.
+Done signal: tasks/done/live-p8-qa.json.
+
+---
+
+## Previous Phase
 **Live Monitoring Phase 7 — Review-Fix (runtime/persistence/connectors + docs) — COMPLETE (2026-07-19)**
 Agent: backend-engineer. Task: fix tech-lead (#3,#4,#5,#10,#11) and architect (N1,N4,N5,N6)
 findings from final review. 274 tests green (267 pre-existing + 7 new).

@@ -38,6 +38,7 @@ from src.config import (
     MOCK_SCADA_INTERVAL_SECONDS,
     MOCK_SCADA_SCOPES,
 )
+from src.live.derived import compute_vpd
 from src.live.events import LiveReadingEvent, SourceStatusEvent
 from src.live.hub import LiveHub
 from src.live.merge import ChannelMerger
@@ -49,6 +50,25 @@ logger = logging.getLogger("live.runtime")
 
 # Exponential back-off cap for supervised restart loops (seconds).
 _MAX_BACKOFF_SECONDS: float = 60.0
+
+
+# ---------------------------------------------------------------------------
+# Derived channels
+# ---------------------------------------------------------------------------
+
+
+def _attach_derived_vpd(event: LiveReadingEvent) -> None:
+    """Add the derived VPD channel when temperature and humidity are present.
+
+    Mutates ``event.channels``/``event.sources`` in place. The scorer only
+    consumes the canonical ML channels, so VPD never affects scoring.
+    """
+    temperature = event.channels.get("temperature")
+    humidity = event.channels.get("humidity")
+    if temperature is None or humidity is None:
+        return
+    event.channels["vpd"] = compute_vpd(temperature, humidity)
+    event.sources["vpd"] = "derived"
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +264,7 @@ class LiveRuntime:
             grace_seconds = LIVE_MERGE_GRACE_SECONDS
 
         async def on_reading(event: LiveReadingEvent) -> None:
+            _attach_derived_vpd(event)
             scored = event
             if scorer is not None:
                 try:

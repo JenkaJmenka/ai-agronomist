@@ -403,7 +403,8 @@ describe("useLiveReadings — error fallback to polling", () => {
     const qc = makeQueryClient();
     renderHook(() => useLiveReadings(true), { wrapper: makeWrapper(qc) });
 
-    const src = MockEventSource.lastInstance!;
+    const src = MockEventSource.lastInstance;
+    if (src == null) throw new Error("EventSource was never constructed");
     act(() => {
       src.triggerError();
       src.triggerError();
