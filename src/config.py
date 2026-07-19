@@ -1004,3 +1004,18 @@ MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS: float = float(
 MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS: float = float(
     os.environ.get("MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", "120.0")
 )
+# Sigma multiplier for compound demo episodes — each affected channel is
+# offset by DEMO_SPIKE_SIGMA × channel_noise_std.  Empirically tuned so that
+# the resulting multi-channel compound episode reliably scores >= 0.08 on the
+# baseline LSTM-VAE detector (comfortable margin over a 0.05 live threshold).
+MOCK_SCADA_DEMO_SPIKE_SIGMA: float = float(
+    os.environ.get("MOCK_SCADA_DEMO_SPIKE_SIGMA", "25.0")
+)
+# Duration range (ticks) for compound demo episodes. Longer durations fill
+# more of the 20-step scoring window, increasing peak score.
+MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS: int = int(
+    os.environ.get("MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS", "8")
+)
+MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS: int = int(
+    os.environ.get("MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS", "12")
+)

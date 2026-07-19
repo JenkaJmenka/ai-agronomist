@@ -28,7 +28,10 @@ from src.config import (
     MOCK_SCADA_ANOMALY_RATE,
     MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS,
     MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS,
+    MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS,
+    MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS,
     MOCK_SCADA_DEMO_MODE,
+    MOCK_SCADA_DEMO_SPIKE_SIGMA,
     MOCK_SCADA_INTERVAL_SECONDS,
     SENSOR_NAMES,
     TEMP_NOISE_STD,
@@ -97,6 +100,25 @@ class _AnomalyEpisode:
         self.accumulated = accumulated  # frozen value (stuck) / drift sum
 
 
+class _CompoundEpisode:
+    """Multi-channel anomaly episode for demo mode.
+
+    Simultaneously offsets 2-3 channels in the same direction to break
+    learned inverse couplings (e.g. temp-humidity) and reliably cross the
+    scoring threshold.
+    """
+
+    __slots__ = ("channel_magnitudes", "remaining_ticks")
+
+    def __init__(
+        self,
+        channel_magnitudes: Dict[str, float],
+        remaining_ticks: int,
+    ) -> None:
+        self.channel_magnitudes = channel_magnitudes
+        self.remaining_ticks = remaining_ticks
+
+
 class MockScadaSource(LiveSourceConnector):
     """Mock SCADA source producing synthetic diurnal greenhouse signals.
 
@@ -112,6 +134,7 @@ class MockScadaSource(LiveSourceConnector):
         self._rng = random.Random(seed)
         self._is_connected = False
         self._episode: Optional[_AnomalyEpisode] = None
+        self._compound_episode: Optional[_CompoundEpisode] = None
         self._start_time: Optional[datetime] = self._parse_start_time(
             config.params.get("start_time"),
         )
@@ -203,11 +226,12 @@ class MockScadaSource(LiveSourceConnector):
                 if ch in fert:
                     raw[ch] = fert[ch]
 
-        # Demo-mode guaranteed episode injection.
+        # Demo-mode guaranteed episode injection (compound).
         self._maybe_start_demo_episode(raw)
 
         self._maybe_start_episode(raw)
         result = self._apply_episode(raw)
+        result = self._apply_compound_episode(result)
         return _clamp_and_sanitize(result)
 
     def _base_signal(
@@ -252,6 +276,8 @@ class MockScadaSource(LiveSourceConnector):
         """With probability ``MOCK_SCADA_ANOMALY_RATE``, start an episode."""
         if self._episode is not None:
             return
+        if self._compound_episode is not None:
+            return  # compound episode active, skip random episode
         if self._rng.random() >= MOCK_SCADA_ANOMALY_RATE:
             return
         if not raw:
@@ -300,6 +326,24 @@ class MockScadaSource(LiveSourceConnector):
 
         return result
 
+    def _apply_compound_episode(self, raw: Dict[str, float]) -> Dict[str, float]:
+        """Apply the active compound episode offsets and tick down."""
+        if self._compound_episode is None:
+            return raw
+
+        ep = self._compound_episode
+        ep.remaining_ticks -= 1
+        result = dict(raw)
+
+        for ch, magnitude in ep.channel_magnitudes.items():
+            if ch in result:
+                result[ch] += magnitude
+
+        if ep.remaining_ticks <= 0:
+            self._compound_episode = None
+
+        return result
+
     # ------------------------------------------------------------------
     # Demo-mode guaranteed episodes
     # ------------------------------------------------------------------
@@ -312,41 +356,52 @@ class MockScadaSource(LiveSourceConnector):
         self._demo_next_tick = self._tick_count + self._rng.randint(min_ticks, max_ticks)
 
     def _maybe_start_demo_episode(self, raw: Dict[str, float]) -> None:
-        """If demo mode is due, force a score-visible episode on an ML channel."""
+        """If demo mode is due, force a compound multi-channel episode.
+
+        Creates a compound episode that simultaneously offsets 2-3 ML channels
+        in the same direction (breaking learned inverse couplings) with large
+        magnitudes sustained for 8-12 ticks — empirically tuned to reliably
+        score >= 0.08 on the baseline LSTM-VAE detector.
+        """
         if not self._demo_mode:
             return
         if self._demo_next_tick is None:
             return
         if self._tick_count < self._demo_next_tick:
             return
-        if self._episode is not None:
+        if self._episode is not None or self._compound_episode is not None:
             # An episode is already active; reschedule slightly ahead.
             self._demo_next_tick = self._tick_count + 1
             return
 
-        # Pick a random canonical ML channel present in this source.
+        # Pick 2-3 canonical ML channels present in this source.
         ml_channels = [ch for ch in raw if ch in ML_CHANNELS]
         if not ml_channels:
             # This source has no ML channels; skip.
             self._schedule_demo_episode()
             return
 
-        channel = self._rng.choice(ml_channels)
-        noise = _NOISE_STD.get(channel, 1.0)
-        kind = self._rng.choice(list(_SCORE_VISIBLE_EPISODES))
+        # Select 2-3 channels (or all available if fewer).
+        n_channels = min(len(ml_channels), self._rng.randint(2, 3))
+        chosen = self._rng.sample(ml_channels, n_channels)
 
-        if kind == "spike":
-            ticks = self._rng.randint(*_SPIKE_TICKS)
-            sigma = self._rng.uniform(_SPIKE_SIGMA_MIN, _SPIKE_SIGMA_MAX)
-            mag = sigma * noise * self._rng.choice([-1, 1])
-            self._episode = _AnomalyEpisode(kind, channel, ticks, mag, 0.0)
-        elif kind == "drift":
-            total = self._rng.uniform(3, 6) * noise * self._rng.choice([-1, 1])
-            per_tick = total / _DRIFT_TICKS
-            self._episode = _AnomalyEpisode(kind, channel, _DRIFT_TICKS, per_tick, 0.0)
-        elif kind == "stuck":
-            self._episode = _AnomalyEpisode(kind, channel, _STUCK_TICKS, 0.0, raw[channel])
+        # Direction: all channels offset in the SAME direction to break
+        # the inverse coupling the model learned (e.g. temp + humidity both up).
+        direction = self._rng.choice([-1, 1])
 
+        # Build per-channel magnitudes using MOCK_SCADA_DEMO_SPIKE_SIGMA.
+        channel_magnitudes: Dict[str, float] = {}
+        for ch in chosen:
+            noise = _NOISE_STD.get(ch, 1.0)
+            channel_magnitudes[ch] = direction * MOCK_SCADA_DEMO_SPIKE_SIGMA * noise
+
+        # Duration: 8-12 ticks (configurable).
+        ticks = self._rng.randint(
+            MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS,
+            MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS,
+        )
+
+        self._compound_episode = _CompoundEpisode(channel_magnitudes, ticks)
         self._schedule_demo_episode()
 
 
