@@ -13,9 +13,12 @@ import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalySt
 import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
 import { LiveToggle } from "@/features/monitoring/components/LiveToggle";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
+import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
+import { SetpointsPanel } from "@/features/monitoring/components/SetpointsPanel";
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
+import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
 
@@ -78,6 +81,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   }, [live, range.from, range.to, setLive]);
 
   const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
+  const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
   const rows = useMemo(
     () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
@@ -117,6 +121,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
+      {/* ── Header ── */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">{title}</h1>
@@ -126,6 +131,12 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <SetpointsPanel
+            channels={channels}
+            setpoints={setpoints}
+            onUpdate={updateSetpoint}
+            onReset={resetToDefaults}
+          />
           <LiveToggle />
           {live && (
             <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
@@ -136,6 +147,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
 
       {isLoading ? (
         <div className="space-y-4">
+          <Skeleton className="h-16 w-full" />
           <Skeleton className="h-80 w-full" />
           <Skeleton className="h-40 w-full" />
         </div>
@@ -149,6 +161,16 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
         </Card>
       ) : (
         <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
+          {/* ── Live sensor tiles ── */}
+          <SensorTiles
+            rows={rows}
+            channels={channels}
+            setpoints={setpoints}
+            isLive={live}
+            isStale={stale}
+            isLoading={false}
+          />
+
           <Card title="Sensor channels">
             <ChannelToggles channels={channels} visible={visible} onToggle={toggleChannel} />
           </Card>
@@ -163,6 +185,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
               channels={channels}
               visible={visible}
               threshold={threshold}
+              setpoints={setpoints}
               onRangeSelect={(from, to) => void setRange({ from, to })}
             />
           </Card>

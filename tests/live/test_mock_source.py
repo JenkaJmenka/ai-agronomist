@@ -365,26 +365,29 @@ class TestLifecycle:
 
 class TestBuildMockSources:
 
-    def test_returns_two_sources(self) -> None:
+    def test_returns_three_sources(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        assert len(sources) == 2
+        assert len(sources) == 3
 
     def test_channel_split(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2 = sources
+        climate, co2, fertigation = sources
         assert set(climate.config.channels) == {"temperature", "humidity", "light"}
         assert set(co2.config.channels) == {"co2"}
+        assert set(fertigation.config.channels) == {"soil_moisture", "root_zone_temp"}
 
     def test_priorities(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2 = sources
-        assert climate.config.priority < co2.config.priority
+        climate, co2, fertigation = sources
+        assert climate.config.priority < co2.config.priority < fertigation.config.priority
 
     def test_interval_ratio(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2 = sources
-        ratio = co2.config.poll_interval_seconds / climate.config.poll_interval_seconds
-        assert abs(ratio - 1.5) < 1e-9
+        climate, co2, fertigation = sources
+        co2_ratio = co2.config.poll_interval_seconds / climate.config.poll_interval_seconds
+        fert_ratio = fertigation.config.poll_interval_seconds / climate.config.poll_interval_seconds
+        assert abs(co2_ratio - 1.5) < 1e-9
+        assert abs(fert_ratio - 2.0) < 1e-9
 
     def test_scope_propagated(self) -> None:
         sources = build_mock_sources_for_scope("tX", "ghY")

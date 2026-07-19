@@ -16,3 +16,6 @@ export function channelColor(index: number): string {
 
 /** Translucent --sev-critical (#ef4444) — anomaly band overlay on charts. */
 export const ANOMALY_BAND_FILL = "rgba(239, 68, 68, 0.15)";
+
+/** Translucent --accent (#16a34a) — optimal setpoint band overlay on charts. */
+export const OPTIMAL_BAND_FILL = "rgba(22, 163, 74, 0.1)";

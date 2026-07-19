@@ -86,7 +86,6 @@ export function LiveBadge({ transport, stale, sourceStatuses }: LiveBadgeProps) 
           {mergedSources.map((s) => (
             <span
               key={s.source_id}
-              // biome-ignore lint/a11y/useValidAriaRole: presentational dot
               role="img"
               title={`${s.source_id} (${s.vendor}): ${s.status}`}
               className={`h-2 w-2 rounded-full ${STATUS_DOT[s.status]}`}

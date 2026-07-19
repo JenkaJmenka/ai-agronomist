@@ -10,8 +10,9 @@ import {
 } from "@/components/charts/rangeSelect";
 import { UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
+import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { type AnomalyBand, computeAnomalyBands } from "@/features/monitoring/lib/anomalyBands";
-import { ANOMALY_BAND_FILL, channelColor } from "@/lib/colors";
+import { ANOMALY_BAND_FILL, channelColor, OPTIMAL_BAND_FILL } from "@/lib/colors";
 
 interface SensorTimeSeriesChartProps {
   readonly rows: SensorRow[];
@@ -22,6 +23,11 @@ interface SensorTimeSeriesChartProps {
   readonly threshold: number;
   /** Drag-selection on the x-axis reports a [from, to] window. */
   readonly onRangeSelect?: RangeSelectHandler;
+  /**
+   * Effective setpoints. When exactly one channel is visible its optimal
+   * [min, max] range is drawn as a subtle horizontal green band.
+   */
+  readonly setpoints?: Setpoints;
 }
 
 /** Paints translucent bands behind the series over anomalous time spans. */
@@ -37,12 +43,33 @@ function drawAnomalyBands(u: uPlot, bands: AnomalyBand[]): void {
   ctx.restore();
 }
 
+/**
+ * Paints a horizontal shaded band between the optimal [min, max] setpoints
+ * for the y-axis. Only called when exactly one channel is visible so we know
+ * the y-scale maps to a single sensor's value range.
+ */
+function drawOptimalBand(u: uPlot, min: number, max: number): void {
+  const { ctx, bbox } = u;
+  ctx.save();
+  ctx.fillStyle = OPTIMAL_BAND_FILL;
+
+  // In uPlot y increases downward in pixel space, so valToPos(max) < valToPos(min).
+  const yTop = Math.max(u.valToPos(max, "y", true), bbox.top);
+  const yBottom = Math.min(u.valToPos(min, "y", true), bbox.top + bbox.height);
+
+  if (yBottom > yTop) {
+    ctx.fillRect(bbox.left, yTop, bbox.width, yBottom - yTop);
+  }
+  ctx.restore();
+}
+
 export function SensorTimeSeriesChart({
   rows,
   channels,
   visible,
   threshold,
   onRangeSelect,
+  setpoints,
 }: SensorTimeSeriesChartProps) {
   const data = useMemo(() => {
     const xs = rows.map((r) => new Date(r.timestamp).getTime() / 1000);
@@ -56,6 +83,17 @@ export function SensorTimeSeriesChart({
   }, [rows, channels]);
 
   const bands = useMemo(() => computeAnomalyBands(rows, threshold), [rows, threshold]);
+
+  // Derive the single visible channel's optimal range (only when exactly one
+  // channel is toggled on so the y-axis maps unambiguously to one sensor).
+  const optimalRange = useMemo((): readonly [number, number] | null => {
+    if (setpoints === undefined) return null;
+    const visibleChannels = channels.filter((ch) => visible.has(ch));
+    if (visibleChannels.length !== 1) return null;
+    const ch = visibleChannels[0];
+    if (ch === undefined) return null;
+    return setpoints[ch] ?? null;
+  }, [channels, visible, setpoints]);
 
   const options = useMemo(
     () => ({
@@ -73,11 +111,18 @@ export function SensorTimeSeriesChart({
       // drawClear runs after the canvas reset and before series strokes,
       // so bands sit behind the traces.
       hooks: {
-        drawClear: [(u: uPlot) => drawAnomalyBands(u, bands)],
+        drawClear: [
+          (u: uPlot) => {
+            drawAnomalyBands(u, bands);
+            if (optimalRange !== null) {
+              drawOptimalBand(u, optimalRange[0], optimalRange[1]);
+            }
+          },
+        ],
         ...(onRangeSelect ? { setSelect: [createRangeSelectHook(onRangeSelect)] } : {}),
       },
     }),
-    [channels, visible, bands, onRangeSelect],
+    [channels, visible, bands, optimalRange, onRangeSelect],
   );
 
   if (rows.length === 0) return null;
