@@ -381,3 +381,63 @@ class TestDemoActiveEpisodeDefer:
 
         # Should have deferred to tick_count + 1
         assert source._demo_next_tick == fire_tick + 1
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock mode regression (prod path: no start_time)
+# ---------------------------------------------------------------------------
+
+
+class TestWallClockTickAdvance:
+    """Regression: _tick_count previously advanced only in logical-clock mode,
+    freezing demo scheduling at tick 0 in production (wall-clock mode)."""
+
+    @pytest.mark.asyncio
+    async def test_ticks_advance_without_start_time(self) -> None:
+        config = SourceConfig(
+            source_id="wallclock",
+            vendor="mock",
+            tenant_id="t1",
+            greenhouse_id="gh_A",
+            channels=["temperature"],
+            priority=10,
+            poll_interval_seconds=0.001,
+            params={"seed": 1, "demo_mode": True},  # no start_time -> wall clock
+        )
+        source = MockScadaSource(config)
+        await source.connect()
+        collected = 0
+        async for _reading in source.stream():
+            collected += 1
+            if collected >= 5:
+                break
+        await source.close()
+        assert source._tick_count >= 5
+
+    @pytest.mark.asyncio
+    async def test_demo_episode_fires_in_wall_clock_mode(self) -> None:
+        config = SourceConfig(
+            source_id="wallclock_demo",
+            vendor="mock",
+            tenant_id="t1",
+            greenhouse_id="gh_A",
+            channels=["temperature", "humidity", "light"],
+            priority=10,
+            poll_interval_seconds=0.001,
+            params={"seed": 7, "demo_mode": True},  # wall clock
+        )
+        source = MockScadaSource(config)
+        # Make the guarantee due almost immediately regardless of config.
+        source._demo_next_tick = 3
+        await source.connect()
+        fired = False
+        collected = 0
+        async for _reading in source.stream():
+            collected += 1
+            if source._compound_episode is not None:
+                fired = True
+                break
+            if collected >= 50:
+                break
+        await source.close()
+        assert fired, "compound demo episode must fire in wall-clock mode"
