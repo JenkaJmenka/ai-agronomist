@@ -1,8 +1,9 @@
 """Tests for the demo-mode guaranteed anomaly injection mechanism.
 
-Covers: guaranteed episode scheduling within [MIN, MAX] window even when
-ANOMALY_RATE=0; episodes target only canonical ML channels; fertigation-only
-source never gets demo episodes; after an episode ends, next one is scheduled.
+Covers: guaranteed compound episode scheduling within [MIN, MAX] window even
+when ANOMALY_RATE=0; compound episodes target only canonical ML channels;
+fertigation-only source never gets demo episodes; after an episode ends,
+next one is scheduled.
 """
 
 from __future__ import annotations
@@ -12,7 +13,12 @@ from datetime import datetime, timezone
 import pytest
 
 from src.live.sources.base import SourceConfig
-from src.live.sources.mock import ML_CHANNELS, MockScadaSource, _SCORE_VISIBLE_EPISODES
+from src.live.sources.mock import (
+    ML_CHANNELS,
+    MockScadaSource,
+    _CompoundEpisode,
+    _SCORE_VISIBLE_EPISODES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +77,7 @@ class TestDemoScheduling:
     def test_guaranteed_episode_within_window(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """With ANOMALY_RATE=0 and tiny demo interval, episode occurs within window."""
+        """With ANOMALY_RATE=0 and tiny demo interval, compound episode occurs within window."""
         # Monkeypatch config to make the window small (2-4 seconds with 1s interval
         # → 2-4 ticks).
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
@@ -88,18 +94,18 @@ class TestDemoScheduling:
         # _demo_next_tick should be >= 2 and <= 4 (from tick_count=0)
         assert 2 <= source._demo_next_tick <= 4
 
-        # Run ticks until we see an episode.
+        # Run ticks until we see a compound episode.
         episode_started = False
         for tick in range(10):
             ts = datetime(2026, 7, 18, 12, 0, tick, tzinfo=timezone.utc)
             source._tick_count = tick
             source._generate_channels(ts)
-            if source._episode is not None:
+            if source._compound_episode is not None:
                 episode_started = True
                 break
 
         assert episode_started, (
-            "Demo episode should have started within the [MIN, MAX] window"
+            "Demo compound episode should have started within the [MIN, MAX] window"
         )
 
 
@@ -113,16 +119,16 @@ class TestDemoEpisodeTargeting:
     def test_episode_targets_ml_channel_only(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Demo episodes only target canonical ML channels (temp, humidity, co2, light)."""
+        """Demo compound episodes only target canonical ML channels (temp, humidity, co2, light)."""
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         # Source has ML channels + fertigation channels mixed
         all_channels = ["temperature", "humidity", "co2", "light", "soil_moisture", "root_zone_temp"]
-        episodes_seen = []
+        channels_seen: list[str] = []
 
-        # Run many trials to collect episode channels
+        # Run many trials to collect compound episode channels
         for trial_seed in range(20):
             source = _make_demo_source(
                 channels=all_channels,
@@ -133,25 +139,25 @@ class TestDemoEpisodeTargeting:
                 ts = datetime(2026, 7, 18, 12, 0, tick, tzinfo=timezone.utc)
                 source._tick_count = tick
                 source._generate_channels(ts)
-                if source._episode is not None:
-                    episodes_seen.append(source._episode.channel)
+                if source._compound_episode is not None:
+                    channels_seen.extend(source._compound_episode.channel_magnitudes.keys())
                     break
 
-        assert len(episodes_seen) > 0, "Expected at least one demo episode"
-        for ch in episodes_seen:
+        assert len(channels_seen) > 0, "Expected at least one demo compound episode"
+        for ch in channels_seen:
             assert ch in ML_CHANNELS, (
-                f"Demo episode targeted non-ML channel '{ch}'"
+                f"Demo compound episode targeted non-ML channel '{ch}'"
             )
 
-    def test_episode_type_is_score_visible(
+    def test_compound_episode_is_multi_channel(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Demo episodes are score-visible types (spike, drift, stuck — not dropout)."""
+        """Demo compound episodes offset multiple channels (2-3) simultaneously."""
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
-        episode_types_seen = set()
+        channel_counts_seen: list[int] = []
         for trial_seed in range(50):
             source = _make_demo_source(
                 channels=["temperature", "humidity", "co2", "light"],
@@ -162,14 +168,16 @@ class TestDemoEpisodeTargeting:
                 ts = datetime(2026, 7, 18, 12, 0, tick, tzinfo=timezone.utc)
                 source._tick_count = tick
                 source._generate_channels(ts)
-                if source._episode is not None:
-                    episode_types_seen.add(source._episode.episode_type)
+                if source._compound_episode is not None:
+                    channel_counts_seen.append(
+                        len(source._compound_episode.channel_magnitudes)
+                    )
                     break
 
-        assert len(episode_types_seen) > 0
-        for ep_type in episode_types_seen:
-            assert ep_type in _SCORE_VISIBLE_EPISODES, (
-                f"Demo episode type '{ep_type}' not in {_SCORE_VISIBLE_EPISODES}"
+        assert len(channel_counts_seen) > 0, "Expected compound episodes"
+        for count in channel_counts_seen:
+            assert 2 <= count <= 3, (
+                f"Compound episode should offset 2-3 channels, got {count}"
             )
 
 
@@ -194,15 +202,13 @@ class TestDemoModeFertigationOnly:
             interval=1.0,
         )
 
-        # Run many ticks — should never get a demo episode
+        # Run many ticks — should never get a compound demo episode
         for tick in range(50):
             ts = datetime(2026, 7, 18, 12, 0, tick, tzinfo=timezone.utc)
             source._tick_count = tick
             source._generate_channels(ts)
-            assert source._episode is None, (
-                f"Fertigation-only source got a demo episode at tick {tick}: "
-                f"{source._episode.episode_type} on {source._episode.channel}"
-                if source._episode else ""
+            assert source._compound_episode is None, (
+                f"Fertigation-only source got a compound demo episode at tick {tick}"
             )
 
     def test_fertigation_only_reschedules_without_episode(
@@ -243,7 +249,7 @@ class TestDemoRescheduling:
     def test_next_episode_scheduled_after_first(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """After a demo episode starts, the next one is already scheduled."""
+        """After a demo compound episode starts, the next one is already scheduled."""
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
@@ -254,26 +260,25 @@ class TestDemoRescheduling:
             interval=1.0,
         )
 
-        first_schedule = source._demo_next_tick
         episode_started_at = None
 
         for tick in range(10):
             ts = datetime(2026, 7, 18, 12, 0, tick, tzinfo=timezone.utc)
             source._tick_count = tick
             source._generate_channels(ts)
-            if source._episode is not None and episode_started_at is None:
+            if source._compound_episode is not None and episode_started_at is None:
                 episode_started_at = tick
                 # Check that the NEXT episode is already scheduled
                 assert source._demo_next_tick is not None
                 assert source._demo_next_tick > tick
                 break
 
-        assert episode_started_at is not None, "Demo episode should have started"
+        assert episode_started_at is not None, "Demo compound episode should have started"
 
     def test_second_episode_fires_after_first_ends(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """After the first demo episode ends, a second one fires eventually."""
+        """After the first demo compound episode ends, a second one fires eventually."""
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 3.0)
@@ -285,27 +290,22 @@ class TestDemoRescheduling:
         )
 
         episode_count = 0
-        last_episode_channel = None
+        was_in_compound = False
 
         for tick in range(100):
             ts = datetime(2026, 7, 18, 12, tick // 60, tick % 60, tzinfo=timezone.utc)
             source._tick_count = tick
             source._generate_channels(ts)
 
-            # Detect episode start: episode becomes not None and is different
-            if source._episode is not None:
-                if source._episode.channel != last_episode_channel or source._episode.remaining_ticks > 1:
-                    pass  # Within same episode
-            elif last_episode_channel is not None:
-                episode_count += 1  # Episode just ended
-
-            if source._episode is not None:
-                last_episode_channel = source._episode.channel
-            else:
-                last_episode_channel = None
+            # Detect compound episode transitions.
+            if source._compound_episode is not None:
+                was_in_compound = True
+            elif was_in_compound:
+                episode_count += 1  # Compound episode just ended
+                was_in_compound = False
 
         assert episode_count >= 2, (
-            f"Expected at least 2 demo episodes in 100 ticks, saw {episode_count}"
+            f"Expected at least 2 demo compound episodes in 100 ticks, saw {episode_count}"
         )
 
 
@@ -316,10 +316,10 @@ class TestDemoRescheduling:
 
 class TestDemoActiveEpisodeDefer:
 
-    def test_demo_defers_when_episode_active(
+    def test_demo_defers_when_single_episode_active(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """If an episode is already active when demo fires, it reschedules +1 tick."""
+        """If a single-channel episode is active when demo fires, it reschedules +1 tick."""
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
         monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
@@ -330,7 +330,7 @@ class TestDemoActiveEpisodeDefer:
             interval=1.0,
         )
 
-        # Force an active episode
+        # Force an active single-channel episode
         from src.live.sources.mock import _AnomalyEpisode
         source._episode = _AnomalyEpisode(
             episode_type="spike",
@@ -338,6 +338,37 @@ class TestDemoActiveEpisodeDefer:
             remaining_ticks=99,
             magnitude=5.0,
             accumulated=0.0,
+        )
+
+        # Set the demo tick to fire now
+        fire_tick = 5
+        source._tick_count = fire_tick
+        source._demo_next_tick = fire_tick
+
+        ts = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+        source._generate_channels(ts)
+
+        # Should have deferred to tick_count + 1
+        assert source._demo_next_tick == fire_tick + 1
+
+    def test_demo_defers_when_compound_episode_active(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If a compound episode is active when demo fires, it reschedules +1 tick."""
+        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+
+        source = _make_demo_source(
+            channels=["temperature", "humidity", "co2", "light"],
+            seed=42,
+            interval=1.0,
+        )
+
+        # Force an active compound episode
+        source._compound_episode = _CompoundEpisode(
+            channel_magnitudes={"temperature": 12.5, "humidity": 25.0},
+            remaining_ticks=99,
         )
 
         # Set the demo tick to fire now
