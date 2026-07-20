@@ -16,27 +16,23 @@ Usage as a FastAPI dependency::
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import redis.asyncio as aioredis
 
+from src.config import REDIS_URL
 from src.live.hub import LiveHub
-
-# Default matches the FastAPICache initialization in src/api/main.py.
-_REDIS_URL_DEFAULT = "redis://localhost:6379/0"
 
 _hub: Optional[LiveHub] = None
 
 
 def _make_redis_client() -> aioredis.Redis:
-    """Create a new async Redis client from the REDIS_URL environment variable.
+    """Create a new async Redis client from ``src.config.REDIS_URL``.
 
     Called once per :meth:`LiveHub.subscribe` invocation so each SSE connection
     gets its own connection (no sharing across subscribers).
     """
-    redis_url = os.environ.get("REDIS_URL", _REDIS_URL_DEFAULT)
-    return aioredis.from_url(redis_url, encoding="utf8", decode_responses=False)
+    return aioredis.from_url(REDIS_URL, encoding="utf8", decode_responses=False)
 
 
 def get_live_hub() -> LiveHub:

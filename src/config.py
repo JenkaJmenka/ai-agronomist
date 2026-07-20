@@ -926,6 +926,11 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
     "yes",
 )
 TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
+
+# Single source of truth for the Redis connection default — previously
+# duplicated as a literal in both src/api/main.py (FastAPICache init) and
+# src/api/services/live_hub_provider.py (LiveHub publisher/subscriber clients).
+REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS", "300"))
 
 # Server-side downsampling (migration plan G1) — readings endpoints.

@@ -11,7 +11,6 @@ import asyncio
 import logging
 import time
 import uuid
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable
 
@@ -34,6 +33,7 @@ try:
 except (ImportError, ValueError):
     logging.basicConfig(level=logging.INFO)
 
+from src.config import REDIS_URL
 from src.db.jobs import fail_stale_preparing_jobs
 from src.db.session import AsyncSessionLocal, engine, get_db, init_db
 from src.mq.connection import close_mq
@@ -106,8 +106,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Orphaned upload-job recovery failed: {e}", exc_info=True)
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    redis = aioredis.from_url(redis_url, encoding="utf8", decode_responses=True)
+    redis = aioredis.from_url(REDIS_URL, encoding="utf8", decode_responses=True)
     FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
     logger.info("Redis cache initialized.")
 
