@@ -306,7 +306,7 @@ class TestVpdRuntimeIntegration:
         monkeypatch.setattr("src.live.runtime.MOCK_SCADA_SCOPES", f"{_TENANT}:{_GH}")
         monkeypatch.setattr("src.live.runtime.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
         monkeypatch.setattr("src.config.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+        monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
         monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", False)
         monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "")
 

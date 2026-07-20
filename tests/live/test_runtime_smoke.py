@@ -64,7 +64,7 @@ def _mock_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # SourceConfig objects with poll_interval_seconds=0.05.
     # The runtime now derives emit_interval from source_configs.poll_interval_seconds,
     # so all three namespaces must agree for fast tests.
-    monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", False)
     monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "")
 

@@ -1,11 +1,13 @@
 """Mock SCADA data source for development and integration testing.
 
 Produces deterministic diurnal sine signals (keyed to UTC wall-clock hour)
-with Gaussian noise and periodic anomaly episodes (spike, drift, stuck,
-dropout) for the four canonical greenhouse channels.
+with Gaussian noise for the four canonical greenhouse channels, plus a
+``mock_fertigation`` source with soil_moisture (sawtooth irrigation
+pattern) and root_zone_temp (damped diurnal).
 
-Also provides a ``mock_fertigation`` source with soil_moisture (sawtooth
-irrigation pattern) and root_zone_temp (damped diurnal).
+Anomaly-episode logic (spike/drift/stuck/dropout and compound demo
+episodes) lives in :mod:`src.live.sources.mock_episodes`; scope factory
+helpers live in :mod:`src.live.sources.mock_factory`.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import asyncio
 import math
 import random
 from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator, ClassVar, Dict, List, Optional, Set, Tuple, Union
+from typing import AsyncIterator, ClassVar, Dict, Optional, Union
 
 from src.config import (
     AMPLITUDE_DIVISOR,
@@ -25,56 +27,23 @@ from src.config import (
     HUMIDITY_RANGE,
     LIGHT_AMPLITUDE,
     LIGHT_NOISE_STD,
-    MOCK_SCADA_ANOMALY_RATE,
-    MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS,
-    MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS,
-    MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS,
-    MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS,
-    MOCK_SCADA_DEMO_MODE,
-    MOCK_SCADA_DEMO_SPIKE_SIGMA,
-    MOCK_SCADA_INTERVAL_SECONDS,
-    SENSOR_NAMES,
     TEMP_NOISE_STD,
     TEMP_RANGE,
 )
-from src.live.events import CHANNEL_BOUNDS, SourceReading
+from src.live.events import SourceReading
 from src.live.sources.base import LiveSourceConnector, SourceConfig
-from src.live.sources.fertigation import (
-    FertigationSignalState,
-    _RZT_NOISE_STD,
-    _SM_NOISE_STD,
+from src.live.sources.fertigation import FertigationSignalState
+from src.live.sources.mock_episodes import (
+    EpisodeEngine,
+    _AnomalyEpisode,
+    _CompoundEpisode,
+)
+from src.live.sources.mock_factory import (  # noqa: F401  (re-export: stable import path)
+    _clamp_and_sanitize,
+    build_mock_sources_for_scope,
 )
 
 _TWO_PI: float = 2.0 * math.pi
-
-# The four channels consumed by the ML scorer (LSTM-VAE).
-ML_CHANNELS: Set[str] = set(SENSOR_NAMES)
-
-# Anomaly episode tick durations
-_SPIKE_TICKS: Tuple[int, int] = (3, 6)
-_DRIFT_TICKS: int = 60
-_STUCK_TICKS: int = 30
-
-# Spike magnitude range (multiples of the channel's noise std)
-_SPIKE_SIGMA_MIN: float = 5.0
-_SPIKE_SIGMA_MAX: float = 8.0
-
-# Episode types that produce a score-visible signal (excludes dropout).
-_SCORE_VISIBLE_EPISODES: Tuple[str, ...] = ("spike", "drift", "stuck")
-
-# Per-channel noise standard deviations (reused from config and fertigation
-# constants).  Every channel that can receive random anomaly episodes MUST
-# have an entry here — the fallback of 1.0 uses absolute-unit magnitudes
-# which produce unrealistic episode sizes for narrow-noise channels like
-# root_zone_temp (noise std 0.15).
-_NOISE_STD: Dict[str, float] = {
-    "temperature": TEMP_NOISE_STD,
-    "humidity": HUMIDITY_NOISE_STD,
-    "co2": CO2_NOISE_STD,
-    "light": LIGHT_NOISE_STD,
-    "soil_moisture": _SM_NOISE_STD,
-    "root_zone_temp": _RZT_NOISE_STD,
-}
 
 
 def _hour_fraction(ts: datetime) -> float:
@@ -87,53 +56,12 @@ def _diurnal_sine(hour_frac: float, phase_offset: float = 6.0) -> float:
     return math.sin(_TWO_PI * (hour_frac - phase_offset) / 24.0)
 
 
-class _AnomalyEpisode:
-    """Tracks an active anomaly episode on a single channel."""
-
-    __slots__ = (
-        "episode_type", "channel", "remaining_ticks",
-        "magnitude", "accumulated",
-    )
-
-    def __init__(
-        self,
-        episode_type: str,
-        channel: str,
-        remaining_ticks: int,
-        magnitude: float,
-        accumulated: float,
-    ) -> None:
-        self.episode_type = episode_type
-        self.channel = channel
-        self.remaining_ticks = remaining_ticks
-        self.magnitude = magnitude
-        self.accumulated = accumulated  # frozen value (stuck) / drift sum
-
-
-class _CompoundEpisode:
-    """Multi-channel anomaly episode for demo mode.
-
-    Simultaneously offsets 2-3 channels in the same direction to break
-    learned inverse couplings (e.g. temp-humidity) and reliably cross the
-    scoring threshold.
-    """
-
-    __slots__ = ("channel_magnitudes", "remaining_ticks")
-
-    def __init__(
-        self,
-        channel_magnitudes: Dict[str, float],
-        remaining_ticks: int,
-    ) -> None:
-        self.channel_magnitudes = channel_magnitudes
-        self.remaining_ticks = remaining_ticks
-
-
 class MockScadaSource(LiveSourceConnector):
     """Mock SCADA source producing synthetic diurnal greenhouse signals.
 
     Deterministic when ``SourceConfig.params["seed"]`` is set (uses a
-    per-instance ``random.Random``).
+    per-instance ``random.Random``, shared with the episode engine so the
+    draw order is stable).
     """
 
     vendor: ClassVar[str] = "mock"
@@ -143,8 +71,6 @@ class MockScadaSource(LiveSourceConnector):
         seed = config.params.get("seed")
         self._rng = random.Random(seed)
         self._is_connected = False
-        self._episode: Optional[_AnomalyEpisode] = None
-        self._compound_episode: Optional[_CompoundEpisode] = None
         self._start_time: Optional[datetime] = self._parse_start_time(
             config.params.get("start_time"),
         )
@@ -156,11 +82,10 @@ class MockScadaSource(LiveSourceConnector):
             FertigationSignalState(self._rng) if has_fert else None
         )
 
-        # Demo-mode guaranteed episode scheduling.
-        self._demo_mode: bool = bool(config.params.get("demo_mode", False))
-        self._demo_next_tick: Optional[int] = None
-        if self._demo_mode:
-            self._schedule_demo_episode()
+        # Episode engine owns all anomaly/demo-episode state.  Constructed
+        # after the fertigation state to preserve the pre-split RNG draw
+        # order at init (demo scheduling draws once when demo_mode is on).
+        self._episodes = EpisodeEngine(self._rng, config)
 
     @staticmethod
     def _parse_start_time(
@@ -177,6 +102,47 @@ class MockScadaSource(LiveSourceConnector):
         if isinstance(value, datetime):
             return value
         return datetime.fromisoformat(value)
+
+    # ------------------------------------------------------------------
+    # Episode-state passthroughs
+    #
+    # Episode state is owned by the EpisodeEngine; these private properties
+    # preserve the attribute surface that existing tests rely on so they
+    # survive the refactor unchanged.  New code should use
+    # ``self._episodes`` directly.
+    # ------------------------------------------------------------------
+
+    @property
+    def _episode(self) -> Optional[_AnomalyEpisode]:
+        return self._episodes.episode
+
+    @_episode.setter
+    def _episode(self, value: Optional[_AnomalyEpisode]) -> None:
+        self._episodes.episode = value
+
+    @property
+    def _compound_episode(self) -> Optional[_CompoundEpisode]:
+        return self._episodes.compound_episode
+
+    @_compound_episode.setter
+    def _compound_episode(self, value: Optional[_CompoundEpisode]) -> None:
+        self._episodes.compound_episode = value
+
+    @property
+    def _demo_mode(self) -> bool:
+        return self._episodes.demo_mode
+
+    @property
+    def _demo_next_tick(self) -> Optional[int]:
+        return self._episodes.demo_next_tick
+
+    @_demo_next_tick.setter
+    def _demo_next_tick(self, value: Optional[int]) -> None:
+        self._episodes.demo_next_tick = value
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     async def connect(self) -> None:
         """Mock connection -- always succeeds."""
@@ -239,13 +205,9 @@ class MockScadaSource(LiveSourceConnector):
                 if ch in fert:
                     raw[ch] = fert[ch]
 
-        # Demo-mode guaranteed episode injection (compound).
-        self._maybe_start_demo_episode(raw)
-
-        self._maybe_start_episode(raw)
-        result = self._apply_episode(raw)
-        result = self._apply_compound_episode(result)
-        return _clamp_and_sanitize(result)
+        # Episode injection (demo compound + random single-channel).
+        shaped = self._episodes.process(raw, self._tick_count)
+        return _clamp_and_sanitize(shaped)
 
     def _base_signal(
         self,
@@ -280,205 +242,3 @@ class MockScadaSource(LiveSourceConnector):
             return base + self._rng.gauss(0, LIGHT_NOISE_STD)
 
         return self._rng.gauss(0, 1.0)
-
-    # ------------------------------------------------------------------
-    # Anomaly episodes
-    # ------------------------------------------------------------------
-
-    def _maybe_start_episode(self, raw: Dict[str, float]) -> None:
-        """With probability ``MOCK_SCADA_ANOMALY_RATE``, start an episode."""
-        if self._episode is not None:
-            return
-        if self._compound_episode is not None:
-            return  # compound episode active, skip random episode
-        if self._rng.random() >= MOCK_SCADA_ANOMALY_RATE:
-            return
-        if not raw:
-            return
-
-        kind = self._rng.choice(["spike", "drift", "stuck", "dropout"])
-        channel = self._rng.choice(list(raw.keys()))
-        noise = _NOISE_STD.get(channel, 1.0)
-
-        if kind == "spike":
-            ticks = self._rng.randint(*_SPIKE_TICKS)
-            sigma = self._rng.uniform(_SPIKE_SIGMA_MIN, _SPIKE_SIGMA_MAX)
-            mag = sigma * noise * self._rng.choice([-1, 1])
-            self._episode = _AnomalyEpisode(kind, channel, ticks, mag, 0.0)
-        elif kind == "drift":
-            total = self._rng.uniform(3, 6) * noise * self._rng.choice([-1, 1])
-            per_tick = total / _DRIFT_TICKS
-            self._episode = _AnomalyEpisode(kind, channel, _DRIFT_TICKS, per_tick, 0.0)
-        elif kind == "stuck":
-            self._episode = _AnomalyEpisode(kind, channel, _STUCK_TICKS, 0.0, raw[channel])
-        elif kind == "dropout":
-            ticks = self._rng.randint(5, 15)
-            self._episode = _AnomalyEpisode(kind, channel, ticks, 0.0, 0.0)
-
-    def _apply_episode(self, raw: Dict[str, float]) -> Dict[str, float]:
-        """Apply the active episode to raw channels and tick down."""
-        if self._episode is None:
-            return raw
-
-        ep = self._episode
-        ep.remaining_ticks -= 1
-        result = dict(raw)
-
-        if ep.episode_type == "spike" and ep.channel in result:
-            result[ep.channel] += ep.magnitude
-        elif ep.episode_type == "drift" and ep.channel in result:
-            ep.accumulated += ep.magnitude
-            result[ep.channel] += ep.accumulated
-        elif ep.episode_type == "stuck" and ep.channel in result:
-            result[ep.channel] = ep.accumulated
-        elif ep.episode_type == "dropout":
-            result.pop(ep.channel, None)
-
-        if ep.remaining_ticks <= 0:
-            self._episode = None
-
-        return result
-
-    def _apply_compound_episode(self, raw: Dict[str, float]) -> Dict[str, float]:
-        """Apply the active compound episode offsets and tick down."""
-        if self._compound_episode is None:
-            return raw
-
-        ep = self._compound_episode
-        ep.remaining_ticks -= 1
-        result = dict(raw)
-
-        for ch, magnitude in ep.channel_magnitudes.items():
-            if ch in result:
-                result[ch] += magnitude
-
-        if ep.remaining_ticks <= 0:
-            self._compound_episode = None
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Demo-mode guaranteed episodes
-    # ------------------------------------------------------------------
-
-    def _schedule_demo_episode(self) -> None:
-        """Schedule the next guaranteed episode tick using config interval."""
-        interval = self._config.poll_interval_seconds
-        min_ticks = max(1, int(MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS / interval))
-        max_ticks = max(min_ticks + 1, int(MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS / interval))
-        self._demo_next_tick = self._tick_count + self._rng.randint(min_ticks, max_ticks)
-
-    def _maybe_start_demo_episode(self, raw: Dict[str, float]) -> None:
-        """If demo mode is due, force a compound multi-channel episode.
-
-        Creates a compound episode that simultaneously offsets 2-3 ML channels
-        in the same direction (breaking learned inverse couplings) with large
-        magnitudes sustained for 8-12 ticks — empirically tuned to reliably
-        score >= 0.08 on the baseline LSTM-VAE detector.
-        """
-        if not self._demo_mode:
-            return
-        if self._demo_next_tick is None:
-            return
-        if self._tick_count < self._demo_next_tick:
-            return
-        if self._episode is not None or self._compound_episode is not None:
-            # An episode is already active; reschedule slightly ahead.
-            self._demo_next_tick = self._tick_count + 1
-            return
-
-        # Pick 2-3 canonical ML channels present in this source.
-        ml_channels = [ch for ch in raw if ch in ML_CHANNELS]
-        if not ml_channels:
-            # This source has no ML channels; skip.
-            self._schedule_demo_episode()
-            return
-
-        # Select 2-3 channels (or all available if fewer).
-        n_channels = min(len(ml_channels), self._rng.randint(2, 3))
-        chosen = self._rng.sample(ml_channels, n_channels)
-
-        # Direction: all channels offset in the SAME direction to break
-        # the inverse coupling the model learned (e.g. temp + humidity both up).
-        direction = self._rng.choice([-1, 1])
-
-        # Build per-channel magnitudes using MOCK_SCADA_DEMO_SPIKE_SIGMA.
-        channel_magnitudes: Dict[str, float] = {}
-        for ch in chosen:
-            noise = _NOISE_STD.get(ch, 1.0)
-            channel_magnitudes[ch] = direction * MOCK_SCADA_DEMO_SPIKE_SIGMA * noise
-
-        # Duration: 8-12 ticks (configurable).
-        ticks = self._rng.randint(
-            MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS,
-            MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS,
-        )
-
-        self._compound_episode = _CompoundEpisode(channel_magnitudes, ticks)
-        self._schedule_demo_episode()
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-def _clamp_and_sanitize(channels: Dict[str, float]) -> Dict[str, float]:
-    """Clamp to ``CHANNEL_BOUNDS`` and drop non-finite values."""
-    out: Dict[str, float] = {}
-    for key, val in channels.items():
-        if not math.isfinite(val):
-            continue
-        lo, hi = CHANNEL_BOUNDS.get(key, (val, val))
-        out[key] = max(lo, min(hi, val))
-    return out
-
-
-def build_mock_sources_for_scope(
-    tenant_id: str,
-    greenhouse_id: str,
-) -> List[MockScadaSource]:
-    """Build three complementary mock sources for a tenant/greenhouse scope.
-
-    Returns
-    -------
-    list[MockScadaSource]
-        - ``mock_climate``: temperature, humidity, light (priority 10).
-          Has demo-mode enabled when ``MOCK_SCADA_DEMO_MODE`` is True.
-        - ``mock_co2``: co2 only (priority 20, 1.5x interval offset).
-        - ``mock_fertigation``: soil_moisture, root_zone_temp (priority 30,
-          2x interval offset).
-
-    The three sources prove multi-source merge with different priorities
-    and cadences.
-    """
-    climate = SourceConfig(
-        source_id=f"{tenant_id}_{greenhouse_id}_mock_climate",
-        vendor="mock",
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        channels=["temperature", "humidity", "light"],
-        priority=10,
-        poll_interval_seconds=MOCK_SCADA_INTERVAL_SECONDS,
-        params={"seed": 42, "demo_mode": MOCK_SCADA_DEMO_MODE},
-    )
-    co2 = SourceConfig(
-        source_id=f"{tenant_id}_{greenhouse_id}_mock_co2",
-        vendor="mock",
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        channels=["co2"],
-        priority=20,
-        poll_interval_seconds=MOCK_SCADA_INTERVAL_SECONDS * 1.5,
-        params={"seed": 137},
-    )
-    fertigation = SourceConfig(
-        source_id=f"{tenant_id}_{greenhouse_id}_mock_fertigation",
-        vendor="mock",
-        tenant_id=tenant_id,
-        greenhouse_id=greenhouse_id,
-        channels=["soil_moisture", "root_zone_temp"],
-        priority=30,
-        poll_interval_seconds=MOCK_SCADA_INTERVAL_SECONDS * 2,
-        params={"seed": 256},
-    )
-    return [MockScadaSource(climate), MockScadaSource(co2), MockScadaSource(fertigation)]

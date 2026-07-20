@@ -139,7 +139,7 @@ async def test_dropout_episode_omits_channel() -> None:
     await source.connect()
 
     # Force a dropout episode directly
-    from src.live.sources.mock import _AnomalyEpisode
+    from src.live.sources.mock_episodes import _AnomalyEpisode
     source._episode = _AnomalyEpisode(
         episode_type="dropout",
         channel="temperature",
@@ -159,7 +159,7 @@ async def test_stuck_episode_freezes_value() -> None:
     source = _make_source(["temperature"], seed=42, interval=0.001)
     await source.connect()
 
-    from src.live.sources.mock import _AnomalyEpisode
+    from src.live.sources.mock_episodes import _AnomalyEpisode
     frozen_val = 25.0
     source._episode = _AnomalyEpisode(
         episode_type="stuck",
@@ -192,7 +192,7 @@ async def test_spike_episode_adds_magnitude() -> None:
     normal_ch = source._generate_channels(datetime.now(timezone.utc))
     normal_val = normal_ch.get("co2", 400.0)
 
-    from src.live.sources.mock import _AnomalyEpisode
+    from src.live.sources.mock_episodes import _AnomalyEpisode
     # Large positive spike
     source._episode = _AnomalyEpisode(
         episode_type="spike",

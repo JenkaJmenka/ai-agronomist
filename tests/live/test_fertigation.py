@@ -24,7 +24,8 @@ from src.live.sources.fertigation import (
     _SM_REFILL_TARGET,
     _SM_REFILL_TRIGGER,
 )
-from src.live.sources.mock import MockScadaSource, _AnomalyEpisode
+from src.live.sources.mock import MockScadaSource
+from src.live.sources.mock_episodes import _AnomalyEpisode
 
 
 # ---------------------------------------------------------------------------

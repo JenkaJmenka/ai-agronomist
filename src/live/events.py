@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from pydantic import BaseModel, field_validator
+
+from src.config import SENSOR_NAMES
 
 # ---------------------------------------------------------------------------
 # Canonical channel bounds for live monitoring.
@@ -32,6 +34,12 @@ CHANNEL_BOUNDS: Dict[str, Tuple[float, float]] = {
     "root_zone_temp": (0.0, 45.0),       # °C
     "vpd": (0.0, 4.0),                   # kPa
 }
+
+# The four canonical channels consumed by the ML scorer (LSTM-VAE).
+# Shared source of truth for the live pipeline (mock episode targeting,
+# tests) — see also ``CHANNEL_ORDER`` in ``src/live/attribution.py`` for
+# the *ordered* model-input layout.
+ML_CHANNELS: Set[str] = set(SENSOR_NAMES)
 
 
 def sanitize_channels(channels: Dict[str, float]) -> Dict[str, float]:
