@@ -191,4 +191,14 @@ describe("useSetpoints — corrupt localStorage ignored", () => {
 
     expect(result.current.setpoints.temperature).toEqual(CHANNEL_META.temperature?.optimal);
   });
+
+  it("falls back to defaults when a setpoint range is inverted ([80, 20]) — F10", () => {
+    // An inverted range passes tuple-shape validation but violates min < max;
+    // the Zod refine rejects it so the whole stored object is discarded.
+    fakeStorage[STORAGE_KEY] = JSON.stringify({ temperature: [80, 20] });
+
+    const { result } = renderHook(() => useSetpoints());
+
+    expect(result.current.setpoints.temperature).toEqual(CHANNEL_META.temperature?.optimal);
+  });
 });

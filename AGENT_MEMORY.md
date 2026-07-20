@@ -3,6 +3,109 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Live Monitoring Phase 11 — Extra-Channel Persistence (dual-write RawReading) — COMPLETE (2026-07-20)**
+Agent: backend-engineer. Task: implement `_event_to_raw_row` + dual-write in `PersistenceBatcher._flush()`,
+backfill script, and extended tests per architect's `docs/architecture/live-demo-v2-review.md` Part 2.
+
+Problem: soil_moisture / root_zone_temp / vpd existed only in the live SSE stream — no persisted history.
+On page reload, extra channels were lost. The `fetch_merged_readings` read path (already used by CSV upload)
+merges RawReading rows with canonical anomaly scores; extras surface with zero read-path changes once raw rows
+are written.
+
+Key design decisions (from architect's Option a):
+- **Zero schema change**: `raw_readings` already has JSON `data`, `source`, and the exact conflict key
+  `(tenant_id, greenhouse_id, timestamp)`. `ON CONFLICT DO NOTHING` semantics match the canonical table.
+- **Full channel dict (NOT extras-only)**: `_event_to_raw_row` writes the complete `event.channels`
+  (canonical + extras + vpd). Writing extras-only would drop temperature/humidity/co2/light from the
+  monitoring view since `fetch_merged_readings` uses raw rows as-is when present.
+- **NaN guard**: `sanitize_channels` strips non-finite values; no `.get(k, 0.0)` fallback on the JSON
+  dict (that would fabricate 0.0 for absent channels). Mandatory for the SQLite/Postgres NaN gap.
+- **No completeness requirement** for raw rows: `RawReading` has no non-nullable channel columns.
+  Extras-only buckets (fertigation-only flush cycle) write a raw row; canonical row still skipped.
+- **Single transaction**: both `SensorReading` and `RawReading` inserts execute in the same
+  `async with session_factory()` block with one `commit()`. Mid-flush failure requeues all events
+  (idempotent on retry via both unique constraints).
+
+Files modified (2 production, 1 test):
+- `src/live/persistence.py`: Updated module docstring (dual-table contract, full-dict rationale,
+  conflict semantics). Imported `RawReading`. Added `_event_to_raw_row()` function. Updated `_flush()`
+  to build both row lists in the same drain pass and execute both inserts in the same transaction.
+  Changed early-exit condition from `if not rows` → `if not rows and not raw_rows`.
+- `tests/live/test_persistence_extra_channels.py`: Extended from 7 → 24 tests. New classes:
+  `TestEventToRawRow` (8 tests), `TestRawRowDualWrite` (6 tests), `TestNanGuardRawRow` (2 tests),
+  `TestReadPathIntegration` (1 test). All 24 pass. Pre-existing 4 `TestEventToRowExtraChannels` +
+  3 `TestFlushWithExtraChannels` (renamed one test) preserved.
+
+Files created (1):
+- `scripts/backfill_live_raw_readings.py`: Standalone backfill script — INSERT INTO raw_readings
+  SELECT ... FROM sensor_readings with 4 canonical channels as JSON data, source='live-backfill',
+  ON CONFLICT DO NOTHING. Accepts --tenant-id, --dry-run, --database-url. NOT invoked automatically.
+
+Test results: 366 passed (tests/live/ + tests/api/test_live_events.py + tests/api/test_live_events_smoke.py).
+tests/api/test_readings_api.py: 21 passed. Zero regressions.
+Done signal: tasks/done/live-p11-persistence.json.
+
+---
+
+## Previous Phase
+**Live Monitoring Phase 11 — Backend Core Review Fixes (F1/F2/F5/F14) — COMPLETE (2026-07-20)**
+Agent: ml-engineer. Task: apply blocking and non-blocking review findings from tech-lead and
+architect reviews (`docs/refactor/live-demo-v2-review.md`, `docs/architecture/live-demo-v2-review.md`).
+Backend core fixes only — persistence.py owned by parallel agent.
+
+**F1 — BLOCKING: Scorer staleness clock wired to wrong interval (tech-lead):**
+- `src/live/runtime.py` `_build_scope()`: moved emit_interval derivation (from `source_configs`
+  poll intervals) ABOVE `LiveScorer` construction. Now passes `emit_interval=emit_interval` to
+  the scorer so the forward-fill staleness cutoff (`LIVE_FORWARD_FILL_MAX_TICKS × emit_interval`)
+  uses the real per-scope cadence, not the `MOCK_SCADA_INTERVAL_SECONDS` (2.0s) default. Previously,
+  a multi-source scope with a slow vendor (Priva 30s, Hoogendoorn 60s) would freeze the staleness
+  cutoff at 5×2.0=10s, silently disabling scoring in production while all tests passed because
+  they explicitly set emit_interval.
+- Design decision (documented in comment): `LIVE_FORWARD_FILL_MAX_TICKS` scales off `min(intervals)`
+  (fastest source), NOT `max(intervals)`. Rationale: staleness protects against a channel going
+  silent, not against slow polling. Using max would allow a fast channel to go silent for 5×60=300s
+  before scoring paused — too long. Using min gives a tighter, safer bound.
+- New test: `TestScorerEmitIntervalWiring::test_scorer_gets_derived_emit_interval_from_mixed_sources`
+  — builds a LIVE_SOURCES_JSON scope with 5s+30s sources, asserts `scope.scorer._emit_interval == 5.0`.
+
+**F2 — Live-path threshold default is a trap (both reviewers):**
+- `src/config.py`: Decoupled `LIVE_ANOMALY_THRESHOLD` from `ANOMALY_THRESHOLD`. Was:
+  `float(os.environ.get("LIVE_ANOMALY_THRESHOLD", str(ANOMALY_THRESHOLD)))` → default 0.8 (batch
+  scale). Now: `float(os.environ.get("LIVE_ANOMALY_THRESHOLD", "0.05"))` — own calibrated default.
+  Added comment explaining the live-scaled-score regime (noise ~0.017, demo peaks ~0.36) and why
+  it must not inherit the batch default. Env var override unchanged for prod.
+
+**F5 — Fertigation episode magnitudes use wrong noise scale (architect):**
+- `src/live/sources/fertigation.py`: Named the inline soil moisture noise std → `_SM_NOISE_STD = 0.02`.
+  Updated `_next_soil_moisture()` to use the named constant. `_RZT_NOISE_STD = 0.15` already existed.
+- `src/live/sources/mock.py`: Added `soil_moisture` and `root_zone_temp` entries to `_NOISE_STD`,
+  importing `_SM_NOISE_STD` and `_RZT_NOISE_STD` from `fertigation.py`. Updated dict docstring
+  explaining why all episode-capable channels must have entries (1.0 fallback = absolute-unit
+  magnitudes → 33-53σ spikes on root_zone_temp).
+- New tests (3): `TestFertigationNoiseStdEntries` — verifies entries exist, match fertigation
+  constants, and are < 1.0 (no fallback used).
+
+**F14 — Supervised backoff never resets (tech-lead):**
+- `src/live/runtime.py` `_supervised()`: Added `_BACKOFF_RESET_THRESHOLD = 2 × _MAX_BACKOFF_SECONDS`.
+  When a coroutine runs longer than this threshold before failing, backoff resets to 1.0s on the next
+  attempt. A long healthy run followed by a crash is treated as transient, not a persistent fault.
+  Previously, a connector that crashed once per day would ratchet toward the 60s cap permanently.
+- New test: `TestSupervisedBackoffReset::test_long_run_then_crash_resets_backoff` — verifies that
+  after quick crashes ratchet backoff up, a long run resets it back to 1.0s.
+
+Files modified (4):
+- `src/live/runtime.py`: F1 (emit_interval ordering) + F14 (backoff reset)
+- `src/config.py`: F2 (LIVE_ANOMALY_THRESHOLD decoupled)
+- `src/live/sources/mock.py`: F5 (fertigation noise std entries)
+- `src/live/sources/fertigation.py`: F5 (named _SM_NOISE_STD constant)
+
+Tests: 349 passed (344 pre-existing + 5 new), 1 warning. No regressions.
+Files NOT touched (per task constraints): src/live/persistence.py, web/, mock.py structure.
+Done signal: tasks/done/live-p11-be-core-fixes.json.
+
+---
+
+## Previous Phase
 **Live Monitoring Phase 9 — Demo Strength (compound episodes cross scoring threshold) — COMPLETE (2026-07-19)**
 Agent: ml-engineer. Task: make demo-forced episodes reliably score >= 0.08 on the baseline LSTM-VAE
 detector (comfortable margin over LIVE_ANOMALY_THRESHOLD=0.05 in prod).

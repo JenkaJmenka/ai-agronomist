@@ -26,3 +26,41 @@ The e2e suite uses `pnpm start` (production build). Any component changes requir
 - `pnpm typecheck`: clean
 - `pnpm test`: 72/72
 - `pnpm exec playwright test monitoring-live.spec.ts`: 7/7
+
+---
+
+## Phase 11 — Live Demo v2 Review Fixes (2026-07-20)
+
+### What was done
+Applied 7 review findings from `docs/architecture/live-demo-v2-review.md` (Part 1, FE items):
+
+**F1 — FIXED** (`readings.ts`): `discoverChannels` was sampling `rows.slice(0, 50)` (oldest), missing extras in live rows that sort after canonical history. Changed to `rows.slice(-50)` (newest tail); also switched dedup from O(n) `includes` to `Set`. New test file `readings.test.ts` with F1 regression test: 100 canonical rows + 2 live rows → all 7 channels discovered.
+
+**F3 — FIXED** (`useSetpoints.ts`): Removed lazy `useState(() => loadOverrides(storageKey))` initializer that caused SSR/hydration mismatch. State now starts as `{}`. The existing `useEffect([storageKey])` already loads overrides post-mount in both mount and scope-change cases.
+
+**F4 — FIXED** (`channelMeta.ts`): Widened CO₂ optimal from `[350, 500]` to `[330, 520]` and humidity from `[55, 75]` to `[53, 77]` to eliminate routine demo warning flicker.
+
+**F9 — FIXED** (`useSetpoints.ts`): Hoisted defaults to module-scope `DEFAULT_SETPOINTS` constant (computed once at load time); merged setpoints now wrapped in `useMemo([overrides])` to prevent unnecessary recalculation on every SSE tick.
+
+**F10 — FIXED** (`useSetpoints.ts`): Added `.refine(([min, max]) => min < max)` to `setpointRangeSchema`. Hand-edited `[80, 20]` in localStorage now fails Zod validation → falls back to defaults. Test added in `useSetpoints.test.ts`.
+
+**F11 — FIXED** (`channelMeta.ts`): Added `alarmBelowMin?: false` to `ChannelMeta` interface; set it on `light`. `getChannelStatus` branches on `CHANNEL_META[channel]?.alarmBelowMin === false` instead of the string literal `channel === "light"`. All existing light tests pass unchanged.
+
+**F12 — FIXED** (`LiveBadge.tsx`): Replaced raw palette classes (`bg-green-400`, `bg-amber-400`, `bg-red-400`, etc.) with `sev-*` design tokens (`bg-sev-normal`, `bg-sev-warning`, `bg-sev-critical`). Wrapped `animate-pulse` with `motion-safe:` to respect `prefers-reduced-motion`.
+
+**F13 — FIXED** (`SetpointsPanel.tsx`):
+- Focus management: captures `document.activeElement` on trigger click (`savedFocusRef`), moves focus to first `input` in dialog on open (falls back to `tabIndex={-1}` dialog div), and restores focus to the captured element on Escape.
+- Blur-commit: `tryUpdate` now fires `onBlur` instead of `onChange`. `onChange` only updates local state and clears any stale error — eliminates transient "Must be numeric" flashes on partial input.
+
+### Zod v4 `.refine()` note
+Zod v4 classic's `.refine()` returns `this` (same schema type), not `ZodEffects` like v3. This means `z.record(z.string(), setpointRangeSchema.refine(...))` type-checks and behaves correctly.
+
+### React 19 ref-forwarding note
+`Button` component doesn't use `forwardRef`. Rather than adding it, `SetpointsPanel` uses `document.activeElement` capture at open-time (saved in a ref) to return focus on close — more robust and requires no changes to the Button component.
+
+### Gates status (2026-07-20)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 3 pre-existing infos, 0 errors
+- `pnpm test`: 135/135 (10 test files)
+- `pnpm build`: clean
+- `pnpm exec playwright test`: 49/49

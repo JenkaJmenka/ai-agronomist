@@ -971,9 +971,17 @@ LIVE_PERSIST_ENABLED: bool = _env_flag("LIVE_PERSIST_ENABLED", True)
 # Flush cadence for the live-to-DB persistence writer.
 LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SECONDS", "10.0"))
 
-# Anomaly threshold for the live scoring path (defaults to the global threshold).
+# Anomaly threshold for the live scoring path.
+#
+# IMPORTANT: this MUST NOT inherit ANOMALY_THRESHOLD (0.8, the batch/fused-
+# detector scale).  Live scores are raw LSTM-VAE reconstruction errors whose
+# noise floor is ~0.017 and demo peaks reach ~0.36 — a completely different
+# regime from the batch path.  The default 0.05 is calibrated so that compound
+# demo episodes (scoring ≥ 0.08) reliably fire while normal noise (≤ 0.02)
+# does not.  Override via the LIVE_ANOMALY_THRESHOLD env var for per-deployment
+# tuning; prod already pins 0.05.
 LIVE_ANOMALY_THRESHOLD: float = float(
-    os.environ.get("LIVE_ANOMALY_THRESHOLD", str(ANOMALY_THRESHOLD))
+    os.environ.get("LIVE_ANOMALY_THRESHOLD", "0.05")
 )
 
 # Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly

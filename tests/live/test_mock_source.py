@@ -400,3 +400,44 @@ class TestBuildMockSources:
         sources = build_mock_sources_for_scope("t1", "gh_A")
         assert sources[0].config.params.get("seed") == 42
         assert sources[1].config.params.get("seed") == 137
+
+
+# ---------------------------------------------------------------------------
+# F5 — Fertigation channel noise stds in _NOISE_STD
+# ---------------------------------------------------------------------------
+
+
+class TestFertigationNoiseStdEntries:
+    """_NOISE_STD must contain soil_moisture and root_zone_temp entries
+    sourced from the constants in fertigation.py, so random episodes on
+    those channels use realistic magnitudes (not the 1.0 fallback)."""
+
+    def test_soil_moisture_entry_matches_fertigation(self) -> None:
+        from src.live.sources.mock import _NOISE_STD
+        from src.live.sources.fertigation import _SM_NOISE_STD
+
+        assert "soil_moisture" in _NOISE_STD, (
+            "_NOISE_STD must have a soil_moisture entry"
+        )
+        assert _NOISE_STD["soil_moisture"] == _SM_NOISE_STD
+
+    def test_root_zone_temp_entry_matches_fertigation(self) -> None:
+        from src.live.sources.mock import _NOISE_STD
+        from src.live.sources.fertigation import _RZT_NOISE_STD
+
+        assert "root_zone_temp" in _NOISE_STD, (
+            "_NOISE_STD must have a root_zone_temp entry"
+        )
+        assert _NOISE_STD["root_zone_temp"] == _RZT_NOISE_STD
+
+    def test_no_fallback_used_for_fertigation_channels(self) -> None:
+        """Episode magnitudes for fertigation channels must not use the 1.0 fallback."""
+        from src.live.sources.mock import _NOISE_STD
+
+        for channel in ("soil_moisture", "root_zone_temp"):
+            noise = _NOISE_STD.get(channel)
+            assert noise is not None, f"Missing _NOISE_STD entry for {channel}"
+            assert noise < 1.0, (
+                f"_NOISE_STD[{channel!r}] = {noise} — should be much smaller "
+                f"than the 1.0 fallback to avoid unrealistic episode magnitudes"
+            )

@@ -704,3 +704,123 @@ class TestPerScopeEmitInterval:
         merged = readings_received[0]
         assert "temperature" in merged.channels, "Fast source channel missing"
         assert "co2" in merged.channels, "Slow source channel was dropped as late"
+
+
+# ---------------------------------------------------------------------------
+# F1 — Scorer emit_interval wired from per-scope derivation
+# ---------------------------------------------------------------------------
+
+
+class TestScorerEmitIntervalWiring:
+    """The scorer's _emit_interval must equal the derived per-scope value,
+    NOT the MOCK_SCADA_INTERVAL_SECONDS default.  This is the F1 fix:
+    LiveScorer was previously constructed before emit_interval was derived,
+    so it fell back to the mock default (2.0 s) for all scopes."""
+
+    def test_scorer_gets_derived_emit_interval_from_mixed_sources(
+        self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Build a LIVE_SOURCES_JSON scope with fast+slow sources and verify
+        the scorer's _emit_interval == min(poll_intervals), not the default."""
+        # Un-block LiveScorer import for this test.
+        sys.modules.pop("src.live.scoring", None)
+        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        source_defs = [
+            {
+                "source_id": "fast_src",
+                "vendor": "mock",
+                "tenant_id": _TENANT,
+                "greenhouse_id": _GH,
+                "channels": ["temperature", "humidity"],
+                "poll_interval_seconds": 5.0,
+                "params": {"seed": 1},
+            },
+            {
+                "source_id": "slow_src",
+                "vendor": "mock",
+                "tenant_id": _TENANT,
+                "greenhouse_id": _GH,
+                "channels": ["co2"],
+                "poll_interval_seconds": 30.0,
+                "params": {"seed": 2},
+            },
+        ]
+        monkeypatch.setattr(
+            "src.live.runtime.LIVE_SOURCES_JSON", json.dumps(source_defs)
+        )
+        runtime = LiveRuntime.build_from_config(hub)
+        assert len(runtime._scopes) == 1
+        scope = runtime._scopes[0]
+        # Scorer must exist (LiveScorer import unblocked).
+        assert scope.scorer is not None, "Scorer should be available for this test"
+        # F1 assertion: scorer._emit_interval == min(5.0, 30.0) == 5.0
+        assert abs(scope.scorer._emit_interval - 5.0) < 1e-9, (
+            f"Scorer emit_interval should be 5.0 (min of poll intervals), "
+            f"got {scope.scorer._emit_interval}"
+        )
+        # Also verify the merger got the same emit_interval.
+        assert abs(scope.merger._emit_interval - 5.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# F14 — Supervised backoff resets after long healthy run
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisedBackoffReset:
+    """_supervised must reset backoff to 1.0 when the coroutine ran longer
+    than _BACKOFF_RESET_THRESHOLD before failing (F14 fix)."""
+
+    @pytest.mark.asyncio
+    async def test_long_run_then_crash_resets_backoff(self) -> None:
+        """A coroutine that runs long then crashes gets backoff reset to 1.0."""
+        from src.live.runtime import _BACKOFF_RESET_THRESHOLD
+
+        call_timestamps: list[float] = []
+
+        async def long_then_crash() -> None:
+            call_timestamps.append(asyncio.get_event_loop().time())
+            if len(call_timestamps) == 1:
+                # First call: crash immediately to ratchet backoff up.
+                raise RuntimeError("quick crash")
+            if len(call_timestamps) == 2:
+                # Second call: also crash quickly (backoff should be 2.0 now).
+                raise RuntimeError("quick crash 2")
+            if len(call_timestamps) == 3:
+                # Third call: run for longer than _BACKOFF_RESET_THRESHOLD.
+                await asyncio.sleep(_BACKOFF_RESET_THRESHOLD + 0.1)
+                raise RuntimeError("late crash after long run")
+            if len(call_timestamps) == 4:
+                # Fourth call: after the long run+crash, backoff should be
+                # reset to 1.0 — measure the gap from third crash to this start.
+                await asyncio.sleep(999)
+
+        task = asyncio.create_task(_supervised("test_backoff_reset", long_then_crash))
+        # Wait long enough for:
+        # - call 1 (immediate crash) + 1s backoff
+        # - call 2 (immediate crash) + 2s backoff
+        # - call 3 (runs _BACKOFF_RESET_THRESHOLD + 0.1 then crashes) + reset backoff to 1s
+        # - call 4 starts
+        total_wait = 1.0 + 2.0 + _BACKOFF_RESET_THRESHOLD + 0.1 + 1.5
+        await asyncio.sleep(total_wait)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert len(call_timestamps) >= 4, (
+            f"Expected at least 4 calls, got {len(call_timestamps)}"
+        )
+        # The gap between call 3 finishing (crash) and call 4 starting
+        # should be ~1.0s (reset backoff), NOT 4.0s (ratcheted).
+        # Call 3 started at call_timestamps[2], ran for _BACKOFF_RESET_THRESHOLD+0.1,
+        # so it crashed at approximately call_timestamps[2] + _BACKOFF_RESET_THRESHOLD + 0.1.
+        # Then after backoff (should be reset to 1.0), call 4 starts.
+        call3_crash_time = call_timestamps[2] + _BACKOFF_RESET_THRESHOLD + 0.1
+        gap_to_call4 = call_timestamps[3] - call3_crash_time
+        # Should be ~1.0s (reset backoff), allow some slack for scheduling.
+        assert gap_to_call4 < 2.0, (
+            f"After a long healthy run, backoff should reset to 1.0s, "
+            f"but gap was {gap_to_call4:.2f}s (looks like backoff was not reset)"
+        )

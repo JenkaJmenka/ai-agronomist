@@ -39,7 +39,11 @@ from src.config import (
 )
 from src.live.events import CHANNEL_BOUNDS, SourceReading
 from src.live.sources.base import LiveSourceConnector, SourceConfig
-from src.live.sources.fertigation import FertigationSignalState
+from src.live.sources.fertigation import (
+    FertigationSignalState,
+    _RZT_NOISE_STD,
+    _SM_NOISE_STD,
+)
 
 _TWO_PI: float = 2.0 * math.pi
 
@@ -58,12 +62,18 @@ _SPIKE_SIGMA_MAX: float = 8.0
 # Episode types that produce a score-visible signal (excludes dropout).
 _SCORE_VISIBLE_EPISODES: Tuple[str, ...] = ("spike", "drift", "stuck")
 
-# Per-channel noise standard deviations (reused from config)
+# Per-channel noise standard deviations (reused from config and fertigation
+# constants).  Every channel that can receive random anomaly episodes MUST
+# have an entry here — the fallback of 1.0 uses absolute-unit magnitudes
+# which produce unrealistic episode sizes for narrow-noise channels like
+# root_zone_temp (noise std 0.15).
 _NOISE_STD: Dict[str, float] = {
     "temperature": TEMP_NOISE_STD,
     "humidity": HUMIDITY_NOISE_STD,
     "co2": CO2_NOISE_STD,
     "light": LIGHT_NOISE_STD,
+    "soil_moisture": _SM_NOISE_STD,
+    "root_zone_temp": _RZT_NOISE_STD,
 }
 
 

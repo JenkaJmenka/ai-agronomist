@@ -92,11 +92,22 @@ class _ScopeContext:
 # ---------------------------------------------------------------------------
 
 
+_BACKOFF_RESET_THRESHOLD: float = 2.0 * _MAX_BACKOFF_SECONDS
+"""If a coroutine ran longer than this before failing, reset backoff to
+the floor (1.0 s) — the long healthy run indicates a transient failure,
+not a persistent crash loop."""
+
+
 async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
     """Run *coro_fn* in a restart loop with exponential back-off.
 
     Propagates ``CancelledError`` immediately so the supervisor shuts down
     cleanly when the enclosing ``asyncio.Task`` is cancelled.
+
+    Backoff resets to the floor (1.0 s) when the coroutine ran longer than
+    ``_BACKOFF_RESET_THRESHOLD`` (2 × ``_MAX_BACKOFF_SECONDS``) before
+    failing — a long healthy run followed by a crash is transient, not a
+    persistent fault.
 
     Parameters
     ----------
@@ -107,15 +118,20 @@ async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
     """
     backoff: float = 1.0
     while True:
+        run_start = asyncio.get_event_loop().time()
         try:
             await coro_fn(*args)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            run_duration = asyncio.get_event_loop().time() - run_start
+            if run_duration >= _BACKOFF_RESET_THRESHOLD:
+                backoff = 1.0
             logger.warning(
-                "Live task %r crashed (%s) — restarting in %.1f s",
+                "Live task %r crashed (%s) after %.1f s — restarting in %.1f s",
                 label,
                 exc,
+                run_duration,
                 backoff,
             )
             await asyncio.sleep(backoff)
@@ -231,6 +247,36 @@ class LiveRuntime:
         batcher: Optional[PersistenceBatcher],
     ) -> _ScopeContext:
         """Build one _ScopeContext for a tenant/greenhouse pair."""
+        source_configs = [c.config for c in connectors]
+
+        # Derive per-scope timing from the actual source intervals FIRST,
+        # because the scorer needs emit_interval for its forward-fill staleness
+        # cutoff (LIVE_FORWARD_FILL_MAX_TICKS × emit_interval).
+        #
+        # emit_interval = min poll interval across sources (so the merger's
+        # bucket width matches the fastest source in the scope).
+        # grace_seconds = max(config default, max poll interval) so the slowest
+        # source's data arrives before its bucket is flushed and dropped.
+        # Fallback to MOCK_SCADA_INTERVAL_SECONDS when source_configs is empty.
+        #
+        # Design note on LIVE_FORWARD_FILL_MAX_TICKS basis: we use min(intervals)
+        # (the fastest source cadence) rather than max(intervals) because the
+        # staleness cutoff protects against a channel going *silent*, not against
+        # it being slow-polled. A slow channel (e.g. 60s Hoogendoorn CO2) reports
+        # once per its own interval — the merger forward-fills between those
+        # reports. The cutoff fires only when a channel stops reporting entirely.
+        # Using max(intervals) would allow a fast channel to go silent for up to
+        # 5×60s=300s before scoring paused, which is far too long. Using
+        # min(intervals) means scoring pauses after 5× the fastest cadence of
+        # silence on ANY channel — a tighter, safer bound.
+        if source_configs:
+            intervals = [sc.poll_interval_seconds for sc in source_configs]
+            emit_interval: float = min(intervals)
+            grace_seconds: float = max(LIVE_MERGE_GRACE_SECONDS, max(intervals))
+        else:
+            emit_interval = MOCK_SCADA_INTERVAL_SECONDS
+            grace_seconds = LIVE_MERGE_GRACE_SECONDS
+
         scorer: Any = None
         try:
             from src.live.scoring import LiveScorer  # lazy — may not exist yet
@@ -239,6 +285,7 @@ class LiveRuntime:
                 greenhouse_id=greenhouse_id,
                 hub=hub,
                 threshold=LIVE_ANOMALY_THRESHOLD,
+                emit_interval=emit_interval,
             )
         except ImportError:
             logger.warning(
@@ -246,22 +293,6 @@ class LiveRuntime:
                 tenant_id,
                 greenhouse_id,
             )
-
-        source_configs = [c.config for c in connectors]
-
-        # Derive per-scope timing from the actual source intervals.
-        # emit_interval = min poll interval across sources (so the merger's
-        # bucket width matches the fastest source in the scope).
-        # grace_seconds = max(config default, max poll interval) so the slowest
-        # source's data arrives before its bucket is flushed and dropped.
-        # Fallback to MOCK_SCADA_INTERVAL_SECONDS when source_configs is empty.
-        if source_configs:
-            intervals = [sc.poll_interval_seconds for sc in source_configs]
-            emit_interval: float = min(intervals)
-            grace_seconds: float = max(LIVE_MERGE_GRACE_SECONDS, max(intervals))
-        else:
-            emit_interval = MOCK_SCADA_INTERVAL_SECONDS
-            grace_seconds = LIVE_MERGE_GRACE_SECONDS
 
         async def on_reading(event: LiveReadingEvent) -> None:
             _attach_derived_vpd(event)

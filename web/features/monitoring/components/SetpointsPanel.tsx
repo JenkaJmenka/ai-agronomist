@@ -40,6 +40,8 @@ function ChannelSetpointRow({ channel, range, onUpdate }: ChannelRowProps) {
 
   if (meta === undefined) return null;
 
+  // F13: validation runs on blur instead of per-keystroke to prevent transient
+  // "Must be numeric" flashes while the user types partial values like "-" or "3.".
   function tryUpdate(rawMin: string, rawMax: string): void {
     const min = parseFloat(rawMin);
     const max = parseFloat(rawMax);
@@ -74,6 +76,13 @@ function ChannelSetpointRow({ channel, range, onUpdate }: ChannelRowProps) {
             className={inputBase}
             onChange={(e) => {
               setMinStr(e.target.value);
+              // Clear stale error while the user is still editing — it will
+              // re-appear on blur if the value remains invalid.
+              setError(null);
+            }}
+            onBlur={(e) => {
+              // Use e.target.value (current DOM value) to avoid stale closure;
+              // maxStr is the last-committed state from the peer field.
               tryUpdate(e.target.value, maxStr);
             }}
           />
@@ -87,6 +96,9 @@ function ChannelSetpointRow({ channel, range, onUpdate }: ChannelRowProps) {
             className={inputBase}
             onChange={(e) => {
               setMaxStr(e.target.value);
+              setError(null);
+            }}
+            onBlur={(e) => {
               tryUpdate(minStr, e.target.value);
             }}
           />
@@ -110,10 +122,27 @@ function ChannelSetpointRow({ channel, range, onUpdate }: ChannelRowProps) {
  *
  * Shows per-channel min/max inputs for all known channels that are currently
  * discovered in the data. Changes take immediate effect in tiles and chart.
+ *
+ * F13: moves focus into the panel on open and returns it to the trigger on
+ * Escape, satisfying WCAG 2.1 SC 2.1.1 and SC 2.4.3 focus-management requirements.
  */
 export function SetpointsPanel({ channels, setpoints, onUpdate, onReset }: SetpointsPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  // F13: panelRef lets us move focus into the dialog on open.
+  const panelRef = useRef<HTMLDivElement>(null);
+  // F13: capture the element that had focus before the dialog opened so we can
+  // restore focus to the trigger on close. Avoids needing ref-forwarding on Button.
+  const savedFocusRef = useRef<Element | null>(null);
+
+  // F13: Move focus into the dialog whenever it opens.
+  useEffect(() => {
+    if (!isOpen || panelRef.current === null) return;
+    // Prefer the first input; fall back to the dialog container itself
+    // (which has tabIndex={-1} for programmatic focus).
+    const firstInput = panelRef.current.querySelector<HTMLElement>("input");
+    (firstInput ?? panelRef.current).focus();
+  }, [isOpen]);
 
   // Close when user clicks outside the panel.
   useEffect(() => {
@@ -127,11 +156,16 @@ export function SetpointsPanel({ channels, setpoints, onUpdate, onReset }: Setpo
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, [isOpen]);
 
-  // Close on Escape.
+  // F13: Close on Escape and return focus to the element that triggered the dialog.
   useEffect(() => {
     if (!isOpen) return;
     function handleKeyDown(e: KeyboardEvent): void {
-      if (e.key === "Escape") setIsOpen(false);
+      if (e.key === "Escape") {
+        setIsOpen(false);
+        if (savedFocusRef.current instanceof HTMLElement) {
+          savedFocusRef.current.focus();
+        }
+      }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
@@ -145,7 +179,13 @@ export function SetpointsPanel({ channels, setpoints, onUpdate, onReset }: Setpo
       <Button
         variant="secondary"
         size="sm"
-        onClick={() => setIsOpen((o) => !o)}
+        onClick={() => {
+          if (!isOpen) {
+            // Capture focus before the dialog opens; restored on Escape.
+            savedFocusRef.current = document.activeElement;
+          }
+          setIsOpen((o) => !o);
+        }}
         aria-expanded={isOpen}
         aria-haspopup="dialog"
         data-testid="setpoints-trigger"
@@ -155,12 +195,17 @@ export function SetpointsPanel({ channels, setpoints, onUpdate, onReset }: Setpo
 
       {isOpen ? (
         <div
+          ref={panelRef}
           role="dialog"
           aria-label="Optimal setpoint ranges"
+          // tabIndex={-1} makes the container programmatically focusable as a
+          // fallback when there are no inputs (empty / loading state).
+          tabIndex={-1}
           className={[
             "absolute right-0 top-full z-20 mt-1 w-[26rem]",
             "rounded-[var(--radius-card)] border border-border",
             "bg-bg-elevated p-4 shadow-[var(--shadow-elevation)]",
+            "focus:outline-none",
           ].join(" ")}
           data-testid="setpoints-dropdown"
         >

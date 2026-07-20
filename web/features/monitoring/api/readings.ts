@@ -72,11 +72,20 @@ export function fetchWindowReadings(params: {
 /** Numeric sensor channels present in the rows, order-stable. */
 export function discoverChannels(rows: SensorRow[]): string[] {
   const channels: string[] = [];
-  const sample = rows.slice(0, 50);
+  const seen = new Set<string>();
+  // Sample the newest rows — extra channels (soil_moisture, root_zone_temp, vpd)
+  // exist only in live stream rows. The merged array sorts historical rows first;
+  // sampling from the oldest end silently drops extras once history accumulates
+  // past 50 rows. Sampling the tail ensures newly-streamed channels are found
+  // regardless of how much canonical-only history precedes them.
+  const sample = rows.slice(-50);
   for (const row of sample) {
     for (const [key, value] of Object.entries(row)) {
-      if (NON_CHANNEL_KEYS.has(key) || channels.includes(key)) continue;
-      if (typeof value === "number") channels.push(key);
+      if (NON_CHANNEL_KEYS.has(key) || seen.has(key)) continue;
+      if (typeof value === "number") {
+        channels.push(key);
+        seen.add(key);
+      }
     }
   }
   return channels;
