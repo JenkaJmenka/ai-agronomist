@@ -21,7 +21,8 @@ from fakeredis.aioredis import FakeRedis
 
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub, stream_key
-from src.live.runtime import LiveRuntime, _supervised, _run_connector
+from src.live.runtime import LiveRuntime
+from src.live.supervision import _run_connector, _supervised
 
 
 # ---------------------------------------------------------------------------
@@ -53,17 +54,17 @@ def hub(fake_redis: FakeRedis) -> LiveHub:
 @pytest.fixture(autouse=True)
 def _mock_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin config values to keep tests fast and deterministic."""
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", True)
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_SCOPES", _SCOPE)
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", True)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_SCOPES", _SCOPE)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr("src.config.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     # Also patch the mock source module so build_mock_sources_for_scope creates
     # SourceConfig objects with poll_interval_seconds=0.05 (not the 2.0 default).
     # The runtime derives emit_interval from source_configs.poll_interval_seconds,
     # so all three namespaces must agree.
-    monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
-    monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", False)
-    monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "")
+    monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", False)
+    monkeypatch.setattr("src.live.runtime_builder.LIVE_SOURCES_JSON", "")
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +121,7 @@ class TestBuildFromConfigScopeParsing:
 
     def test_multi_scope(self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "src.live.runtime.MOCK_SCADA_SCOPES",
+            "src.live.runtime_builder.MOCK_SCADA_SCOPES",
             "t1:gh1,t2:gh2,t3:gh3",
         )
         runtime = LiveRuntime.build_from_config(hub)
@@ -134,11 +135,11 @@ class TestBuildFromConfigScopeParsing:
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch, caplog
     ) -> None:
         monkeypatch.setattr(
-            "src.live.runtime.MOCK_SCADA_SCOPES",
+            "src.live.runtime_builder.MOCK_SCADA_SCOPES",
             "valid_tenant:valid_gh,malformed_no_colon,also:valid",
         )
         import logging
-        with caplog.at_level(logging.WARNING, logger="live.runtime"):
+        with caplog.at_level(logging.WARNING, logger="live.runtime_builder"):
             runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 2  # malformed skipped
         assert any("malformed_no_colon" in r.message for r in caplog.records)
@@ -146,9 +147,9 @@ class TestBuildFromConfigScopeParsing:
     def test_empty_tenant_skipped(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch, caplog
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_SCOPES", ":gh1,t2:gh2")
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_SCOPES", ":gh1,t2:gh2")
         import logging
-        with caplog.at_level(logging.WARNING, logger="live.runtime"):
+        with caplog.at_level(logging.WARNING, logger="live.runtime_builder"):
             runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 1
 
@@ -156,7 +157,7 @@ class TestBuildFromConfigScopeParsing:
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "src.live.runtime.MOCK_SCADA_SCOPES",
+            "src.live.runtime_builder.MOCK_SCADA_SCOPES",
             " t1 : gh1 , t2 : gh2 ",
         )
         runtime = LiveRuntime.build_from_config(hub)
@@ -173,7 +174,7 @@ class TestBuildFromConfigSourcesJSON:
     def test_valid_source_json(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
         source_defs = [
             {
                 "source_id": "ext_1",
@@ -187,7 +188,7 @@ class TestBuildFromConfigSourcesJSON:
             }
         ]
         monkeypatch.setattr(
-            "src.live.runtime.LIVE_SOURCES_JSON", json.dumps(source_defs)
+            "src.live.runtime_builder.LIVE_SOURCES_JSON", json.dumps(source_defs)
         )
         runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 1
@@ -196,7 +197,7 @@ class TestBuildFromConfigSourcesJSON:
     def test_unknown_vendor_skipped(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch, caplog
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
         source_defs = [
             {
                 "source_id": "x",
@@ -207,10 +208,10 @@ class TestBuildFromConfigSourcesJSON:
             }
         ]
         monkeypatch.setattr(
-            "src.live.runtime.LIVE_SOURCES_JSON", json.dumps(source_defs)
+            "src.live.runtime_builder.LIVE_SOURCES_JSON", json.dumps(source_defs)
         )
         import logging
-        with caplog.at_level(logging.WARNING, logger="live.runtime"):
+        with caplog.at_level(logging.WARNING, logger="live.runtime_builder"):
             runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 0
         assert any("unknown_vendor" in r.message for r in caplog.records)
@@ -218,10 +219,10 @@ class TestBuildFromConfigSourcesJSON:
     def test_malformed_json_no_crash(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch, caplog
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
-        monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "{{not json")
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_SOURCES_JSON", "{{not json")
         import logging
-        with caplog.at_level(logging.WARNING, logger="live.runtime"):
+        with caplog.at_level(logging.WARNING, logger="live.runtime_builder"):
             runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 0
         assert any("parse error" in r.message.lower() for r in caplog.records)
@@ -229,14 +230,14 @@ class TestBuildFromConfigSourcesJSON:
     def test_invalid_source_config_skipped(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch, caplog
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
         # Missing required fields
         source_defs = [{"vendor": "mock"}]
         monkeypatch.setattr(
-            "src.live.runtime.LIVE_SOURCES_JSON", json.dumps(source_defs)
+            "src.live.runtime_builder.LIVE_SOURCES_JSON", json.dumps(source_defs)
         )
         import logging
-        with caplog.at_level(logging.WARNING, logger="live.runtime"):
+        with caplog.at_level(logging.WARNING, logger="live.runtime_builder"):
             runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 0
 
@@ -423,7 +424,7 @@ class TestPersistenceIntegration:
     async def test_batcher_created_when_enabled(
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", True)
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         assert runtime._batcher is not None
 
@@ -594,7 +595,7 @@ class TestPerScopeEmitInterval:
         self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Build a scope from LIVE_SOURCES_JSON and verify emit_interval == min interval."""
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
         source_defs = [
             {
                 "source_id": "fast",
@@ -617,7 +618,7 @@ class TestPerScopeEmitInterval:
         ]
         import json as _json
         monkeypatch.setattr(
-            "src.live.runtime.LIVE_SOURCES_JSON", _json.dumps(source_defs)
+            "src.live.runtime_builder.LIVE_SOURCES_JSON", _json.dumps(source_defs)
         )
         runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 1
@@ -660,7 +661,7 @@ class TestPerScopeEmitInterval:
             pass
 
         # Use tiny LIVE_MERGE_GRACE_SECONDS so the test runs fast.
-        monkeypatch.setattr("src.live.runtime.LIVE_MERGE_GRACE_SECONDS", 0.1)
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_MERGE_GRACE_SECONDS", 0.1)
         monkeypatch.setattr("src.config.LIVE_MERGE_GRACE_SECONDS", 0.1)
 
         # derive: emit_interval=0.02, grace=max(0.1, 0.06)=0.1
@@ -724,7 +725,7 @@ class TestScorerEmitIntervalWiring:
         the scorer's _emit_interval == min(poll_intervals), not the default."""
         # Un-block LiveScorer import for this test.
         sys.modules.pop("src.live.scoring", None)
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", False)
         source_defs = [
             {
                 "source_id": "fast_src",
@@ -746,7 +747,7 @@ class TestScorerEmitIntervalWiring:
             },
         ]
         monkeypatch.setattr(
-            "src.live.runtime.LIVE_SOURCES_JSON", json.dumps(source_defs)
+            "src.live.runtime_builder.LIVE_SOURCES_JSON", json.dumps(source_defs)
         )
         runtime = LiveRuntime.build_from_config(hub)
         assert len(runtime._scopes) == 1
@@ -774,7 +775,7 @@ class TestSupervisedBackoffReset:
     @pytest.mark.asyncio
     async def test_long_run_then_crash_resets_backoff(self) -> None:
         """A coroutine that runs long then crashes gets backoff reset to 1.0."""
-        from src.live.runtime import _BACKOFF_RESET_THRESHOLD
+        from src.live.supervision import _BACKOFF_RESET_THRESHOLD
 
         call_timestamps: list[float] = []
 

@@ -1,6 +1,6 @@
 """Tests for VPD derived-channel wiring in the runtime layer.
 
-Covers: _attach_derived_vpd mutates event when temp+humidity present;
+Covers: attach_derived_channels mutates event when temp+humidity present;
 absent when humidity missing; VPD source set to "derived"; scoring unaffected
 by non-ML channels (vpd/soil_moisture); runtime end-to-end publishes vpd.
 """
@@ -21,7 +21,8 @@ from fakeredis.aioredis import FakeRedis
 from src.live.derived import compute_vpd
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub, stream_key
-from src.live.runtime import LiveRuntime, _attach_derived_vpd
+from src.live.derived import attach_derived_channels
+from src.live.runtime import LiveRuntime
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ def hub(fake_redis: FakeRedis) -> LiveHub:
 
 
 # ---------------------------------------------------------------------------
-# _attach_derived_vpd — unit tests
+# attach_derived_channels — unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -67,7 +68,7 @@ class TestAttachDerivedVpd:
             sources={"temperature": "src1", "humidity": "src1", "co2": "src2", "light": "src1"},
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert "vpd" in event.channels
         expected_vpd = compute_vpd(25.0, 60.0)
@@ -84,7 +85,7 @@ class TestAttachDerivedVpd:
             sources={"temperature": "src1", "humidity": "src1"},
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert event.sources.get("vpd") == "derived"
 
@@ -99,7 +100,7 @@ class TestAttachDerivedVpd:
             sources={"temperature": "src1", "co2": "src2"},
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert "vpd" not in event.channels
         assert "vpd" not in event.sources
@@ -115,7 +116,7 @@ class TestAttachDerivedVpd:
             sources={"humidity": "src1"},
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert "vpd" not in event.channels
 
@@ -130,7 +131,7 @@ class TestAttachDerivedVpd:
             sources={"co2": "src2", "light": "src1"},
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert "vpd" not in event.channels
 
@@ -157,14 +158,14 @@ class TestAttachDerivedVpd:
             },
         )
 
-        _attach_derived_vpd(event)
+        attach_derived_channels(event)
 
         assert "vpd" in event.channels
         expected = compute_vpd(20.0, 80.0)
         assert abs(event.channels["vpd"] - expected) < 0.001
 
     def test_vpd_mutates_in_place(self) -> None:
-        """_attach_derived_vpd mutates the event in place (no return value)."""
+        """attach_derived_channels mutates the event in place (no return value)."""
         event = LiveReadingEvent(
             seq="6",
             timestamp=datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc),
@@ -174,7 +175,7 @@ class TestAttachDerivedVpd:
             sources={"temperature": "src1", "humidity": "src1"},
         )
 
-        result = _attach_derived_vpd(event)
+        result = attach_derived_channels(event)
 
         assert result is None  # returns None (mutates in place)
         assert "vpd" in event.channels
@@ -251,7 +252,7 @@ class TestScoringUnaffectedByExtraChannels:
             loop = asyncio.new_event_loop()
             try:
                 with patch.object(
-                    scorer, '_resolve_detector',
+                    scorer._resolver, 'resolve',
                     new_callable=AsyncMock,
                     return_value=detector,
                 ):
@@ -302,13 +303,13 @@ class TestVpdRuntimeIntegration:
     @pytest.fixture(autouse=True)
     def _mock_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pin config for fast deterministic tests."""
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", True)
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_SCOPES", f"{_TENANT}:{_GH}")
-        monkeypatch.setattr("src.live.runtime.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", True)
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_SCOPES", f"{_TENANT}:{_GH}")
+        monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
         monkeypatch.setattr("src.config.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
-        monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", False)
-        monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "")
+        monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", False)
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_SOURCES_JSON", "")
 
     @pytest.fixture(autouse=True)
     def _block_live_scorer(self, monkeypatch: pytest.MonkeyPatch) -> None:

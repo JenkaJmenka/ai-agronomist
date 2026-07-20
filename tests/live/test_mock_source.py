@@ -17,12 +17,12 @@ from src.live.events import CHANNEL_BOUNDS, SourceReading
 from src.live.sources.base import SourceConfig
 from src.live.sources.mock import (
     MockScadaSource,
-    _AnomalyEpisode,
     _clamp_and_sanitize,
     _diurnal_sine,
     _hour_fraction,
     build_mock_sources_for_scope,
 )
+from src.live.sources.mock_episodes import _AnomalyEpisode
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +413,7 @@ class TestFertigationNoiseStdEntries:
     those channels use realistic magnitudes (not the 1.0 fallback)."""
 
     def test_soil_moisture_entry_matches_fertigation(self) -> None:
-        from src.live.sources.mock import _NOISE_STD
+        from src.live.sources.mock_episodes import _NOISE_STD
         from src.live.sources.fertigation import _SM_NOISE_STD
 
         assert "soil_moisture" in _NOISE_STD, (
@@ -422,7 +422,7 @@ class TestFertigationNoiseStdEntries:
         assert _NOISE_STD["soil_moisture"] == _SM_NOISE_STD
 
     def test_root_zone_temp_entry_matches_fertigation(self) -> None:
-        from src.live.sources.mock import _NOISE_STD
+        from src.live.sources.mock_episodes import _NOISE_STD
         from src.live.sources.fertigation import _RZT_NOISE_STD
 
         assert "root_zone_temp" in _NOISE_STD, (
@@ -432,7 +432,7 @@ class TestFertigationNoiseStdEntries:
 
     def test_no_fallback_used_for_fertigation_channels(self) -> None:
         """Episode magnitudes for fertigation channels must not use the 1.0 fallback."""
-        from src.live.sources.mock import _NOISE_STD
+        from src.live.sources.mock_episodes import _NOISE_STD
 
         for channel in ("soil_moisture", "root_zone_temp"):
             noise = _NOISE_STD.get(channel)

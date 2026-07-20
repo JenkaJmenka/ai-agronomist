@@ -55,18 +55,18 @@ def hub(fake_redis: FakeRedis) -> LiveHub:
 @pytest.fixture(autouse=True)
 def _mock_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin config values to keep tests fast and deterministic."""
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_ENABLED", True)
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_SCOPES", _SCOPE)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_ENABLED", True)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_SCOPES", _SCOPE)
     # Tiny interval so readings arrive quickly.
-    monkeypatch.setattr("src.live.runtime.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("src.live.runtime_builder.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr("src.config.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     # Also patch the mock source module so build_mock_sources_for_scope creates
     # SourceConfig objects with poll_interval_seconds=0.05.
     # The runtime now derives emit_interval from source_configs.poll_interval_seconds,
     # so all three namespaces must agree for fast tests.
-    monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
-    monkeypatch.setattr("src.live.runtime.LIVE_PERSIST_ENABLED", False)
-    monkeypatch.setattr("src.live.runtime.LIVE_SOURCES_JSON", "")
+    monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", False)
+    monkeypatch.setattr("src.live.runtime_builder.LIVE_SOURCES_JSON", "")
 
 
 @pytest.fixture(autouse=True)

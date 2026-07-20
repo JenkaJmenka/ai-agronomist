@@ -29,12 +29,9 @@ from src.config import (
     CO2_NOISE_STD,
     LIGHT_NOISE_STD,
 )
-from src.live.sources.mock import (
-    ML_CHANNELS,
-    MockScadaSource,
-    _NOISE_STD,
-    _CompoundEpisode,
-)
+from src.live.events import ML_CHANNELS
+from src.live.sources.mock import MockScadaSource
+from src.live.sources.mock_episodes import _NOISE_STD, _CompoundEpisode
 from src.live.sources.base import SourceConfig
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 
@@ -81,7 +78,7 @@ def _build_normal_window(seed: int = 42) -> np.ndarray:
     )
     source = MockScadaSource(config)
     # Monkey-patch anomaly rate to zero so no random episodes contaminate.
-    import src.live.sources.mock as mock_mod
+    import src.live.sources.mock_episodes as mock_mod
     original_rate = mock_mod.MOCK_SCADA_ANOMALY_RATE
     mock_mod.MOCK_SCADA_ANOMALY_RATE = 0.0
     try:
@@ -241,7 +238,7 @@ class TestCompoundDemoScore:
 
     def test_mock_source_compound_episode_integration(self) -> None:
         """End-to-end: MockScadaSource in demo mode produces scoreable compound."""
-        import src.live.sources.mock as mock_mod
+        import src.live.sources.mock_episodes as mock_mod
         detector = _get_detector()
 
         # Configure source with fast demo scheduling.

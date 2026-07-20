@@ -12,13 +12,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.live.events import ML_CHANNELS
 from src.live.sources.base import SourceConfig
-from src.live.sources.mock import (
-    ML_CHANNELS,
-    MockScadaSource,
-    _CompoundEpisode,
-    _SCORE_VISIBLE_EPISODES,
-)
+from src.live.sources.mock import MockScadaSource
+from src.live.sources.mock_episodes import _CompoundEpisode, _SCORE_VISIBLE_EPISODES
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +77,9 @@ class TestDemoScheduling:
         """With ANOMALY_RATE=0 and tiny demo interval, compound episode occurs within window."""
         # Monkeypatch config to make the window small (2-4 seconds with 1s interval
         # → 2-4 ticks).
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 2.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 4.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 4.0)
 
         source = _make_demo_source(
             channels=["temperature", "humidity", "co2", "light"],
@@ -120,9 +117,9 @@ class TestDemoEpisodeTargeting:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Demo compound episodes only target canonical ML channels (temp, humidity, co2, light)."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         # Source has ML channels + fertigation channels mixed
         all_channels = ["temperature", "humidity", "co2", "light", "soil_moisture", "root_zone_temp"]
@@ -153,9 +150,9 @@ class TestDemoEpisodeTargeting:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Demo compound episodes offset multiple channels (2-3) simultaneously."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         channel_counts_seen: list[int] = []
         for trial_seed in range(50):
@@ -192,9 +189,9 @@ class TestDemoModeFertigationOnly:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A source with only fertigation channels (no ML) never gets demo episodes."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         source = _make_demo_source(
             channels=["soil_moisture", "root_zone_temp"],
@@ -215,9 +212,9 @@ class TestDemoModeFertigationOnly:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When demo fires on a fertigation-only source, it reschedules without creating an episode."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         source = _make_demo_source(
             channels=["soil_moisture", "root_zone_temp"],
@@ -250,9 +247,9 @@ class TestDemoRescheduling:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After a demo compound episode starts, the next one is already scheduled."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         source = _make_demo_source(
             channels=["temperature", "humidity", "co2", "light"],
@@ -279,9 +276,9 @@ class TestDemoRescheduling:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After the first demo compound episode ends, a second one fires eventually."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 3.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 3.0)
 
         source = _make_demo_source(
             channels=["temperature", "humidity", "co2", "light"],
@@ -320,9 +317,9 @@ class TestDemoActiveEpisodeDefer:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If a single-channel episode is active when demo fires, it reschedules +1 tick."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         source = _make_demo_source(
             channels=["temperature", "humidity", "co2", "light"],
@@ -331,7 +328,7 @@ class TestDemoActiveEpisodeDefer:
         )
 
         # Force an active single-channel episode
-        from src.live.sources.mock import _AnomalyEpisode
+        from src.live.sources.mock_episodes import _AnomalyEpisode
         source._episode = _AnomalyEpisode(
             episode_type="spike",
             channel="temperature",
@@ -355,9 +352,9 @@ class TestDemoActiveEpisodeDefer:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If a compound episode is active when demo fires, it reschedules +1 tick."""
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_ANOMALY_RATE", 0.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
-        monkeypatch.setattr("src.live.sources.mock.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_ANOMALY_RATE", 0.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MIN_SECONDS", 1.0)
+        monkeypatch.setattr("src.live.sources.mock_episodes.MOCK_SCADA_DEMO_ANOMALY_MAX_SECONDS", 2.0)
 
         source = _make_demo_source(
             channels=["temperature", "humidity", "co2", "light"],

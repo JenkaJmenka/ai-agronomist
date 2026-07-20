@@ -3,6 +3,11 @@
 Maintains a sliding window of sensor readings, normalises with the same
 min-max scheme the batch inference path uses, runs the tenant's active
 LSTM-VAE detector, and publishes anomaly / enrichment events to the hub.
+
+Detector resolution and enrichment are delegated to :class:`DetectorResolver`
+(:mod:`src.live.detector_resolver`) and :class:`EnrichmentRunner`
+(:mod:`src.live.enrichment`) — the DI seam that lets both be unit-tested
+without a real database or checkpoint file.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Deque, Dict, List, Optional, Set
+from typing import Deque, Dict, List, Optional, Set
 
 import numpy as np
 
@@ -30,21 +35,13 @@ from src.live.attribution import (
     compute_channel_attribution,
     forward_pass_sync,
 )
-from src.live.events import (
-    AnomalyDetailEvent,
-    LiveAnomalyEvent,
-    LiveReadingEvent,
-)
+from src.live.detector_resolver import DetectorResolver
+from src.live.enrichment import EnrichmentRunner
+from src.live.events import LiveAnomalyEvent, LiveReadingEvent
 from src.live.hub import LiveHub
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 
-if TYPE_CHECKING:
-    from src.models.inference import AnomalyDetector
-
 logger = logging.getLogger(__name__)
-
-# How often (seconds, monotonic) to re-resolve the tenant's checkpoint.
-_DETECTOR_REFRESH_SECONDS: float = 300.0
 
 
 class LiveScorer:
@@ -54,6 +51,10 @@ class LiveScorer:
         ``__init__(tenant_id, greenhouse_id, hub, threshold)``
         ``async score(event) -> LiveReadingEvent``
         ``async close() -> None``
+
+    ``resolver``/``enrichment`` are optional DI seams for tests — production
+    callers get real ``DetectorResolver``/``EnrichmentRunner`` instances
+    built automatically.
     """
 
     def __init__(
@@ -63,12 +64,22 @@ class LiveScorer:
         hub: LiveHub,
         threshold: float = LIVE_ANOMALY_THRESHOLD,
         emit_interval: float = MOCK_SCADA_INTERVAL_SECONDS,
+        resolver: Optional[DetectorResolver] = None,
+        enrichment: Optional[EnrichmentRunner] = None,
     ) -> None:
         self._tenant_id = tenant_id
         self._greenhouse_id = greenhouse_id
         self._hub = hub
         self._threshold = threshold
         self._emit_interval = emit_interval
+
+        self._resolver = resolver or DetectorResolver(tenant_id)
+        self._enrichment = enrichment or EnrichmentRunner(
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+            hub=hub,
+            resolver=self._resolver,
+        )
 
         # Sliding window of raw [temp, humidity, co2, light] vectors.
         self._window: Deque[List[float]] = deque(maxlen=SEQ_LEN)
@@ -80,17 +91,10 @@ class LiveScorer:
         # Per-channel monotonic timestamp of last update (for staleness cutoff).
         self._channel_last_update: Dict[str, float] = {}
 
-        # Lazy-loaded detector + refresh timer.
-        self._detector: Optional[AnomalyDetector] = None
-        self._detector_resolved_at: float = 0.0
-
         # Anomaly episode state.
         self._in_episode: bool = False
         self._episode_id: str = ""
         self._last_anomaly_emit: float = 0.0
-
-        # Supervised enrichment tasks.
-        self._enrichment_tasks: Set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -108,7 +112,7 @@ class LiveScorer:
         if len(self._window) < SEQ_LEN:
             return event  # window not full
 
-        detector = await self._resolve_detector()
+        detector = await self._resolver.resolve()
         if detector is None:
             return event
 
@@ -141,13 +145,7 @@ class LiveScorer:
 
     async def close(self) -> None:
         """Cancel and await all in-flight enrichment tasks."""
-        for task in self._enrichment_tasks:
-            task.cancel()
-        if self._enrichment_tasks:
-            await asyncio.gather(
-                *self._enrichment_tasks, return_exceptions=True,
-            )
-        self._enrichment_tasks.clear()
+        await self._enrichment.close()
 
     # ------------------------------------------------------------------
     # Vector extraction
@@ -181,51 +179,6 @@ class LiveScorer:
         return [self._last_known[ch] for ch in CHANNEL_ORDER]
 
     # ------------------------------------------------------------------
-    # Detector resolution
-    # ------------------------------------------------------------------
-
-    async def _resolve_detector(self) -> Optional[AnomalyDetector]:
-        """Lazy resolution with 5-minute refresh; falls back to baseline."""
-        now = time.monotonic()
-        if (
-            self._detector is not None
-            and (now - self._detector_resolved_at) < _DETECTOR_REFRESH_SECONDS
-        ):
-            return self._detector
-
-        try:
-            from src.api.services.detector_cache import get_cached_detector
-            from src.db.session import AsyncSessionLocal
-            from src.models.artifact_store import resolve_checkpoint
-            from src.models.model_registry import ModelRegistry
-
-            async with AsyncSessionLocal() as session:
-                registry = ModelRegistry(session)
-                active = await registry.get_active_model(self._tenant_id)
-                cp = active["checkpoint_path"] if active else None
-                cp = await resolve_checkpoint(session, cp)
-
-            self._detector = get_cached_detector(cp)
-            self._detector_resolved_at = now
-        except Exception:
-            logger.warning(
-                "Detector resolution failed for %s, trying baseline",
-                self._tenant_id, exc_info=True,
-            )
-            try:
-                from src.api.services.detector_cache import get_cached_detector
-                self._detector = get_cached_detector(None)
-                self._detector_resolved_at = now
-            except Exception:
-                logger.error(
-                    "Baseline detector also failed for %s",
-                    self._tenant_id, exc_info=True,
-                )
-                return None
-
-        return self._detector
-
-    # ------------------------------------------------------------------
     # Episode management
     # ------------------------------------------------------------------
 
@@ -246,7 +199,7 @@ class LiveScorer:
             self._episode_id = uuid.uuid4().hex
             self._last_anomaly_emit = now
             await self._publish_anomaly(event, score, per_channel_errors)
-            self._spawn_enrichment(window_array, self._episode_id)
+            self._enrichment.spawn(window_array, self._episode_id)
 
         elif is_anomalous and self._in_episode:
             if (now - self._last_anomaly_emit) >= LIVE_ANOMALY_REEMIT_SECONDS:
@@ -288,84 +241,5 @@ class LiveScorer:
         except Exception:
             logger.warning(
                 "Anomaly event publish failed for %s/%s",
-                self._tenant_id, self._greenhouse_id, exc_info=True,
-            )
-
-    # ------------------------------------------------------------------
-    # Enrichment (fire-and-forget, supervised)
-    # ------------------------------------------------------------------
-
-    def _spawn_enrichment(
-        self, window_array: np.ndarray, anomaly_seq: str,
-    ) -> None:
-        """Launch a supervised enrichment task for a new episode."""
-        task = asyncio.create_task(
-            self._run_enrichment(window_array.copy(), anomaly_seq),
-        )
-        self._enrichment_tasks.add(task)
-        task.add_done_callback(self._on_enrichment_done)
-
-    def _on_enrichment_done(self, task: asyncio.Task[None]) -> None:
-        """Clean up after an enrichment task completes."""
-        self._enrichment_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                logger.warning("Enrichment task raised: %s", exc)
-
-    async def _run_enrichment(
-        self, window_array: np.ndarray, anomaly_seq: str,
-    ) -> None:
-        """Run ``ComprehensiveInferencePipeline``, persist ``Incident``, publish detail.
-
-        Any exception is logged and swallowed — enrichment must NEVER crash
-        or slow the hot scoring path.
-        """
-        try:
-            detector = await self._resolve_detector()
-            if detector is None:
-                return
-
-            normalized = normalize_data(window_array, SENSOR_RANGES)
-
-            from src.api.services.comprehensive_pipeline import (
-                ComprehensiveInferencePipeline,
-            )
-            from src.db.session import AsyncSessionLocal
-
-            async with AsyncSessionLocal() as session:
-                pipeline = ComprehensiveInferencePipeline(detector=detector)
-                result = await pipeline.run(
-                    customer_id=self._tenant_id,
-                    sequence=normalized.tolist(),
-                    db=session,
-                    greenhouse_id=self._greenhouse_id,
-                )
-
-            # Extract incident_id from the pipeline result (UUID string).
-            incident_id: Optional[str] = None
-            incident = result.get("incident")
-            if incident is not None and hasattr(incident, "id"):
-                incident_id = str(incident.id)
-            elif isinstance(result.get("incident_id"), str):
-                incident_id = result["incident_id"]
-
-            await self._hub.publish(
-                self._tenant_id,
-                self._greenhouse_id,
-                "anomaly-detail",
-                AnomalyDetailEvent(
-                    anomaly_seq=anomaly_seq,
-                    tenant_id=self._tenant_id,
-                    greenhouse_id=self._greenhouse_id,
-                    reasoning=result.get("reasoning", ""),
-                    fault_type=result.get("fault_type"),
-                    root_cause=result.get("root_cause"),
-                    incident_id=incident_id,
-                ),
-            )
-        except Exception:
-            logger.warning(
-                "Enrichment failed for %s/%s (non-critical)",
                 self._tenant_id, self._greenhouse_id, exc_info=True,
             )

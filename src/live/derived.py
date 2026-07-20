@@ -8,6 +8,26 @@ from __future__ import annotations
 
 import math
 
+from src.live.events import LiveReadingEvent
+
+
+def attach_derived_channels(event: LiveReadingEvent) -> None:
+    """Attach derived channels (currently VPD) to a validated reading event.
+
+    Adds the ``vpd`` channel when both ``temperature`` and ``humidity`` are
+    present.  Mutates ``event.channels``/``event.sources`` in place — this is
+    safe because :func:`compute_vpd` guarantees a finite return value (it
+    returns ``0.0`` for any non-finite input), so the mutation can never
+    introduce NaN/Inf into an already-validated event.  The scorer only
+    consumes the canonical ML channels, so VPD never affects scoring.
+    """
+    temperature = event.channels.get("temperature")
+    humidity = event.channels.get("humidity")
+    if temperature is None or humidity is None:
+        return
+    event.channels["vpd"] = compute_vpd(temperature, humidity)
+    event.sources["vpd"] = "derived"
+
 
 def compute_vpd(temperature_c: float, relative_humidity_pct: float) -> float:
     """Compute Vapour Pressure Deficit (kPa) via the Magnus formula.
