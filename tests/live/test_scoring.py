@@ -222,7 +222,7 @@ class TestWarmupGating:
     async def test_warmup_window_not_full(self, scorer: LiveScorer) -> None:
         """Even with all channels seen, need SEQ_LEN readings to warm up."""
         # Patch detector resolution to return a fake detector
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock) as mock_det:
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock) as mock_det:
             mock_det.return_value = None
             for i in range(SEQ_LEN - 1):
                 event = _full_channel_reading(step=i)
@@ -263,7 +263,7 @@ class TestForwardFill:
             return tensor.clone(), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             # First, send all 4 channels for SEQ_LEN readings
             for i in range(SEQ_LEN):
                 event = _full_channel_reading(step=i)
@@ -298,7 +298,7 @@ class TestScoreAttached:
             return tensor.clone(), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             for i in range(SEQ_LEN + 1):
                 event = _full_channel_reading(step=i)
                 result = await scorer.score(event)
@@ -317,7 +317,7 @@ class TestScoreAttached:
             return torch.full_like(tensor, float('nan')), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             for i in range(SEQ_LEN + 1):
                 event = _full_channel_reading(step=i)
                 result = await scorer.score(event)
@@ -353,8 +353,8 @@ class TestAnomalyEpisodes:
             return torch.zeros_like(tensor), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn'):
                 for i in range(SEQ_LEN + 3):
                     event = _full_channel_reading(step=i)
                     await scorer.score(event)
@@ -385,8 +385,8 @@ class TestAnomalyEpisodes:
             return torch.zeros_like(tensor), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn'):
                 # Fill warmup window
                 for i in range(SEQ_LEN):
                     event = _full_channel_reading(step=i)
@@ -430,8 +430,8 @@ class TestAnomalyEpisodes:
         detector = MagicMock()
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch('src.live.scoring.LiveScorer._spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch('src.live.enrichment.EnrichmentRunner.spawn'):
                 for i in range(SEQ_LEN + 5):
                     event = _full_channel_reading(step=i)
                     await scorer.score(event)
@@ -461,8 +461,8 @@ class TestAnomalyEpisodes:
             return recon, None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch('src.live.scoring.LiveScorer._spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch('src.live.enrichment.EnrichmentRunner.spawn'):
                 for i in range(SEQ_LEN + 1):
                     event = _full_channel_reading(step=i)
                     await scorer.score(event)
@@ -487,7 +487,7 @@ class TestDetectorResolution:
     @pytest.mark.asyncio
     async def test_detector_none_returns_unscored(self, scorer: LiveScorer) -> None:
         """When detector resolution returns None, event is returned unscored."""
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=None):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=None):
             for i in range(SEQ_LEN + 1):
                 event = _full_channel_reading(step=i)
                 result = await scorer.score(event)
@@ -499,7 +499,7 @@ class TestDetectorResolution:
         detector = MagicMock()
         detector.model = MagicMock(side_effect=RuntimeError("model crashed"))
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             for i in range(SEQ_LEN + 1):
                 event = _full_channel_reading(step=i)
                 result = await scorer.score(event)
@@ -528,10 +528,10 @@ class TestEnrichment:
             return torch.zeros_like(tensor), None, None, None
         detector.model = MagicMock(side_effect=model_fn)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             # Let enrichment run but make it fail
             with patch(
-                'src.live.scoring.LiveScorer._run_enrichment',
+                'src.live.enrichment.EnrichmentRunner._run_enrichment',
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("enrichment failed"),
             ):
@@ -563,8 +563,8 @@ class TestEnrichment:
         async def fast_enrichment(window_array, anomaly_seq):
             await asyncio.sleep(0.01)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_run_enrichment', fast_enrichment):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, '_run_enrichment', fast_enrichment):
                 for i in range(SEQ_LEN + 1):
                     event = _full_channel_reading(step=i)
                     await scorer.score(event)
@@ -572,7 +572,7 @@ class TestEnrichment:
                 # Wait for enrichment to complete
                 await asyncio.sleep(0.1)
                 # The done callback should have removed the task
-                assert len(scorer._enrichment_tasks) == 0
+                assert len(scorer._enrichment.tasks) == 0
 
     @pytest.mark.asyncio
     async def test_publish_anomaly_exception_swallowed(self, redis_client: FakeRedis) -> None:
@@ -592,8 +592,8 @@ class TestEnrichment:
         detector.model = MagicMock(side_effect=model_fn)
 
         # After warmup, patch hub.publish to fail on anomaly events
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn'):
                 original_publish = hub.publish
 
                 async def failing_publish(t, g, event_type, payload):
@@ -611,9 +611,9 @@ class TestEnrichment:
     @pytest.mark.asyncio
     async def test_close_with_no_tasks(self, scorer: LiveScorer) -> None:
         """close() with no in-flight enrichment tasks is a no-op."""
-        assert len(scorer._enrichment_tasks) == 0
+        assert len(scorer._enrichment.tasks) == 0
         await scorer.close()
-        assert len(scorer._enrichment_tasks) == 0
+        assert len(scorer._enrichment.tasks) == 0
 
     @pytest.mark.asyncio
     async def test_close_cancels_inflight_enrichment(self, hub: LiveHub) -> None:
@@ -634,18 +634,18 @@ class TestEnrichment:
         async def slow_enrichment(window_array, anomaly_seq):
             await asyncio.sleep(999)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_run_enrichment', slow_enrichment):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, '_run_enrichment', slow_enrichment):
                 for i in range(SEQ_LEN + 1):
                     event = _full_channel_reading(step=i)
                     await scorer.score(event)
 
                 # Give the task time to start
                 await asyncio.sleep(0.05)
-                assert len(scorer._enrichment_tasks) >= 1
+                assert len(scorer._enrichment.tasks) >= 1
 
         await scorer.close()
-        assert len(scorer._enrichment_tasks) == 0
+        assert len(scorer._enrichment.tasks) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -692,8 +692,8 @@ class TestEpisodeIdCorrelation:
             hub=hub, threshold=0.1,
         )
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn'):
                 step = 0
                 # Warm up window
                 for i in range(SEQ_LEN):
@@ -780,8 +780,8 @@ class TestEpisodeIdCorrelation:
             hub=hub, threshold=0.1,
         )
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment'):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn'):
                 for i in range(SEQ_LEN + 1):
                     event = LiveReadingEvent(
                         seq="",
@@ -841,8 +841,8 @@ class TestEpisodeIdCorrelation:
         def capture_spawn(window_array, anomaly_seq):
             episode_ids_passed.append(anomaly_seq)
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
-            with patch.object(scorer, '_spawn_enrichment', capture_spawn):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
+            with patch.object(scorer._enrichment, 'spawn', capture_spawn):
                 for i in range(SEQ_LEN + 1):
                     event = LiveReadingEvent(
                         seq="",
@@ -896,7 +896,7 @@ class TestForwardFillStaleness:
             emit_interval=emit_interval,
         )
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             # Warm up: all channels present
             for i in range(SEQ_LEN):
                 event = _full_channel_reading(step=i)
@@ -942,7 +942,7 @@ class TestForwardFillStaleness:
             emit_interval=emit_interval,
         )
 
-        with patch.object(scorer, '_resolve_detector', new_callable=AsyncMock, return_value=detector):
+        with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
             # Warm up
             for i in range(SEQ_LEN + 1):
                 event = _full_channel_reading(step=i)
