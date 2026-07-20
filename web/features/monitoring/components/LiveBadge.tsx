@@ -13,10 +13,12 @@ interface LiveBadgeProps {
   readonly sourceStatuses: SourceStatus[];
 }
 
+// F12: use sev-* design tokens (MIGRATION_PLAN §7.2) instead of raw palette classes
+// so status colours are consistent with SensorTile and respect dark-mode overrides.
 const STATUS_DOT: Record<SourceStatus["status"], string> = {
-  online: "bg-green-400",
-  degraded: "bg-amber-400",
-  offline: "bg-red-400",
+  online: "bg-sev-normal",
+  degraded: "bg-sev-warning",
+  offline: "bg-sev-critical",
 };
 
 /** Fetches the initial source list; SSE `source-status` events keep it fresh. */
@@ -115,21 +117,23 @@ function getBadgeStyle({
   if (stale) {
     return {
       label: "Stalled",
-      pillClass: "bg-red-500/15 text-red-500",
-      dotClass: "bg-red-500",
+      pillClass: "bg-sev-critical/15 text-sev-critical",
+      dotClass: "bg-sev-critical",
     };
   }
   if (transport === "sse") {
     return {
       label: "Live · SSE",
-      pillClass: "bg-green-500/15 text-green-600",
-      dotClass: "animate-pulse bg-green-500",
+      pillClass: "bg-sev-normal/15 text-sev-normal",
+      // F12: motion-safe: respects prefers-reduced-motion (mirrors SensorTile's
+      // tile-flash guard in globals.css) — pulse is decorative, not informational.
+      dotClass: "motion-safe:animate-pulse bg-sev-normal",
     };
   }
   // polling
   return {
     label: "Live · polling",
-    pillClass: "bg-amber-500/15 text-amber-600",
-    dotClass: "bg-amber-500",
+    pillClass: "bg-sev-warning/15 text-sev-warning",
+    dotClass: "bg-sev-warning",
   };
 }

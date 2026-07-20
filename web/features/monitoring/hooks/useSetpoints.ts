@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
@@ -13,20 +13,25 @@ export type Setpoints = Readonly<Record<string, SetpointRange>>;
 // Zod schema — validate user-controlled localStorage data at runtime.
 // ---------------------------------------------------------------------------
 
-const setpointRangeSchema = z.tuple([z.number(), z.number()]);
+const setpointRangeSchema = z
+  .tuple([z.number(), z.number()])
+  // F10: reject inverted ranges ([80, 20]) that would produce nonsense statuses.
+  .refine(([min, max]) => min < max, "min must be less than max");
+
 const setpointsSchema = z.record(z.string(), setpointRangeSchema);
+
+// ---------------------------------------------------------------------------
+// Module-scope defaults — CHANNEL_META is static; compute once on load.
+// ---------------------------------------------------------------------------
+
+// F9: hoisted to module scope so the hook never rebuilds defaults on every render.
+const DEFAULT_SETPOINTS: Setpoints = Object.fromEntries(
+  Object.entries(CHANNEL_META).map(([ch, meta]) => [ch, meta.optimal]),
+) as Setpoints;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function getDefaultSetpoints(): Setpoints {
-  const defaults: Record<string, SetpointRange> = {};
-  for (const [channel, meta] of Object.entries(CHANNEL_META)) {
-    defaults[channel] = meta.optimal;
-  }
-  return defaults;
-}
 
 function buildStorageKey(tenant: string, gh: string): string {
   return `gh-setpoints:${tenant}:${gh}`;
@@ -87,22 +92,29 @@ export interface UseSetpointsResult {
  * Defaults come from `CHANNEL_META`. User overrides are merged on top and
  * stored under `gh-setpoints:{tenant}:{gh}`. Corrupted/invalid JSON is
  * silently discarded and falls back to defaults.
+ *
+ * F3: initializes to {} to avoid server/client hydration mismatch — localStorage
+ * is unavailable on the server so a lazy useState initializer would differ between
+ * SSR and hydration. The existing useEffect on [storageKey] loads overrides post-mount.
  */
 export function useSetpoints(): UseSetpointsResult {
   const { tenant, gh } = useScope();
   const storageKey = buildStorageKey(tenant, gh);
 
-  const [overrides, setOverrides] = useState<Partial<Setpoints>>(() => loadOverrides(storageKey));
+  // F3: initialize to {} (not via lazy initializer) to avoid SSR/client hydration
+  // mismatch. The useEffect below loads overrides after mount.
+  const [overrides, setOverrides] = useState<Partial<Setpoints>>({});
 
-  // Reload overrides when scope changes (tenant or gh switched).
+  // Reload overrides when scope changes (tenant or gh switched), and on initial mount.
   useEffect(() => {
     setOverrides(loadOverrides(storageKey));
   }, [storageKey]);
 
-  const defaults = getDefaultSetpoints();
-  // Spread is safe: defaults covers all keys, overrides values are non-undefined.
-  // TypeScript can't infer this from Partial<Setpoints>, so we assert.
-  const setpoints = { ...defaults, ...overrides } as Setpoints;
+  // F9: merge is memoized — only recomputes when overrides change (not every SSE tick).
+  const setpoints = useMemo(
+    () => ({ ...DEFAULT_SETPOINTS, ...overrides }) as Setpoints,
+    [overrides],
+  );
 
   const updateSetpoint = useCallback(
     (channel: string, range: SetpointRange): void => {

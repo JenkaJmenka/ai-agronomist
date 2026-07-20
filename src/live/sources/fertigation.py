@@ -12,6 +12,9 @@ from typing import Dict
 
 _TWO_PI: float = 2.0 * math.pi
 
+# Soil moisture noise standard deviation (% per tick).
+_SM_NOISE_STD: float = 0.02
+
 # Soil moisture depletion rate per tick (% per tick, before noise).
 _SM_DEPLETION_RATE: float = 0.05
 
@@ -75,7 +78,7 @@ class FertigationSignalState:
             self._refill_remaining -= 1
         else:
             # Depleting with noise.
-            noise = self._rng.gauss(0, 0.02)
+            noise = self._rng.gauss(0, _SM_NOISE_STD)
             self.soil_moisture -= _SM_DEPLETION_RATE + noise
 
             # Check if irrigation trigger fires.

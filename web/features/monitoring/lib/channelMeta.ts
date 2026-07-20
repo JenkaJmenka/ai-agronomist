@@ -14,6 +14,12 @@ export interface ChannelMeta {
    * than measured directly (e.g. VPD from temperature + humidity).
    */
   readonly provenance?: "derived";
+  /**
+   * When `false`, values below the optimal minimum are never alarmed.
+   * Used for light — low values are normal during nighttime.
+   * Absent (undefined) means below-min triggers warning/critical as normal.
+   */
+  readonly alarmBelowMin?: false;
 }
 
 export type ChannelStatus = "ok" | "warning" | "critical";
@@ -29,21 +35,27 @@ export const CHANNEL_META: Readonly<Record<string, ChannelMeta>> = {
     label: "Humidity",
     unit: "%",
     decimals: 0,
-    optimal: [55, 75],
+    // Widened from [55,75] — temperature coupling can graze the 55 floor causing
+    // routine warning flicker during demos with no real anomaly present.
+    optimal: [53, 77],
   },
   co2: {
     label: "CO₂",
     unit: "ppm",
     decimals: 0,
-    optimal: [350, 500],
+    // Widened from [350,500] — midday dip bottoms near 350 causing routine
+    // warning flicker during demos with no real anomaly present.
+    optimal: [330, 520],
   },
   light: {
     label: "Light",
     unit: "lux",
     decimals: 0,
     // min=0 here but below-min is never alarmed — nighttime is normal.
-    // Only values above max trigger warning/critical.
+    // alarmBelowMin=false drives this rule via metadata rather than a string
+    // literal so any future light-like channel can reuse the same behaviour.
     optimal: [0, 1000],
+    alarmBelowMin: false,
   },
   vpd: {
     label: "VPD",
@@ -94,8 +106,8 @@ export function getChannelStatus(
   const warnMax = max + pad;
 
   if (value < min) {
-    // Light: low values are normal during night — never alarm.
-    if (channel === "light") return "ok";
+    // Channels with alarmBelowMin=false treat low values as normal (e.g. light at night).
+    if (CHANNEL_META[channel]?.alarmBelowMin === false) return "ok";
     if (value < warnMin) return "critical";
     return "warning";
   }

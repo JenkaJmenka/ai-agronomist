@@ -1,28 +1,69 @@
 """Persistence batcher for live monitoring readings.
 
 Buffers ``LiveReadingEvent`` objects in memory and bulk-inserts them into
-``SensorReading`` on a configurable flush interval.
+``SensorReading`` **and** ``RawReading`` on a configurable flush interval.
 
 The batcher is cancellation-safe: when its ``run()`` coroutine is cancelled
 (e.g. by ``LiveRuntime.stop()``), it performs a final flush before
 re-raising ``CancelledError``.
 
+Dual-table contract
+-------------------
+Each flush writes to two tables in the **same session/transaction**:
+
+1. ``sensor_readings`` (``SensorReading``) — the four canonical float columns
+   (temperature, humidity, co2, light) plus ``anomaly_score``.  Only written
+   for complete buckets (see "Incomplete-row policy" below).
+
+2. ``raw_readings`` (``RawReading``) — the **full** ``event.channels`` dict
+   (canonical + extras + vpd) stored as a JSON ``data`` column with
+   ``source="live"``.  Written for *any* event whose sanitized channel dict
+   is non-empty; no completeness requirement.
+
+The raw row's ``data`` must be the **complete** channel dict — not extras
+only.  ``fetch_merged_readings`` uses raw rows as-is when they exist; an
+extras-only dict would drop temperature/humidity/co2/light from the
+monitoring view for live data, breaking the main chart.
+
+This is the same mechanism used by the CSV upload flow: the read path
+(``fetch_merged_readings``) already merges ``RawReading`` rows with canonical
+anomaly scores, so extra channels (soil_moisture, root_zone_temp, vpd) surface
+in ``/api/readings/*`` responses with zero read-path changes.
+
+Conflict semantics
+------------------
+Both tables enforce ``ON CONFLICT DO NOTHING`` on
+``(tenant_id, greenhouse_id, timestamp)``.  If a CSV upload's timestamps
+collide with live raw rows already written here, first-writer-wins — the same
+behaviour the canonical table has today.  This is acceptable: partial-flush
+retries are idempotent via both unique constraints.
+
 Duplicate detection
 -------------------
-The ``(tenant_id, greenhouse_id, timestamp)`` unique constraint on
-``sensor_readings`` is enforced via ``INSERT ... ON CONFLICT DO NOTHING``
-using the SQLAlchemy dialect-specific insert.  Duplicate rows are silently
-dropped rather than overwriting previously persisted data.
+The ``(tenant_id, greenhouse_id, timestamp)`` unique constraint on both tables
+is enforced via ``INSERT ... ON CONFLICT DO NOTHING`` using the SQLAlchemy
+dialect-specific insert.  Duplicate rows are silently dropped rather than
+overwriting previously persisted data.
 
-NaN / Infinity guard
---------------------
+NaN / Infinity guard (raw rows)
+--------------------------------
+``sanitize_channels`` strips non-finite values before the dict reaches the
+JSON column.  Do **not** use a ``.get(k, 0.0)`` fallback here — that would
+write a ``0.0`` sentinel for a channel that was never provided, corrupting the
+full-fidelity record.  The known SQLite/Postgres NaN gap (SQLite JSON accepts
+NaN; Postgres 500s on insert) makes this guard mandatory.
+
+NaN / Infinity guard (canonical rows)
+--------------------------------------
 ``LiveReadingEvent.channels`` values are already validated as finite by the
 Pydantic model, but ``sanitize_channels`` is applied as a second defence to
 guard the ``anomaly_score`` path and any future callers that bypass the
-Pydantic constructor.
+Pydantic constructor.  For canonical rows, NaN in a **present** channel is
+replaced with ``0.0`` via ``.get(k, 0.0)`` — this is acceptable because the
+sensor reported a value (just invalid) rather than never reporting at all.
 
-Incomplete-row policy
----------------------
+Incomplete-row policy (canonical only)
+----------------------------------------
 ``SensorReading`` has four non-nullable channel columns (``temperature``,
 ``humidity``, ``co2``, ``light``).  When a merged bucket contains only a
 subset of those channels — e.g. during warm-up, single-channel buckets, or
@@ -31,10 +72,10 @@ fabricating a ``0.0`` sentinel value that would poison training/analytics data
 (a ``0.0`` CO2 reading is indistinguishable from a real fault).
 
 Policy: rows missing **any** of the four canonical channels are **skipped**
-(not written to the DB).  The count of skipped rows is tracked in
-``PersistenceBatcher.skipped_incomplete_count`` and logged at WARNING level.
-Complete rows (all four channels present after NaN sanitization) are
-persisted normally.
+from ``sensor_readings`` (not written to the DB).  The count of skipped rows
+is tracked in ``PersistenceBatcher.skipped_incomplete_count`` and logged at
+WARNING level.  The corresponding raw row **is still written** to
+``raw_readings`` (extras-only buckets are valid partial records).
 """
 
 from __future__ import annotations
@@ -48,7 +89,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite as _sqlite_dialect
 
 from src.config import LIVE_PERSIST_FLUSH_SECONDS
-from src.db.models import SensorReading
+from src.db.models import RawReading, SensorReading
 from src.live.events import LiveReadingEvent, sanitize_channels
 
 logger = logging.getLogger("live.persistence")
@@ -95,6 +136,37 @@ def _event_to_row(event: LiveReadingEvent) -> Optional[Dict[str, Any]]:
         "co2": safe_channels.get("co2", 0.0),
         "light": safe_channels.get("light", 0.0),
         "anomaly_score": event.anomaly_score,
+    }
+
+
+def _event_to_raw_row(event: LiveReadingEvent) -> Optional[Dict[str, Any]]:
+    """Convert a ``LiveReadingEvent`` to a ``RawReading`` column dict.
+
+    Writes the **full** channel dict (canonical + extras + vpd) — not
+    extras-only.  The read path (``fetch_merged_readings``) uses raw rows as-is
+    when they exist; an extras-only dict would drop temperature/humidity/co2/
+    light from the monitoring view for live data.
+
+    ``sanitize_channels`` strips non-finite values before the dict reaches the
+    JSON column (mandatory NaN guard — see module docstring).  Do **not** apply
+    a ``.get(k, 0.0)`` fallback here: a missing value should simply be absent
+    from the dict, not fabricated.
+
+    Returns ``None`` only when the sanitized dict is empty (all channels
+    non-finite, or ``event.channels`` was empty).
+
+    No completeness requirement: ``RawReading`` has no non-nullable channel
+    columns; partial buckets are valid full-fidelity records.
+    """
+    safe = sanitize_channels(event.channels)
+    if not safe:
+        return None
+    return {
+        "tenant_id": event.tenant_id,
+        "greenhouse_id": event.greenhouse_id,
+        "timestamp": event.timestamp,
+        "source": "live",
+        "data": safe,
     }
 
 
@@ -187,7 +259,13 @@ class PersistenceBatcher:
     # ------------------------------------------------------------------
 
     async def _flush(self) -> None:
-        """Drain the buffer and bulk-insert rows into ``SensorReading``."""
+        """Drain the buffer and bulk-insert rows into ``SensorReading`` and ``RawReading``.
+
+        Both inserts run in the **same** session/transaction so a mid-flush
+        failure leaves neither table partially committed.  On exception all
+        drained events are requeueed for the next flush cycle (idempotent via
+        both unique constraints).
+        """
         if not self._buffer:
             return
 
@@ -195,14 +273,19 @@ class PersistenceBatcher:
         to_flush: list[LiveReadingEvent] = list(self._buffer)
         self._buffer.clear()
 
-        # Skip events that lack all four canonical channels (see module docstring).
+        # Build both row lists in the same drain pass.
         rows: list[Dict[str, Any]] = []
+        raw_rows: list[Dict[str, Any]] = []
         for ev in to_flush:
-            row = _event_to_row(ev)
-            if row is None:
+            canonical = _event_to_row(ev)
+            if canonical is None:
                 self._skipped_incomplete_count += 1
             else:
-                rows.append(row)
+                rows.append(canonical)
+            raw = _event_to_raw_row(ev)
+            if raw is not None:
+                raw_rows.append(raw)
+
         if self._skipped_incomplete_count and len(rows) < len(to_flush):
             logger.warning(
                 "Persistence: skipped %d incomplete event(s) missing canonical channels "
@@ -211,7 +294,7 @@ class PersistenceBatcher:
                 self._skipped_incomplete_count,
             )
 
-        if not rows:
+        if not rows and not raw_rows:
             return
 
         try:
@@ -222,23 +305,36 @@ class PersistenceBatcher:
                     raise NotImplementedError(
                         f"Persistence batcher: unsupported dialect {dialect_name!r}"
                     )
-                stmt = (
-                    insert_fn(SensorReading)
-                    .values(rows)
-                    .on_conflict_do_nothing(index_elements=_CONFLICT_COLS)
-                )
-                await session.execute(stmt)
+                if rows:
+                    stmt = (
+                        insert_fn(SensorReading)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=_CONFLICT_COLS)
+                    )
+                    await session.execute(stmt)
+                if raw_rows:
+                    raw_stmt = (
+                        insert_fn(RawReading)
+                        .values(raw_rows)
+                        .on_conflict_do_nothing(index_elements=_CONFLICT_COLS)
+                    )
+                    await session.execute(raw_stmt)
                 await session.commit()
-                logger.debug("Persistence flush: %d rows written.", len(rows))
+                logger.debug(
+                    "Persistence flush: %d canonical row(s), %d raw row(s) written.",
+                    len(rows),
+                    len(raw_rows),
+                )
         except Exception as exc:
             logger.error(
-                "Persistence flush failed for %d rows — buffering for retry: %s",
+                "Persistence flush failed (%d canonical, %d raw rows) — buffering for retry: %s",
                 len(rows),
+                len(raw_rows),
                 exc,
                 exc_info=True,
             )
-            # Return rows to the front of the buffer for the next flush cycle.
-            # The cap still applies; excess rows are silently discarded.
+            # Return events to the front of the buffer for the next flush cycle.
+            # The cap still applies; excess events are silently discarded.
             for ev in reversed(to_flush):
                 if len(self._buffer) < _BUFFER_CAP:
                     self._buffer.appendleft(ev)
