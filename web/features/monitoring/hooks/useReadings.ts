@@ -42,9 +42,8 @@ export interface ReadingsState {
 
 /**
  * URL-scoped readings: tenant/gh/from/to all live in the query string.
- * In live mode the window rolls forward on the refresh interval.
- * Preset (non-custom) windows are anchored to the newest stored timestamp
- * when not live, so historical uploads are not missed by wall-clock "now".
+ * In live mode the window rolls forward on the refresh interval, anchored to
+ * max(now, newest stored timestamp) so mock/future-dated streams stay in view.
  */
 export function useReadings(): ReadingsState {
   const [{ tenant, gh, from, to, live }, setParams] = useQueryStates({
@@ -62,21 +61,38 @@ export function useReadings(): ReadingsState {
   lookbackRef.current = lookbackHours;
   const setParamsRef = useRef(setParams);
   setParamsRef.current = setParams;
+  const scopeRef = useRef({ tenant, gh });
+  scopeRef.current = { tenant, gh };
 
-  // While live with a preset period, roll the lookback window forward so charts
-  // stay anchored to "now − period". Custom absolute windows are left alone.
+  // While live with a preset period, roll the lookback window forward.
+  // Anchor to newest stored data when it is ahead of wall-clock (demo SCADA).
   useEffect(() => {
     if (!live) return;
 
-    function rollWindow(): void {
+    let cancelled = false;
+
+    async function rollWindow(): Promise<void> {
       const hours = lookbackRef.current;
       if (hours === null) return;
-      const next = windowForPeriod(hours);
+      let maxTimestamp: Date | null = null;
+      try {
+        const bounds = await fetchReadingsBounds(scopeRef.current);
+        if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
+      } catch {
+        // Fall back to wall-clock via periodWindowEnd.
+      }
+      if (cancelled) return;
+      const end = periodWindowEnd({ maxTimestamp, live: true });
+      const next = windowForPeriod(hours, end);
       void setParamsRef.current({ from: next.from, to: next.to });
     }
 
-    const id = window.setInterval(rollWindow, refreshSeconds * 1000);
-    return () => window.clearInterval(id);
+    void rollWindow();
+    const id = window.setInterval(() => void rollWindow(), refreshSeconds * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
   }, [live, refreshSeconds]);
 
   // One-shot: if a preset URL window ends far after the newest stored row
@@ -115,7 +131,9 @@ export function useReadings(): ReadingsState {
         : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
     refetchInterval: live ? refreshSeconds * 1000 : false,
-    placeholderData: keepPreviousData,
+    // Never keep a previous (often much wider) window while live — that is what
+    // made "Last 15 min" charts stretch across months after Go Live.
+    placeholderData: live ? undefined : keepPreviousData,
   });
 
   const rows = query.data?.rows ?? [];

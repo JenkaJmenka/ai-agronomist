@@ -4,15 +4,22 @@ import { parseAsBoolean, useQueryState } from "nuqs";
 
 import { Button } from "@/components/ui/Button";
 import { resumeLiveScope } from "@/features/monitoring/api/live";
-import { DEFAULT_PERIOD_ID, periodHours, windowForPeriod } from "@/lib/periodPresets";
+import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
+import {
+  DEFAULT_PERIOD_ID,
+  matchPeriodId,
+  periodHours,
+  periodWindowEnd,
+  windowForPeriod,
+} from "@/lib/periodPresets";
 import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 
 /**
  * "Go Live" toggle — drives the `live` URL param.
  * Enabling live resumes a scope muted by Clear all data, then streams.
- * When enabling without a window, applies the default 24h lookback so
- * period + refresh controls drive the rolling dashboard window.
+ * Always re-snaps the current preset (or default 24h) to an end anchor of
+ * max(now, newest stored reading) so the chart matches the Period control.
  */
 export function LiveToggle() {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
@@ -22,10 +29,22 @@ export function LiveToggle() {
   async function handleClick(): Promise<void> {
     const next = !live;
     if (next) {
-      if (from === null || to === null) {
-        const hours = periodHours(DEFAULT_PERIOD_ID) ?? 24;
-        await setRange(windowForPeriod(hours));
+      const matched = from && to ? matchPeriodId(from, to) : DEFAULT_PERIOD_ID;
+      const hours =
+        periodHours(matched === "custom" ? DEFAULT_PERIOD_ID : matched) ??
+        periodHours(DEFAULT_PERIOD_ID) ??
+        24;
+
+      let maxTimestamp: Date | null = null;
+      try {
+        const bounds = await fetchReadingsBounds({ tenant, gh });
+        if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
+      } catch {
+        // Wall-clock fallback via periodWindowEnd.
       }
+      const end = periodWindowEnd({ maxTimestamp, live: true });
+      await setRange(windowForPeriod(hours, end));
+
       // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
       try {
         await resumeLiveScope({ tenant, gh });

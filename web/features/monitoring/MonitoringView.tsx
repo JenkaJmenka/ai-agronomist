@@ -19,6 +19,7 @@ import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
+import { filterRowsToWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
 
@@ -77,15 +78,17 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
-  const [, setRange] = useDateRange();
+  const [{ from, to }, setRange] = useDateRange();
 
   const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
-  const rows = useMemo(
-    () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
-    [live, historicalRows, liveRows],
-  );
+  const rows = useMemo(() => {
+    const merged = live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows;
+    // Enforce the Period window on the client so keepPreviousData / live
+    // buffers never stretch the chart past Last 15/30 min / etc.
+    return filterRowsToWindow(merged, from, to);
+  }, [live, historicalRows, liveRows, from, to]);
 
   // Envelope for G4 enrichment — rows are chronological after dedupe.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);

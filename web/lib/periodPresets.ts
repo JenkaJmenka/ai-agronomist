@@ -9,6 +9,7 @@ export interface PeriodPreset {
 
 export const PERIOD_PRESETS: readonly PeriodPreset[] = [
   { id: "15m", label: "Last 15 min", hours: 0.25 },
+  { id: "30m", label: "Last 30 min", hours: 0.5 },
   { id: "1h", label: "Last hour", hours: 1 },
   { id: "12h", label: "Last 12 hours", hours: 12 },
   { id: "24h", label: "Last 24 hours", hours: 24 },
@@ -43,10 +44,10 @@ export function windowForPeriod(hours: number, end: Date = new Date()): { from: 
 /**
  * Choose the end of a preset lookback.
  *
- * Historical uploads often end days/months before wall-clock "now". Anchoring
- * to the newest stored timestamp (like `/api/readings/recent`) keeps
- * "Last hour / 24h / 7d" filled. While Go Live is on, prefer wall-clock so the
- * rolling window includes incoming ticks; if stored data is ahead of now, use it.
+ * Historical uploads (and mock SCADA) often sit far from wall-clock "now".
+ * Always prefer the newest known data timestamp when it is ahead of now so
+ * "Last 15/30 min" stays filled. While live with data behind the clock, use
+ * now so incoming ticks remain in range.
  */
 export function periodWindowEnd(options: {
   readonly maxTimestamp: Date | null;
@@ -55,10 +56,8 @@ export function periodWindowEnd(options: {
 }): Date {
   const now = options.now ?? new Date();
   const maxTs = options.maxTimestamp;
-  if (options.live) {
-    if (maxTs !== null && maxTs.getTime() > now.getTime()) return maxTs;
-    return now;
-  }
+  if (maxTs !== null && maxTs.getTime() > now.getTime()) return maxTs;
+  if (options.live) return now;
   return maxTs ?? now;
 }
 
@@ -72,4 +71,20 @@ export function matchPeriodId(from: Date | null, to: Date | null): string {
     if (Math.abs(hours - preset.hours) <= tol) return preset.id;
   }
   return "custom";
+}
+
+/** Keep only rows whose timestamps fall inside [from, to] (inclusive). */
+export function filterRowsToWindow<T extends { readonly timestamp: string }>(
+  rows: readonly T[],
+  from: Date | null,
+  to: Date | null,
+): T[] {
+  if (from === null || to === null) return [...rows];
+  const startMs = from.getTime();
+  const endMs = to.getTime();
+  if (!(endMs >= startMs)) return [...rows];
+  return rows.filter((row) => {
+    const ms = Date.parse(row.timestamp);
+    return Number.isFinite(ms) && ms >= startMs && ms <= endMs;
+  });
 }
