@@ -183,7 +183,12 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
             />
           </Card>
           <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>
-            <ReadingsTable rows={rows} channels={channels} threshold={threshold} />
+            <ReadingsTable
+              rows={rows}
+              channels={channels}
+              threshold={threshold}
+              setpoints={setpoints}
+            />
           </Card>
         </RefetchingBlock>
       )}

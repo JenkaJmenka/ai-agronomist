@@ -2,7 +2,7 @@
 
 import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 /** Row count above which the body renders through the virtualizer. */
 const VIRTUALIZE_THRESHOLD = 100;
@@ -14,8 +14,10 @@ interface DataTableProps<T> {
   readonly columns: ColumnDef<T, unknown>[];
   readonly rows: T[];
   readonly emptyMessage?: string;
-  /** Extra classes for a body row (e.g. anomaly highlighting). */
+  /** Extra classes for a body row. */
   readonly rowClassName?: (row: T) => string | undefined;
+  /** Extra classes for a body cell (e.g. per-column anomaly highlight). */
+  readonly cellClassName?: (row: T, columnId: string) => string | undefined;
   /** Top-align cells so rows with wrapping content (e.g. multi-line "Why") read cleanly. */
   readonly alignTop?: boolean;
   /** Keep columns at their natural width (no wrap) so wide tables scroll horizontally. */
@@ -28,12 +30,15 @@ interface DataTableProps<T> {
  * Sticky-header table shell (TanStack Table). Large row sets render through
  * TanStack Virtual so a 50k-row window stays smooth (plan §3) — only the
  * visible slice plus overscan hits the DOM; spacer rows preserve scroll size.
+ *
+ * Pointer drag pans the scrollport (grab + drag); wheel/trackpad also scroll.
  */
 export function DataTable<T>({
   columns,
   rows,
   emptyMessage = "No records in the selected filters.",
   rowClassName,
+  cellClassName,
   alignTop = false,
   scrollX = false,
   scrollY = false,
@@ -47,6 +52,7 @@ export function DataTable<T>({
 
   const tableRows = table.getRowModel().rows;
   const isVirtual = tableRows.length > VIRTUALIZE_THRESHOLD;
+  const isEmpty = rows.length === 0;
 
   const virtualizer = useVirtualizer({
     count: tableRows.length,
@@ -56,7 +62,79 @@ export function DataTable<T>({
     enabled: isVirtual,
   });
 
-  if (rows.length === 0) {
+  // Click-drag to scroll — keeps the table navigable with the mouse pointer
+  // when the wheel is reserved for page/chart gestures elsewhere.
+  useEffect(() => {
+    if (isEmpty) return;
+    const scrollEl = scrollRef.current;
+    if (scrollEl === null) return;
+    const root: HTMLDivElement = scrollEl;
+
+    let active = false;
+    let startX = 0;
+    let startY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+    let moved = false;
+
+    function onPointerDown(event: PointerEvent): void {
+      if (event.button !== 0) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("a, button, input, select, textarea, label")) return;
+      active = true;
+      moved = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      originLeft = root.scrollLeft;
+      originTop = root.scrollTop;
+      root.setPointerCapture(event.pointerId);
+      root.classList.add("cursor-grabbing");
+      root.classList.remove("cursor-grab");
+    }
+
+    function onPointerMove(event: PointerEvent): void {
+      if (!active) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      root.scrollLeft = originLeft - dx;
+      root.scrollTop = originTop - dy;
+    }
+
+    function onPointerUp(event: PointerEvent): void {
+      if (!active) return;
+      active = false;
+      root.releasePointerCapture(event.pointerId);
+      root.classList.remove("cursor-grabbing");
+      root.classList.add("cursor-grab");
+    }
+
+    // Suppress click after a drag so row/cell click handlers don't fire.
+    function onClickCapture(event: MouseEvent): void {
+      if (!moved) return;
+      event.preventDefault();
+      event.stopPropagation();
+      moved = false;
+    }
+
+    root.classList.add("cursor-grab");
+    root.addEventListener("pointerdown", onPointerDown);
+    root.addEventListener("pointermove", onPointerMove);
+    root.addEventListener("pointerup", onPointerUp);
+    root.addEventListener("pointercancel", onPointerUp);
+    root.addEventListener("click", onClickCapture, true);
+
+    return () => {
+      root.classList.remove("cursor-grab", "cursor-grabbing");
+      root.removeEventListener("pointerdown", onPointerDown);
+      root.removeEventListener("pointermove", onPointerMove);
+      root.removeEventListener("pointerup", onPointerUp);
+      root.removeEventListener("pointercancel", onPointerUp);
+      root.removeEventListener("click", onClickCapture, true);
+    };
+  }, [isEmpty]);
+
+  if (isEmpty) {
     return <p className="py-8 text-center text-sm text-text-muted">{emptyMessage}</p>;
   }
 
@@ -71,7 +149,7 @@ export function DataTable<T>({
       ref={scrollRef}
       data-testid="data-table"
       data-virtualized={isVirtual || undefined}
-      className={`overflow-auto rounded-[var(--radius-card)] border border-border ${
+      className={`overflow-auto overscroll-contain rounded-[var(--radius-card)] border border-border ${
         isVirtual || scrollY ? VIRTUAL_VIEWPORT_MAX_HEIGHT : ""
       }`}
     >
@@ -118,7 +196,7 @@ export function DataTable<T>({
                     key={cell.id}
                     className={`px-3 py-2 ${alignTop ? "align-top" : ""} ${
                       scrollX ? "whitespace-nowrap" : ""
-                    }`}
+                    } ${cellClassName?.(row.original, cell.column.id) ?? ""}`}
                   >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>

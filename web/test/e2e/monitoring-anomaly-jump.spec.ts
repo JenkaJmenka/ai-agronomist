@@ -13,7 +13,9 @@ function isoAtHour(hour: number): string {
 function makeRows(count: number) {
   return Array.from({ length: count }, (_, i) => ({
     timestamp: isoAtHour(i),
-    temperature: 21 + (i % 10) * 0.1,
+    // Anomalous hours spike temperature out of the optimal [20, 28] band so
+    // only that channel cell is highlighted (not the whole row).
+    temperature: ANOMALY_HOURS.includes(i) ? 35 : 21 + (i % 10) * 0.1,
     humidity: 60,
     co2: 400,
     anomaly_score: ANOMALY_HOURS.includes(i) ? 0.9 : 0.01,
@@ -100,7 +102,7 @@ test("clicking the jump opens Monitoring with the affected sensors selected", as
   await expect(toggles.getByRole("checkbox", { name: "co2" })).not.toBeChecked();
 });
 
-test("monitoring highlights anomalous table rows and renders the chart", async ({ page }) => {
+test("monitoring highlights anomalous channel cells and renders the chart", async ({ page }) => {
   const rows = makeRows(48);
   await page.route("**/api/bff/readings/window**", (route) =>
     route.fulfill({ json: { rows, count: rows.length } }),
@@ -111,7 +113,14 @@ test("monitoring highlights anomalous table rows and renders the chart", async (
   );
 
   await expect(page.getByTestId("uplot-chart")).toBeVisible();
-  const flaggedRows = page.locator('[data-testid="data-table"] tbody tr[class*="bg-sev-critical"]');
-  await expect(flaggedRows).toHaveCount(ANOMALY_HOURS.length);
-  await expect(flaggedRows.first()).toContainText("0.900");
+  // Whole-row highlight is gone — only off-setpoint channel + score cells light up.
+  await expect(
+    page.locator('[data-testid="data-table"] tbody tr[class*="bg-sev-critical"]'),
+  ).toHaveCount(0);
+  const flaggedCells = page.locator(
+    '[data-testid="data-table"] tbody td[class*="bg-sev-critical"]',
+  );
+  // 2 anomalous rows × (temperature + score) = 4 highlighted cells.
+  await expect(flaggedCells).toHaveCount(ANOMALY_HOURS.length * 2);
+  await expect(flaggedCells.first()).toContainText("35.00");
 });

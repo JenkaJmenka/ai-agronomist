@@ -6,17 +6,34 @@ import { useMemo } from "react";
 import { Chip } from "@/components/ui/Chip";
 import { DataTable } from "@/components/ui/DataTable";
 import type { SensorRow } from "@/features/monitoring/api/readings";
+import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { getChannelStatus } from "@/features/monitoring/lib/channelMeta";
 import { getSeverity } from "@/lib/severity";
 
 interface ReadingsTableProps {
   readonly rows: SensorRow[];
   readonly channels: string[];
-  /** Rows scoring at/above this are highlighted as anomalies. */
+  /** Rows scoring at/above this are treated as anomalous. */
   readonly threshold: number;
+  /** Effective setpoints — used to decide which channel cells to highlight. */
+  readonly setpoints: Setpoints;
 }
 
 function isAnomalousRow(row: SensorRow, threshold: number): boolean {
   return typeof row.anomaly_score === "number" && row.anomaly_score >= threshold;
+}
+
+/** Channel cell is anomalous when the row is flagged and the value is off-setpoint. */
+function isAnomalousChannel(
+  row: SensorRow,
+  channel: string,
+  threshold: number,
+  setpoints: Setpoints,
+): boolean {
+  if (!isAnomalousRow(row, threshold)) return false;
+  const value = row[channel];
+  if (typeof value !== "number") return false;
+  return getChannelStatus(channel, value, setpoints) !== "ok";
 }
 
 /** Split a reading timestamp into a short localized date line and a seconds-free time line. */
@@ -39,7 +56,9 @@ function TimestampCell({ value }: { readonly value: unknown }) {
   );
 }
 
-export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps) {
+const ANOMALY_CELL = "bg-sev-critical/15";
+
+export function ReadingsTable({ rows, channels, threshold, setpoints }: ReadingsTableProps) {
   const columns = useMemo<ColumnDef<SensorRow, unknown>[]>(() => {
     const base: ColumnDef<SensorRow, unknown>[] = [
       {
@@ -48,6 +67,7 @@ export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps)
         cell: (ctx) => <TimestampCell value={ctx.getValue()} />,
       },
       ...channels.map<ColumnDef<SensorRow, unknown>>((ch) => ({
+        id: ch,
         header: ch,
         accessorKey: ch,
         cell: (ctx) => {
@@ -56,6 +76,7 @@ export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps)
         },
       })),
       {
+        id: "anomaly_score",
         header: "Score",
         accessorKey: "anomaly_score",
         cell: (ctx) => {
@@ -78,7 +99,18 @@ export function ReadingsTable({ rows, channels, threshold }: ReadingsTableProps)
       rows={recentRows}
       scrollX
       scrollY
-      rowClassName={(row) => (isAnomalousRow(row, threshold) ? "bg-sev-critical/10" : undefined)}
+      cellClassName={(row, columnId) => {
+        if (columnId === "anomaly_score") {
+          return isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
+        }
+        if (
+          channels.includes(columnId) &&
+          isAnomalousChannel(row, columnId, threshold, setpoints)
+        ) {
+          return ANOMALY_CELL;
+        }
+        return undefined;
+      }}
     />
   );
 }
