@@ -4,6 +4,7 @@ import type { SensorRow } from "@/features/monitoring/api/readings";
 import {
   anomalousChannelsForRow,
   isAnomalousRow,
+  resolveAffectedChannels,
 } from "@/features/monitoring/components/ReadingsTable";
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
 
@@ -29,6 +30,20 @@ describe("isAnomalousRow", () => {
   });
 });
 
+describe("resolveAffectedChannels", () => {
+  it("maps detector names onto visible table columns", () => {
+    expect(
+      resolveAffectedChannels(["temperature", "humidity"], ["temperature", "humidity", "co2"]),
+    ).toEqual(["temperature", "humidity"]);
+  });
+
+  it("soft-matches partial sensor names", () => {
+    expect(resolveAffectedChannels(["temp"], ["temperature", "humidity"])).toEqual([
+      "temperature",
+    ]);
+  });
+});
+
 describe("anomalousChannelsForRow", () => {
   const channels = ["temperature", "humidity", "co2"];
 
@@ -38,26 +53,40 @@ describe("anomalousChannelsForRow", () => {
     ).toEqual([]);
   });
 
-  it("prefers off-setpoint channels on a flagged row", () => {
+  it("highlights only detector-affected sensors when provided", () => {
     expect(
       anomalousChannelsForRow(
-        row({ timestamp: "t1", anomaly_score: 0.9, temperature: 35 }),
+        row({ timestamp: "t1", anomaly_score: 0.9, temperature: 24, humidity: 60 }),
         channels,
         0.5,
         SETPOINTS,
+        ["humidity"],
       ),
-    ).toEqual(["temperature"]);
+    ).toEqual(["humidity"]);
   });
 
-  it("falls back to all numeric channels when flagged but still in band", () => {
-    // Score fired (e.g. pattern/SCADA) while values sit inside monitoring setpoints.
+  it("does not fall back to every channel when affected list is empty", () => {
+    // Flagged but in-band and no attribution → score cell only (no sensor cells).
     expect(
       anomalousChannelsForRow(
         row({ timestamp: "t1", anomaly_score: 0.9, temperature: 24, humidity: 60, co2: 400 }),
         channels,
         0.5,
         SETPOINTS,
+        [],
       ),
-    ).toEqual(["temperature", "humidity", "co2"]);
+    ).toEqual([]);
+  });
+
+  it("falls back to off-setpoint channels when attribution is missing", () => {
+    expect(
+      anomalousChannelsForRow(
+        row({ timestamp: "t1", anomaly_score: 0.9, temperature: 35 }),
+        channels,
+        0.5,
+        SETPOINTS,
+        null,
+      ),
+    ).toEqual(["temperature"]);
   });
 });

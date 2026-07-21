@@ -16,35 +16,69 @@ interface ReadingsTableProps {
   readonly channels: string[];
   /** Rows scoring at/above this are treated as anomalous. */
   readonly threshold: number;
-  /** Effective setpoints — preferred signal for which channel cells to highlight. */
+  /** Effective setpoints — fallback when enrichment has no affected sensors. */
   readonly setpoints: Setpoints;
+  /**
+   * Detector-attributed sensors keyed by reading timestamp.
+   * When present, only these channel cells highlight on a flagged row.
+   */
+  readonly affectedByTimestamp?: ReadonlyMap<string, readonly string[]>;
 }
 
 export function isAnomalousRow(row: SensorRow, threshold: number): boolean {
   return typeof row.anomaly_score === "number" && row.anomaly_score >= threshold;
 }
 
+/** Map detector sensor names onto columns currently shown in the table. */
+export function resolveAffectedChannels(
+  affected: readonly string[],
+  channels: readonly string[],
+): string[] {
+  if (affected.length === 0 || channels.length === 0) return [];
+  const channelSet = new Set(channels);
+  const out: string[] = [];
+  for (const sensor of affected) {
+    if (channelSet.has(sensor)) {
+      if (!out.includes(sensor)) out.push(sensor);
+      continue;
+    }
+    const hit = channels.find(
+      (ch) =>
+        ch.toLowerCase() === sensor.toLowerCase() ||
+        ch.toLowerCase().includes(sensor.toLowerCase()) ||
+        sensor.toLowerCase().includes(ch.toLowerCase()),
+    );
+    if (hit && !out.includes(hit)) out.push(hit);
+  }
+  return out;
+}
+
 /**
- * Channels to highlight on a flagged row.
+ * Channels to highlight on a flagged row — never the whole row.
  *
- * Prefer off-setpoint channels (precise). When the row is anomalous but every
- * value is still inside the monitoring band (common for LSTM / pattern / SCADA
- * findings vs wider UI setpoints), fall back to all numeric channels so the
- * operator still sees the detection.
+ * 1. Detector `affected_sensors` / live `affected_channels` (when known)
+ * 2. Else off-setpoint channels only
+ * 3. Else none (score cell still highlights)
  */
 export function anomalousChannelsForRow(
   row: SensorRow,
   channels: readonly string[],
   threshold: number,
   setpoints: Setpoints,
+  affectedSensors?: readonly string[] | null,
 ): readonly string[] {
   if (!isAnomalousRow(row, threshold)) return [];
 
-  const numeric = channels.filter((ch) => typeof row[ch] === "number");
-  const offSetpoint = numeric.filter(
-    (ch) => getChannelStatus(ch, row[ch] as number, setpoints) !== "ok",
-  );
-  return offSetpoint.length > 0 ? offSetpoint : numeric;
+  if (affectedSensors && affectedSensors.length > 0) {
+    return resolveAffectedChannels(affectedSensors, channels).filter(
+      (ch) => typeof row[ch] === "number",
+    );
+  }
+
+  return channels.filter((ch) => {
+    const value = row[ch];
+    return typeof value === "number" && getChannelStatus(ch, value, setpoints) !== "ok";
+  });
 }
 
 /** Split a reading timestamp into a short localized date line and a seconds-free time line. */
@@ -69,7 +103,19 @@ function TimestampCell({ value }: { readonly value: unknown }) {
 
 const ANOMALY_CELL = "bg-sev-critical/20";
 
-export function ReadingsTable({ rows, channels, threshold, setpoints }: ReadingsTableProps) {
+/** Normalize ISO timestamps so enrichment / live / reading keys align. */
+function timestampKey(ts: string): string {
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : ts;
+}
+
+export function ReadingsTable({
+  rows,
+  channels,
+  threshold,
+  setpoints,
+  affectedByTimestamp,
+}: ReadingsTableProps) {
   const columns = useMemo<ColumnDef<SensorRow, unknown>[]>(() => {
     const base: ColumnDef<SensorRow, unknown>[] = [
       {
@@ -124,13 +170,18 @@ export function ReadingsTable({ rows, channels, threshold, setpoints }: Readings
   const highlightByTs = useMemo(() => {
     const map = new Map<string, ReadonlySet<string>>();
     for (const row of recentRows) {
+      const key = timestampKey(row.timestamp);
+      const affected =
+        affectedByTimestamp?.get(row.timestamp) ??
+        affectedByTimestamp?.get(key) ??
+        null;
       map.set(
         row.timestamp,
-        new Set(anomalousChannelsForRow(row, channels, threshold, setpoints)),
+        new Set(anomalousChannelsForRow(row, channels, threshold, setpoints, affected)),
       );
     }
     return map;
-  }, [recentRows, channels, threshold, setpoints]);
+  }, [recentRows, channels, threshold, setpoints, affectedByTimestamp]);
 
   return (
     <div className="space-y-2">

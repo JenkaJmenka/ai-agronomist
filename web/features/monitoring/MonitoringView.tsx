@@ -6,6 +6,8 @@ import { Suspense, useMemo, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
+import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import { discoverChannels, type SensorRow } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
@@ -84,6 +86,35 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
     [live, historicalRows, liveRows],
   );
+
+  // Envelope for G4 enrichment — rows are chronological after dedupe.
+  const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
+  const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
+  const enrichment = useEnrichedAnomalies({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: rows.length > 0,
+    limit: SERVER_GROUPING_THRESHOLD,
+  });
+
+  /** Detector-attributed sensors per timestamp (enrichment + live SSE). */
+  const affectedByTimestamp = useMemo(() => {
+    const map = new Map<string, readonly string[]>();
+    const put = (ts: string, sensors: readonly string[]) => {
+      if (sensors.length === 0) return;
+      map.set(ts, sensors);
+      const ms = Date.parse(ts);
+      if (Number.isFinite(ms)) map.set(new Date(ms).toISOString(), sensors);
+    };
+    for (const [ts, detail] of enrichment.byTimestamp) {
+      put(ts, detail.affectedSensors);
+    }
+    for (const anomaly of anomalies) {
+      put(anomaly.timestamp, anomaly.affected_channels);
+    }
+    return map;
+  }, [enrichment.byTimestamp, anomalies]);
 
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
@@ -194,6 +225,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               channels={channels}
               threshold={threshold}
               setpoints={setpoints}
+              affectedByTimestamp={affectedByTimestamp}
             />
           </Card>
         </RefetchingBlock>
