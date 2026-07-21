@@ -46,19 +46,29 @@ function withTimeAxis(
 /**
  * Client-only uPlot wrapper (plan §3): canvas rendering, ResizeObserver-aware
  * width, imperative chart instance kept out of React state.
+ *
+ * Data updates call ``setData`` — the chart is only recreated when options or
+ * height change. Recreating on every live tick froze the main thread and made
+ * sidebar navigation feel dead after opening Monitoring/Climate/Gas.
  */
 export function UPlotChart({ data, options, height = 280, onWindowChange }: UPlotChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<uPlot | null>(null);
   const onWindowChangeRef = useRef(onWindowChange);
   onWindowChangeRef.current = onWindowChange;
+  const dataRef = useRef(data);
+  dataRef.current = data;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const merged = withTimeAxis(options);
-    const chart = new uPlot({ ...merged, width: container.clientWidth, height }, data, container);
+    const chart = new uPlot(
+      { ...merged, width: container.clientWidth, height },
+      dataRef.current,
+      container,
+    );
     chartRef.current = chart;
 
     const observer = new ResizeObserver((entries) => {
@@ -109,7 +119,12 @@ export function UPlotChart({ data, options, height = 280, onWindowChange }: UPlo
       chart.destroy();
       chartRef.current = null;
     };
-  }, [data, options, height]);
+    // Intentionally omit ``data`` — live ticks must not destroy/recreate the chart.
+  }, [options, height]);
+
+  useEffect(() => {
+    chartRef.current?.setData(data);
+  }, [data]);
 
   return (
     <div

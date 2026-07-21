@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
 import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
@@ -94,6 +94,16 @@ export function SensorTimeSeriesChart({
     return setpoints[ch] ?? null;
   }, [channels, visible, setpoints]);
 
+  // Keep draw/select hooks stable so live ticks do not rebuild uPlot options.
+  const bandsRef = useRef(bands);
+  bandsRef.current = bands;
+  const optimalRangeRef = useRef(optimalRange);
+  optimalRangeRef.current = optimalRange;
+  const onRangeSelectRef = useRef(onRangeSelect);
+  onRangeSelectRef.current = onRangeSelect;
+
+  const canSelectRange = Boolean(onRangeSelect);
+
   const options = useMemo(
     () => ({
       series: [
@@ -106,20 +116,29 @@ export function SensorTimeSeriesChart({
         })),
       ],
       legend: { show: false },
-      ...(onRangeSelect ? { cursor: SELECT_ONLY_CURSOR } : {}),
+      ...(canSelectRange ? { cursor: SELECT_ONLY_CURSOR } : {}),
       hooks: {
         drawClear: [
           (u: uPlot) => {
-            drawAnomalyBands(u, bands);
-            if (optimalRange !== null) {
-              drawOptimalBand(u, optimalRange[0], optimalRange[1]);
+            drawAnomalyBands(u, bandsRef.current);
+            const optimal = optimalRangeRef.current;
+            if (optimal !== null) {
+              drawOptimalBand(u, optimal[0], optimal[1]);
             }
           },
         ],
-        ...(onRangeSelect ? { setSelect: [createRangeSelectHook(onRangeSelect)] } : {}),
+        ...(canSelectRange
+          ? {
+              setSelect: [
+                createRangeSelectHook((from, to) => {
+                  onRangeSelectRef.current?.(from, to);
+                }),
+              ],
+            }
+          : {}),
       },
     }),
-    [channels, visible, bands, optimalRange, onRangeSelect],
+    [channels, visible, canSelectRange],
   );
 
   if (rows.length === 0) return null;

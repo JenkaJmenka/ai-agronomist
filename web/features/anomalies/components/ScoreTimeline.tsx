@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
 import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
@@ -43,6 +43,14 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
     return max;
   }, [rows]);
 
+  const peakRef = useRef(peak);
+  peakRef.current = peak;
+  const thresholdRef = useRef(threshold);
+  thresholdRef.current = threshold;
+  const onRangeSelectRef = useRef(onRangeSelect);
+  onRangeSelectRef.current = onRangeSelect;
+  const canSelectRange = Boolean(onRangeSelect);
+
   const options = useMemo(
     () => ({
       series: [
@@ -56,7 +64,7 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
           points: { show: false },
         },
         {
-          label: `Threshold ${threshold.toFixed(3)}`,
+          label: "Threshold",
           stroke: "#ef4444",
           width: 1,
           dash: [6, 4],
@@ -64,16 +72,30 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
         },
       ],
       legend: { show: false },
-      ...(onRangeSelect ? { cursor: SELECT_ONLY_CURSOR } : {}),
-      ...(onRangeSelect ? { hooks: { setSelect: [createRangeSelectHook(onRangeSelect)] } } : {}),
+      ...(canSelectRange ? { cursor: SELECT_ONLY_CURSOR } : {}),
+      ...(canSelectRange
+        ? {
+            hooks: {
+              setSelect: [
+                createRangeSelectHook((from, to) => {
+                  onRangeSelectRef.current?.(from, to);
+                }),
+              ],
+            },
+          }
+        : {}),
       scales: {
         y: {
           // Fit the data, never clip peaks; keep the threshold visible too.
-          range: [0, Math.max(peak * 1.1, threshold * 1.4, 0.25)] as [number, number],
+          range: (): [number, number] => {
+            const p = peakRef.current;
+            const t = thresholdRef.current;
+            return [0, Math.max(p * 1.1, t * 1.4, 0.25)];
+          },
         },
       },
     }),
-    [threshold, peak, onRangeSelect],
+    [canSelectRange],
   );
 
   if (rows.length === 0) return null;

@@ -38,6 +38,44 @@ test("every sidebar entry navigates", async ({ page }) => {
   }
 });
 
+test("monitoring family screens stay navigable after the first open", async ({ page }) => {
+  // Regression: live chart remounts + URL rewrites used to cancel soft navigations.
+  await page.route("**/api/bff/readings/**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [
+          {
+            timestamp: "2026-07-18T12:00:00.000Z",
+            temperature: 22,
+            humidity: 60,
+            co2: 400,
+            light: 500,
+          },
+        ],
+        count: 1,
+        min_timestamp: "2026-07-18T12:00:00.000Z",
+        max_timestamp: "2026-07-18T12:00:00.000Z",
+      },
+    }),
+  );
+  await page.route("**/api/bff/live/events**", (route) => route.fulfill({ status: 204, body: "" }));
+
+  await page.goto("/monitoring?live=true&refresh=10");
+  await expect(page.getByRole("heading", { name: "Monitoring" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Climate Data", exact: true }).click();
+  await expect(page).toHaveURL(/\/climate/);
+  await expect(page.getByRole("heading", { name: "Climate Data" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Gas Monitoring", exact: true }).click();
+  await expect(page).toHaveURL(/\/gas/);
+  await expect(page.getByRole("heading", { name: "Gas Monitoring" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Monitoring", exact: true }).click();
+  await expect(page).toHaveURL(/\/monitoring/);
+  await expect(page.getByRole("heading", { name: "Monitoring" })).toBeVisible();
+});
+
 test("sidebar preserves period, live, refresh, and threshold across pages", async ({ page }) => {
   await page.goto(
     "/monitoring?from=2026-06-01T00:00:00.000Z&to=2026-06-02T00:00:00.000Z&live=true&refresh=60&threshold=0.25",
