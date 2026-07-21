@@ -18,6 +18,11 @@ interface UPlotChartProps {
    * Callers typically write the new [from, to] into the URL.
    */
   readonly onWindowChange?: ChartWindowHandler;
+  /**
+   * Per-series visibility for indices 1..n (x-axis is 0). Updated via
+   * ``setSeries`` so channel toggles do not recreate the chart.
+   */
+  readonly seriesVisibility?: readonly boolean[];
 }
 
 /** Fraction of the visible span to shift per wheel notch. */
@@ -51,13 +56,21 @@ function withTimeAxis(
  * height change. Recreating on every live tick froze the main thread and made
  * sidebar navigation feel dead after opening Monitoring/Climate/Gas.
  */
-export function UPlotChart({ data, options, height = 280, onWindowChange }: UPlotChartProps) {
+export function UPlotChart({
+  data,
+  options,
+  height = 280,
+  onWindowChange,
+  seriesVisibility,
+}: UPlotChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<uPlot | null>(null);
   const onWindowChangeRef = useRef(onWindowChange);
   onWindowChangeRef.current = onWindowChange;
   const dataRef = useRef(data);
   dataRef.current = data;
+  const seriesVisibilityRef = useRef(seriesVisibility);
+  seriesVisibilityRef.current = seriesVisibility;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -70,6 +83,13 @@ export function UPlotChart({ data, options, height = 280, onWindowChange }: UPlo
       container,
     );
     chartRef.current = chart;
+
+    const visibility = seriesVisibilityRef.current;
+    if (visibility) {
+      visibility.forEach((show, index) => {
+        chart.setSeries(index + 1, { show });
+      });
+    }
 
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width;
@@ -125,6 +145,14 @@ export function UPlotChart({ data, options, height = 280, onWindowChange }: UPlo
   useEffect(() => {
     chartRef.current?.setData(data);
   }, [data]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !seriesVisibility) return;
+    seriesVisibility.forEach((show, index) => {
+      chart.setSeries(index + 1, { show });
+    });
+  }, [seriesVisibility]);
 
   return (
     <div

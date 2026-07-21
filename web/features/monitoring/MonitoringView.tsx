@@ -77,13 +77,15 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     error,
     windowLabel,
     downsampled,
+    from,
+    to,
   } = useReadings();
 
   const { tenant, gh } = useScope();
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
-  const [{ from, to }, setRange] = useDateRange();
+  const [, setRange] = useDateRange();
 
   const { rows: liveRows, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -137,7 +139,11 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     setKnownChannels([]);
   }, [tenant, gh]);
   useEffect(() => {
-    setKnownChannels((prev) => mergeChannelLists(prev, discoveredNow));
+    setKnownChannels((prev) => {
+      const next = mergeChannelLists(prev, discoveredNow);
+      if (next.length === prev.length && next.every((ch, i) => ch === prev[i])) return prev;
+      return next;
+    });
   }, [discoveredNow]);
 
   const channels = useMemo(() => {
@@ -172,7 +178,27 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   }
 
   if (isError) {
-    throw error ?? new Error("Failed to load readings");
+    return (
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold">{title}</h1>
+            <p className="text-sm text-text-muted tabular-nums">{windowLabel}</p>
+          </div>
+          <SharedViewControls
+            channels={channels}
+            setpoints={setpoints}
+            onUpdateSetpoint={updateSetpoint}
+            onResetSetpoints={resetToDefaults}
+          />
+        </div>
+        <Card>
+          <p role="alert" className="py-8 text-center text-sm text-sev-critical">
+            {error?.message ?? "Failed to load readings"}
+          </p>
+        </Card>
+      </div>
+    );
   }
 
   return (

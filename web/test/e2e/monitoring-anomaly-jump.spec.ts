@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 /** Anomaly → Monitoring jump: all affected sensors pre-selected, anomalous
  *  chart region banded, anomalous table rows highlighted. All BFF mocked. */
 
-const ANOMALY_HOURS = [10, 11];
+const ANOMALY_HOURS = [46, 47];
 
 function isoAtHour(hour: number): string {
   const base = new Date("2026-06-01T00:00:00Z").getTime();
@@ -56,9 +56,11 @@ test("jump link carries every affected sensor and the threshold", async ({ page 
   );
 
   await page.goto("/anomalies");
-  const jump = page.getByRole("link", {
-    name: `Open ${rows[ANOMALY_HOURS[0]].timestamp} in Monitoring`,
-  });
+  const jump = page
+    .getByRole("link", {
+      name: `Open ${rows[ANOMALY_HOURS[0]].timestamp} in Monitoring`,
+    })
+    .first();
   await expect(jump).toHaveAttribute("href", /channel=temperature%2Chumidity/);
   await expect(jump).toHaveAttribute("href", /threshold=0.15/);
 });
@@ -93,6 +95,7 @@ test("clicking the jump opens Monitoring with the affected sensors selected", as
   await page.goto("/anomalies");
   await page
     .getByRole("link", { name: `Open ${rows[ANOMALY_HOURS[0]].timestamp} in Monitoring` })
+    .first()
     .click();
 
   await expect(page).toHaveURL(/\/monitoring\?/);

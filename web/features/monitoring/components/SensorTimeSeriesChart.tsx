@@ -102,7 +102,12 @@ export function SensorTimeSeriesChart({
   const onRangeSelectRef = useRef(onRangeSelect);
   onRangeSelectRef.current = onRangeSelect;
 
+  const channelsKey = channels.join("\0");
   const canSelectRange = Boolean(onRangeSelect);
+  const seriesVisibility = useMemo(
+    () => channels.map((ch) => visible.has(ch)),
+    [channels, visible],
+  );
 
   const options = useMemo(
     () => ({
@@ -112,7 +117,6 @@ export function SensorTimeSeriesChart({
           label: ch,
           stroke: channelColor(i),
           width: 1.5,
-          show: visible.has(ch),
         })),
       ],
       legend: { show: false },
@@ -138,7 +142,9 @@ export function SensorTimeSeriesChart({
           : {}),
       },
     }),
-    [channels, visible, canSelectRange],
+    // channelsKey keeps options stable when the channels array identity churns.
+    // Visibility is applied via seriesVisibility → setSeries (not options).
+    [channels, channelsKey, canSelectRange],
   );
 
   if (rows.length === 0) return null;
@@ -149,7 +155,13 @@ export function SensorTimeSeriesChart({
           <ChartZoomOutButton />
         </div>
       ) : null}
-      <UPlotChart data={data} options={options} height={320} onWindowChange={onRangeSelect} />
+      <UPlotChart
+        data={data}
+        options={options}
+        height={320}
+        onWindowChange={onRangeSelect}
+        seriesVisibility={seriesVisibility}
+      />
     </div>
   );
 }

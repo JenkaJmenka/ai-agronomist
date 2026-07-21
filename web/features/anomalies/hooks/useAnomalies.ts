@@ -8,7 +8,6 @@ import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { filterRowsToWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD, getSeverity, type Severity } from "@/lib/severity";
-import { useDateRange } from "@/lib/useDateRange";
 
 export interface AnomalyRow extends SensorRow {
   readonly score: number;
@@ -52,7 +51,6 @@ function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRo
 export function useAnomalies(): AnomaliesState {
   const readings = useReadings();
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
-  const [{ from, to }] = useDateRange();
   const { rows: liveRows } = useLiveReadings(live);
   const [threshold, setThresholdRaw] = useQueryState(
     "threshold",
@@ -61,8 +59,8 @@ export function useAnomalies(): AnomaliesState {
 
   const rows = useMemo(() => {
     const merged = live ? dedupeByTimestamp(readings.rows, liveRows) : readings.rows;
-    return filterRowsToWindow(merged, from, to);
-  }, [live, readings.rows, liveRows, from, to]);
+    return filterRowsToWindow(merged, readings.from, readings.to);
+  }, [live, readings.rows, readings.from, readings.to, liveRows]);
 
   const anomalies = useMemo<AnomalyRow[]>(() => {
     const flagged: AnomalyRow[] = [];

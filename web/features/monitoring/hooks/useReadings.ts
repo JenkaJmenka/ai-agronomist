@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { parseAsBoolean, parseAsIsoDateTime, parseAsString, useQueryStates } from "nuqs";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchReadingsBounds,
@@ -22,8 +22,8 @@ const DEFAULT_MAX_POINTS = 2000;
 /** Re-anchor preset windows when URL `to` is this far past the newest stored row. */
 const STALE_PRESET_SLACK_MS = 5 * 60_000;
 
-/** Skip URL rewrites when the window barely moved (avoids history spam). */
-const WINDOW_WRITE_SLACK_MS = 1_000;
+/** Stable empty list — ``?? []`` would allocate every render and infinite-loop effects. */
+const EMPTY_ROWS: SensorRow[] = [];
 
 export interface ReadingsState {
   readonly rows: SensorRow[];
@@ -36,23 +36,20 @@ export interface ReadingsState {
   /** Pre-downsampling row count of the window (equals rows.length otherwise). */
   readonly originalCount: number;
   readonly windowLabel: string;
-}
-
-function datesClose(a: Date, b: Date, slackMs = WINDOW_WRITE_SLACK_MS): boolean {
-  return Math.abs(a.getTime() - b.getTime()) <= slackMs;
+  /** Effective lookback window used for fetch + client filters. */
+  readonly from: Date | null;
+  readonly to: Date | null;
 }
 
 /**
  * URL-scoped readings: tenant/gh/from/to all live in the query string.
- * In live mode the window rolls forward on the refresh interval, anchored to
- * max(now, newest stored timestamp) so mock/future-dated streams stay in view.
  *
- * Background URL writes are suppressed after the user starts a cross-page
- * navigation — otherwise ``router.replace`` from a live roll / re-anchor can
- * cancel the soft navigation and leave Monitoring/Climate/Gas stuck.
+ * While live, the lookback window rolls in React state only — never via
+ * ``router.replace``. Background URL writes cancel Next.js soft navigations
+ * (sidebar Monitoring ↔ Climate ↔ Gas stays stuck on the first page).
  */
 export function useReadings(): ReadingsState {
-  const [{ tenant, gh, from, to, live }, setParams] = useQueryStates({
+  const [{ tenant, gh, from, to, live }] = useQueryStates({
     tenant: parseAsString.withDefault("tenant_1"),
     gh: parseAsString.withDefault("gh_A"),
     from: parseAsIsoDateTime,
@@ -61,59 +58,26 @@ export function useReadings(): ReadingsState {
   });
   const [refreshSeconds] = useRefreshInterval();
 
-  const hasWindow = from !== null && to !== null;
-  const lookbackHours = hasWindow ? periodHours(matchPeriodId(from, to)) : null;
+  /** Live-only rolling window — must not touch the URL. */
+  const [liveWindow, setLiveWindow] = useState<{ from: Date; to: Date } | null>(null);
+  /** One-shot historical re-anchor override (also written to URL carefully). */
+  const [anchorWindow, setAnchorWindow] = useState<{ from: Date; to: Date } | null>(null);
+
+  const lookbackHours = from !== null && to !== null ? periodHours(matchPeriodId(from, to)) : null;
   const lookbackRef = useRef(lookbackHours);
   lookbackRef.current = lookbackHours;
-  const setParamsRef = useRef(setParams);
-  setParamsRef.current = setParams;
   const scopeRef = useRef({ tenant, gh });
   scopeRef.current = { tenant, gh };
-  const fromRef = useRef(from);
-  const toRef = useRef(to);
-  fromRef.current = from;
-  toRef.current = to;
-  /** Bumped on sidebar / in-app path changes so in-flight URL writes abort. */
-  const urlWriteGenRef = useRef(0);
-  const writeWindowRef = useRef((next: { from: Date; to: Date }, gen: number): void => {
-    if (gen !== urlWriteGenRef.current) return;
-    const curFrom = fromRef.current;
-    const curTo = toRef.current;
-    if (
-      curFrom !== null &&
-      curTo !== null &&
-      datesClose(curFrom, next.from) &&
-      datesClose(curTo, next.to)
-    ) {
-      return;
-    }
-    void setParamsRef.current({ from: next.from, to: next.to });
-  });
 
+  // Clear live/anchor overrides when leaving live or changing scope.
   useEffect(() => {
-    function onPointerDown(event: PointerEvent): void {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      const anchor = target.closest("a[href]");
-      if (!(anchor instanceof HTMLAnchorElement)) return;
-      const href = anchor.getAttribute("href");
-      if (!href || href.startsWith("#")) return;
-      try {
-        const next = new URL(href, window.location.href);
-        if (next.origin !== window.location.origin) return;
-        if (next.pathname !== window.location.pathname) {
-          urlWriteGenRef.current += 1;
-        }
-      } catch {
-        // Ignore malformed hrefs.
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown, true);
-    return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, []);
+    if (!live) setLiveWindow(null);
+  }, [live]);
+  useEffect(() => {
+    setAnchorWindow(null);
+  }, [tenant, gh]);
 
-  // While live with a preset period, roll the lookback window forward.
-  // Anchor to newest stored data when it is ahead of wall-clock (demo SCADA).
+  // Live: roll lookback in React state only (never setParams / router.replace).
   useEffect(() => {
     if (!live) return;
 
@@ -122,17 +86,16 @@ export function useReadings(): ReadingsState {
     async function rollWindow(): Promise<void> {
       const hours = lookbackRef.current;
       if (hours === null) return;
-      const gen = urlWriteGenRef.current;
       let maxTimestamp: Date | null = null;
       try {
         const bounds = await fetchReadingsBounds(scopeRef.current);
         if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
       } catch {
-        // Fall back to wall-clock via periodWindowEnd.
+        // Wall-clock fallback via periodWindowEnd.
       }
       if (cancelled) return;
       const end = periodWindowEnd({ maxTimestamp, live: true });
-      writeWindowRef.current(windowForPeriod(hours, end), gen);
+      setLiveWindow(windowForPeriod(hours, end));
     }
 
     void rollWindow();
@@ -143,16 +106,14 @@ export function useReadings(): ReadingsState {
     };
   }, [live, refreshSeconds]);
 
-  // One-shot: if a preset URL window ends far after the newest stored row
-  // (typical wall-clock "Last hour" on a historical dataset), shift it to the
-  // data max so the chart/table fill. Custom ranges are never rewritten.
+  // Historical: one-shot re-anchor of stale wall-clock presets onto data max.
+  // Prefer local override; URL sync is deferred and aborted if the user navigates.
   useEffect(() => {
     if (live || from === null || to === null) return;
     const hours = periodHours(matchPeriodId(from, to));
     if (hours === null) return;
 
     let cancelled = false;
-    const gen = urlWriteGenRef.current;
     void (async () => {
       try {
         const bounds = await fetchReadingsBounds({ tenant, gh });
@@ -160,7 +121,10 @@ export function useReadings(): ReadingsState {
         const maxTimestamp = new Date(bounds.max_timestamp);
         if (to.getTime() - maxTimestamp.getTime() <= STALE_PRESET_SLACK_MS) return;
         const end = periodWindowEnd({ maxTimestamp, live: false });
-        writeWindowRef.current(windowForPeriod(hours, end), gen);
+        const next = windowForPeriod(hours, end);
+        setAnchorWindow(next);
+        // Do not call setParams / router.replace here — that cancels soft
+        // navigations when the sidebar is clicked during the bounds fetch.
       } catch {
         // Keep the URL window; the readings query still runs as-is.
       }
@@ -171,11 +135,27 @@ export function useReadings(): ReadingsState {
     };
   }, [tenant, gh, live, from, to]);
 
+  const effectiveFrom = live ? (liveWindow?.from ?? from) : (anchorWindow?.from ?? from);
+  const effectiveTo = live ? (liveWindow?.to ?? to) : (anchorWindow?.to ?? to);
+  const hasWindow = effectiveFrom !== null && effectiveTo !== null;
+
   const query = useQuery<RecentReadingsResponse | WindowReadingsResponse, Error>({
-    queryKey: ["readings", tenant, gh, from?.toISOString() ?? "recent", to?.toISOString() ?? ""],
+    queryKey: [
+      "readings",
+      tenant,
+      gh,
+      effectiveFrom?.toISOString() ?? "recent",
+      effectiveTo?.toISOString() ?? "",
+    ],
     queryFn: (): Promise<RecentReadingsResponse | WindowReadingsResponse> =>
       hasWindow
-        ? fetchWindowReadings({ tenant, gh, from, to, maxPoints: DEFAULT_MAX_POINTS })
+        ? fetchWindowReadings({
+            tenant,
+            gh,
+            from: effectiveFrom,
+            to: effectiveTo,
+            maxPoints: DEFAULT_MAX_POINTS,
+          })
         : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
     refetchInterval: live ? refreshSeconds * 1000 : false,
@@ -184,7 +164,7 @@ export function useReadings(): ReadingsState {
     placeholderData: live ? undefined : keepPreviousData,
   });
 
-  const rows = query.data?.rows ?? [];
+  const rows = query.data?.rows ?? EMPTY_ROWS;
   return {
     rows,
     isLoading: query.isPending,
@@ -195,7 +175,9 @@ export function useReadings(): ReadingsState {
     originalCount:
       (query.data as { original_count?: number } | undefined)?.original_count ?? rows.length,
     windowLabel: hasWindow
-      ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
+      ? `${effectiveFrom.toISOString().slice(0, 16)} → ${effectiveTo.toISOString().slice(0, 16)}`
       : "Most recent data (7 days)",
+    from: effectiveFrom,
+    to: effectiveTo,
   };
 }

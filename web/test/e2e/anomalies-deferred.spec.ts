@@ -55,7 +55,7 @@ test("top anomalies show G4 fault labels and channel-aware jump", async ({ page 
   await expect(page.getByTestId("fault-type").first()).toHaveText("Spike fault");
   await expect(page.getByTestId("reasoning").first()).toContainText("Transient spike");
 
-  const jump = page.getByRole("link", { name: `Open ${rows[0].timestamp} in Monitoring` });
+  const jump = page.getByRole("link", { name: `Open ${rows[0].timestamp} in Monitoring` }).first();
   await expect(jump).toHaveAttribute("href", /channel=temperature/);
 });
 
@@ -147,7 +147,7 @@ test("grouped view counts exact G2 flagged rows, not downsampled chart rows", as
   await expect(page.getByText("5 anomalies · 3 groups")).toBeVisible();
 });
 
-test("large readings table renders virtualized without a row cap", async ({ page }) => {
+test("large readings table paginates instead of capping rows", async ({ page }) => {
   const rows = makeRows(600, 100);
   await page.route("**/api/bff/readings/recent**", (route) =>
     route.fulfill({ json: mockRecent(rows) }),
@@ -155,5 +155,6 @@ test("large readings table renders virtualized without a row cap", async ({ page
 
   await page.goto("/monitoring");
   await expect(page.getByText("Readings (600 rows, newest first)")).toBeVisible();
-  await expect(page.getByTestId("data-table")).toHaveAttribute("data-virtualized", "true");
+  await expect(page.getByTestId("table-pagination")).toBeVisible();
+  await expect(page.getByTestId("table-pagination-page")).toContainText("1");
 });
