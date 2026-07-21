@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TABLE_PAGE_SIZE, paginateItems } from "@/components/ui/TablePagination";
+import { paginateItems, TABLE_PAGE_SIZE } from "@/components/ui/TablePagination";
 
 describe("paginateItems", () => {
   it("uses 24 as the default page size", () => {

@@ -38,9 +38,7 @@ describe("resolveAffectedChannels", () => {
   });
 
   it("soft-matches partial sensor names", () => {
-    expect(resolveAffectedChannels(["temp"], ["temperature", "humidity"])).toEqual([
-      "temperature",
-    ]);
+    expect(resolveAffectedChannels(["temp"], ["temperature", "humidity"])).toEqual(["temperature"]);
   });
 });
 
@@ -48,9 +46,7 @@ describe("anomalousChannelsForRow", () => {
   const channels = ["temperature", "humidity", "co2"];
 
   it("returns nothing for a normal row", () => {
-    expect(
-      anomalousChannelsForRow(row({ timestamp: "t1" }), channels, 0.5, SETPOINTS),
-    ).toEqual([]);
+    expect(anomalousChannelsForRow(row({ timestamp: "t1" }), channels, 0.5, SETPOINTS)).toEqual([]);
   });
 
   it("highlights only detector-affected sensors when provided", () => {

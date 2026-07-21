@@ -172,9 +172,7 @@ export function ReadingsTable({
     for (const row of recentRows) {
       const key = timestampKey(row.timestamp);
       const affected =
-        affectedByTimestamp?.get(row.timestamp) ??
-        affectedByTimestamp?.get(key) ??
-        null;
+        affectedByTimestamp?.get(row.timestamp) ?? affectedByTimestamp?.get(key) ?? null;
       map.set(
         row.timestamp,
         new Set(anomalousChannelsForRow(row, channels, threshold, setpoints, affected)),

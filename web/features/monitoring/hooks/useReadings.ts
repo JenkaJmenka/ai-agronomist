@@ -12,12 +12,7 @@ import {
   type SensorRow,
   type WindowReadingsResponse,
 } from "@/features/monitoring/api/readings";
-import {
-  matchPeriodId,
-  periodHours,
-  periodWindowEnd,
-  windowForPeriod,
-} from "@/lib/periodPresets";
+import { matchPeriodId, periodHours, periodWindowEnd, windowForPeriod } from "@/lib/periodPresets";
 import { STALE_TIME_MS } from "@/lib/query";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
 
@@ -80,6 +75,20 @@ export function useReadings(): ReadingsState {
   toRef.current = to;
   /** Bumped on sidebar / in-app path changes so in-flight URL writes abort. */
   const urlWriteGenRef = useRef(0);
+  const writeWindowRef = useRef((next: { from: Date; to: Date }, gen: number): void => {
+    if (gen !== urlWriteGenRef.current) return;
+    const curFrom = fromRef.current;
+    const curTo = toRef.current;
+    if (
+      curFrom !== null &&
+      curTo !== null &&
+      datesClose(curFrom, next.from) &&
+      datesClose(curTo, next.to)
+    ) {
+      return;
+    }
+    void setParamsRef.current({ from: next.from, to: next.to });
+  });
 
   useEffect(() => {
     function onPointerDown(event: PointerEvent): void {
@@ -103,21 +112,6 @@ export function useReadings(): ReadingsState {
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
   }, []);
 
-  function writeWindow(next: { from: Date; to: Date }, gen: number): void {
-    if (gen !== urlWriteGenRef.current) return;
-    const curFrom = fromRef.current;
-    const curTo = toRef.current;
-    if (
-      curFrom !== null &&
-      curTo !== null &&
-      datesClose(curFrom, next.from) &&
-      datesClose(curTo, next.to)
-    ) {
-      return;
-    }
-    void setParamsRef.current({ from: next.from, to: next.to });
-  }
-
   // While live with a preset period, roll the lookback window forward.
   // Anchor to newest stored data when it is ahead of wall-clock (demo SCADA).
   useEffect(() => {
@@ -138,7 +132,7 @@ export function useReadings(): ReadingsState {
       }
       if (cancelled) return;
       const end = periodWindowEnd({ maxTimestamp, live: true });
-      writeWindow(windowForPeriod(hours, end), gen);
+      writeWindowRef.current(windowForPeriod(hours, end), gen);
     }
 
     void rollWindow();
@@ -166,7 +160,7 @@ export function useReadings(): ReadingsState {
         const maxTimestamp = new Date(bounds.max_timestamp);
         if (to.getTime() - maxTimestamp.getTime() <= STALE_PRESET_SLACK_MS) return;
         const end = periodWindowEnd({ maxTimestamp, live: false });
-        writeWindow(windowForPeriod(hours, end), gen);
+        writeWindowRef.current(windowForPeriod(hours, end), gen);
       } catch {
         // Keep the URL window; the readings query still runs as-is.
       }

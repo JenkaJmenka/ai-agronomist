@@ -117,10 +117,7 @@ export function discoverChannels(rows: SensorRow[]): string[] {
 }
 
 /** Union two channel lists, preserving first-seen order. */
-export function mergeChannelLists(
-  previous: readonly string[],
-  next: readonly string[],
-): string[] {
+export function mergeChannelLists(previous: readonly string[], next: readonly string[]): string[] {
   if (previous.length === 0) return [...next];
   if (next.length === 0) return [...previous];
   const seen = new Set(previous);

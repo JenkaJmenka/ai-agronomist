@@ -1,16 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
-import {
-  TABLE_PAGE_SIZE,
-  TablePagination,
-  paginateItems,
-} from "@/components/ui/TablePagination";
+import { paginateItems, TABLE_PAGE_SIZE, TablePagination } from "@/components/ui/TablePagination";
 import type {
   AnomalyGroup,
   AnomalyGroupSample,
@@ -166,17 +162,15 @@ function PaginatedList<T>({
     setPageIndex(0);
   }, [resetKey, items.length]);
 
-  const { pageItems, pageIndex: safePage, pageCount } = paginateItems(
-    items,
-    pageIndex,
-    TABLE_PAGE_SIZE,
-  );
+  const {
+    pageItems,
+    pageIndex: safePage,
+    pageCount,
+  } = paginateItems(items, pageIndex, TABLE_PAGE_SIZE);
 
   return (
     <div className="space-y-2">
-      <ul className="divide-y divide-border border-t border-border">
-        {pageItems.map(renderItem)}
-      </ul>
+      <ul className="divide-y divide-border border-t border-border">{pageItems.map(renderItem)}</ul>
       <div className="px-4 pb-3">
         <TablePagination
           pageIndex={safePage}
@@ -222,9 +216,7 @@ function ServerGroupedList(props: {
             className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
           >
             <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
-              {props.serverGroupBy === "type"
-                ? (FAULT_LABELS[group.key] ?? group.key)
-                : group.key}{" "}
+              {props.serverGroupBy === "type" ? (FAULT_LABELS[group.key] ?? group.key) : group.key}{" "}
               · {group.count.toLocaleString()} record{group.count === 1 ? "" : "s"} · peak{" "}
               <span className="tabular-nums">{group.top_score.toFixed(3)}</span>
             </summary>

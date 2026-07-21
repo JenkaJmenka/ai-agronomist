@@ -6,4 +6,4 @@ export { DateRangeControls } from "./DateRangeControls";
 export { DateTimeField } from "./DateTimeField";
 export { RefetchingBlock } from "./RefetchingBlock";
 export { Skeleton } from "./Skeleton";
-export { TABLE_PAGE_SIZE, TablePagination, paginateItems } from "./TablePagination";
+export { paginateItems, TABLE_PAGE_SIZE, TablePagination } from "./TablePagination";

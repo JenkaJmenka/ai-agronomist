@@ -93,10 +93,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
     [live, historicalRows, liveRows],
   );
-  const rows = useMemo(
-    () => filterRowsToWindow(mergedRows, from, to),
-    [mergedRows, from, to],
-  );
+  const rows = useMemo(() => filterRowsToWindow(mergedRows, from, to), [mergedRows, from, to]);
 
   // Envelope for G4 enrichment — rows are chronological after dedupe.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);

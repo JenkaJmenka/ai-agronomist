@@ -204,9 +204,7 @@ export function DataTable<T>({
                       scrollX ? "whitespace-nowrap" : ""
                     }`}
                   >
-                    {h.isPlaceholder
-                      ? null
-                      : flexRender(h.column.columnDef.header, h.getContext())}
+                    {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
                   </th>
                 ))}
               </tr>
