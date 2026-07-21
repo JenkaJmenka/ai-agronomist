@@ -1,14 +1,18 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
-import { discoverChannels, type SensorRow } from "@/features/monitoring/api/readings";
+import {
+  discoverChannels,
+  mergeChannelLists,
+  type SensorRow,
+} from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
 import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
@@ -22,6 +26,7 @@ import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { filterRowsToWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
+import { useScope } from "@/lib/useScope";
 
 interface MonitoringViewProps {
   readonly title: string;
@@ -75,6 +80,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     downsampled,
   } = useReadings();
 
+  const { tenant, gh } = useScope();
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
@@ -83,12 +89,15 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
-  const rows = useMemo(() => {
-    const merged = live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows;
-    // Enforce the Period window on the client so keepPreviousData / live
-    // buffers never stretch the chart past Last 15/30 min / etc.
-    return filterRowsToWindow(merged, from, to);
-  }, [live, historicalRows, liveRows, from, to]);
+  // Unfiltered merge drives channel discovery; period filter only clips the chart/table.
+  const mergedRows = useMemo(
+    () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
+    [live, historicalRows, liveRows],
+  );
+  const rows = useMemo(
+    () => filterRowsToWindow(mergedRows, from, to),
+    [mergedRows, from, to],
+  );
 
   // Envelope for G4 enrichment — rows are chronological after dedupe.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
@@ -119,8 +128,24 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     return map;
   }, [enrichment.byTimestamp, anomalies]);
 
+  const discoveredNow = useMemo(() => {
+    const fromMerge = discoverChannels(mergedRows);
+    // Live buffer alone can still carry channels that the windowed history lost.
+    return live ? mergeChannelLists(fromMerge, discoverChannels(liveRows)) : fromMerge;
+  }, [mergedRows, live, liveRows]);
+
+  // Remember every channel seen this session so rolling Last 15/30 min windows
+  // do not remove sensors that only appear on some ticks.
+  const [knownChannels, setKnownChannels] = useState<string[]>([]);
+  useEffect(() => {
+    setKnownChannels([]);
+  }, [tenant, gh]);
+  useEffect(() => {
+    setKnownChannels((prev) => mergeChannelLists(prev, discoveredNow));
+  }, [discoveredNow]);
+
   const channels = useMemo(() => {
-    const discovered = discoverChannels(rows);
+    const discovered = knownChannels.length > 0 ? knownChannels : discoveredNow;
     if (!channelFilter || channelFilter.length === 0) return discovered;
     if (channelMatch === "exact") {
       const wanted = new Set(channelFilter);
@@ -129,7 +154,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     return discovered.filter((ch) =>
       channelFilter.some((f) => ch.toLowerCase().includes(f.toLowerCase())),
     );
-  }, [rows, channelFilter, channelMatch]);
+  }, [knownChannels, discoveredNow, channelFilter, channelMatch]);
 
   const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
   const visible = useMemo(() => {

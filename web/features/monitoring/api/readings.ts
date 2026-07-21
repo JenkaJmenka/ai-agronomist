@@ -90,20 +90,45 @@ export function fetchReadingsBounds(params: {
 export function discoverChannels(rows: SensorRow[]): string[] {
   const channels: string[] = [];
   const seen = new Set<string>();
-  // Sample the newest rows — extra channels (soil_moisture, root_zone_temp, vpd)
-  // exist only in live stream rows. The merged array sorts historical rows first;
-  // sampling from the oldest end silently drops extras once history accumulates
-  // past 50 rows. Sampling the tail ensures newly-streamed channels are found
-  // regardless of how much canonical-only history precedes them.
-  const sample = rows.slice(-50);
-  for (const row of sample) {
-    for (const [key, value] of Object.entries(row)) {
-      if (NON_CHANNEL_KEYS.has(key) || seen.has(key)) continue;
-      if (typeof value === "number") {
-        channels.push(key);
-        seen.add(key);
+
+  function absorb(sample: readonly SensorRow[]): void {
+    for (const row of sample) {
+      for (const [key, value] of Object.entries(row)) {
+        if (NON_CHANNEL_KEYS.has(key) || seen.has(key)) continue;
+        if (typeof value === "number") {
+          channels.push(key);
+          seen.add(key);
+        }
       }
     }
   }
+
+  if (rows.length <= 200) {
+    // Short windows (live 15/30 min): scan everything so intermittent
+    // SCADA channels are not missed by a tail-only sample.
+    absorb(rows);
+  } else {
+    // Head: channels that fall out of the newest ticks.
+    // Tail: live-only extras after long canonical-only history (F1).
+    absorb(rows.slice(0, 50));
+    absorb(rows.slice(-50));
+  }
   return channels;
+}
+
+/** Union two channel lists, preserving first-seen order. */
+export function mergeChannelLists(
+  previous: readonly string[],
+  next: readonly string[],
+): string[] {
+  if (previous.length === 0) return [...next];
+  if (next.length === 0) return [...previous];
+  const seen = new Set(previous);
+  const out = [...previous];
+  for (const ch of next) {
+    if (seen.has(ch)) continue;
+    out.push(ch);
+    seen.add(ch);
+  }
+  return out;
 }

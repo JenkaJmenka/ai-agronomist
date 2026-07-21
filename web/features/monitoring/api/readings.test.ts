@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { discoverChannels, type SensorRow } from "@/features/monitoring/api/readings";
+import {
+  discoverChannels,
+  mergeChannelLists,
+  type SensorRow,
+} from "@/features/monitoring/api/readings";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -134,5 +138,28 @@ describe("discoverChannels — F1 regression", () => {
     expect(found).not.toContain("root_zone_temp");
     expect(found).not.toContain("vpd");
     expect(found).toContain("temperature");
+  });
+
+  it("still finds extras that only appear in older rows of a long series", () => {
+    const rows: SensorRow[] = [
+      fullRow("2024-01-01T00:00:00Z"),
+      ...Array.from({ length: 100 }, (_, i) =>
+        canonicalRow(`2024-01-01T${String(i + 1).padStart(2, "0")}:00:00Z`),
+      ),
+    ];
+    const found = discoverChannels(rows);
+    expect(found).toContain("soil_moisture");
+    expect(found).toContain("vpd");
+  });
+});
+
+describe("mergeChannelLists", () => {
+  it("unions lists without duplicates and keeps order", () => {
+    expect(mergeChannelLists(["temperature", "humidity"], ["humidity", "co2", "vpd"])).toEqual([
+      "temperature",
+      "humidity",
+      "co2",
+      "vpd",
+    ]);
   });
 });
