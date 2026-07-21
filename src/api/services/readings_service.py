@@ -121,6 +121,9 @@ def _df_to_json_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
     if df.empty:
         return []
     out = df.copy()
+    # Charts and table clients expect ascending time; merge/dedupe can scramble order.
+    if "timestamp" in out.columns:
+        out = out.sort_values("timestamp", kind="mergesort")
     out["timestamp"] = out["timestamp"].map(_iso)
     # NaN → None so the JSON body carries proper nulls.
     return [

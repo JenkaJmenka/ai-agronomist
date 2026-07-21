@@ -66,14 +66,15 @@ class TestGroupAnomalyRows:
             _row("2026-06-02T10:00:00", 0.8),
         ]
         groups = group_anomaly_rows(rows, "date", sample_limit=5)
-        assert [g["key"] for g in groups] == ["2026-06-01", "2026-06-02"]
-        first = groups[0]
-        assert first["count"] == 2
-        assert first["top_score"] == pytest.approx(0.9)
-        # sample_ids ranked by score: the 11:00 row scores highest.
-        assert first["sample_ids"][0] == "2026-06-01T11:00:00"
-        assert first["samples"][0]["timestamp"] == "2026-06-01T11:00:00"
-        assert first["samples"][0]["values"]["temperature"] == pytest.approx(22.0)
+        # Newest calendar day first.
+        assert [g["key"] for g in groups] == ["2026-06-02", "2026-06-01"]
+        june1 = next(g for g in groups if g["key"] == "2026-06-01")
+        assert june1["count"] == 2
+        assert june1["top_score"] == pytest.approx(0.9)
+        # Samples newest-first by timestamp.
+        assert june1["sample_ids"][0] == "2026-06-01T11:00:00"
+        assert june1["samples"][0]["timestamp"] == "2026-06-01T11:00:00"
+        assert june1["samples"][0]["values"]["temperature"] == pytest.approx(22.0)
 
     def test_samples_include_affected_sensors_and_reasoning(self):
         rows = [

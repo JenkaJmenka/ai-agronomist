@@ -161,7 +161,9 @@ def group_anomaly_rows(
     no stable primary key, so ``sample_ids`` / ``samples`` are the group's
     highest-scoring rows — the FE uses them to jump to Monitoring and to
     show sensors / values / reasoning inside each group.
-    Groups are ordered by count (desc), then key.
+    Groups are ordered by count (desc), then key. When ``group_by='date'``,
+    groups are newest calendar day first. Samples inside each group are
+    newest-first by timestamp.
     """
     if group_by not in GROUP_BY_CHOICES:
         raise ValueError(f"group_by must be one of {GROUP_BY_CHOICES}, got {group_by!r}")
@@ -173,15 +175,23 @@ def group_anomaly_rows(
 
     groups = []
     for key, bucket in buckets.items():
+        # Prefer high-score samples for the preview, then show them by date.
         ranked = sorted(bucket, key=lambda row: _numeric_score(row) or 0.0, reverse=True)
         top = ranked[:sample_limit]
+        top_by_time = sorted(
+            top,
+            key=lambda row: str(row.get(_TIMESTAMP_KEY) or ""),
+            reverse=True,
+        )
         groups.append(
             {
                 "key": key,
                 "count": len(bucket),
                 "top_score": _numeric_score(ranked[0]) or 0.0,
-                "sample_ids": [str(row.get(_TIMESTAMP_KEY)) for row in top],
-                "samples": [_sample_from_row(row) for row in top],
+                "sample_ids": [str(row.get(_TIMESTAMP_KEY)) for row in top_by_time],
+                "samples": [_sample_from_row(row) for row in top_by_time],
             }
         )
+    if group_by == "date":
+        return sorted(groups, key=lambda group: group["key"], reverse=True)
     return sorted(groups, key=lambda group: (-group["count"], group["key"]))

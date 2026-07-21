@@ -34,7 +34,7 @@ function faultLabel(faultType: string | null | undefined): string | null {
   return FAULT_LABELS[faultType] ?? faultType.replaceAll("_", " ");
 }
 
-/** Top anomalies, most severe first, with fault type + Monitoring jump. */
+/** Top anomalies by score, displayed newest-first by timestamp. */
 export function AnomalyTable({
   anomalies,
   enrichment,
@@ -121,7 +121,15 @@ export function AnomalyTable({
     [enrichment, isEnrichmentLoading],
   );
 
-  const top = useMemo(() => anomalies.slice(0, TOP_ANOMALIES_CAP), [anomalies]);
+  // Keep the highest-scoring rows, then show them newest → oldest.
+  const top = useMemo(() => {
+    const byScore = [...anomalies]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, TOP_ANOMALIES_CAP);
+    return byScore.sort((a, b) =>
+      a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+    );
+  }, [anomalies]);
 
   const exportRows = useMemo(() => {
     return top.map((row) => {

@@ -91,8 +91,14 @@ export function ReadingsTable({ rows, channels, threshold, setpoints }: Readings
     return base;
   }, [channels, threshold]);
 
-  // Newest first; DataTable caps body height (scrollY) and virtualizes large windows.
-  const recentRows = useMemo(() => [...rows].reverse(), [rows]);
+  // Explicit newest-first by timestamp (don't assume API/chart row order).
+  const recentRows = useMemo(
+    () =>
+      [...rows].sort((a, b) =>
+        a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+      ),
+    [rows],
+  );
 
   const exportRows = useMemo(() => {
     return recentRows.map((row) => [

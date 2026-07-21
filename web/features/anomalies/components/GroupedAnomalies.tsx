@@ -53,13 +53,19 @@ function groupClientSide(anomalies: AnomalyRow[], groupBy: ClientGroupBy): Clien
     if (bucket) bucket.push(row);
     else buckets.set(key, [row]);
   }
-  return [...buckets.entries()]
-    .map(([key, rows]) => ({
-      key,
-      rows: rows.sort((a, b) => b.score - a.score),
-      peak: Math.max(...rows.map((r) => r.score)),
-    }))
-    .sort((a, b) => b.peak - a.peak);
+  const groups = [...buckets.entries()].map(([key, rows]) => ({
+    key,
+    // Newest first within each group.
+    rows: [...rows].sort((a, b) =>
+      a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+    ),
+    peak: Math.max(...rows.map((r) => r.score)),
+  }));
+  if (groupBy === "date") {
+    // Date groups newest calendar day first.
+    return groups.sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+  }
+  return groups.sort((a, b) => b.peak - a.peak);
 }
 
 function GroupModeButton(props: {
