@@ -38,6 +38,26 @@ test("every sidebar entry navigates", async ({ page }) => {
   }
 });
 
+test("sidebar preserves period, live, refresh, and threshold across pages", async ({ page }) => {
+  await page.goto(
+    "/monitoring?from=2026-06-01T00:00:00.000Z&to=2026-06-02T00:00:00.000Z&live=true&refresh=60&threshold=0.25",
+  );
+  await page.getByRole("link", { name: "Anomaly Detection", exact: true }).click();
+  await expect(page).toHaveURL(/\/anomalies/);
+  await expect(page).toHaveURL(/from=2026-06-01/);
+  await expect(page).toHaveURL(/to=2026-06-02/);
+  await expect(page).toHaveURL(/live=true/);
+  await expect(page).toHaveURL(/refresh=60/);
+  await expect(page).toHaveURL(/threshold=0.25/);
+
+  await page.getByRole("link", { name: "Climate Data", exact: true }).click();
+  await expect(page).toHaveURL(/\/climate/);
+  await expect(page).toHaveURL(/live=true/);
+  await expect(page).toHaveURL(/threshold=0.25/);
+  await expect(page.getByTestId("shared-view-controls")).toBeVisible();
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
+});
+
 test("tenant selector updates the URL", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("tenant-select").selectOption("tenant_2");
@@ -107,7 +127,7 @@ test("anomalies threshold writes to the URL", async ({ page }) => {
   await expect(page).toHaveURL(/threshold=0.25/);
 });
 
-test("thresholds page: preview slider updates flagged counts and URL", async ({ page }) => {
+test("thresholds page: threshold slider updates flagged counts and URL", async ({ page }) => {
   // The slider only renders over scored rows — mock the BFF so the test
   // is backend-independent (CI has no API; never rely on live data).
   const scoredRows = Array.from({ length: 48 }, (_, i) => ({
@@ -130,9 +150,9 @@ test("thresholds page: preview slider updates flagged counts and URL", async ({ 
   await expect(page.getByRole("heading", { name: "Threshold Management" })).toBeVisible();
   const slider = page.getByTestId("threshold-control").locator("input[type=range]");
   await slider.fill("0.3");
-  await expect(page).toHaveURL(/preview=0.3/);
-  // Slider preview recomputes flagged counts client-side over the mock data.
-  await expect(page.getByText("Flagged at preview (0.300)")).toBeVisible();
+  await expect(page).toHaveURL(/threshold=0.3/);
+  // Slider recomputes flagged counts client-side over the mock data.
+  await expect(page.getByText("Flagged at threshold (0.300)")).toBeVisible();
 });
 
 test("calendar dropdown picks a day into the segmented field", async ({ page }) => {

@@ -66,6 +66,16 @@ from src.models.pot_threshold import POTThresholdFitter
 from src.models.recommendation_engine import RecommendationEngine
 from src.models.retraining_orchestrator import RetrainingOrchestrator
 from src.models.root_cause_analyzer import RootCauseAnalyzer
+from src.models.setpoint_scada_detector import (
+    DEHUMIDIFICATION_FAILURE,
+    HUMIDITY_SATURATION_RISK,
+    OVER_HEATING,
+    SENSOR_FLATLINE,
+    THERMAL_DIVERGENCE,
+    UNDER_HEATING,
+    SetpointAwareScadaDetector,
+    climate_context_from_mapping,
+)
 from src.monitoring.anomaly_metrics import AnomalyMetrics
 from src.utils.lru import LRUDict
 
@@ -159,6 +169,66 @@ _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
         "reasoning": (
             "Change-point: Bayesian online change-point detection (BOCPD) "
             "flagged a level shift on {sensors}"
+        ),
+    },
+    "under_heating": {
+        "fault_type": "under_heating",
+        "root_cause": "heating_setpoint_deficit",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": (
+            "Under-heating: {sensors} below climate-computer heating setpoint "
+            "by more than the configured margin"
+        ),
+    },
+    "over_heating": {
+        "fault_type": "over_heating",
+        "root_cause": "cooling_or_ventilation_shortfall",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": (
+            "Over-heating: {sensors} above heating setpoint without solar-driven "
+            "outdoor conditions to explain the excess"
+        ),
+    },
+    "dehumidification_failure": {
+        "fault_type": "dehumidification_failure",
+        "root_cause": "dehumidification_capacity_failure",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": (
+            "Dehumidification failure: {sensors} at critical RH with near-zero "
+            "humidity deficit"
+        ),
+    },
+    "humidity_saturation_risk": {
+        "fault_type": "humidity_saturation_risk",
+        "root_cause": "moisture_saturation_near_dewpoint",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": (
+            "Humidity saturation risk: {sensors} at or above the critical RH "
+            "threshold near dew point"
+        ),
+    },
+    "thermal_divergence": {
+        "fault_type": "thermal_divergence",
+        "root_cause": "crop_air_thermal_disconnect",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": (
+            "Thermal divergence: canopy vs greenhouse air on {sensors} exceeds "
+            "the microclimate critical delta"
+        ),
+    },
+    "sensor_flatline": {
+        "fault_type": "stuck_fault",
+        "root_cause": "sensor_flatline_frozen_telemetry",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": (
+            "Sensor flatline: {sensors} frozen (zero variance) for the "
+            "configured multi-hour window"
         ),
     },
 }
@@ -273,6 +343,7 @@ class PipelineResult(TypedDict):
     learning_progress: Optional[Dict[str, int]]
     timestamp: str
     pipeline_version: str
+    scada_anomalies: List[Dict[str, Any]]
 
 
 class ComprehensiveInferencePipeline:
@@ -318,6 +389,7 @@ class ComprehensiveInferencePipeline:
         # both stateless and shared. They run on the physical-unit window.
         self._mahalanobis_detector = MultivariateMahalanobisDetector()
         self._bocpd_detector = BOCPDDetector()
+        self._setpoint_scada_detector = SetpointAwareScadaDetector()
         # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
         self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
         # Component caching
@@ -387,8 +459,13 @@ class ComprehensiveInferencePipeline:
         baseline_sequences: Optional[List[List[List[float]]]] = None,
         sensor_pairs: Optional[List[Dict[str, Any]]] = None,
         sequence_timestamp: Optional[str] = None,
+        climate_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Execute the full pipeline for one sequence."""
+        """Execute the full pipeline for one sequence.
+
+        ``climate_context`` may carry climate-computer extras
+        (``t_setpoint``, ``t_plant``, ``t_outdoor``, ``i_solar``, …).
+        """
         seq_array = np.asarray(sequence, dtype=np.float32)
         if seq_array.shape != (SEQ_LEN, INPUT_DIM):
             raise ValueError(
@@ -410,6 +487,7 @@ class ComprehensiveInferencePipeline:
             pattern_detector=pattern_detector,
             sensor_pairs=sensor_pairs,
             sequence_timestamp=sequence_timestamp,
+            climate_context=climate_context,
         )
 
     async def run_batch(
@@ -460,6 +538,7 @@ class ComprehensiveInferencePipeline:
         pattern_detector: PatternDetector,
         sensor_pairs: Optional[List[Dict[str, Any]]] = None,
         sequence_timestamp: Optional[str] = None,
+        climate_context: Optional[Dict[str, Any]] = None,
     ) -> "PipelineResult":
         """Core pipeline logic shared by ``run()`` and ``run_batch()``."""
         now = datetime.now(timezone.utc)
@@ -509,6 +588,38 @@ class ComprehensiveInferencePipeline:
         # Denormalize so per-sensor detection uses physical units (°C, %, ppm,
         # lux) consistent with SENSOR_NOISE_TARGETS in src/config.py.
         _denormed_for_noise = _denormalize_sequence(seq_array)
+
+        # 0a+. Setpoint-aware climate / RH / microclimate / flatline rules.
+        scada_anomalies: list[dict[str, Any]] = []
+        _climate_ctx = climate_context_from_mapping(climate_context)
+        _scada_findings = self._setpoint_scada_detector.detect(
+            _denormed_for_noise,
+            context=_climate_ctx,
+            timestamp=seq_ts,
+        )
+        _SCADA_TYPE_TO_VOTE = {
+            UNDER_HEATING: "under_heating",
+            OVER_HEATING: "over_heating",
+            DEHUMIDIFICATION_FAILURE: "dehumidification_failure",
+            HUMIDITY_SATURATION_RISK: "humidity_saturation_risk",
+            THERMAL_DIVERGENCE: "thermal_divergence",
+            SENSOR_FLATLINE: "sensor_flatline",
+        }
+        for finding in _scada_findings:
+            scada_anomalies.append(finding.to_dict())
+            vote_key = _SCADA_TYPE_TO_VOTE.get(finding.anomaly_type)
+            if vote_key:
+                rule_votes.setdefault(vote_key, [])
+                for sensor in finding.affected_sensors:
+                    if sensor not in rule_votes[vote_key]:
+                        rule_votes[vote_key].append(sensor)
+                logger.warning(
+                    "Setpoint SCADA %s for tenant %s: %s",
+                    finding.anomaly_type,
+                    customer_id,
+                    finding.reasoning,
+                )
+
         noise_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             if self._noise_detector.detect(_denormed_for_noise[:, s_idx], s_name):
@@ -792,6 +903,9 @@ class ComprehensiveInferencePipeline:
                 "urgency": rule_profile["urgency"],
                 "reasoning": build_rule_reasoning(rule_votes),
             }
+            # Prefer contextual setpoint-SCADA prose when those rules fired.
+            if scada_anomalies:
+                root_cause_result["reasoning"] = scada_anomalies[0]["reasoning"]
         recommendation_result = self.recommendation_engine.recommend(
             root_cause=root_cause_result["root_cause"],
             severity=root_cause_result.get("severity", "medium"),
@@ -822,6 +936,7 @@ class ComprehensiveInferencePipeline:
             "fault_type": fault_type,
             "physics_validation": physics_result.reason,
             "rule_votes": rule_votes,
+            "scada_anomalies": scada_anomalies,
             # Persisted so the feedback UI can show the explanation; the fused
             # path previously omitted both, leaving the review queue blank.
             "reasoning": reasoning,
@@ -882,6 +997,7 @@ class ComprehensiveInferencePipeline:
             learning_progress=learning_progress,
             timestamp=now.isoformat(),
             pipeline_version=PIPELINE_VERSION,
+            scada_anomalies=scada_anomalies,
         )
 
     @staticmethod
@@ -919,6 +1035,7 @@ class ComprehensiveInferencePipeline:
             learning_progress=None,
             timestamp=datetime.now(timezone.utc).isoformat(),
             pipeline_version=PIPELINE_VERSION,
+            scada_anomalies=[],
         )
 
     @staticmethod
@@ -962,6 +1079,7 @@ class ComprehensiveInferencePipeline:
             learning_progress=None,
             timestamp=datetime.now(timezone.utc).isoformat(),
             pipeline_version=PIPELINE_VERSION,
+            scada_anomalies=[],
         )
 
     @staticmethod
@@ -1003,6 +1121,7 @@ class ComprehensiveInferencePipeline:
             learning_progress=None,
             timestamp=datetime.now(timezone.utc).isoformat(),
             pipeline_version=PIPELINE_VERSION,
+            scada_anomalies=[],
         )
 
     async def _ensure_diurnal_profiles(

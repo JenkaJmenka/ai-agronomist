@@ -14,7 +14,14 @@ from datetime import datetime
 
 import numpy as np
 
-from src.config import HUMIDITY_RANGE, TEMP_RANGE
+# Wider greenhouse operating envelope for diurnal suppression only.
+# Static TEMP_RANGE (20–30 °C) / HUMIDITY_RANGE (50–80 %) are training
+# normalisation bands — not climate-computer setpoints — and must not gate
+# suppression (that caused false “normal” labels under real setpoints).
+_DIURNAL_TEMP_LOW: float = 10.0
+_DIURNAL_TEMP_HIGH: float = 40.0
+_DIURNAL_HUM_LOW: float = 20.0
+_DIURNAL_HUM_HIGH: float = 98.0
 
 
 @dataclass(frozen=True)
@@ -137,9 +144,9 @@ class PhysicsValidator:
         # Rule 5 (suppression): Normal diurnal variation
         # Both temp and humidity are co-moving (changing in the same
         # direction, both non-zero) with gradual per-step changes
-        # (below trend thresholds), and all values stay within normal
-        # physical ranges.  Only fires after all confirmation rules
-        # pass — a real fault always takes priority over suppression.
+        # (below trend thresholds), and all values stay within a *wide*
+        # greenhouse envelope — not the static 20–30 °C training band.
+        # Only fires after all confirmation rules pass.
         is_temp_changing = temp_trend != 0.0
         is_hum_changing = hum_trend != 0.0
         is_co_moving = (
@@ -150,12 +157,12 @@ class PhysicsValidator:
         is_temp_gradual = abs(temp_trend) < _TEMP_TREND_THRESHOLD
         is_hum_gradual = abs(hum_trend) < _HUM_TREND_THRESHOLD
         temp_in_range = bool(
-            np.all(sequence[:, 0] >= TEMP_RANGE[0])
-            and np.all(sequence[:, 0] <= TEMP_RANGE[1])
+            np.all(sequence[:, 0] >= _DIURNAL_TEMP_LOW)
+            and np.all(sequence[:, 0] <= _DIURNAL_TEMP_HIGH)
         )
         hum_in_range = bool(
-            np.all(sequence[:, 1] >= HUMIDITY_RANGE[0])
-            and np.all(sequence[:, 1] <= HUMIDITY_RANGE[1])
+            np.all(sequence[:, 1] >= _DIURNAL_HUM_LOW)
+            and np.all(sequence[:, 1] <= _DIURNAL_HUM_HIGH)
         )
         if (
             is_co_moving

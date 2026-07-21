@@ -102,6 +102,29 @@ async def live_source_status(
     return {"sources": runtime.source_statuses(tenant_id, greenhouse_id)}
 
 
+@router.post("/resume")
+async def resume_live_scope_endpoint(
+    request: Request,
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query(default="default"),
+    auth_tenant: Optional[str] = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Explicitly re-enable live publish/persistence after Clear all data.
+
+    Called when the operator turns Go Live on — not on every SSE reconnect,
+    which would immediately re-seed the wiped database.
+    """
+    enforce_tenant_access(auth_tenant, tenant_id)
+    runtime = getattr(request.app.state, "live_runtime", None)
+    if runtime is not None:
+        runtime.resume_persistence(tenant_id, greenhouse_id)
+        return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    from src.live.scope_control import resume_live_scope
+
+    resume_live_scope(tenant_id, greenhouse_id)
+    return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+
+
 @router.get("/events")
 async def stream_live_events(
     request: Request,
@@ -117,6 +140,9 @@ async def stream_live_events(
     then tails the Redis stream live.  Hard-closes after
     ``LIVE_MAX_STREAM_SECONDS`` so the browser reconnects and the server
     sheds stale connections automatically.
+
+    Does **not** resume a scope muted by Clear all data — use POST /resume
+    (wired to Go Live) for that.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
 

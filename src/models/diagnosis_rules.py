@@ -115,8 +115,12 @@ DIAGNOSIS_RULES: Dict[tuple, Dict[str, Any]] = {
     ("saturation", "humidity_max"): {
         "cause": "humidity_limit_exceeded",
         "confidence": 0.80,
-        "description": (
-            "Humidity at maximum indicates system cannot dehumidify"
+        # Template: RootCauseAnalyzer substitutes the measured RH.
+        # Never claim "at maximum" unless RH ≥ RH_ABSOLUTE_MAX_PERCENT.
+        "description": "Humidity elevated — system may struggle to dehumidify",
+        "description_template": (
+            "{rh_phrase} indicates elevated moisture load; "
+            "verify dehumidification capacity"
         ),
         "indicators": ["boundary_value", "no_control"],
     },

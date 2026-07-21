@@ -3,7 +3,6 @@
 import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
-import { DateRangeControls } from "@/components/ui/DateRangeControls";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
@@ -12,6 +11,9 @@ import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
+import { discoverChannels } from "@/features/monitoring/api/readings";
+import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { useDateRange } from "@/lib/useDateRange";
 
 type ViewMode = "graphical" | "table";
@@ -32,6 +34,8 @@ function AnomaliesBody() {
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
   const [, setRange] = useDateRange();
+  const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
+  const channels = useMemo(() => discoverChannels(rows), [rows]);
 
   // Envelope bounds drive the G4/G3 queries — rows are timestamp-ordered.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
@@ -61,7 +65,12 @@ function AnomaliesBody() {
             {downsampled ? " · downsampled (anomalies preserved)" : ""}
           </p>
         </div>
-        <DateRangeControls />
+        <SharedViewControls
+          channels={channels}
+          setpoints={setpoints}
+          onUpdateSetpoint={updateSetpoint}
+          onResetSetpoints={resetToDefaults}
+        />
       </div>
 
       <Card>
@@ -113,7 +122,7 @@ function AnomaliesBody() {
               rows={rows}
               threshold={threshold}
               // Drag-selecting a span narrows the URL window, so the anomaly
-              // tables below filter to the same range.
+              // tables below filter to the same range — and the Period control.
               onRangeSelect={(from, to) => void setRange({ from, to })}
             />
           </Card>

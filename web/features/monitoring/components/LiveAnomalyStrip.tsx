@@ -1,6 +1,9 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
+
 import type { LiveAnomalyItem } from "@/features/monitoring/hooks/useLiveReadings";
+import { pickDashboardSearchParams } from "@/lib/dashboardQuery";
 import { formatTime } from "@/lib/formatTime";
 
 interface LiveAnomalyStripProps {
@@ -11,10 +14,11 @@ interface LiveAnomalyStripProps {
 /**
  * Slim strip showing the latest live anomalies above the chart.
  * Each entry links to the Anomalies page with the affected channels and
- * threshold pre-selected (mirrors the existing deep-link pattern).
- * Upgraded in place by `anomaly-detail` SSE events via the parent.
+ * shared dashboard window/live/refresh/threshold preserved.
  */
 export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps) {
+  const search = useSearchParams();
+
   // Safety-net dedupe: the hook upserts re-emits by seq, but as a display-layer
   // guard we also collapse any remaining duplicates (e.g. empty-seq items that
   // can't be matched). For non-empty seqs the first occurrence (newest, since
@@ -40,8 +44,10 @@ export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps
       <ul className="flex flex-col gap-0.5" data-testid="live-anomaly-list">
         {displayAnomalies.map((a) => {
           const time = formatTime(a.timestamp);
-          const channelParam = encodeURIComponent(a.affected_channels.join(","));
-          const href = `/anomalies?channel=${channelParam}&threshold=${threshold}`;
+          const q = pickDashboardSearchParams(search);
+          q.set("channel", a.affected_channels.join(","));
+          q.set("threshold", String(threshold));
+          const href = `/anomalies?${q.toString()}`;
 
           return (
             <li

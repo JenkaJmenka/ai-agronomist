@@ -31,6 +31,7 @@ from src.live.events import LiveReadingEvent, SourceStatusEvent
 from src.live.hub import LiveHub
 from src.live.merge import ChannelMerger
 from src.live.persistence import PersistenceBatcher
+from src.live.scope_control import is_live_scope_suppressed
 from src.live.sources import CONNECTOR_TYPES
 from src.live.sources.base import LiveSourceConnector, SourceConfig
 
@@ -165,6 +166,9 @@ def _build_scope(
         )
 
     async def on_reading(event: LiveReadingEvent) -> None:
+        # After Clear all data the scope stays muted until Go Live resumes it.
+        if is_live_scope_suppressed(tenant_id, greenhouse_id):
+            return
         attach_derived_channels(event)
         scored = event
         if scorer is not None:
@@ -182,6 +186,8 @@ def _build_scope(
             await batcher.add(scored)
 
     async def on_status(status_ev: SourceStatusEvent) -> None:
+        if is_live_scope_suppressed(tenant_id, greenhouse_id):
+            return
         await hub.publish(tenant_id, greenhouse_id, "source-status", status_ev)
 
     merger = ChannelMerger(

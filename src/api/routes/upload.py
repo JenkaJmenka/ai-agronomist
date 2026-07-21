@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -292,6 +292,7 @@ async def upload_csv(
 
 @router.delete("/upload/data")
 async def clear_tenant_data(
+    request: Request,
     tenant_id: str,
     greenhouse_id: str = "default",
     db: AsyncSession = Depends(get_db),
@@ -299,12 +300,42 @@ async def clear_tenant_data(
     """Delete all greenhouse-scoped data for a tenant/greenhouse.
 
     Removes SensorReading + RawReading (including synthetic inject rows),
-    related Incident / IncidentAction rows, and the live Redis stream so
-    mock/live buffers cannot immediately re-surface cleared history.
+    related Incident / IncidentAction rows, operator feedback, learning
+    logs, metrics snapshots, and the live Redis stream.
+
+    Also mutes live mock/SCADA publish + DB persistence for this scope until
+    the operator explicitly turns Go Live back on — otherwise mock SCADA
+    immediately re-seeds the tables that were just wiped.
     """
     from sqlalchemy import select as _select
 
-    from src.db.models import Incident, IncidentAction
+    from src.db.models import (
+        Incident,
+        IncidentAction,
+        LearningLog,
+        MetricsSnapshot,
+        OperatorFeedback,
+    )
+
+    # Mute live pipeline first so mock SCADA cannot write during/after the wipe.
+    live_persistence_suppressed = False
+    runtime = getattr(request.app.state, "live_runtime", None)
+    if runtime is not None:
+        try:
+            runtime.suppress_persistence(tenant_id, greenhouse_id)
+            live_persistence_suppressed = True
+        except Exception:  # noqa: BLE001 — clear must succeed even if runtime is wedged
+            logger.warning(
+                "clear_tenant_data: live persistence suppress failed for %s/%s",
+                tenant_id,
+                greenhouse_id,
+                exc_info=True,
+            )
+    else:
+        from src.live.scope_control import suppress_live_scope
+
+        suppress_live_scope(tenant_id, greenhouse_id)
+        live_persistence_suppressed = True
 
     raw_result = await db.execute(
         delete(RawReading).where(
@@ -338,10 +369,24 @@ async def clear_tenant_data(
             Incident.greenhouse_id == greenhouse_id,
         )
     )
+
+    # Feedback is keyed by customer_id (legacy name for tenant).
+    feedback_result = await db.execute(
+        delete(OperatorFeedback).where(OperatorFeedback.customer_id == tenant_id)
+    )
+    learning_result = await db.execute(
+        delete(LearningLog).where(
+            LearningLog.tenant_id == tenant_id,
+            LearningLog.greenhouse_id == greenhouse_id,
+        )
+    )
+    metrics_result = await db.execute(
+        delete(MetricsSnapshot).where(MetricsSnapshot.tenant_id == tenant_id)
+    )
     await db.commit()
 
     # Best-effort: drop the live replay buffer so cleared rows don't reappear
-    # from Redis XREAD until fresh events are published.
+    # from Redis XREAD until fresh events are published after Go Live resume.
     live_stream_cleared = False
     try:
         from src.api.services.live_hub_provider import get_live_hub
@@ -361,7 +406,11 @@ async def clear_tenant_data(
         "deleted_sensor": sensor_result.rowcount or 0,
         "deleted_incidents": incidents_result.rowcount or 0,
         "deleted_incident_actions": deleted_actions,
+        "deleted_feedback": feedback_result.rowcount or 0,
+        "deleted_learning_logs": learning_result.rowcount or 0,
+        "deleted_metrics_snapshots": metrics_result.rowcount or 0,
         "live_stream_cleared": live_stream_cleared,
+        "live_persistence_suppressed": live_persistence_suppressed,
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }

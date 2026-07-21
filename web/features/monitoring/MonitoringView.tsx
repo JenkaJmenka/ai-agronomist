@@ -4,28 +4,32 @@ import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs
 import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
-import { DateRangeControls } from "@/components/ui/DateRangeControls";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { discoverChannels, type SensorRow } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
 import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
-import { LiveToggle } from "@/features/monitoring/components/LiveToggle";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
-import { SetpointsPanel } from "@/features/monitoring/components/SetpointsPanel";
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
 
 interface MonitoringViewProps {
   readonly title: string;
-  /** Restrict to these channels (e.g. gas page → co2). Empty = all discovered. */
+  /** Restrict to these channels (e.g. climate → temp/humid prefixes). Empty = all. */
   readonly channelFilter?: readonly string[];
+  /**
+   * How ``channelFilter`` matches discovered names.
+   * - ``includes`` (default): substring match (climate ``temp`` → ``temperature``)
+   * - ``exact``: only exact channel names (gas page must not pick climate ``co2``)
+   */
+  readonly channelMatch?: "includes" | "exact";
 }
 
 function matchChannel(channels: string[], wanted: string): string[] {
@@ -57,7 +61,7 @@ function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRo
   );
 }
 
-function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
+function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: MonitoringViewProps) {
   const {
     rows: historicalRows,
     isLoading,
@@ -84,10 +88,14 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
   const channels = useMemo(() => {
     const discovered = discoverChannels(rows);
     if (!channelFilter || channelFilter.length === 0) return discovered;
+    if (channelMatch === "exact") {
+      const wanted = new Set(channelFilter);
+      return discovered.filter((ch) => wanted.has(ch));
+    }
     return discovered.filter((ch) =>
       channelFilter.some((f) => ch.toLowerCase().includes(f.toLowerCase())),
     );
-  }, [rows, channelFilter]);
+  }, [rows, channelFilter, channelMatch]);
 
   const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
   const visible = useMemo(() => {
@@ -123,19 +131,17 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
             {downsampled ? " · downsampled" : ""}
           </p>
         </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <SetpointsPanel
-            channels={channels}
-            setpoints={setpoints}
-            onUpdate={updateSetpoint}
-            onReset={resetToDefaults}
-          />
-          <LiveToggle />
-          {live && (
-            <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
-          )}
-          <DateRangeControls />
-        </div>
+        <SharedViewControls
+          channels={channels}
+          setpoints={setpoints}
+          onUpdateSetpoint={updateSetpoint}
+          onResetSetpoints={resetToDefaults}
+          trailing={
+            live ? (
+              <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
+            ) : null
+          }
+        />
       </div>
 
       {isLoading ? (

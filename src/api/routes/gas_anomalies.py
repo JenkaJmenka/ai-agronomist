@@ -27,28 +27,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/gas", tags=["gas"])
 
-# Column aliases: keys in RawReading.data that map to a GAS_COLUMNS canonical name.
-# Handles CSVs that use "co2" instead of "gas_co2" (the dedicated gas CO2 sensor).
-_GAS_COL_ALIASES: dict[str, str] = {
-    "co2": "gas_co2",
-}
-
-
-def _resolve_gas_col(data: dict[str, Any], col: str) -> Any:
-    """Return the raw value for a gas column, trying aliases when the canonical key is absent."""
-    val = data.get(col)
-    if val is None:
-        for alias, canonical in _GAS_COL_ALIASES.items():
-            if canonical == col:
-                val = data.get(alias)
-                if val is not None:
-                    break
-    return val
+# Climate ``co2`` must NOT alias to ``gas_co2``. Environmental CO₂ from
+# climate/mock SCADA is a different sensor than the dedicated gas-panel CO₂.
 
 
 def _source_is_real(col: Any) -> Any:
     """SQLAlchemy clause: source IS NULL OR source NOT LIKE 'synthetic:%'."""
     return or_(col.is_(None), ~col.like("synthetic:%"))
+
+
+def _numeric_or_none(value: Any) -> Optional[float]:
+    """Coerce a raw JSON value to float, or None when absent/non-numeric."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _fetch_real_readings(
@@ -91,17 +86,7 @@ async def gas_summary(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, hours=hours
     )
 
-    def _apply_aliases(d: dict[str, Any]) -> dict[str, Any]:
-        """Remap alias column names to their canonical gas column names."""
-        if not _GAS_COL_ALIASES:
-            return d
-        result = dict(d)
-        for alias, canonical in _GAS_COL_ALIASES.items():
-            if alias in result and canonical not in result:
-                result[canonical] = result.pop(alias)
-        return result
-
-    readings_data = [_apply_aliases(row.data or {}) for row in rows]
+    readings_data = [row.data or {} for row in rows]
     detector = GasAnomalyDetector()
     baselines = detector.fit(readings_data)
 
@@ -111,7 +96,7 @@ async def gas_summary(
     }
 
     for row in rows:
-        row_data = _apply_aliases(row.data or {})
+        row_data = row.data or {}
         row_values: dict[str, float] = {}
         for col in col_entries:
             raw = row_data.get(col)
@@ -188,7 +173,7 @@ async def gas_readings(
         {
             "timestamp": row.timestamp.isoformat(),
             "data": {
-                col: (row.data or {}).get(col) for col in GAS_COLUMNS
+                col: _numeric_or_none((row.data or {}).get(col)) for col in GAS_COLUMNS
             },
         }
         for row in rows

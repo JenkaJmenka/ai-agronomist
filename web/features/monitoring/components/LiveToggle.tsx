@@ -3,32 +3,44 @@
 import { parseAsBoolean, useQueryState } from "nuqs";
 
 import { Button } from "@/components/ui/Button";
+import { resumeLiveScope } from "@/features/monitoring/api/live";
 import { DEFAULT_PERIOD_ID, periodHours, windowForPeriod } from "@/lib/periodPresets";
 import { useDateRange } from "@/lib/useDateRange";
+import { useScope } from "@/lib/useScope";
 
 /**
  * "Go Live" toggle — drives the `live` URL param.
- * When enabling live without a window, applies the default 24h lookback so
+ * Enabling live resumes a scope muted by Clear all data, then streams.
+ * When enabling without a window, applies the default 24h lookback so
  * period + refresh controls drive the rolling dashboard window.
  */
 export function LiveToggle() {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [{ from, to }, setRange] = useDateRange();
+  const { tenant, gh } = useScope();
 
-  function handleClick(): void {
+  async function handleClick(): Promise<void> {
     const next = !live;
-    if (next && (from === null || to === null)) {
-      const hours = periodHours(DEFAULT_PERIOD_ID) ?? 24;
-      void setRange(windowForPeriod(hours));
+    if (next) {
+      if (from === null || to === null) {
+        const hours = periodHours(DEFAULT_PERIOD_ID) ?? 24;
+        await setRange(windowForPeriod(hours));
+      }
+      // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
+      try {
+        await resumeLiveScope({ tenant, gh });
+      } catch {
+        // Still flip live on; stream may work if scope was never muted.
+      }
     }
-    void setLive(next);
+    await setLive(next);
   }
 
   return (
     <Button
       variant={live ? "primary" : "secondary"}
       size="sm"
-      onClick={handleClick}
+      onClick={() => void handleClick()}
       aria-pressed={live}
       data-testid="live-toggle"
       data-live={live ? "true" : "false"}

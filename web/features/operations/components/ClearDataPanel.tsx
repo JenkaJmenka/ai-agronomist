@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { parseAsBoolean, useQueryState } from "nuqs";
 
 import { TwoStepConfirm } from "@/components/ui/TwoStepConfirm";
 import { clearTenantData } from "@/features/operations/api/operations";
@@ -13,17 +14,23 @@ interface ClearDataPanelProps {
 /** Destructive tenant/greenhouse wipe behind the two-step confirm. */
 export function ClearDataPanel({ tenant, gh }: ClearDataPanelProps) {
   const queryClient = useQueryClient();
+  const [, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
   const mutation = useMutation<unknown, Error>({
     mutationFn: () => clearTenantData({ tenant, gh }),
-    // Every cached read for this scope is stale after a wipe.
-    onSuccess: () => void queryClient.invalidateQueries(),
+    onSuccess: async () => {
+      // Turn off Go Live so SSE does not keep showing mock stream data.
+      await setLive(false);
+      // Every cached read for this scope is stale after a wipe.
+      await queryClient.invalidateQueries();
+    },
   });
 
   return (
     <div className="space-y-3">
       <p className="text-sm text-sev-warning">
         This permanently deletes all sensor readings, synthetic inject rows, and related incidents
-        for the selected tenant and greenhouse.
+        for the selected tenant and greenhouse. Live mock data stays muted until you turn Go Live
+        back on.
       </p>
       <TwoStepConfirm
         triggerLabel="Clear all data"
@@ -48,7 +55,7 @@ export function ClearDataPanel({ tenant, gh }: ClearDataPanelProps) {
       ) : null}
       {mutation.isSuccess ? (
         <p role="status" className="text-sm text-sev-normal">
-          All data cleared for {tenant} / {gh}.
+          All data cleared for {tenant} / {gh}. Live feed muted until Go Live.
         </p>
       ) : null}
     </div>

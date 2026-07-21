@@ -5,13 +5,14 @@ import { Suspense, useMemo } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { Chip } from "@/components/ui/Chip";
-import { DateRangeControls } from "@/components/ui/DateRangeControls";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
+import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
-
-const SAVED_THRESHOLD_DEFAULT = 0.15;
+import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { SharedViewControls } from "@/features/shell/SharedViewControls";
+import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 
 function countFlagged(scores: number[], cutoff: number): number {
   let count = 0;
@@ -27,12 +28,14 @@ function quantile(sorted: number[], q: number): number {
 
 function ThresholdsBody() {
   const { rows, isLoading, isRefetching, isError, error, windowLabel } = useReadings();
-  // "preview" is the slider; "saved" mirrors the persisted dashboard cutoff.
-  const [preview, setPreview] = useQueryState(
-    "preview",
-    parseAsFloat.withDefault(SAVED_THRESHOLD_DEFAULT),
+  // Same `threshold` URL key as Monitoring / Anomalies so the slider stays shared.
+  const [threshold, setThreshold] = useQueryState(
+    "threshold",
+    parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   );
-  const [saved] = useQueryState("saved", parseAsFloat.withDefault(SAVED_THRESHOLD_DEFAULT));
+  const [saved] = useQueryState("saved", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
+  const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
+  const channels = useMemo(() => discoverChannels(rows), [rows]);
 
   const scores = useMemo(() => {
     const out: number[] = [];
@@ -45,7 +48,7 @@ function ThresholdsBody() {
   if (isError) throw error ?? new Error("Failed to load scores");
 
   const flaggedSaved = countFlagged(scores, saved);
-  const flaggedPreview = countFlagged(scores, preview);
+  const flaggedPreview = countFlagged(scores, threshold);
   const delta = flaggedPreview - flaggedSaved;
 
   return (
@@ -55,7 +58,12 @@ function ThresholdsBody() {
           <h1 className="text-2xl font-bold">Threshold Management</h1>
           <p className="text-sm text-text-muted tabular-nums">{windowLabel}</p>
         </div>
-        <DateRangeControls />
+        <SharedViewControls
+          channels={channels}
+          setpoints={setpoints}
+          onUpdateSetpoint={updateSetpoint}
+          onResetSetpoints={resetToDefaults}
+        />
       </div>
 
       {isLoading ? (
@@ -68,8 +76,8 @@ function ThresholdsBody() {
         </Card>
       ) : (
         <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
-          <Card title="Preview threshold">
-            <ThresholdControl threshold={preview} onChange={(v) => void setPreview(v)} />
+          <Card title="Threshold">
+            <ThresholdControl threshold={threshold} onChange={(v) => void setThreshold(v)} />
             <p className="mt-3 text-sm text-text-muted tabular-nums">
               Score range in window: {scores[0].toFixed(3)} → {scores[scores.length - 1].toFixed(3)}{" "}
               · p90 {quantile(scores, 0.9).toFixed(3)} · p95 {quantile(scores, 0.95).toFixed(3)}
@@ -86,7 +94,7 @@ function ThresholdsBody() {
             <Card title={`Flagged at saved (${saved.toFixed(3)})`}>
               <p className="text-2xl font-bold tabular-nums">{flaggedSaved}</p>
             </Card>
-            <Card title={`Flagged at preview (${preview.toFixed(3)})`}>
+            <Card title={`Flagged at threshold (${threshold.toFixed(3)})`}>
               <p className="text-2xl font-bold tabular-nums">{flaggedPreview}</p>
               <Chip severity={delta > 0 ? "warning" : "normal"}>
                 {delta >= 0 ? `+${delta}` : delta} vs saved

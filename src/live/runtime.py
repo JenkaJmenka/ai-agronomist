@@ -139,6 +139,24 @@ class LiveRuntime:
 
         logger.info("LiveRuntime stopped.")
 
+    def suppress_persistence(self, tenant_id: str, greenhouse_id: str) -> None:
+        """Mute live publish + DB writes for a scope (used by clear-all-data)."""
+        if self._batcher is not None:
+            self._batcher.suppress_scope(tenant_id, greenhouse_id)
+        else:
+            from src.live.scope_control import suppress_live_scope
+
+            suppress_live_scope(tenant_id, greenhouse_id)
+
+    def resume_persistence(self, tenant_id: str, greenhouse_id: str) -> None:
+        """Re-enable live publish + persistence (explicit Go Live only)."""
+        if self._batcher is not None:
+            self._batcher.resume_scope(tenant_id, greenhouse_id)
+        else:
+            from src.live.scope_control import resume_live_scope
+
+            resume_live_scope(tenant_id, greenhouse_id)
+
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------

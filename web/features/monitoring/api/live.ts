@@ -132,6 +132,28 @@ export const statusResponseSchema = z.object({
 
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
 
+const resumeResponseSchema = z.object({
+  resumed: z.boolean(),
+  tenant_id: z.string(),
+  greenhouse_id: z.string(),
+});
+
+/**
+ * Re-enable live publish/persistence after Clear all data muted the scope.
+ * Called when the operator turns Go Live on.
+ */
+export async function resumeLiveScope(params: { tenant: string; gh: string }): Promise<void> {
+  const query = new URLSearchParams({
+    tenant_id: params.tenant,
+    greenhouse_id: params.gh,
+  });
+  const res = await fetch(`/api/bff/live/resume?${query}`, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(`Failed to resume live scope (${res.status})`);
+  }
+  resumeResponseSchema.parse(await res.json());
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

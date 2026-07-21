@@ -37,6 +37,13 @@ class ComprehensiveInferenceRequest(BaseModel):
         None,
         description="ISO-8601 timestamp of the sequence for diurnal profile checks",
     )
+    climate_context: Optional[Dict[str, float]] = Field(
+        None,
+        description=(
+            "Optional climate-computer / microclimate scalars for setpoint-aware "
+            "SCADA rules (t_setpoint, t_plant, t_outdoor, i_solar, …)"
+        ),
+    )
 
     @field_validator("sequence")
     @classmethod
@@ -88,6 +95,7 @@ class ComprehensiveInferenceResponse(BaseModel):
     learning_progress: Optional[LearningProgressSummary] = None
     timestamp: str
     pipeline_version: str = "1.0"
+    scada_anomalies: Optional[List[Dict[str, Any]]] = None
 
 
 class BatchInferenceRequest(BaseModel):

@@ -95,6 +95,7 @@ def _to_response(result: dict) -> ComprehensiveInferenceResponse:
         learning_progress=learning,
         timestamp=result["timestamp"],
         pipeline_version=result["pipeline_version"],
+        scada_anomalies=result.get("scada_anomalies") or [],
     )
 
 
@@ -127,6 +128,7 @@ async def comprehensive_inference(
             baseline_sequences=request.baseline_sequences,
             sensor_pairs=sensor_pairs_raw,
             sequence_timestamp=request.sequence_timestamp,
+            climate_context=request.climate_context,
         )
         return _to_response(result)
     except ValueError as exc:

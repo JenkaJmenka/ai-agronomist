@@ -469,3 +469,44 @@ class TestBackgroundTask:
             pass
 
         assert await _count(session_factory) >= 1
+
+
+class TestPersistenceSuppress:
+    @pytest.fixture(autouse=True)
+    def _reset_scope_gate(self):
+        from src.live.scope_control import clear_all_suppressed_scopes
+
+        clear_all_suppressed_scopes()
+        yield
+        clear_all_suppressed_scopes()
+
+    @pytest.mark.asyncio
+    async def test_suppress_drops_buffered_and_blocks_add(
+        self, session_factory
+    ) -> None:
+        b = PersistenceBatcher(flush_interval=9999.0, session_factory=session_factory)
+        await b.add(_make_event(1))
+        await b.add(_make_event(2, tenant="other"))
+        b.suppress_scope(_TENANT, _GH)
+        assert b.is_scope_suppressed(_TENANT, _GH)
+        assert len(b._buffer) == 1
+        assert b._buffer[0].tenant_id == "other"
+
+        await b.add(_make_event(3))
+        assert all(ev.tenant_id != _TENANT for ev in b._buffer)
+
+        await b._flush()
+        assert await _count(session_factory, _TENANT) == 0
+        assert await _count(session_factory, "other") == 1
+
+    @pytest.mark.asyncio
+    async def test_resume_allows_persist_again(self, session_factory) -> None:
+        b = PersistenceBatcher(flush_interval=9999.0, session_factory=session_factory)
+        b.suppress_scope(_TENANT, _GH)
+        await b.add(_make_event(1))
+        assert len(b._buffer) == 0
+
+        b.resume_scope(_TENANT, _GH)
+        await b.add(_make_event(2))
+        await b._flush()
+        assert await _count(session_factory) == 1

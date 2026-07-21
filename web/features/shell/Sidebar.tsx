@@ -7,17 +7,11 @@ import { Suspense } from "react";
 import { NAV_SECTIONS } from "@/features/shell/nav";
 import { TenantSelector } from "@/features/shell/TenantSelector";
 import { ThemeToggle } from "@/features/shell/ThemeToggle";
+import { withDashboardQuery } from "@/lib/dashboardQuery";
 
 function NavLinks() {
   const pathname = usePathname();
   const search = useSearchParams();
-  // Keep tenant/gh context on every navigation.
-  const scope = new URLSearchParams();
-  for (const key of ["tenant", "gh"] as const) {
-    const value = search.get(key);
-    if (value) scope.set(key, value);
-  }
-  const suffix = scope.size > 0 ? `?${scope.toString()}` : "";
 
   return (
     <nav className="flex-1 overflow-y-auto px-2 py-3">
@@ -33,7 +27,7 @@ function NavLinks() {
             return (
               <Link
                 key={entry.href}
-                href={`${entry.href}${suffix}`}
+                href={withDashboardQuery(entry.href, search)}
                 aria-current={isActive ? "page" : undefined}
                 className={`block rounded-[var(--radius-control)] px-2 py-1.5 text-sm ${
                   isActive ? "bg-accent/15 font-medium text-accent" : "text-text hover:bg-border/50"

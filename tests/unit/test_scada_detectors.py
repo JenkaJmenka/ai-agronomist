@@ -319,10 +319,10 @@ class TestPhysicsValidator:
         assert result.suppressed is False
 
     def test_diurnal_suppression_not_fired_when_temp_out_of_greenhouse_range(self) -> None:
-        """Rule 5 requires all temp values within TEMP_RANGE; out-of-range disables suppression."""
+        """Rule 5 requires temps within the wide diurnal envelope (10–40 °C)."""
         seq = np.tile([25.0, 65.0, 400.0, 300.0], (20, 1)).astype(float)
-        # Temp gradual but starts below the 20°C floor
-        seq[:, 0] = np.linspace(18.0, 22.0, 20)
+        # Gradual co-moving trends but below the diurnal floor (still above hard 5 °C).
+        seq[:, 0] = np.linspace(8.0, 9.5, 20)
         seq[:, 1] = np.linspace(55.0, 60.0, 20)
         result = PhysicsValidator.validate(seq, self._NOW)
         assert result.suppressed is False

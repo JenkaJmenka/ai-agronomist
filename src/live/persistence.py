@@ -91,6 +91,7 @@ from sqlalchemy.dialects import sqlite as _sqlite_dialect
 from src.config import LIVE_PERSIST_FLUSH_SECONDS
 from src.db.models import RawReading, SensorReading
 from src.live.events import LiveReadingEvent, sanitize_channels
+from src.live.scope_control import is_live_scope_suppressed, suppress_live_scope, resume_live_scope
 
 logger = logging.getLogger("live.persistence")
 
@@ -202,8 +203,36 @@ class PersistenceBatcher:
     # Public API
     # ------------------------------------------------------------------
 
+    def suppress_scope(self, tenant_id: str, greenhouse_id: str) -> None:
+        """Stop persisting live events for a tenant/greenhouse and drop buffered ones."""
+        suppress_live_scope(tenant_id, greenhouse_id)
+        key = (tenant_id, greenhouse_id)
+        kept = deque(
+            ev
+            for ev in self._buffer
+            if (ev.tenant_id, ev.greenhouse_id) != key
+        )
+        dropped = len(self._buffer) - len(kept)
+        self._buffer = kept
+        if dropped:
+            logger.info(
+                "Persistence: dropped %d buffered event(s) for suppressed scope %s/%s",
+                dropped,
+                tenant_id,
+                greenhouse_id,
+            )
+
+    def resume_scope(self, tenant_id: str, greenhouse_id: str) -> None:
+        """Allow live persistence again for a tenant/greenhouse (e.g. after Go Live)."""
+        resume_live_scope(tenant_id, greenhouse_id)
+
+    def is_scope_suppressed(self, tenant_id: str, greenhouse_id: str) -> bool:
+        return is_live_scope_suppressed(tenant_id, greenhouse_id)
+
     async def add(self, event: LiveReadingEvent) -> None:
         """Append *event* to the buffer, dropping the oldest if at capacity."""
+        if is_live_scope_suppressed(event.tenant_id, event.greenhouse_id):
+            return
         if len(self._buffer) >= _BUFFER_CAP:
             self._buffer.popleft()
             self._dropped_count += 1

@@ -134,6 +134,11 @@ const SSE_BODY_CRITICAL =
 
 async function mockAllRoutes(page: Page) {
   await page.route("**/api/bff/readings/recent**", (route) => route.fulfill({ json: MOCK_RECENT }));
+  await page.route("**/api/bff/live/resume**", (route) =>
+    route.fulfill({
+      json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
+  );
   await page.route("**/api/bff/live/status**", (route) =>
     route.fulfill({
       json: {
@@ -153,6 +158,11 @@ async function mockAllRoutes(page: Page) {
 async function mockAllRoutesV2(page: Page, sseBody = SSE_BODY_V2) {
   await page.route("**/api/bff/readings/recent**", (route) =>
     route.fulfill({ json: MOCK_RECENT_V2 }),
+  );
+  await page.route("**/api/bff/live/resume**", (route) =>
+    route.fulfill({
+      json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
   );
   await page.route("**/api/bff/live/status**", (route) =>
     route.fulfill({

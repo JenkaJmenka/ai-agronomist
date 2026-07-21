@@ -128,7 +128,7 @@ class RootCauseAnalyzer:
             return {
                 "root_cause": top_match["cause"],
                 "confidence": top_match["confidence"],
-                "reasoning": top_match["description"],
+                "reasoning": self._format_rule_description(top_match, sequence),
                 "supporting_evidence": self._gather_evidence(
                     sequence, top_match
                 ),
@@ -240,11 +240,43 @@ class RootCauseAnalyzer:
                 and "humidity" in lower_sensors
             )
 
+        # Exact token match for composite keys like humidity_max.
+        if rule_sensors == "humidity_max":
+            return any(s.lower() == "humidity" for s in affected_sensors)
+
         for sensor in affected_sensors:
-            if sensor.lower() in rule_sensors.lower():
+            sensor_l = sensor.lower()
+            # Prefer exact equality; fall back to whole-token containment.
+            tokens = set(rule_sensors.lower().replace("-", "_").split("_"))
+            if sensor_l == rule_sensors.lower() or sensor_l in tokens:
                 return True
 
         return False
+
+    def _format_rule_description(
+        self, match: Dict[str, Any], sequence: np.ndarray
+    ) -> str:
+        """Build operator-facing reasoning, injecting measured RH when needed."""
+        template = match.get("description_template")
+        if not template:
+            return str(match.get("description", ""))
+        rh = float("nan")
+        try:
+            hum_idx = self.sensor_names.index("humidity")
+            rh = float(np.asarray(sequence)[-1, hum_idx])
+        except (ValueError, IndexError):
+            pass
+        from src.models.setpoint_scada_detector import humidity_reasoning_text
+
+        rh_phrase = (
+            humidity_reasoning_text(rh)
+            if np.isfinite(rh)
+            else "Humidity elevated"
+        )
+        try:
+            return template.format(rh_phrase=rh_phrase, rh=rh)
+        except (KeyError, ValueError):
+            return str(match.get("description", rh_phrase))
 
     def _gather_evidence(
         self, sequence: np.ndarray, match: Dict[str, Any]

@@ -709,6 +709,63 @@ STUCK_VARIANCE_THRESHOLD: float = 1e-4
 STUCK_FLAT_RANGE_THRESHOLD: float = 1e-4
 
 # =============================================================================
+# Setpoint-aware SCADA rules (dynamic climate-computer detection)
+# =============================================================================
+# Temperature deficit / excess margin relative to heating setpoint (°C).
+SETPOINT_TEMP_DELTA_C: float = float(os.environ.get("SETPOINT_TEMP_DELTA_C", "2.0"))
+
+# Solar / outdoor conditions that naturally explain over-heating (no alarm).
+OVERHEAT_SOLAR_WM2: float = float(os.environ.get("OVERHEAT_SOLAR_WM2", "400.0"))
+OVERHEAT_OUTDOOR_TEMP_C: float = float(os.environ.get("OVERHEAT_OUTDOOR_TEMP_C", "25.0"))
+
+# Relative humidity condensation / dehumidification thresholds.
+RH_CRIT_PERCENT: float = float(os.environ.get("RH_CRIT_PERCENT", "95.0"))
+RH_ABSOLUTE_MAX_PERCENT: float = float(os.environ.get("RH_ABSOLUTE_MAX_PERCENT", "98.0"))
+# Humidity deficit (g/m³) at/below which dehumidification is considered failed.
+DEHUMID_HD_CRIT_G_M3: float = float(os.environ.get("DEHUMID_HD_CRIT_G_M3", "0.5"))
+
+# Crop microclimate: canopy vs greenhouse air (°C).
+THERMAL_DIVERGENCE_CRIT_C: float = float(
+    os.environ.get("THERMAL_DIVERGENCE_CRIT_C", "5.0")
+)
+THERMAL_DIVERGENCE_SEVERE_C: float = float(
+    os.environ.get("THERMAL_DIVERGENCE_SEVERE_C", "10.0")
+)
+
+# Sensor flatline: variance window (N) and consecutive identical samples.
+# At 5-minute sampling, N=12 ≈ 1 h; 24 identical samples ≈ 2 h.
+FLATLINE_VARIANCE_WINDOW: int = int(os.environ.get("FLATLINE_VARIANCE_WINDOW", "12"))
+FLATLINE_IDENTICAL_STEPS: int = int(os.environ.get("FLATLINE_IDENTICAL_STEPS", "24"))
+
+# Column aliases for optional climate-computer / microclimate context.
+SETPOINT_COLUMN_ALIASES: Tuple[str, ...] = (
+    "t_setpoint",
+    "heating_setpoint",
+    "calculated_heating_temp",
+    "setpoint_temp",
+    "heating_temp",
+)
+PLANT_TEMP_COLUMN_ALIASES: Tuple[str, ...] = (
+    "t_plant",
+    "measured_plant_temp",
+    "plant_temp",
+    "canopy_temp",
+)
+OUTDOOR_TEMP_COLUMN_ALIASES: Tuple[str, ...] = (
+    "t_outdoor",
+    "outdoor_temp",
+    "outside_temp",
+    "ambient_outdoor_temp",
+)
+SOLAR_COLUMN_ALIASES: Tuple[str, ...] = (
+    "i_solar",
+    "solar_radiation",
+    "radiation_wm2",
+    "solar",
+    "radiation",
+)
+
+# =============================================================================
 # Noise / Precision Degradation Detection (SCADA spec section 1.4)
 # =============================================================================
 # Multiplier applied to per-sensor noise targets: alarm when rolling_std
