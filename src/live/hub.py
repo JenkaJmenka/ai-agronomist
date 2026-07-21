@@ -104,6 +104,12 @@ class LiveHub:
         )
         return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
 
+    async def clear_stream(self, tenant_id: str, greenhouse_id: str) -> bool:
+        """Delete the Redis stream for a tenant/greenhouse. Returns True if a key was removed."""
+        client = await self._get_client()
+        deleted = await client.delete(stream_key(tenant_id, greenhouse_id))
+        return bool(deleted)
+
     # ------------------------------------------------------------------
     # Subscribe
     # ------------------------------------------------------------------

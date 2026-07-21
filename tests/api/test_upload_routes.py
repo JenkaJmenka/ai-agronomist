@@ -117,6 +117,33 @@ class TestClearTenantData:
         assert await _count(test_database, SensorReading) == 0
         assert await _count(test_database, RawReading) == 0
 
+    async def test_clear_also_removes_synthetic_inject_rows(
+        self, test_client, test_database
+    ):
+        """Clear all must wipe inject-test rows, not only CSV uploads."""
+        test_client.post(
+            "/api/upload/inject-test-anomalies",
+            data={
+                "tenant_id": TENANT,
+                "greenhouse_id": "default",
+                "n_normal": 10,
+                "n_anomalies": 3,
+                "anomaly_type": "temperature_spike",
+            },
+        )
+        assert await _count(test_database, SensorReading) == 13
+
+        response = test_client.delete(
+            "/api/upload/data",
+            params={"tenant_id": TENANT, "greenhouse_id": "default"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["cleared"] is True
+        assert body["deleted_sensor"] == 13
+        assert await _count(test_database, SensorReading) == 0
+        assert await _count(test_database, RawReading) == 0
+
 
 class TestInjectTestAnomalies:
     async def test_inject_without_raw_sample_uses_canonical_stats(

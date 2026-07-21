@@ -22,7 +22,8 @@ export function ClearDataPanel({ tenant, gh }: ClearDataPanelProps) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-sev-warning">
-        This permanently deletes all sensor readings for the selected tenant and greenhouse.
+        This permanently deletes all sensor readings, synthetic inject rows, and related incidents
+        for the selected tenant and greenhouse.
       </p>
       <TwoStepConfirm
         triggerLabel="Clear all data"

@@ -4,68 +4,96 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
+import {
+  DEFAULT_PERIOD_ID,
+  matchPeriodId,
+  PERIOD_PRESETS,
+  periodHours,
+  REFRESH_PRESETS,
+  windowForPeriod,
+} from "@/lib/periodPresets";
 import { useDateRange } from "@/lib/useDateRange";
+import { useRefreshInterval } from "@/lib/useRefreshInterval";
 
-const QUICK_RANGES = [
-  { label: "24 h", hours: 24 },
-  { label: "7 d", hours: 24 * 7 },
-  { label: "1 mo", hours: 24 * 30 },
-  { label: "6 mo", hours: 24 * 182 },
-] as const;
+const SELECT_CLASS =
+  "h-8 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 text-sm text-text";
 
 /**
- * URL-driven window controls (plan §7.4): state lives in the URL so reloads
- * and interrupted fetches are lossless — the structural fix for the
- * Streamlit state-loss bug.
+ * Period + refresh dropdowns (URL-driven). Replaces the old chip row so
+ * Setpoints / Go Live share the same baseline as these controls.
  */
 export function DateRangeControls() {
   const [{ from, to }, setRange] = useDateRange();
+  const [refresh, setRefresh] = useRefreshInterval();
   const [isCustomOpen, setIsCustomOpen] = useState(false);
 
-  function applyQuickRange(hours: number): void {
-    const end = new Date();
-    const start = new Date(end.getTime() - hours * 3_600_000);
+  const periodValue = isCustomOpen ? "custom" : from && to ? matchPeriodId(from, to) : "";
+
+  function applyPeriod(periodId: string): void {
+    if (periodId === "custom") {
+      setIsCustomOpen(true);
+      return;
+    }
+    if (!periodId) return;
+    setIsCustomOpen(false);
+    const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
+    const next = windowForPeriod(hours);
+    void setRange(next);
+  }
+
+  function applyCustomRange(start: Date, end: Date): void {
     setIsCustomOpen(false);
     void setRange({ from: start, to: end });
   }
 
-  function applyCustomRange(start: Date, end: Date): void {
-    void setRange({ from: start, to: end });
-  }
-
   return (
-    <div className="relative flex flex-col items-end gap-1" data-testid="date-range-controls">
-      <div className="flex flex-wrap items-center gap-2">
-        {QUICK_RANGES.map((r) => (
-          <Button
-            key={r.label}
-            variant="secondary"
-            size="sm"
-            onClick={() => applyQuickRange(r.hours)}
-          >
-            {r.label}
-          </Button>
-        ))}
-        <Button
-          variant={isCustomOpen ? "primary" : "secondary"}
-          size="sm"
-          aria-expanded={isCustomOpen}
-          onClick={() => setIsCustomOpen((open) => !open)}
-          data-testid="custom-range-toggle"
+    <div className="relative flex items-center gap-2" data-testid="date-range-controls">
+      <label className="flex items-center gap-1.5 text-sm text-text-muted">
+        <span className="sr-only">Period</span>
+        <select
+          className={SELECT_CLASS}
+          value={periodValue}
+          onChange={(e) => applyPeriod(e.target.value)}
+          data-testid="period-select"
+          aria-label="Time period"
         >
-          Custom
-        </Button>
-      </div>
-      <span className="text-xs text-text-muted tabular-nums">
-        {from && to
-          ? `${from.toISOString().slice(0, 16)} → ${to.toISOString().slice(0, 16)}`
-          : "No window selected"}
-      </span>
+          <option value="" disabled>
+            Period
+          </option>
+          {PERIOD_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+
+      <label className="flex items-center gap-1.5 text-sm text-text-muted">
+        <span className="sr-only">Refresh</span>
+        <select
+          className={SELECT_CLASS}
+          value={String(refresh)}
+          onChange={(e) => void setRefresh(Number(e.target.value))}
+          data-testid="refresh-select"
+          aria-label="Refresh interval"
+        >
+          {REFRESH_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              Refresh {p.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
       {isCustomOpen && (
-        // Anchored dropdown: opening, typing, or applying never reflows the
-        // header row, so the picker can't drift from right to left.
         <div className="absolute right-0 top-full z-20 mt-1 w-max">
           <CustomDateRangeForm from={from} to={to} onApply={applyCustomRange} />
+          <div className="mt-1 flex justify-end">
+            <Button variant="ghost" size="sm" onClick={() => setIsCustomOpen(false)}>
+              Cancel
+            </Button>
+          </div>
         </div>
       )}
     </div>

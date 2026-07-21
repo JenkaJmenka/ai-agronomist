@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
@@ -68,17 +68,10 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
     downsampled,
   } = useReadings();
 
-  const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
+  const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
-  const [range, setRange] = useDateRange();
-
-  // Setting a date window while live → force live off.
-  useEffect(() => {
-    if (live && range.from !== null && range.to !== null) {
-      void setLive(false);
-    }
-  }, [live, range.from, range.to, setLive]);
+  const [, setRange] = useDateRange();
 
   const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -130,7 +123,7 @@ function MonitoringBody({ title, channelFilter }: MonitoringViewProps) {
             {downsampled ? " · downsampled" : ""}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-end gap-2">
           <SetpointsPanel
             channels={channels}
             setpoints={setpoints}

@@ -1,71 +1,45 @@
 "use client";
 
-import * as Tooltip from "@radix-ui/react-tooltip";
-import { parseAsBoolean, parseAsIsoDateTime, useQueryState, useQueryStates } from "nuqs";
+import { parseAsBoolean, useQueryState } from "nuqs";
 
 import { Button } from "@/components/ui/Button";
+import { DEFAULT_PERIOD_ID, periodHours, windowForPeriod } from "@/lib/periodPresets";
+import { useDateRange } from "@/lib/useDateRange";
 
 /**
- * "Go Live" toggle button — drives the `live` URL param.
- * Disabled (with tooltip) when an explicit from/to window is set; the date
- * window takes precedence over live mode.
+ * "Go Live" toggle — drives the `live` URL param.
+ * When enabling live without a window, applies the default 24h lookback so
+ * period + refresh controls drive the rolling dashboard window.
  */
 export function LiveToggle() {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
-  const [{ from, to }] = useQueryStates({
-    from: parseAsIsoDateTime,
-    to: parseAsIsoDateTime,
-  });
-
-  const hasWindow = from !== null && to !== null;
-  const isDisabled = hasWindow;
+  const [{ from, to }, setRange] = useDateRange();
 
   function handleClick(): void {
-    if (isDisabled) return;
-    void setLive((prev) => !prev);
+    const next = !live;
+    if (next && (from === null || to === null)) {
+      const hours = periodHours(DEFAULT_PERIOD_ID) ?? 24;
+      void setRange(windowForPeriod(hours));
+    }
+    void setLive(next);
   }
 
-  const button = (
+  return (
     <Button
-      variant={live && !isDisabled ? "primary" : "secondary"}
+      variant={live ? "primary" : "secondary"}
       size="sm"
       onClick={handleClick}
-      disabled={isDisabled}
-      aria-pressed={live && !isDisabled}
+      aria-pressed={live}
       data-testid="live-toggle"
-      data-live={live && !isDisabled ? "true" : "false"}
+      data-live={live ? "true" : "false"}
     >
       <span
         className={`inline-block h-2 w-2 rounded-full ${
-          live && !isDisabled ? "animate-pulse bg-green-400" : "bg-text-muted"
+          live ? "animate-pulse bg-green-400" : "bg-text-muted"
         }`}
         aria-hidden="true"
       />
       Go Live
     </Button>
-  );
-
-  if (!isDisabled) {
-    return button;
-  }
-
-  return (
-    <Tooltip.Provider delayDuration={300}>
-      <Tooltip.Root>
-        {/* Wrap disabled button in a span so pointer events reach the trigger */}
-        <Tooltip.Trigger asChild>
-          <span data-testid="live-toggle-wrapper">{button}</span>
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            side="bottom"
-            className="z-50 rounded bg-bg-elevated px-2 py-1 text-xs text-text shadow"
-          >
-            Clear the date window to enable live mode
-            <Tooltip.Arrow className="fill-bg-elevated" />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
   );
 }

@@ -46,15 +46,15 @@ test("tenant selector updates the URL", async ({ page }) => {
   await expect(page).toHaveURL(/gh=gh_B/);
 });
 
-test("quick range buttons write the window to the URL", async ({ page }) => {
+test("period select writes the window to the URL", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "7 d" }).click();
+  await page.getByTestId("period-select").selectOption("7d");
   await expect(page).toHaveURL(/from=.+to=.+/);
 });
 
 test("custom range form writes an explicit window to the URL", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("period-select").selectOption("custom");
   await fillDateTimeField(page, "custom-range-from", "2026-06-01T12:00");
   await fillDateTimeField(page, "custom-range-to", "2026-06-15T12:30");
   await page.getByTestId("custom-range-apply").click();
@@ -67,7 +67,7 @@ test("custom range form writes an explicit window to the URL", async ({ page }) 
 
 test("custom range apply is disabled when from is not before to", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("period-select").selectOption("custom");
   await fillDateTimeField(page, "custom-range-from", "2026-06-15T12:00");
   await fillDateTimeField(page, "custom-range-to", "2026-06-01T12:00");
   await expect(page.getByTestId("custom-range-apply")).toBeDisabled();
@@ -79,7 +79,7 @@ test("custom range apply is disabled when from is not before to", async ({ page 
 
 test("custom range year segment caps at 4 digits and advances to hours", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("period-select").selectOption("custom");
   const year = page.getByTestId("custom-range-from-year");
   await year.click();
   await year.pressSequentially("20261");
@@ -137,7 +137,7 @@ test("thresholds page: preview slider updates flagged counts and URL", async ({ 
 
 test("calendar dropdown picks a day into the segmented field", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("custom-range-toggle").click();
+  await page.getByTestId("period-select").selectOption("custom");
   await fillDateTimeField(page, "custom-range-from", "2026-06-01T09:30");
   await page.getByTestId("custom-range-from-calendar-toggle").click();
   const calendar = page.getByTestId("custom-range-from-calendar");

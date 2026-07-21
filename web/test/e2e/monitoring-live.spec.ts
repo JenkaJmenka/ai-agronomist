@@ -244,21 +244,20 @@ test("anomaly strip item links to the Anomalies page with correct params", async
   await expect(link).toHaveAttribute("href", /threshold=/);
 });
 
-test("setting a date window while live forces live=false", async ({ page }) => {
+test("setting a date window while live keeps live mode on", async ({ page }) => {
   await mockAllRoutes(page);
   await page.goto("/monitoring?live=true");
 
   await expect(page.getByTestId("live-badge")).toBeVisible({ timeout: 3000 });
 
-  // Apply a quick range (which sets from/to in the URL).
-  await page.getByTestId("date-range-controls").getByRole("button", { name: "24 h" }).click();
+  // Apply a period preset (sets from/to in the URL) — live stays on.
+  await page.getByTestId("period-select").selectOption("24h");
 
-  // live param should be gone or false.
-  await expect(page).not.toHaveURL(/live=true/);
-  await expect(page.getByTestId("live-badge")).not.toBeVisible();
+  await expect(page).toHaveURL(/live=true/);
+  await expect(page.getByTestId("live-badge")).toBeVisible();
 });
 
-test("Go Live button is disabled when a date window is set", async ({ page }) => {
+test("Go Live stays enabled when a date window is set", async ({ page }) => {
   await page.route("**/api/bff/readings/window**", (route) =>
     route.fulfill({ json: { rows: HISTORICAL_ROWS, count: HISTORICAL_ROWS.length } }),
   );
@@ -266,7 +265,7 @@ test("Go Live button is disabled when a date window is set", async ({ page }) =>
   await page.goto("/monitoring?from=2026-07-18T00:00:00.000Z&to=2026-07-18T12:00:00.000Z");
 
   await expect(page.getByTestId("live-toggle")).toBeVisible();
-  await expect(page.getByTestId("live-toggle")).toBeDisabled();
+  await expect(page.getByTestId("live-toggle")).not.toBeDisabled();
 });
 
 // ---------------------------------------------------------------------------

@@ -296,21 +296,75 @@ async def clear_tenant_data(
     greenhouse_id: str = "default",
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete all raw and sensor readings for a tenant/greenhouse."""
-    await db.execute(
+    """Delete all greenhouse-scoped data for a tenant/greenhouse.
+
+    Removes SensorReading + RawReading (including synthetic inject rows),
+    related Incident / IncidentAction rows, and the live Redis stream so
+    mock/live buffers cannot immediately re-surface cleared history.
+    """
+    from sqlalchemy import select as _select
+
+    from src.db.models import Incident, IncidentAction
+
+    raw_result = await db.execute(
         delete(RawReading).where(
             RawReading.tenant_id == tenant_id,
             RawReading.greenhouse_id == greenhouse_id,
         )
     )
-    await db.execute(
+    sensor_result = await db.execute(
         delete(SensorReading).where(
             SensorReading.tenant_id == tenant_id,
             SensorReading.greenhouse_id == greenhouse_id,
         )
     )
+
+    id_result = await db.execute(
+        _select(Incident.id).where(
+            Incident.tenant_id == tenant_id,
+            Incident.greenhouse_id == greenhouse_id,
+        )
+    )
+    incident_ids = [row[0] for row in id_result.fetchall()]
+    deleted_actions = 0
+    if incident_ids:
+        actions_result = await db.execute(
+            delete(IncidentAction).where(IncidentAction.incident_id.in_(incident_ids))
+        )
+        deleted_actions = actions_result.rowcount or 0
+    incidents_result = await db.execute(
+        delete(Incident).where(
+            Incident.tenant_id == tenant_id,
+            Incident.greenhouse_id == greenhouse_id,
+        )
+    )
     await db.commit()
-    return {"cleared": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+
+    # Best-effort: drop the live replay buffer so cleared rows don't reappear
+    # from Redis XREAD until fresh events are published.
+    live_stream_cleared = False
+    try:
+        from src.api.services.live_hub_provider import get_live_hub
+
+        live_stream_cleared = await get_live_hub().clear_stream(tenant_id, greenhouse_id)
+    except Exception:  # noqa: BLE001 — clear must succeed even if Redis is down
+        logger.warning(
+            "clear_tenant_data: live stream clear failed for %s/%s",
+            tenant_id,
+            greenhouse_id,
+            exc_info=True,
+        )
+
+    return {
+        "cleared": True,
+        "deleted_raw": raw_result.rowcount or 0,
+        "deleted_sensor": sensor_result.rowcount or 0,
+        "deleted_incidents": incidents_result.rowcount or 0,
+        "deleted_incident_actions": deleted_actions,
+        "live_stream_cleared": live_stream_cleared,
+        "tenant_id": tenant_id,
+        "greenhouse_id": greenhouse_id,
+    }
 
 
 def _daily_cycle(hour: float, lo: float, hi: float, peak_hour: float = 14.0) -> float:
@@ -551,20 +605,23 @@ async def remove_synthetic_anomalies(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Remove synthetically injected test anomalies. Real sensor data is never touched."""
-    if anomaly_type is not None and anomaly_type not in ANOMALY_TYPES:
+    # Treat empty string the same as omit (UI "All synthetic" option).
+    resolved_type = anomaly_type.strip() if anomaly_type else None
+    if resolved_type is not None and resolved_type not in ANOMALY_TYPES:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown anomaly_type '{anomaly_type}'. Valid: {ANOMALY_TYPES}",
+            detail=f"Unknown anomaly_type '{resolved_type}'. Valid: {ANOMALY_TYPES}",
         )
 
     # SensorReading rows are tagged via non-null anomaly_type field
+    # (spike types + synthetic_context background rows).
     sensor_where = [
         SensorReading.tenant_id == tenant_id,
         SensorReading.greenhouse_id == greenhouse_id,
         SensorReading.anomaly_type.is_not(None),
     ]
-    if anomaly_type:
-        sensor_where[-1] = SensorReading.anomaly_type == anomaly_type
+    if resolved_type:
+        sensor_where[-1] = SensorReading.anomaly_type == resolved_type
 
     # RawReading rows are tagged via source = "synthetic:<type>" or "synthetic:context"
     raw_where = [
@@ -572,8 +629,8 @@ async def remove_synthetic_anomalies(
         RawReading.greenhouse_id == greenhouse_id,
         RawReading.source.like("synthetic:%"),
     ]
-    if anomaly_type:
-        raw_where[-1] = RawReading.source == f"synthetic:{anomaly_type}"
+    if resolved_type:
+        raw_where[-1] = RawReading.source == f"synthetic:{resolved_type}"
 
     sensor_result = await db.execute(delete(SensorReading).where(*sensor_where))
     raw_result = await db.execute(delete(RawReading).where(*raw_where))
@@ -582,7 +639,7 @@ async def remove_synthetic_anomalies(
     return {
         "deleted_sensor": sensor_result.rowcount,
         "deleted_raw": raw_result.rowcount,
-        "anomaly_type": anomaly_type or "all",
+        "anomaly_type": resolved_type or "all",
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }
