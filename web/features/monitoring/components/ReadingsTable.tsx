@@ -16,25 +16,35 @@ interface ReadingsTableProps {
   readonly channels: string[];
   /** Rows scoring at/above this are treated as anomalous. */
   readonly threshold: number;
-  /** Effective setpoints — used to decide which channel cells to highlight. */
+  /** Effective setpoints — preferred signal for which channel cells to highlight. */
   readonly setpoints: Setpoints;
 }
 
-function isAnomalousRow(row: SensorRow, threshold: number): boolean {
+export function isAnomalousRow(row: SensorRow, threshold: number): boolean {
   return typeof row.anomaly_score === "number" && row.anomaly_score >= threshold;
 }
 
-/** Channel cell is anomalous when the row is flagged and the value is off-setpoint. */
-function isAnomalousChannel(
+/**
+ * Channels to highlight on a flagged row.
+ *
+ * Prefer off-setpoint channels (precise). When the row is anomalous but every
+ * value is still inside the monitoring band (common for LSTM / pattern / SCADA
+ * findings vs wider UI setpoints), fall back to all numeric channels so the
+ * operator still sees the detection.
+ */
+export function anomalousChannelsForRow(
   row: SensorRow,
-  channel: string,
+  channels: readonly string[],
   threshold: number,
   setpoints: Setpoints,
-): boolean {
-  if (!isAnomalousRow(row, threshold)) return false;
-  const value = row[channel];
-  if (typeof value !== "number") return false;
-  return getChannelStatus(channel, value, setpoints) !== "ok";
+): readonly string[] {
+  if (!isAnomalousRow(row, threshold)) return [];
+
+  const numeric = channels.filter((ch) => typeof row[ch] === "number");
+  const offSetpoint = numeric.filter(
+    (ch) => getChannelStatus(ch, row[ch] as number, setpoints) !== "ok",
+  );
+  return offSetpoint.length > 0 ? offSetpoint : numeric;
 }
 
 /** Split a reading timestamp into a short localized date line and a seconds-free time line. */
@@ -57,7 +67,7 @@ function TimestampCell({ value }: { readonly value: unknown }) {
   );
 }
 
-const ANOMALY_CELL = "bg-sev-critical/15";
+const ANOMALY_CELL = "bg-sev-critical/20";
 
 export function ReadingsTable({ rows, channels, threshold, setpoints }: ReadingsTableProps) {
   const columns = useMemo<ColumnDef<SensorRow, unknown>[]>(() => {
@@ -111,6 +121,17 @@ export function ReadingsTable({ rows, channels, threshold, setpoints }: Readings
     ]);
   }, [recentRows, channels]);
 
+  const highlightByTs = useMemo(() => {
+    const map = new Map<string, ReadonlySet<string>>();
+    for (const row of recentRows) {
+      map.set(
+        row.timestamp,
+        new Set(anomalousChannelsForRow(row, channels, threshold, setpoints)),
+      );
+    }
+    return map;
+  }, [recentRows, channels, threshold, setpoints]);
+
   return (
     <div className="space-y-2">
       <div className="flex justify-end">
@@ -130,10 +151,7 @@ export function ReadingsTable({ rows, channels, threshold, setpoints }: Readings
           if (columnId === "anomaly_score") {
             return isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
           }
-          if (
-            channels.includes(columnId) &&
-            isAnomalousChannel(row, columnId, threshold, setpoints)
-          ) {
+          if (highlightByTs.get(row.timestamp)?.has(columnId)) {
             return ANOMALY_CELL;
           }
           return undefined;
