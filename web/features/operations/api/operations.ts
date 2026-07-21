@@ -216,3 +216,27 @@ export function clearTenantData(params: { tenant: string; gh: string }): Promise
     method: "DELETE",
   });
 }
+
+const removeLiveResultSchema = z
+  .object({
+    cleared_live: z.boolean(),
+    deleted_sensor: z.number(),
+    deleted_raw: z.number(),
+  })
+  .loose();
+
+export type RemoveLiveResult = z.infer<typeof removeLiveResultSchema>;
+
+/** Wipe Go Live / mock SCADA rows only; keep CSV uploads and inject-test data. */
+export function removeLiveDemoData(params: {
+  tenant: string;
+  gh: string;
+}): Promise<RemoveLiveResult> {
+  const query = new URLSearchParams({
+    tenant_id: params.tenant,
+    greenhouse_id: params.gh,
+  });
+  return requestJson(`/api/bff/upload/live-data?${query}`, removeLiveResultSchema, {
+    method: "DELETE",
+  });
+}

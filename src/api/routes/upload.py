@@ -9,7 +9,7 @@ import pandas as pd
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from sqlalchemy import delete
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.sensor_data import UploadResponse
@@ -416,6 +416,101 @@ async def clear_tenant_data(
     }
 
 
+# Marker written by live PersistenceBatcher on SensorReading rows.
+_LIVE_ANOMALY_TYPE = "live"
+# RawReading.source for live mock/SCADA persistence (see live/persistence.py).
+_LIVE_RAW_SOURCE = "live"
+
+
+@router.delete("/upload/live-data")
+async def remove_live_demo_data(
+    request: Request,
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query("default"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete Go Live / mock SCADA persisted rows only.
+
+    Client CSV uploads and inject-test synthetic rows are left untouched.
+    Mutes live publish+persistence and clears the Redis stream so wiped rows
+    do not reappear until the operator turns Live back on.
+    """
+    live_persistence_suppressed = False
+    runtime = getattr(request.app.state, "live_runtime", None)
+    if runtime is not None:
+        try:
+            runtime.suppress_persistence(tenant_id, greenhouse_id)
+            live_persistence_suppressed = True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "remove_live_demo_data: live persistence suppress failed for %s/%s",
+                tenant_id,
+                greenhouse_id,
+                exc_info=True,
+            )
+    else:
+        from src.live.scope_control import suppress_live_scope
+
+        suppress_live_scope(tenant_id, greenhouse_id)
+        live_persistence_suppressed = True
+
+    live_raw_filter = [
+        RawReading.tenant_id == tenant_id,
+        RawReading.greenhouse_id == greenhouse_id,
+        or_(
+            RawReading.source == _LIVE_RAW_SOURCE,
+            RawReading.source.like(f"{_LIVE_RAW_SOURCE}:%"),
+        ),
+    ]
+    ts_result = await db.execute(select(RawReading.timestamp).where(*live_raw_filter))
+    live_timestamps = [row[0] for row in ts_result.fetchall()]
+
+    # Prefer the live tag; also remove pre-tag SensorReading rows that share
+    # timestamps with live RawReading (untagged only — never wipe inject rows).
+    sensor_match = SensorReading.anomaly_type == _LIVE_ANOMALY_TYPE
+    if live_timestamps:
+        sensor_match = or_(
+            sensor_match,
+            and_(
+                SensorReading.timestamp.in_(live_timestamps),
+                SensorReading.anomaly_type.is_(None),
+            ),
+        )
+    sensor_result = await db.execute(
+        delete(SensorReading).where(
+            SensorReading.tenant_id == tenant_id,
+            SensorReading.greenhouse_id == greenhouse_id,
+            sensor_match,
+        )
+    )
+
+    raw_result = await db.execute(delete(RawReading).where(*live_raw_filter))
+    await db.commit()
+
+    live_stream_cleared = False
+    try:
+        from src.api.services.live_hub_provider import get_live_hub
+
+        live_stream_cleared = await get_live_hub().clear_stream(tenant_id, greenhouse_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "remove_live_demo_data: live stream clear failed for %s/%s",
+            tenant_id,
+            greenhouse_id,
+            exc_info=True,
+        )
+
+    return {
+        "cleared_live": True,
+        "deleted_raw": raw_result.rowcount or 0,
+        "deleted_sensor": sensor_result.rowcount or 0,
+        "live_stream_cleared": live_stream_cleared,
+        "live_persistence_suppressed": live_persistence_suppressed,
+        "tenant_id": tenant_id,
+        "greenhouse_id": greenhouse_id,
+    }
+
+
 def _daily_cycle(hour: float, lo: float, hi: float, peak_hour: float = 14.0) -> float:
     phase = (hour - peak_hour) / 24.0 * 2 * math.pi
     mid = (lo + hi) / 2.0
@@ -663,14 +758,20 @@ async def remove_synthetic_anomalies(
         )
 
     # SensorReading rows are tagged via non-null anomaly_type field
-    # (spike types + synthetic_context background rows).
+    # (spike types + synthetic_context background rows). Live demo rows use
+    # anomaly_type="live" and are cleaned by DELETE /upload/live-data instead.
     sensor_where = [
         SensorReading.tenant_id == tenant_id,
         SensorReading.greenhouse_id == greenhouse_id,
         SensorReading.anomaly_type.is_not(None),
+        SensorReading.anomaly_type != _LIVE_ANOMALY_TYPE,
     ]
     if resolved_type:
-        sensor_where[-1] = SensorReading.anomaly_type == resolved_type
+        sensor_where = [
+            SensorReading.tenant_id == tenant_id,
+            SensorReading.greenhouse_id == greenhouse_id,
+            SensorReading.anomaly_type == resolved_type,
+        ]
 
     # RawReading rows are tagged via source = "synthetic:<type>" or "synthetic:context"
     raw_where = [

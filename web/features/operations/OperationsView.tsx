@@ -34,7 +34,7 @@ function OperationsBody() {
         <InjectAnomaliesPanel tenant={tenant} gh={gh} />
       </Card>
 
-      <Card title="Clear stored data">
+      <Card title="Manage stored data">
         <ClearDataPanel tenant={tenant} gh={gh} />
       </Card>
     </div>

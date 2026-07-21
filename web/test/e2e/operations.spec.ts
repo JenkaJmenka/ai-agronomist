@@ -103,6 +103,25 @@ test("clear data fires only after the second confirm click", async ({ page }) =>
   expect(deleteRequests).toBe(1);
 });
 
+test("remove live demo data fires only after the second confirm click", async ({ page }) => {
+  let deleteRequests = 0;
+  await page.route("**/api/bff/upload/live-data**", (route) => {
+    deleteRequests += 1;
+    return route.fulfill({
+      json: { cleared_live: true, deleted_sensor: 3, deleted_raw: 3 },
+    });
+  });
+
+  await page.goto("/operations");
+  await page.getByTestId("remove-live-data-trigger").click();
+  await expect(page.getByText(/Remove live\/mock readings/)).toBeVisible();
+  expect(deleteRequests).toBe(0);
+
+  await page.getByTestId("remove-live-data-confirm").click();
+  await expect(page.getByText(/Live demo data removed/)).toBeVisible();
+  expect(deleteRequests).toBe(1);
+});
+
 test("model registry lists versions and activates an inactive one", async ({ page }) => {
   let activateRequests = 0;
   await page.route("**/api/bff/models/*/activate", (route) => {

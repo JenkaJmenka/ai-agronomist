@@ -260,9 +260,186 @@ class TestRemoveSyntheticAnomalies:
         assert await _count(test_database, SensorReading) == 10
         assert await _count(test_database, RawReading) == 10
 
+    async def test_remove_inject_keeps_live_tagged_rows(self, test_client, test_database):
+        """Inject cleanup must not own live demo rows (anomaly_type=live)."""
+        live_ts = NOW - datetime.timedelta(minutes=1)
+        test_database.add(
+            SensorReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=live_ts,
+                temperature=22.0,
+                humidity=60.0,
+                co2=400.0,
+                light=500.0,
+                anomaly_type="live",
+            )
+        )
+        test_database.add(
+            RawReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=live_ts,
+                source="live",
+                data={"temperature": 22.0, "humidity": 60.0, "co2": 400.0, "light": 500.0},
+            )
+        )
+        await test_database.commit()
+        test_client.post(
+            "/api/upload/inject-test-anomalies",
+            data={
+                "tenant_id": TENANT,
+                "greenhouse_id": "default",
+                "n_normal": 4,
+                "n_anomalies": 1,
+                "anomaly_type": "temperature_spike",
+            },
+        )
+        assert await _count(test_database, SensorReading) == 6
+
+        response = test_client.delete(
+            "/api/upload/inject-test-anomalies",
+            params={"tenant_id": TENANT, "greenhouse_id": "default"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert await _count(test_database, SensorReading) == 1
+        assert await _count(test_database, RawReading) == 1
+        remaining = (
+            await test_database.execute(select(SensorReading).where(SensorReading.tenant_id == TENANT))
+        ).scalar_one()
+        assert remaining.anomaly_type == "live"
+
     def test_unknown_type_rejected(self, test_client):
         response = test_client.delete(
             "/api/upload/inject-test-anomalies",
             params={"tenant_id": TENANT, "anomaly_type": "volcano"},
         )
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+class TestRemoveLiveDemoData:
+    async def test_removes_live_keeps_csv_and_inject(self, test_client, test_database):
+        test_client.post(
+            "/api/upload",
+            files={"file": ("data.csv", io.BytesIO(_csv_bytes(8)), "text/csv")},
+            data={"tenant_id": TENANT, "greenhouse_id": "default"},
+        )
+        test_client.post(
+            "/api/upload/inject-test-anomalies",
+            data={
+                "tenant_id": TENANT,
+                "greenhouse_id": "default",
+                "n_normal": 3,
+                "n_anomalies": 1,
+                "anomaly_type": "humidity_drop",
+            },
+        )
+        live_ts = NOW - datetime.timedelta(minutes=2)
+        legacy_ts = NOW - datetime.timedelta(minutes=3)
+        test_database.add(
+            SensorReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=live_ts,
+                temperature=23.0,
+                humidity=55.0,
+                co2=410.0,
+                light=480.0,
+                anomaly_type="live",
+            )
+        )
+        test_database.add(
+            RawReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=live_ts,
+                source="live",
+                data={"temperature": 23.0, "humidity": 55.0, "co2": 410.0, "light": 480.0},
+            )
+        )
+        # Pre-tag live SensorReading: untagged score sharing a live raw timestamp.
+        test_database.add(
+            SensorReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=legacy_ts,
+                temperature=24.0,
+                humidity=56.0,
+                co2=420.0,
+                light=490.0,
+                anomaly_type=None,
+            )
+        )
+        test_database.add(
+            RawReading(
+                tenant_id=TENANT,
+                greenhouse_id="default",
+                timestamp=legacy_ts,
+                source="live",
+                data={"temperature": 24.0, "humidity": 56.0, "co2": 420.0, "light": 490.0},
+            )
+        )
+        await test_database.commit()
+
+        assert await _count(test_database, SensorReading) == 14  # 8 csv + 4 inject + 2 live
+        assert await _count(test_database, RawReading) == 14  # 8 csv + 4 inject + 2 live
+
+        response = test_client.delete(
+            "/api/upload/live-data",
+            params={"tenant_id": TENANT, "greenhouse_id": "default"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["cleared_live"] is True
+        assert body["deleted_sensor"] == 2
+        assert body["deleted_raw"] == 2
+        assert body["live_persistence_suppressed"] is True
+        assert await _count(test_database, SensorReading) == 12
+        assert await _count(test_database, RawReading) == 12
+        live_left = await test_database.execute(
+            select(func.count(SensorReading.id)).where(
+                SensorReading.tenant_id == TENANT,
+                SensorReading.anomaly_type == "live",
+            )
+        )
+        assert live_left.scalar() == 0
+
+    async def test_removes_only_target_greenhouse(self, test_client, test_database):
+        other_gh = "gh-other"
+        for gh, source in (("default", "live"), (other_gh, "live")):
+            test_database.add(
+                SensorReading(
+                    tenant_id=TENANT,
+                    greenhouse_id=gh,
+                    timestamp=NOW,
+                    temperature=22.0,
+                    humidity=60.0,
+                    co2=400.0,
+                    light=500.0,
+                    anomaly_type="live",
+                )
+            )
+            test_database.add(
+                RawReading(
+                    tenant_id=TENANT,
+                    greenhouse_id=gh,
+                    timestamp=NOW,
+                    source=source,
+                    data={"temperature": 22.0},
+                )
+            )
+        await test_database.commit()
+
+        response = test_client.delete(
+            "/api/upload/live-data",
+            params={"tenant_id": TENANT, "greenhouse_id": "default"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["deleted_raw"] == 1
+        remaining_other = await test_database.execute(
+            select(func.count(RawReading.id)).where(
+                RawReading.tenant_id == TENANT,
+                RawReading.greenhouse_id == other_gh,
+            )
+        )
+        assert remaining_other.scalar() == 1

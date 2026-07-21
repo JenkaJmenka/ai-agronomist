@@ -111,6 +111,7 @@ class TestEventToRow:
         assert row["greenhouse_id"] == _GH
         assert row["timestamp"] == _ts(5)
         assert abs(row["temperature"] - 27.0) < 1e-6
+        assert row["anomaly_type"] == "live"
 
     def test_incomplete_event_returns_none(self) -> None:
         """Events missing any canonical channel return None (skip policy)."""
