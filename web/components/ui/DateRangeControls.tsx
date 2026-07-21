@@ -1,19 +1,23 @@
 "use client";
 
+import { parseAsBoolean, useQueryState } from "nuqs";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
+import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
 import {
   DEFAULT_PERIOD_ID,
   matchPeriodId,
   PERIOD_PRESETS,
   periodHours,
+  periodWindowEnd,
   REFRESH_PRESETS,
   windowForPeriod,
 } from "@/lib/periodPresets";
 import { useDateRange } from "@/lib/useDateRange";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
+import { useScope } from "@/lib/useScope";
 
 const SELECT_CLASS =
   "h-8 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 text-sm text-text";
@@ -21,9 +25,15 @@ const SELECT_CLASS =
 /**
  * Period + refresh dropdowns (URL-driven). Replaces the old chip row so
  * Setpoints / Go Live share the same baseline as these controls.
+ *
+ * Preset periods anchor to the newest stored reading (not wall-clock now),
+ * matching `/api/readings/recent`, so historical uploads fill Last hour/24h/7d.
+ * While Go Live is on, the end prefers wall-clock so incoming ticks stay in view.
  */
 export function DateRangeControls() {
+  const { tenant, gh } = useScope();
   const [{ from, to }, setRange] = useDateRange();
+  const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [refresh, setRefresh] = useRefreshInterval();
   const [isCustomOpen, setIsCustomOpen] = useState(false);
   /**
@@ -37,7 +47,7 @@ export function DateRangeControls() {
   const periodValue = isCustomOpen || matched === "custom" ? "custom" : matched;
   const selectValue = armCustomReselect ? "" : periodValue;
 
-  function applyPeriod(periodId: string): void {
+  async function applyPeriod(periodId: string): Promise<void> {
     if (periodId === "custom") {
       setIsCustomOpen(true);
       return;
@@ -45,7 +55,17 @@ export function DateRangeControls() {
     if (!periodId) return;
     setIsCustomOpen(false);
     const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
-    void setRange(windowForPeriod(hours));
+
+    let maxTimestamp: Date | null = null;
+    try {
+      const bounds = await fetchReadingsBounds({ tenant, gh });
+      if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
+    } catch {
+      // Fall back to wall-clock if bounds are unavailable.
+    }
+
+    const end = periodWindowEnd({ maxTimestamp, live });
+    void setRange(windowForPeriod(hours, end));
   }
 
   function applyCustomRange(start: Date, end: Date): void {
@@ -62,7 +82,7 @@ export function DateRangeControls() {
 
   function handlePeriodChange(value: string): void {
     setArmCustomReselect(false);
-    applyPeriod(value);
+    void applyPeriod(value);
   }
 
   function handlePeriodBlur(): void {

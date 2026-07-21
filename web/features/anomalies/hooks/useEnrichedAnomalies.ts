@@ -12,7 +12,7 @@ import { STALE_TIME_MS } from "@/lib/query";
 import { getSeverity } from "@/lib/severity";
 import { useScope } from "@/lib/useScope";
 
-/** Matches the Top Anomalies table cap in AnomalyTable by default. */
+/** Default cap when callers omit `limit` — Top Anomalies table size. */
 const DEFAULT_ENRICHED_LIMIT = 50;
 
 export interface AnomalyEnrichment {

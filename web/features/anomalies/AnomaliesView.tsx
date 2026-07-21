@@ -5,6 +5,7 @@ import { Suspense, useMemo, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
 import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomalies";
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
@@ -40,16 +41,17 @@ function AnomaliesBody() {
   // Envelope bounds drive the G4/G3 queries — rows are timestamp-ordered.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
   const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
-  // Enabled whenever the window has rows (not just flagged ones): the server
-  // count is the total's source of truth, since client rows are downsampled
-  // and switching ranges would otherwise drift the number.
+  // Fetch up to the API max so "All anomalies" can list every flagged row
+  // (Top anomalies still slices to 50 client-side). Chart rows alone undercount.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
     enabled: rows.length > 0,
+    limit: SERVER_GROUPING_THRESHOLD,
   });
   const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
+  const tableAnomalies = enrichment.topRows ?? anomalies;
 
   if (isError) {
     throw error ?? new Error("Failed to load anomalies");
@@ -127,10 +129,23 @@ function AnomaliesBody() {
             />
           </Card>
           <Card title="Top anomalies">
-            {/* Server-ranked rows once loaded — chart rows are downsampled and
-                can show anomalies the enrichment payload doesn't cover. */}
             <AnomalyTable
-              anomalies={enrichment.topRows ?? anomalies}
+              mode="top"
+              anomalies={tableAnomalies}
+              enrichment={enrichment.byTimestamp}
+              isEnrichmentLoading={enrichment.isLoading}
+            />
+          </Card>
+          <Card
+            title={
+              anomalyTotal > 0
+                ? `All anomalies (${anomalyTotal.toLocaleString()})`
+                : "All anomalies"
+            }
+          >
+            <AnomalyTable
+              mode="all"
+              anomalies={tableAnomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
             />

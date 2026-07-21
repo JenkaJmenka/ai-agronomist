@@ -69,6 +69,23 @@ export function fetchWindowReadings(params: {
   return fetchJson(`/api/bff/readings/window?${q}`);
 }
 
+export interface ReadingsBounds {
+  readonly min_timestamp: string | null;
+  readonly max_timestamp: string | null;
+}
+
+/** Newest/oldest stored timestamps for the scope — used to anchor period presets. */
+export function fetchReadingsBounds(params: {
+  tenant: string;
+  gh: string;
+}): Promise<ReadingsBounds> {
+  const q = new URLSearchParams({
+    tenant_id: params.tenant,
+    greenhouse_id: params.gh,
+  });
+  return fetchJson(`/api/bff/readings/bounds?${q}`);
+}
+
 /** Numeric sensor channels present in the rows, order-stable. */
 export function discoverChannels(rows: SensorRow[]): string[] {
   const channels: string[] = [];

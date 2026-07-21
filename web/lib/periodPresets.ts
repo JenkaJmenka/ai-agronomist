@@ -40,6 +40,28 @@ export function windowForPeriod(hours: number, end: Date = new Date()): { from: 
   };
 }
 
+/**
+ * Choose the end of a preset lookback.
+ *
+ * Historical uploads often end days/months before wall-clock "now". Anchoring
+ * to the newest stored timestamp (like `/api/readings/recent`) keeps
+ * "Last hour / 24h / 7d" filled. While Go Live is on, prefer wall-clock so the
+ * rolling window includes incoming ticks; if stored data is ahead of now, use it.
+ */
+export function periodWindowEnd(options: {
+  readonly maxTimestamp: Date | null;
+  readonly live: boolean;
+  readonly now?: Date;
+}): Date {
+  const now = options.now ?? new Date();
+  const maxTs = options.maxTimestamp;
+  if (options.live) {
+    if (maxTs !== null && maxTs.getTime() > now.getTime()) return maxTs;
+    return now;
+  }
+  return maxTs ?? now;
+}
+
 /** Match a from/to span to a preset id when within ~2% tolerance; else "custom". */
 export function matchPeriodId(from: Date | null, to: Date | null): string {
   if (!from || !to) return DEFAULT_PERIOD_ID;

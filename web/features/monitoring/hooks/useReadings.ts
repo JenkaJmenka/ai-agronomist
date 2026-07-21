@@ -5,18 +5,27 @@ import { parseAsBoolean, parseAsIsoDateTime, parseAsString, useQueryStates } fro
 import { useEffect, useRef } from "react";
 
 import {
+  fetchReadingsBounds,
   fetchRecentReadings,
   fetchWindowReadings,
   type RecentReadingsResponse,
   type SensorRow,
   type WindowReadingsResponse,
 } from "@/features/monitoring/api/readings";
-import { matchPeriodId, periodHours, windowForPeriod } from "@/lib/periodPresets";
+import {
+  matchPeriodId,
+  periodHours,
+  periodWindowEnd,
+  windowForPeriod,
+} from "@/lib/periodPresets";
 import { STALE_TIME_MS } from "@/lib/query";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
 
 /** Default chart budget until backend G1 downsampling is live everywhere. */
 const DEFAULT_MAX_POINTS = 2000;
+
+/** Re-anchor preset windows when URL `to` is this far past the newest stored row. */
+const STALE_PRESET_SLACK_MS = 5 * 60_000;
 
 export interface ReadingsState {
   readonly rows: SensorRow[];
@@ -34,6 +43,8 @@ export interface ReadingsState {
 /**
  * URL-scoped readings: tenant/gh/from/to all live in the query string.
  * In live mode the window rolls forward on the refresh interval.
+ * Preset (non-custom) windows are anchored to the newest stored timestamp
+ * when not live, so historical uploads are not missed by wall-clock "now".
  */
 export function useReadings(): ReadingsState {
   const [{ tenant, gh, from, to, live }, setParams] = useQueryStates({
@@ -67,6 +78,34 @@ export function useReadings(): ReadingsState {
     const id = window.setInterval(rollWindow, refreshSeconds * 1000);
     return () => window.clearInterval(id);
   }, [live, refreshSeconds]);
+
+  // One-shot: if a preset URL window ends far after the newest stored row
+  // (typical wall-clock "Last hour" on a historical dataset), shift it to the
+  // data max so the chart/table fill. Custom ranges are never rewritten.
+  useEffect(() => {
+    if (live || from === null || to === null) return;
+    const hours = periodHours(matchPeriodId(from, to));
+    if (hours === null) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bounds = await fetchReadingsBounds({ tenant, gh });
+        if (cancelled || !bounds.max_timestamp) return;
+        const maxTimestamp = new Date(bounds.max_timestamp);
+        if (to.getTime() - maxTimestamp.getTime() <= STALE_PRESET_SLACK_MS) return;
+        const end = periodWindowEnd({ maxTimestamp, live: false });
+        const next = windowForPeriod(hours, end);
+        void setParamsRef.current({ from: next.from, to: next.to });
+      } catch {
+        // Keep the URL window; the readings query still runs as-is.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tenant, gh, live, from, to]);
 
   const query = useQuery<RecentReadingsResponse | WindowReadingsResponse, Error>({
     queryKey: ["readings", tenant, gh, from?.toISOString() ?? "recent", to?.toISOString() ?? ""],
