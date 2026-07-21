@@ -93,6 +93,15 @@ test("grouped view switches to G3 server groups at 500+ anomalies", async ({ pag
             count: 600,
             top_score: 0.9,
             sample_ids: [rows[0].timestamp],
+            samples: [
+              {
+                timestamp: rows[0].timestamp,
+                anomaly_score: 0.9,
+                affected_sensors: ["temperature"],
+                reasoning: "Server-side sample reasoning",
+                values: { temperature: 35.2 },
+              },
+            ],
           },
         ],
         group_by: requestedGroupBy,

@@ -66,13 +66,23 @@ export async function fetchEnrichedAnomalies(
 export const SERVER_GROUP_BY = ["date", "type", "sensor"] as const;
 export type ServerGroupBy = (typeof SERVER_GROUP_BY)[number];
 
+const anomalyGroupSampleSchema = z.object({
+  timestamp: z.string(),
+  anomaly_score: z.number().nullable().optional(),
+  affected_sensors: z.array(z.string()).default([]),
+  reasoning: z.string().nullable().optional(),
+  values: z.record(z.string(), z.number()).default({}),
+});
+
 const anomalyGroupSchema = z.object({
   key: z.string(),
   count: z.number(),
   top_score: z.number(),
   sample_ids: z.array(z.string()),
+  samples: z.array(anomalyGroupSampleSchema).default([]),
 });
 
+export type AnomalyGroupSample = z.infer<typeof anomalyGroupSampleSchema>;
 export type AnomalyGroup = z.infer<typeof anomalyGroupSchema>;
 
 const groupsResponseSchema = z

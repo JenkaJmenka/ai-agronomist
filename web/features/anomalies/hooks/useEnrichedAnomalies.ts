@@ -12,8 +12,8 @@ import { STALE_TIME_MS } from "@/lib/query";
 import { getSeverity } from "@/lib/severity";
 import { useScope } from "@/lib/useScope";
 
-/** Matches the Top Anomalies table cap in AnomalyTable. */
-const ENRICHED_LIMIT = 50;
+/** Matches the Top Anomalies table cap in AnomalyTable by default. */
+const DEFAULT_ENRICHED_LIMIT = 50;
 
 export interface AnomalyEnrichment {
   readonly faultType: string | null;
@@ -47,12 +47,15 @@ export function useEnrichedAnomalies(params: {
   windowEnd: string | null;
   threshold: number;
   enabled: boolean;
+  /** Cap for /enriched rows (default 50; raise for grouped table coverage). */
+  limit?: number;
 }): EnrichedAnomaliesState {
   const { tenant, gh } = useScope();
   const { windowStart, windowEnd, threshold, enabled } = params;
+  const limit = params.limit ?? DEFAULT_ENRICHED_LIMIT;
 
   const query = useQuery<EnrichedAnomaliesResult, Error>({
-    queryKey: ["anomalies-enriched", tenant, gh, windowStart, windowEnd, threshold],
+    queryKey: ["anomalies-enriched", tenant, gh, windowStart, windowEnd, threshold, limit],
     queryFn: () =>
       fetchEnrichedAnomalies({
         tenant,
@@ -60,7 +63,7 @@ export function useEnrichedAnomalies(params: {
         start: windowStart ?? "",
         end: windowEnd ?? "",
         threshold,
-        limit: ENRICHED_LIMIT,
+        limit,
       }),
     enabled: enabled && windowStart !== null && windowEnd !== null,
     staleTime: STALE_TIME_MS.anomaliesInWindow,

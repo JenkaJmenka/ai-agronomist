@@ -93,11 +93,12 @@ async def get_anomaly_groups(
         end=end,
         threshold=threshold,
     )
-    if group_by in ("type", "sensor"):
-        incidents = await _load_incidents(
-            db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, start=start, end=end
-        )
-        flagged = enrich_anomaly_rows(flagged, incidents)
+    # Always enrich so group samples carry affected_sensors + reasoning
+    # (date grouping previously skipped the join and left those blank).
+    incidents = await _load_incidents(
+        db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, start=start, end=end
+    )
+    flagged = enrich_anomaly_rows(flagged, incidents)
     groups = group_anomaly_rows(
         flagged, group_by, sample_limit=ANOMALY_GROUP_SAMPLE_IDS
     )

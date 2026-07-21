@@ -5,6 +5,7 @@ import { useMemo } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { DataTable } from "@/components/ui/DataTable";
+import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
@@ -122,12 +123,36 @@ export function AnomalyTable({
 
   const top = useMemo(() => anomalies.slice(0, TOP_ANOMALIES_CAP), [anomalies]);
 
+  const exportRows = useMemo(() => {
+    return top.map((row) => {
+      const detail = enrichment?.get(row.timestamp);
+      return [
+        row.timestamp,
+        row.score,
+        SEVERITY_LABEL[row.severity],
+        faultLabel(detail?.faultType) ?? "",
+        detail?.reasoning ?? "",
+        (detail?.affectedSensors ?? []).join(", "),
+      ];
+    });
+  }, [top, enrichment]);
+
   return (
-    <DataTable
-      columns={columns}
-      rows={top}
-      alignTop
-      emptyMessage="No anomalies above the threshold in this window. Widen the range or lower the threshold."
-    />
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <ExportCsvButton
+          filename="top-anomalies"
+          headers={["timestamp", "score", "severity", "fault_type", "reasoning", "sensors"]}
+          rows={exportRows}
+          testId="export-anomalies-csv"
+        />
+      </div>
+      <DataTable
+        columns={columns}
+        rows={top}
+        alignTop
+        emptyMessage="No anomalies above the threshold in this window. Widen the range or lower the threshold."
+      />
+    </div>
   );
 }

@@ -5,6 +5,7 @@ import { useMemo } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { DataTable } from "@/components/ui/DataTable";
+import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { getChannelStatus } from "@/features/monitoring/lib/channelMeta";
@@ -93,24 +94,45 @@ export function ReadingsTable({ rows, channels, threshold, setpoints }: Readings
   // Newest first; DataTable caps body height (scrollY) and virtualizes large windows.
   const recentRows = useMemo(() => [...rows].reverse(), [rows]);
 
+  const exportRows = useMemo(() => {
+    return recentRows.map((row) => [
+      row.timestamp,
+      ...channels.map((ch) => {
+        const v = row[ch];
+        return typeof v === "number" ? v : "";
+      }),
+      typeof row.anomaly_score === "number" ? row.anomaly_score : "",
+    ]);
+  }, [recentRows, channels]);
+
   return (
-    <DataTable
-      columns={columns}
-      rows={recentRows}
-      scrollX
-      scrollY
-      cellClassName={(row, columnId) => {
-        if (columnId === "anomaly_score") {
-          return isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
-        }
-        if (
-          channels.includes(columnId) &&
-          isAnomalousChannel(row, columnId, threshold, setpoints)
-        ) {
-          return ANOMALY_CELL;
-        }
-        return undefined;
-      }}
-    />
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <ExportCsvButton
+          filename="sensor-readings"
+          headers={["timestamp", ...channels, "anomaly_score"]}
+          rows={exportRows}
+          testId="export-readings-csv"
+        />
+      </div>
+      <DataTable
+        columns={columns}
+        rows={recentRows}
+        scrollX
+        scrollY
+        cellClassName={(row, columnId) => {
+          if (columnId === "anomaly_score") {
+            return isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
+          }
+          if (
+            channels.includes(columnId) &&
+            isAnomalousChannel(row, columnId, threshold, setpoints)
+          ) {
+            return ANOMALY_CELL;
+          }
+          return undefined;
+        }}
+      />
+    </div>
   );
 }

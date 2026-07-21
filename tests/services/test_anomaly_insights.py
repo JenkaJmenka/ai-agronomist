@@ -72,6 +72,24 @@ class TestGroupAnomalyRows:
         assert first["top_score"] == pytest.approx(0.9)
         # sample_ids ranked by score: the 11:00 row scores highest.
         assert first["sample_ids"][0] == "2026-06-01T11:00:00"
+        assert first["samples"][0]["timestamp"] == "2026-06-01T11:00:00"
+        assert first["samples"][0]["values"]["temperature"] == pytest.approx(22.0)
+
+    def test_samples_include_affected_sensors_and_reasoning(self):
+        rows = [
+            _row(
+                "2026-06-01T10:00:00",
+                0.9,
+                affected_sensors=["temperature"],
+                reasoning="Temperature spike beyond MAD",
+                temperature=45.0,
+            ),
+        ]
+        groups = group_anomaly_rows(rows, "date", sample_limit=5)
+        sample = groups[0]["samples"][0]
+        assert sample["affected_sensors"] == ["temperature"]
+        assert sample["reasoning"] == "Temperature spike beyond MAD"
+        assert sample["values"] == {"temperature": 45.0}
 
     def test_group_by_type_falls_back_to_unknown(self):
         rows = [

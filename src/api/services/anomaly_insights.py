@@ -112,17 +112,55 @@ def _group_keys(row: dict[str, Any], group_by: str) -> list[str]:
     return [_UNKNOWN_KEY]
 
 
+_SENSOR_VALUE_KEYS = (
+    "temperature",
+    "humidity",
+    "co2",
+    "light",
+    "vpd",
+    "soil_moisture",
+    "root_zone_temp",
+)
+
+
+def _sensor_values(row: dict[str, Any], sensors: list[str]) -> dict[str, float]:
+    """Numeric readings for the sensors that caused (or best explain) the anomaly."""
+    keys = sensors if sensors else list(_SENSOR_VALUE_KEYS)
+    out: dict[str, float] = {}
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _sample_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    sensors = [str(s) for s in (row.get("affected_sensors") or []) if s]
+    return {
+        "timestamp": str(row.get(_TIMESTAMP_KEY) or ""),
+        "anomaly_score": _numeric_score(row),
+        "affected_sensors": sensors,
+        "reasoning": row.get("reasoning"),
+        "values": _sensor_values(row, sensors),
+    }
+
+
 def group_anomaly_rows(
     rows: list[dict[str, Any]],
     group_by: str,
     *,
     sample_limit: int,
 ) -> list[dict[str, Any]]:
-    """Aggregate anomaly rows into ``{key, count, top_score, sample_ids}``.
+    """Aggregate anomaly rows into ``{key, count, top_score, sample_ids, samples}``.
 
     ``group_by='sensor'`` counts a row once per affected sensor. Rows carry
-    no stable primary key, so ``sample_ids`` are the ISO timestamps of the
-    group's highest-scoring rows — the FE uses them to jump to Monitoring.
+    no stable primary key, so ``sample_ids`` / ``samples`` are the group's
+    highest-scoring rows — the FE uses them to jump to Monitoring and to
+    show sensors / values / reasoning inside each group.
     Groups are ordered by count (desc), then key.
     """
     if group_by not in GROUP_BY_CHOICES:
@@ -136,14 +174,14 @@ def group_anomaly_rows(
     groups = []
     for key, bucket in buckets.items():
         ranked = sorted(bucket, key=lambda row: _numeric_score(row) or 0.0, reverse=True)
+        top = ranked[:sample_limit]
         groups.append(
             {
                 "key": key,
                 "count": len(bucket),
                 "top_score": _numeric_score(ranked[0]) or 0.0,
-                "sample_ids": [
-                    str(row.get(_TIMESTAMP_KEY)) for row in ranked[:sample_limit]
-                ],
+                "sample_ids": [str(row.get(_TIMESTAMP_KEY)) for row in top],
+                "samples": [_sample_from_row(row) for row in top],
             }
         )
     return sorted(groups, key=lambda group: (-group["count"], group["key"]))
