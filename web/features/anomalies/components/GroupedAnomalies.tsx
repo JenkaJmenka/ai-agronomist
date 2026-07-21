@@ -1,12 +1,21 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
-import type { AnomalyGroupSample, ServerGroupBy } from "@/features/anomalies/api/enriched";
+import {
+  TABLE_PAGE_SIZE,
+  TablePagination,
+  paginateItems,
+} from "@/components/ui/TablePagination";
+import type {
+  AnomalyGroup,
+  AnomalyGroupSample,
+  ServerGroupBy,
+} from "@/features/anomalies/api/enriched";
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
@@ -22,7 +31,6 @@ import {
 } from "@/features/anomalies/lib/formatAnomalyDetails";
 import { FAULT_LABELS } from "@/lib/severity";
 
-const CLIENT_GROUP_ROW_PREVIEW = 20;
 const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
   date: "Date",
   type: "Fault type",
@@ -143,6 +151,118 @@ function clientRowValues(row: AnomalyRow): Record<string, unknown> {
   return row as Record<string, unknown>;
 }
 
+/** Paginate nested sample/row lists inside a single group. */
+function PaginatedList<T>({
+  items,
+  resetKey,
+  renderItem,
+}: {
+  readonly items: readonly T[];
+  readonly resetKey: string;
+  readonly renderItem: (item: T) => ReactNode;
+}) {
+  const [pageIndex, setPageIndex] = useState(0);
+  useEffect(() => {
+    setPageIndex(0);
+  }, [resetKey, items.length]);
+
+  const { pageItems, pageIndex: safePage, pageCount } = paginateItems(
+    items,
+    pageIndex,
+    TABLE_PAGE_SIZE,
+  );
+
+  return (
+    <div className="space-y-2">
+      <ul className="divide-y divide-border border-t border-border">
+        {pageItems.map(renderItem)}
+      </ul>
+      <div className="px-4 pb-3">
+        <TablePagination
+          pageIndex={safePage}
+          pageCount={pageCount}
+          totalRows={items.length}
+          onPageChange={setPageIndex}
+          label="records"
+        />
+      </div>
+    </div>
+  );
+}
+
+function ServerGroupedList(props: {
+  readonly groups: readonly AnomalyGroup[];
+  readonly groupsPageIndex: number;
+  readonly onGroupsPageChange: (pageIndex: number) => void;
+  readonly serverGroupBy: ServerGroupBy;
+  readonly isRefetching: boolean;
+}) {
+  const {
+    pageItems: pageGroups,
+    pageIndex: safeGroupsPage,
+    pageCount: groupsPageCount,
+  } = paginateItems(props.groups, props.groupsPageIndex, TABLE_PAGE_SIZE);
+
+  return (
+    <RefetchingBlock isRefetching={props.isRefetching} className="space-y-3">
+      {pageGroups.map((group) => {
+        const samples: AnomalyGroupSample[] =
+          group.samples.length > 0
+            ? group.samples
+            : group.sample_ids.map((timestamp) => ({
+                timestamp,
+                anomaly_score: null,
+                affected_sensors: [],
+                reasoning: null,
+                values: {},
+              }));
+        return (
+          <details
+            key={group.key}
+            className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
+          >
+            <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
+              {props.serverGroupBy === "type"
+                ? (FAULT_LABELS[group.key] ?? group.key)
+                : group.key}{" "}
+              · {group.count.toLocaleString()} record{group.count === 1 ? "" : "s"} · peak{" "}
+              <span className="tabular-nums">{group.top_score.toFixed(3)}</span>
+            </summary>
+            <PaginatedList
+              items={samples}
+              resetKey={`${group.key}:${samples.length}`}
+              renderItem={(sample) => (
+                <AnomalyDetailRow
+                  key={sample.timestamp}
+                  timestamp={sample.timestamp}
+                  score={sample.anomaly_score ?? null}
+                  sensors={
+                    props.serverGroupBy === "sensor" && sample.affected_sensors.length === 0
+                      ? [group.key]
+                      : sample.affected_sensors
+                  }
+                  values={sample.values}
+                  reasoning={sample.reasoning ?? null}
+                  jumpChannels={
+                    props.serverGroupBy === "sensor" ? [group.key] : sample.affected_sensors
+                  }
+                />
+              )}
+            />
+          </details>
+        );
+      })}
+      <TablePagination
+        pageIndex={safeGroupsPage}
+        pageCount={groupsPageCount}
+        totalRows={props.groups.length}
+        onPageChange={props.onGroupsPageChange}
+        label="groups"
+      />
+    </RefetchingBlock>
+  );
+}
+
 /**
  * Grouped table view (plan §6.2 AnomalyGroupedTable). Under
  * SERVER_GROUPING_THRESHOLD flagged rows grouping is client compute over the
@@ -183,6 +303,11 @@ export function GroupedAnomalies({
     () => (useServer ? [] : groupClientSide(flagged.anomalies, clientGroupBy)),
     [flagged.anomalies, clientGroupBy, useServer],
   );
+
+  const [groupsPageIndex, setGroupsPageIndex] = useState(0);
+  useEffect(() => {
+    setGroupsPageIndex(0);
+  }, [clientGroupBy, serverGroupBy, useServer, anomalyCount, flagged.anomalies.length]);
 
   const exportRows = useMemo(() => {
     if (useServer) {
@@ -282,55 +407,23 @@ export function GroupedAnomalies({
             Could not load server groups — narrow the window or retry.
           </p>
         ) : (
-          <RefetchingBlock isRefetching={serverState.isRefetching} className="space-y-3">
-            {serverState.groups.map((group) => {
-              const samples: AnomalyGroupSample[] =
-                group.samples.length > 0
-                  ? group.samples
-                  : group.sample_ids.map((timestamp) => ({
-                      timestamp,
-                      anomaly_score: null,
-                      affected_sensors: [],
-                      reasoning: null,
-                      values: {},
-                    }));
-              return (
-                <details
-                  key={group.key}
-                  className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
-                >
-                  <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">
-                    {serverGroupBy === "type" ? (FAULT_LABELS[group.key] ?? group.key) : group.key}{" "}
-                    · {group.count.toLocaleString()} record{group.count === 1 ? "" : "s"} · peak{" "}
-                    <span className="tabular-nums">{group.top_score.toFixed(3)}</span>
-                  </summary>
-                  <ul className="divide-y divide-border border-t border-border">
-                    {samples.map((sample) => (
-                      <AnomalyDetailRow
-                        key={sample.timestamp}
-                        timestamp={sample.timestamp}
-                        score={sample.anomaly_score ?? null}
-                        sensors={
-                          serverGroupBy === "sensor" && sample.affected_sensors.length === 0
-                            ? [group.key]
-                            : sample.affected_sensors
-                        }
-                        values={sample.values}
-                        reasoning={sample.reasoning ?? null}
-                        jumpChannels={
-                          serverGroupBy === "sensor" ? [group.key] : sample.affected_sensors
-                        }
-                      />
-                    ))}
-                  </ul>
-                </details>
-              );
-            })}
-          </RefetchingBlock>
+          <ServerGroupedList
+            groups={serverState.groups}
+            groupsPageIndex={groupsPageIndex}
+            onGroupsPageChange={setGroupsPageIndex}
+            serverGroupBy={serverGroupBy}
+            isRefetching={serverState.isRefetching}
+          />
         )}
       </div>
     );
   }
+
+  const {
+    pageItems: pageClientGroups,
+    pageIndex: safeClientGroupsPage,
+    pageCount: clientGroupsPageCount,
+  } = paginateItems(clientGroups, groupsPageIndex, TABLE_PAGE_SIZE);
 
   return (
     <div className="space-y-3">
@@ -356,7 +449,7 @@ export function GroupedAnomalies({
       </div>
 
       <RefetchingBlock isRefetching={flagged.isRefetching} className="space-y-3">
-        {clientGroups.map((group) => (
+        {pageClientGroups.map((group) => (
           <details
             key={group.key}
             className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
@@ -366,8 +459,10 @@ export function GroupedAnomalies({
               {group.key} · {group.rows.length} record{group.rows.length === 1 ? "" : "s"} · peak{" "}
               <span className="tabular-nums">{group.peak.toFixed(3)}</span>
             </summary>
-            <ul className="divide-y divide-border border-t border-border">
-              {group.rows.slice(0, CLIENT_GROUP_ROW_PREVIEW).map((row) => {
+            <PaginatedList
+              items={group.rows}
+              resetKey={`${group.key}:${group.rows.length}`}
+              renderItem={(row) => {
                 const detail = enrichmentFor(enrichment.byTimestamp, row.timestamp);
                 const sensors = detail?.affectedSensors ?? [];
                 return (
@@ -382,10 +477,17 @@ export function GroupedAnomalies({
                     jumpChannels={sensors}
                   />
                 );
-              })}
-            </ul>
+              }}
+            />
           </details>
         ))}
+        <TablePagination
+          pageIndex={safeClientGroupsPage}
+          pageCount={clientGroupsPageCount}
+          totalRows={clientGroups.length}
+          onPageChange={setGroupsPageIndex}
+          label="groups"
+        />
       </RefetchingBlock>
     </div>
   );
