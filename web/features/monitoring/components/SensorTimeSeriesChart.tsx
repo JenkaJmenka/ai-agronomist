@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import type uPlot from "uplot";
 
+import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -21,7 +22,7 @@ interface SensorTimeSeriesChartProps {
   readonly visible: ReadonlySet<string>;
   /** Rows scoring at/above this get a red background band on the chart. */
   readonly threshold: number;
-  /** Drag-selection on the x-axis reports a [from, to] window. */
+  /** Drag-selection / pan / zoom-out update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
   /**
    * Effective setpoints. When exactly one channel is visible its optimal
@@ -84,8 +85,6 @@ export function SensorTimeSeriesChart({
 
   const bands = useMemo(() => computeAnomalyBands(rows, threshold), [rows, threshold]);
 
-  // Derive the single visible channel's optimal range (only when exactly one
-  // channel is toggled on so the y-axis maps unambiguously to one sensor).
   const optimalRange = useMemo((): readonly [number, number] | null => {
     if (setpoints === undefined) return null;
     const visibleChannels = channels.filter((ch) => visible.has(ch));
@@ -108,8 +107,6 @@ export function SensorTimeSeriesChart({
       ],
       legend: { show: false },
       ...(onRangeSelect ? { cursor: SELECT_ONLY_CURSOR } : {}),
-      // drawClear runs after the canvas reset and before series strokes,
-      // so bands sit behind the traces.
       hooks: {
         drawClear: [
           (u: uPlot) => {
@@ -126,5 +123,14 @@ export function SensorTimeSeriesChart({
   );
 
   if (rows.length === 0) return null;
-  return <UPlotChart data={data} options={options} height={320} />;
+  return (
+    <div className="space-y-2">
+      {onRangeSelect ? (
+        <div className="flex justify-end">
+          <ChartZoomOutButton />
+        </div>
+      ) : null}
+      <UPlotChart data={data} options={options} height={320} onWindowChange={onRangeSelect} />
+    </div>
+  );
 }

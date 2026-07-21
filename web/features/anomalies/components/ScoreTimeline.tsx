@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
+import type uPlot from "uplot";
 
+import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -13,7 +15,7 @@ import type { SensorRow } from "@/features/monitoring/api/readings";
 interface ScoreTimelineProps {
   readonly rows: SensorRow[];
   readonly threshold: number;
-  /** Drag-selection on the x-axis reports a [from, to] window. */
+  /** Drag-selection / pan / zoom-out update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
 }
 
@@ -75,5 +77,14 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
   );
 
   if (rows.length === 0) return null;
-  return <UPlotChart data={data} options={options} height={260} />;
+  return (
+    <div className="space-y-2">
+      {onRangeSelect ? (
+        <div className="flex justify-end">
+          <ChartZoomOutButton />
+        </div>
+      ) : null}
+      <UPlotChart data={data} options={options} height={260} onWindowChange={onRangeSelect} />
+    </div>
+  );
 }

@@ -26,8 +26,16 @@ export function DateRangeControls() {
   const [{ from, to }, setRange] = useDateRange();
   const [refresh, setRefresh] = useRefreshInterval();
   const [isCustomOpen, setIsCustomOpen] = useState(false);
+  /**
+   * When Custom is already the selected value, `<select onChange>` does not
+   * fire if the user picks Custom again. Briefly clear the value while the
+   * menu is open so choosing Custom always reopens the datetime pickers.
+   */
+  const [armCustomReselect, setArmCustomReselect] = useState(false);
 
-  const periodValue = isCustomOpen ? "custom" : from && to ? matchPeriodId(from, to) : "";
+  const matched = from && to ? matchPeriodId(from, to) : "";
+  const periodValue = isCustomOpen || matched === "custom" ? "custom" : matched;
+  const selectValue = armCustomReselect ? "" : periodValue;
 
   function applyPeriod(periodId: string): void {
     if (periodId === "custom") {
@@ -37,13 +45,29 @@ export function DateRangeControls() {
     if (!periodId) return;
     setIsCustomOpen(false);
     const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
-    const next = windowForPeriod(hours);
-    void setRange(next);
+    void setRange(windowForPeriod(hours));
   }
 
   function applyCustomRange(start: Date, end: Date): void {
     setIsCustomOpen(false);
     void setRange({ from: start, to: end });
+  }
+
+  function handlePeriodMouseDown(): void {
+    // Only Custom needs re-select-to-reopen; presets already change the value.
+    if (periodValue === "custom") {
+      setArmCustomReselect(true);
+    }
+  }
+
+  function handlePeriodChange(value: string): void {
+    setArmCustomReselect(false);
+    applyPeriod(value);
+  }
+
+  function handlePeriodBlur(): void {
+    // If the menu closed without a change, restore the displayed Custom value.
+    setArmCustomReselect(false);
   }
 
   return (
@@ -52,8 +76,10 @@ export function DateRangeControls() {
         <span className="sr-only">Period</span>
         <select
           className={SELECT_CLASS}
-          value={periodValue}
-          onChange={(e) => applyPeriod(e.target.value)}
+          value={selectValue}
+          onMouseDown={handlePeriodMouseDown}
+          onBlur={handlePeriodBlur}
+          onChange={(e) => handlePeriodChange(e.target.value)}
           data-testid="period-select"
           aria-label="Time period"
         >
