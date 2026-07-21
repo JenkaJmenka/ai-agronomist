@@ -201,31 +201,34 @@ test("live mode is OFF by default — badge and strip not visible", async ({ pag
   await expect(page.getByTestId("data-table")).toBeVisible();
 
   expect(sseCalled).toBe(false);
-  await expect(page.getByTestId("live-badge")).not.toBeVisible();
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "false");
   await expect(page.getByTestId("live-anomaly-strip")).not.toBeVisible();
 });
 
-test("Go Live button is present and toggles live mode", async ({ page }) => {
+test("Live button is present and toggles live mode", async ({ page }) => {
   await mockAllRoutes(page);
   await page.goto("/monitoring");
 
   await expect(page.getByTestId("live-toggle")).toBeVisible();
+  await expect(page.getByTestId("live-toggle")).toContainText("Live");
   await expect(page.getByTestId("live-toggle")).not.toBeDisabled();
 
   // Toggle on.
   await page.getByTestId("live-toggle").click();
   await expect(page).toHaveURL(/live=true/);
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
 });
 
-test("live badge shows Live · SSE and appends live rows to the table", async ({ page }) => {
+test("live toggle shows active state and appends live rows to the table", async ({ page }) => {
   await mockAllRoutes(page);
 
   // Navigate directly into live mode.
   await page.goto("/monitoring?live=true");
 
-  // Wait for badge to appear.
-  await expect(page.getByTestId("live-badge")).toBeVisible({ timeout: 5000 });
-  await expect(page.getByTestId("live-badge")).toContainText("Live");
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true", {
+    timeout: 5000,
+  });
+  await expect(page.getByTestId("live-toggle")).toContainText("Live");
 
   // The live reading has timestamp isoAtMinute(20) — distinct from the 10 historical rows.
   // Wait for it to appear in the table.
@@ -258,16 +261,18 @@ test("setting a date window while live keeps live mode on", async ({ page }) => 
   await mockAllRoutes(page);
   await page.goto("/monitoring?live=true");
 
-  await expect(page.getByTestId("live-badge")).toBeVisible({ timeout: 3000 });
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true", {
+    timeout: 3000,
+  });
 
   // Apply a period preset (sets from/to in the URL) — live stays on.
   await page.getByTestId("period-select").selectOption("24h");
 
   await expect(page).toHaveURL(/live=true/);
-  await expect(page.getByTestId("live-badge")).toBeVisible();
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
 });
 
-test("Go Live stays enabled when a date window is set", async ({ page }) => {
+test("Live stays enabled when a date window is set", async ({ page }) => {
   await page.route("**/api/bff/readings/window**", (route) =>
     route.fulfill({ json: { rows: HISTORICAL_ROWS, count: HISTORICAL_ROWS.length } }),
   );

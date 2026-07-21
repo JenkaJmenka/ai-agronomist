@@ -13,12 +13,12 @@ interface SharedViewControlsProps {
   readonly setpoints: Setpoints;
   readonly onUpdateSetpoint: (channel: string, range: SetpointRange) => void;
   readonly onResetSetpoints: () => void;
-  /** Extra controls after Go Live (e.g. LiveBadge on Monitoring). */
+  /** Extra controls after Live (optional). */
   readonly trailing?: ReactNode;
 }
 
 /**
- * Shared Setpoints + Go Live + Period + Refresh toolbar.
+ * Shared Setpoints + Live + Period + Refresh toolbar.
  * URL owns live/from/to/refresh; setpoints stay in the parent hook
  * (localStorage) so chart tiles and the editor stay in sync.
  */

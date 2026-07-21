@@ -16,7 +16,7 @@ import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 
 /**
- * "Go Live" toggle — drives the `live` URL param.
+ * Live toggle — drives the `live` URL param.
  * Enabling live resumes a scope muted by Clear all data, then streams.
  * Always re-snaps the current preset (or default 24h) to an end anchor of
  * max(now, newest stored reading) so the chart matches the Period control.
@@ -65,12 +65,12 @@ export function LiveToggle() {
       data-live={live ? "true" : "false"}
     >
       <span
-        className={`inline-block h-2 w-2 rounded-full ${
+        className={`inline-block h-2 w-2 shrink-0 rounded-full ${
           live ? "animate-pulse bg-green-400" : "bg-text-muted"
         }`}
         aria-hidden="true"
       />
-      Go Live
+      Live
     </Button>
   );
 }

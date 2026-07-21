@@ -15,7 +15,6 @@ import {
 } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
-import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
@@ -86,7 +85,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
   const [{ from, to }, setRange] = useDateRange();
 
-  const { rows: liveRows, anomalies, transport, stale, sourceStatuses } = useLiveReadings(live);
+  const { rows: liveRows, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
   // Unfiltered merge drives channel discovery; period filter only clips the chart/table.
@@ -195,11 +194,6 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}
           onResetSetpoints={resetToDefaults}
-          trailing={
-            live ? (
-              <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
-            ) : null
-          }
         />
       </div>
 
