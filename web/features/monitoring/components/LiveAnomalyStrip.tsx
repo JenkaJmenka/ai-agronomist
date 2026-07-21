@@ -11,10 +11,30 @@ interface LiveAnomalyStripProps {
   readonly threshold: number;
 }
 
+/** Pad around an anomaly timestamp when the event has no scoring window. */
+const VIEW_PAD_MS = 30 * 60_000;
+
+function anomalyViewWindow(a: LiveAnomalyItem): { from: string; to: string } | null {
+  const startMs = Date.parse(a.window_start);
+  const endMs = Date.parse(a.window_end);
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+    return {
+      from: new Date(startMs).toISOString(),
+      to: new Date(endMs).toISOString(),
+    };
+  }
+  const center = Date.parse(a.timestamp);
+  if (!Number.isFinite(center)) return null;
+  return {
+    from: new Date(center - VIEW_PAD_MS).toISOString(),
+    to: new Date(center + VIEW_PAD_MS).toISOString(),
+  };
+}
+
 /**
  * Slim strip showing the latest live anomalies above the chart.
- * Each entry links to the Anomalies page with the affected channels and
- * shared dashboard window/live/refresh/threshold preserved.
+ * Each entry links to the Anomalies page focused on that episode's window,
+ * with shared dashboard live/refresh/threshold/channel preserved.
  */
 export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps) {
   const search = useSearchParams();
@@ -47,6 +67,14 @@ export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps
           const q = pickDashboardSearchParams(search);
           q.set("channel", a.affected_channels.join(","));
           q.set("threshold", String(threshold));
+          // Focus Anomalies on the episode — the broad Live lookback often has
+          // no persisted history yet, which showed as an empty page.
+          const window = anomalyViewWindow(a);
+          if (window) {
+            q.set("from", window.from);
+            q.set("to", window.to);
+          }
+          q.set("live", "true");
           const href = `/anomalies?${q.toString()}`;
 
           return (

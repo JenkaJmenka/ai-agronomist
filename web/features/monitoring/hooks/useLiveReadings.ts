@@ -38,6 +38,9 @@ export interface LiveAnomalyItem {
   readonly threshold: number;
   readonly affected_channels: readonly string[];
   readonly reasoning: string;
+  /** Scoring window that produced this anomaly (for View deep-links). */
+  readonly window_start: string;
+  readonly window_end: string;
   readonly fault_type?: string | null;
   readonly root_cause?: string | null;
   readonly incident_id?: string | null;
@@ -118,6 +121,8 @@ export function useLiveReadings(enabled: boolean): UseLiveReadingsResult {
         threshold: parsed.data.threshold,
         affected_channels: parsed.data.affected_channels,
         reasoning: parsed.data.reasoning,
+        window_start: parsed.data.window_start,
+        window_end: parsed.data.window_end,
       };
       setAnomalies((prev) => {
         // Re-emit: when the same episode seq arrives again (e.g. every 60 s),

@@ -255,6 +255,9 @@ test("anomaly strip item links to the Anomalies page with correct params", async
   await expect(link).toHaveAttribute("href", /\/anomalies\?/);
   await expect(link).toHaveAttribute("href", /channel=co2/);
   await expect(link).toHaveAttribute("href", /threshold=/);
+  await expect(link).toHaveAttribute("href", /live=true/);
+  await expect(link).toHaveAttribute("href", /from=/);
+  await expect(link).toHaveAttribute("href", /to=/);
 });
 
 test("setting a date window while live keeps live mode on", async ({ page }) => {

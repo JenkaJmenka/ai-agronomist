@@ -1,11 +1,14 @@
 "use client";
 
-import { parseAsFloat, useQueryState } from "nuqs";
+import { parseAsBoolean, parseAsFloat, useQueryState } from "nuqs";
 import { useMemo } from "react";
 
 import type { SensorRow } from "@/features/monitoring/api/readings";
+import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
+import { filterRowsToWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD, getSeverity, type Severity } from "@/lib/severity";
+import { useDateRange } from "@/lib/useDateRange";
 
 export interface AnomalyRow extends SensorRow {
   readonly score: number;
@@ -28,33 +31,63 @@ export interface AnomaliesState {
   readonly originalCount: number;
 }
 
+/** Merge historical + live rows; live wins on duplicate timestamp. */
+function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRow[] {
+  const map = new Map<string, SensorRow>();
+  for (const row of historical) map.set(row.timestamp, row);
+  for (const row of live) map.set(row.timestamp, row);
+  return Array.from(map.values()).sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
+}
+
 /**
  * One windowed fetch powers the score timeline and both tables: G1 keeps
  * anomaly rows in the downsampled payload, and flagging happens client-side
  * so threshold changes are instant (<500 ms budget, no refetch).
+ *
+ * When Live is on, SSE rows are merged in (same as Monitoring) so View from
+ * the live anomaly strip is not empty while history has not caught up yet.
  */
 export function useAnomalies(): AnomaliesState {
   const readings = useReadings();
+  const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
+  const [{ from, to }] = useDateRange();
+  const { rows: liveRows } = useLiveReadings(live);
   const [threshold, setThresholdRaw] = useQueryState(
     "threshold",
     parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   );
 
+  const rows = useMemo(() => {
+    const merged = live ? dedupeByTimestamp(readings.rows, liveRows) : readings.rows;
+    return filterRowsToWindow(merged, from, to);
+  }, [live, readings.rows, liveRows, from, to]);
+
   const anomalies = useMemo<AnomalyRow[]>(() => {
     const flagged: AnomalyRow[] = [];
-    for (const row of readings.rows) {
+    for (const row of rows) {
       const score = row.anomaly_score;
       if (typeof score !== "number" || score < threshold) continue;
       flagged.push({ ...row, score, severity: getSeverity({ score, threshold }) });
     }
     // Most severe first — mirrors the Streamlit Top Anomalies ordering.
     return flagged.sort((a, b) => b.score - a.score);
-  }, [readings.rows, threshold]);
+  }, [rows, threshold]);
+
+  const hasLiveRows = live && liveRows.length > 0;
 
   return {
-    ...readings,
+    rows,
     anomalies,
     threshold,
     setThreshold: (value: number) => void setThresholdRaw(value),
+    isLoading: readings.isLoading && !hasLiveRows,
+    isRefetching: readings.isRefetching,
+    isError: readings.isError,
+    error: readings.error,
+    windowLabel: readings.windowLabel,
+    downsampled: readings.downsampled,
+    originalCount: Math.max(readings.originalCount, rows.length),
   };
 }
