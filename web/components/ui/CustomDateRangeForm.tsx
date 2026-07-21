@@ -30,40 +30,47 @@ export function CustomDateRangeForm({ from, to, onApply }: CustomDateRangeFormPr
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex flex-wrap items-end gap-x-3 gap-y-2 rounded-[var(--radius-card)] border border-border bg-bg-elevated p-3 shadow-[var(--shadow-elevation)]"
+      className="flex w-max flex-col gap-2 rounded-[var(--radius-card)] border border-border bg-bg-elevated p-3 shadow-[var(--shadow-elevation)]"
       data-testid="custom-range-form"
     >
-      <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-        From
-        <DateTimeField
-          value={fromValue}
-          onChange={setFromValue}
-          isInvalid={isInvalid}
-          label="From"
-          testId="custom-range-from"
-        />
+      <div className="flex items-end gap-x-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          From
+          <DateTimeField
+            value={fromValue}
+            onChange={setFromValue}
+            isInvalid={isInvalid}
+            label="From"
+            testId="custom-range-from"
+          />
+        </div>
+        <span className="pb-2 text-text-muted" aria-hidden="true">
+          →
+        </span>
+        <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          To
+          <DateTimeField
+            value={toValue}
+            onChange={setToValue}
+            isInvalid={isInvalid}
+            label="To"
+            testId="custom-range-to"
+          />
+        </div>
+        <Button type="submit" disabled={!isOrdered} data-testid="custom-range-apply">
+          Apply
+        </Button>
       </div>
-      <span className="pb-2 text-text-muted" aria-hidden="true">
-        →
-      </span>
-      <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-        To
-        <DateTimeField
-          value={toValue}
-          onChange={setToValue}
-          isInvalid={isInvalid}
-          label="To"
-          testId="custom-range-to"
-        />
-      </div>
-      <Button type="submit" disabled={!isOrdered} data-testid="custom-range-apply">
-        Apply
-      </Button>
-      {isInvalid && (
-        <p role="alert" className="basis-full text-xs text-sev-critical">
+      {isInvalid ? (
+        <p
+          role="alert"
+          // w-0 min-w-full: take the controls-row width without expanding the
+          // right-anchored dropdown (which would shove pickers left).
+          className="w-0 min-w-full text-xs text-sev-critical"
+        >
           “From” must be before “To”.
         </p>
-      )}
+      ) : null}
     </form>
   );
 }
