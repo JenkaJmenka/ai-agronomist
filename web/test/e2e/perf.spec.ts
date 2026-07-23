@@ -105,4 +105,10 @@ test(`channel toggle re-renders client-side under ${CHANNEL_TOGGLE_BUDGET_MS} ms
   expect(elapsed, `channel toggle ${elapsed} ms`).toBeLessThan(CHANNEL_TOGGLE_BUDGET_MS);
   // The §1.2 contract: toggling never refetches — pure client state.
   expect(readingsRefetches).toBe(0);
+  // Table columns follow ChannelToggles: hidden sensor drops its column.
+  const table = page.getByTestId("data-table");
+  await expect(table.getByRole("columnheader", { name: "temperature" })).toHaveCount(0);
+  await expect(table.getByRole("columnheader", { name: "humidity" })).toBeVisible();
+  await expect(table.getByRole("columnheader", { name: "Timestamp" })).toBeVisible();
+  await expect(table.getByRole("columnheader", { name: "Score" })).toBeVisible();
 });

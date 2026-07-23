@@ -14,6 +14,11 @@ import { getSeverity } from "@/lib/severity";
 interface ReadingsTableProps {
   readonly rows: SensorRow[];
   readonly channels: string[];
+  /**
+   * Channels currently shown on the chart (ChannelToggles). Table sensor
+   * columns follow this set; Timestamp + Score always remain.
+   */
+  readonly visible: ReadonlySet<string>;
   /** Rows scoring at/above this are treated as anomalous. */
   readonly threshold: number;
   /** Effective setpoints — fallback when enrichment has no affected sensors. */
@@ -23,6 +28,14 @@ interface ReadingsTableProps {
    * When present, only these channel cells highlight on a flagged row.
    */
   readonly affectedByTimestamp?: ReadonlyMap<string, readonly string[]>;
+}
+
+/** Sensor columns that match ChannelToggles visibility (stable channel order). */
+export function visibleSensorColumns(
+  channels: readonly string[],
+  visible: ReadonlySet<string>,
+): string[] {
+  return channels.filter((ch) => visible.has(ch));
 }
 
 export function isAnomalousRow(row: SensorRow, threshold: number): boolean {
@@ -112,10 +125,16 @@ function timestampKey(ts: string): string {
 export function ReadingsTable({
   rows,
   channels,
+  visible,
   threshold,
   setpoints,
   affectedByTimestamp,
 }: ReadingsTableProps) {
+  const displayChannels = useMemo(
+    () => visibleSensorColumns(channels, visible),
+    [channels, visible],
+  );
+
   const columns = useMemo<ColumnDef<SensorRow, unknown>[]>(() => {
     const base: ColumnDef<SensorRow, unknown>[] = [
       {
@@ -123,7 +142,7 @@ export function ReadingsTable({
         accessorKey: "timestamp",
         cell: (ctx) => <TimestampCell value={ctx.getValue()} />,
       },
-      ...channels.map<ColumnDef<SensorRow, unknown>>((ch) => ({
+      ...displayChannels.map<ColumnDef<SensorRow, unknown>>((ch) => ({
         id: ch,
         header: ch,
         accessorKey: ch,
@@ -145,7 +164,7 @@ export function ReadingsTable({
       },
     ];
     return base;
-  }, [channels, threshold]);
+  }, [displayChannels, threshold]);
 
   // Explicit newest-first by timestamp (don't assume API/chart row order).
   const recentRows = useMemo(
@@ -159,13 +178,13 @@ export function ReadingsTable({
   const exportRows = useMemo(() => {
     return recentRows.map((row) => [
       row.timestamp,
-      ...channels.map((ch) => {
+      ...displayChannels.map((ch) => {
         const v = row[ch];
         return typeof v === "number" ? v : "";
       }),
       typeof row.anomaly_score === "number" ? row.anomaly_score : "",
     ]);
-  }, [recentRows, channels]);
+  }, [recentRows, displayChannels]);
 
   const highlightByTs = useMemo(() => {
     const map = new Map<string, ReadonlySet<string>>();
@@ -175,22 +194,28 @@ export function ReadingsTable({
         affectedByTimestamp?.get(row.timestamp) ?? affectedByTimestamp?.get(key) ?? null;
       map.set(
         row.timestamp,
-        new Set(anomalousChannelsForRow(row, channels, threshold, setpoints, affected)),
+        new Set(anomalousChannelsForRow(row, displayChannels, threshold, setpoints, affected)),
       );
     }
     return map;
-  }, [recentRows, channels, threshold, setpoints, affectedByTimestamp]);
+  }, [recentRows, displayChannels, threshold, setpoints, affectedByTimestamp]);
 
   return (
     <div className="space-y-2">
       <div className="flex justify-end">
         <ExportCsvButton
           filename="sensor-readings"
-          headers={["timestamp", ...channels, "anomaly_score"]}
+          headers={["timestamp", ...displayChannels, "anomaly_score"]}
           rows={exportRows}
           testId="export-readings-csv"
         />
       </div>
+      {displayChannels.length === 0 ? (
+        <p className="text-sm text-text-muted" data-testid="readings-no-sensor-cols">
+          No sensor columns selected — enable channels above to show values. Timestamp and Score
+          remain available.
+        </p>
+      ) : null}
       <DataTable
         columns={columns}
         rows={recentRows}

@@ -274,6 +274,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
             <ReadingsTable
               rows={deferredRows}
               channels={channels}
+              visible={visible}
               threshold={threshold}
               setpoints={setpoints}
               affectedByTimestamp={affectedByTimestamp}

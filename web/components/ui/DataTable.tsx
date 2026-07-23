@@ -41,7 +41,8 @@ interface DataTableProps<T> {
  * Large single-page row sets still render through TanStack Virtual so a
  * 50k-row window stays smooth when pagination is disabled or oversized.
  *
- * Pointer drag pans the scrollport (grab + drag); wheel/trackpad also scroll.
+ * Pointer drag pans the scrollport horizontally (grab + drag); wheel/trackpad
+ * still scrolls vertically when the viewport is capped.
  */
 export function DataTable<T>({
   columns,
@@ -100,8 +101,8 @@ export function DataTable<T>({
     enabled: isVirtual,
   });
 
-  // Click-drag to scroll — keeps the table navigable with the mouse pointer
-  // when the wheel is reserved for page/chart gestures elsewhere.
+  // Click-drag pans horizontally only — vertical movement stays with wheel /
+  // trackpad / scrollbar so pointer drag does not fight page or chart scroll.
   useEffect(() => {
     if (isEmpty) return;
     const scrollEl = scrollRef.current;
@@ -110,9 +111,7 @@ export function DataTable<T>({
 
     let active = false;
     let startX = 0;
-    let startY = 0;
     let originLeft = 0;
-    let originTop = 0;
     let moved = false;
 
     function onPointerDown(event: PointerEvent): void {
@@ -122,9 +121,7 @@ export function DataTable<T>({
       active = true;
       moved = false;
       startX = event.clientX;
-      startY = event.clientY;
       originLeft = root.scrollLeft;
-      originTop = root.scrollTop;
       root.setPointerCapture(event.pointerId);
       root.classList.add("cursor-grabbing");
       root.classList.remove("cursor-grab");
@@ -133,10 +130,8 @@ export function DataTable<T>({
     function onPointerMove(event: PointerEvent): void {
       if (!active) return;
       const dx = event.clientX - startX;
-      const dy = event.clientY - startY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      if (Math.abs(dx) > 3) moved = true;
       root.scrollLeft = originLeft - dx;
-      root.scrollTop = originTop - dy;
     }
 
     function onPointerUp(event: PointerEvent): void {

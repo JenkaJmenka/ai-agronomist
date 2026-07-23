@@ -5,6 +5,7 @@ import {
   anomalousChannelsForRow,
   isAnomalousRow,
   resolveAffectedChannels,
+  visibleSensorColumns,
 } from "@/features/monitoring/components/ReadingsTable";
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
 
@@ -21,6 +22,21 @@ function row(partial: Partial<SensorRow> & { timestamp: string }): SensorRow {
     ...partial,
   };
 }
+
+describe("visibleSensorColumns", () => {
+  const channels = ["temperature", "humidity", "co2"];
+
+  it("keeps channel order and drops hidden sensors", () => {
+    expect(visibleSensorColumns(channels, new Set(["co2", "temperature"]))).toEqual([
+      "temperature",
+      "co2",
+    ]);
+  });
+
+  it("returns empty when nothing is visible", () => {
+    expect(visibleSensorColumns(channels, new Set())).toEqual([]);
+  });
+});
 
 describe("isAnomalousRow", () => {
   it("flags rows at or above the threshold", () => {
