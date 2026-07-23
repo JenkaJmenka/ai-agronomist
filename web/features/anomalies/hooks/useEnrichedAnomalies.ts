@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import {
@@ -58,7 +58,7 @@ export function useEnrichedAnomalies(params: {
 
   const query = useQuery<EnrichedAnomaliesResult, Error>({
     queryKey: ["anomalies-enriched", tenant, gh, windowStart, windowEnd, threshold, limit],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchEnrichedAnomalies({
         tenant,
         gh,
@@ -66,9 +66,12 @@ export function useEnrichedAnomalies(params: {
         end: windowEnd ?? "",
         threshold,
         limit,
+        signal,
       }),
     enabled: enabled && windowStart !== null && windowEnd !== null,
     staleTime: STALE_TIME_MS.anomaliesInWindow,
+    // Keep prior fault labels visible while a new window's enrich is deferred/in-flight.
+    placeholderData: keepPreviousData,
     retry: 1,
   });
 

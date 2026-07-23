@@ -88,3 +88,21 @@ export function filterRowsToWindow<T extends { readonly timestamp: string }>(
     return Number.isFinite(ms) && ms >= startMs && ms <= endMs;
   });
 }
+
+/**
+ * Chart/table rows for the active URL window.
+ *
+ * While a new window is refetching, keepPreviousData still holds the *previous*
+ * (often wider, LTTB-downsampled) payload. Client-clipping that to the new
+ * ``from``/``to`` produces a sparse misleading preview (e.g. 55 pts) that then
+ * pops to full resolution — skip the clip until the fetch settles.
+ */
+export function rowsForActiveWindow<T extends { readonly timestamp: string }>(params: {
+  readonly rows: readonly T[];
+  readonly from: Date | null;
+  readonly to: Date | null;
+  readonly isRefetching: boolean;
+}): T[] {
+  if (params.isRefetching) return [...params.rows];
+  return filterRowsToWindow(params.rows, params.from, params.to);
+}

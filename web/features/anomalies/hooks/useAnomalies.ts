@@ -6,7 +6,7 @@ import { useMemo } from "react";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
-import { filterRowsToWindow } from "@/lib/periodPresets";
+import { rowsForActiveWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD, getSeverity, type Severity } from "@/lib/severity";
 
 export interface AnomalyRow extends SensorRow {
@@ -59,8 +59,15 @@ export function useAnomalies(): AnomaliesState {
 
   const rows = useMemo(() => {
     const merged = live ? dedupeByTimestamp(readings.rows, liveRows) : readings.rows;
-    return filterRowsToWindow(merged, readings.from, readings.to);
-  }, [live, readings.rows, readings.from, readings.to, liveRows]);
+    // While refetching, keep the previous payload unclipped — client-filtering
+    // a downsampled wide window onto a narrow brush produces a sparse fake preview.
+    return rowsForActiveWindow({
+      rows: merged,
+      from: readings.from,
+      to: readings.to,
+      isRefetching: readings.isRefetching,
+    });
+  }, [live, readings.rows, readings.from, readings.to, readings.isRefetching, liveRows]);
 
   const anomalies = useMemo<AnomalyRow[]>(() => {
     const flagged: AnomalyRow[] = [];

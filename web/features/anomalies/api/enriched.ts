@@ -51,11 +51,13 @@ export interface EnrichedAnomaliesResult {
 }
 
 export async function fetchEnrichedAnomalies(
-  params: AnomalyWindowParams & { limit?: number },
+  params: AnomalyWindowParams & { limit?: number; signal?: AbortSignal },
 ): Promise<EnrichedAnomaliesResult> {
   const query = windowQuery(params);
   if (params.limit) query.set("limit", String(params.limit));
-  const res = await fetch(`/api/bff/anomalies/enriched?${query}`);
+  const res = await fetch(`/api/bff/anomalies/enriched?${query}`, {
+    signal: params.signal,
+  });
   if (!res.ok) {
     throw new Error(`Enriched anomalies request failed (${res.status})`);
   }

@@ -14,7 +14,6 @@ import {
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import {
   discoverChannels,
@@ -34,7 +33,8 @@ import {
   shouldPaintAnomalyHighlight,
 } from "@/features/monitoring/lib/anomalyHighlight";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
-import { filterRowsToWindow } from "@/lib/periodPresets";
+import { debounce } from "@/lib/debounce";
+import { rowsForActiveWindow } from "@/lib/periodPresets";
 import { measureInteraction } from "@/lib/profiling";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
@@ -88,12 +88,21 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   const { rows: liveRows, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
-  // Unfiltered merge drives channel discovery; period filter only clips the chart/table.
+  // Unfiltered merge drives channel discovery; period filter only clips once settled.
   const mergedRows = useMemo(
     () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
     [live, historicalRows, liveRows],
   );
-  const rows = useMemo(() => filterRowsToWindow(mergedRows, from, to), [mergedRows, from, to]);
+  const rows = useMemo(
+    () =>
+      rowsForActiveWindow({
+        rows: mergedRows,
+        from,
+        to,
+        isRefetching,
+      }),
+    [mergedRows, from, to, isRefetching],
+  );
   // Chart/table can lag a frame behind tiles so nav/clicks stay responsive under live SSE.
   const deferredRows = useDeferredValue(rows);
 
@@ -101,22 +110,31 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   // does not churn on every SSE flush (rows[0]/at(-1) move every tick).
   const windowStart = from?.toISOString() ?? deferredRows[0]?.timestamp ?? null;
   const windowEnd = to?.toISOString() ?? deferredRows.at(-1)?.timestamp ?? null;
+  // Defer G4 until readings settle; cap at 50 so Monitoring never waits on limit=500.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: deferredRows.length > 0,
-    limit: SERVER_GROUPING_THRESHOLD,
+    enabled: deferredRows.length > 0 && !isRefetching,
+    limit: 50,
   });
   const { isDimmed, beginWindowChange } = useWindowBusyCue({
     isReadingsBusy: isRefetching,
   });
+  const debouncedSetRange = useMemo(
+    () =>
+      debounce((nextFrom: Date, nextTo: Date) => {
+        void setRange({ from: nextFrom, to: nextTo });
+      }, 200),
+    [setRange],
+  );
+  useEffect(() => () => debouncedSetRange.cancel(), [debouncedSetRange]);
   const onChartRangeSelect = useCallback(
-    (from: Date, to: Date) => {
+    (nextFrom: Date, nextTo: Date) => {
       beginWindowChange();
-      void setRange({ from, to });
+      debouncedSetRange(nextFrom, nextTo);
     },
-    [beginWindowChange, setRange],
+    [beginWindowChange, debouncedSetRange],
   );
 
   /** Detector-attributed sensors per timestamp (enrichment + live SSE). */

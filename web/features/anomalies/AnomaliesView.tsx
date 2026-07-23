@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -15,6 +15,7 @@ import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnom
 import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
+import { debounce } from "@/lib/debounce";
 import { useDateRange } from "@/lib/useDateRange";
 import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
 
@@ -42,24 +43,31 @@ function AnomaliesBody() {
   // Envelope bounds drive the G4/G3 queries — rows are timestamp-ordered.
   const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
   const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
-  // Fetch up to the API max so "All anomalies" can list every flagged row
-  // (Top anomalies still slices to 50 client-side). Chart rows alone undercount.
+  // Defer enrich until readings settle so brush-zoom is not queued behind G4.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: rows.length > 0,
+    enabled: rows.length > 0 && !isRefetching,
     limit: SERVER_GROUPING_THRESHOLD,
   });
   const { isDimmed, beginWindowChange } = useWindowBusyCue({
     isReadingsBusy: isRefetching,
   });
+  const debouncedSetRange = useMemo(
+    () =>
+      debounce((nextFrom: Date, nextTo: Date) => {
+        void setRange({ from: nextFrom, to: nextTo });
+      }, 200),
+    [setRange],
+  );
+  useEffect(() => () => debouncedSetRange.cancel(), [debouncedSetRange]);
   const onChartRangeSelect = useCallback(
-    (from: Date, to: Date) => {
+    (nextFrom: Date, nextTo: Date) => {
       beginWindowChange();
-      void setRange({ from, to });
+      debouncedSetRange(nextFrom, nextTo);
     },
-    [beginWindowChange, setRange],
+    [beginWindowChange, debouncedSetRange],
   );
   const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
   const tableAnomalies = enrichment.topRows ?? anomalies;

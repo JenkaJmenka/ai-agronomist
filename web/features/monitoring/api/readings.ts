@@ -29,8 +29,8 @@ const NON_CHANNEL_KEYS = new Set([
   "id",
 ]);
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) {
     throw new Error(`Readings request failed (${res.status})`);
   }
@@ -42,6 +42,7 @@ export function fetchRecentReadings(params: {
   gh: string;
   hours?: number;
   maxPoints?: number;
+  signal?: AbortSignal;
 }): Promise<RecentReadingsResponse> {
   const q = new URLSearchParams({
     tenant_id: params.tenant,
@@ -49,7 +50,7 @@ export function fetchRecentReadings(params: {
     hours: String(params.hours ?? 168),
   });
   if (params.maxPoints) q.set("max_points", String(params.maxPoints));
-  return fetchJson(`/api/bff/readings/recent?${q}`);
+  return fetchJson(`/api/bff/readings/recent?${q}`, params.signal);
 }
 
 export function fetchWindowReadings(params: {
@@ -58,6 +59,7 @@ export function fetchWindowReadings(params: {
   from: Date;
   to: Date;
   maxPoints?: number;
+  signal?: AbortSignal;
 }): Promise<WindowReadingsResponse> {
   const q = new URLSearchParams({
     tenant_id: params.tenant,
@@ -66,7 +68,7 @@ export function fetchWindowReadings(params: {
     end: params.to.toISOString(),
   });
   if (params.maxPoints) q.set("max_points", String(params.maxPoints));
-  return fetchJson(`/api/bff/readings/window?${q}`);
+  return fetchJson(`/api/bff/readings/window?${q}`, params.signal);
 }
 
 export interface ReadingsBounds {
@@ -78,12 +80,13 @@ export interface ReadingsBounds {
 export function fetchReadingsBounds(params: {
   tenant: string;
   gh: string;
+  signal?: AbortSignal;
 }): Promise<ReadingsBounds> {
   const q = new URLSearchParams({
     tenant_id: params.tenant,
     greenhouse_id: params.gh,
   });
-  return fetchJson(`/api/bff/readings/bounds?${q}`);
+  return fetchJson(`/api/bff/readings/bounds?${q}`, params.signal);
 }
 
 /** Numeric sensor channels present in the rows, order-stable. */

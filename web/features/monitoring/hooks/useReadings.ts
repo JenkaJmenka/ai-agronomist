@@ -147,7 +147,7 @@ export function useReadings(): ReadingsState {
       effectiveFrom?.toISOString() ?? "recent",
       effectiveTo?.toISOString() ?? "",
     ],
-    queryFn: (): Promise<RecentReadingsResponse | WindowReadingsResponse> =>
+    queryFn: ({ signal }): Promise<RecentReadingsResponse | WindowReadingsResponse> =>
       hasWindow
         ? fetchWindowReadings({
             tenant,
@@ -155,8 +155,9 @@ export function useReadings(): ReadingsState {
             from: effectiveFrom,
             to: effectiveTo,
             maxPoints: DEFAULT_MAX_POINTS,
+            signal,
           })
-        : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS }),
+        : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS, signal }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
     // Live ticks come from SSE (`useLiveReadings`); rolling `liveWindow` already
     // changes the queryKey when the lookback re-anchors. A parallel refetchInterval
