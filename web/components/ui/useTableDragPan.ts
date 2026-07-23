@@ -35,8 +35,12 @@ export function useTableDragPan(
       if (event.button !== 0) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("a, button, input, select, textarea, label")) return;
+      // Selectable body rows own the gesture (chart/window sync). Starting a
+      // drag-pan here would arm pointer-capture on tiny movement and swallow
+      // the row click — especially on wide horizontally-scrollable tables.
+      if (target?.closest("tbody tr[tabindex]")) return;
       // Do not capture yet — wait until movement exceeds the drag threshold
-      // so row clicks (selection → chart window) still fire.
+      // so plain clicks outside selectable rows still behave normally.
       active = true;
       dragging = false;
       didPan = false;
