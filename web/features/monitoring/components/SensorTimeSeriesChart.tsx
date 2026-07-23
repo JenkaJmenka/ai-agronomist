@@ -3,7 +3,7 @@
 import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
-import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
+import { ChartResetButton } from "@/components/charts/ChartResetButton";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -22,7 +22,7 @@ interface SensorTimeSeriesChartProps {
   readonly visible: ReadonlySet<string>;
   /** Rows scoring at/above this get a red background band on the chart. */
   readonly threshold: number;
-  /** Drag-selection / pan / zoom-out update the URL window. */
+  /** Drag-selection / pan / zoom / reset update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
   /**
    * Effective setpoints. When exactly one channel is visible its optimal
@@ -152,7 +152,7 @@ export function SensorTimeSeriesChart({
     <div className="space-y-2">
       {onRangeSelect ? (
         <div className="flex justify-end">
-          <ChartZoomOutButton />
+          <ChartResetButton />
         </div>
       ) : null}
       <UPlotChart

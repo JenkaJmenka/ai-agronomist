@@ -3,7 +3,7 @@
 import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
-import { ChartZoomOutButton } from "@/components/charts/ChartZoomOutButton";
+import { ChartResetButton } from "@/components/charts/ChartResetButton";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -15,7 +15,7 @@ import type { SensorRow } from "@/features/monitoring/api/readings";
 interface ScoreTimelineProps {
   readonly rows: SensorRow[];
   readonly threshold: number;
-  /** Drag-selection / pan / zoom-out update the URL window. */
+  /** Drag-selection / pan / zoom / reset update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
 }
 
@@ -103,7 +103,7 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
     <div className="space-y-2">
       {onRangeSelect ? (
         <div className="flex justify-end">
-          <ChartZoomOutButton />
+          <ChartResetButton />
         </div>
       ) : null}
       <UPlotChart data={data} options={options} height={260} onWindowChange={onRangeSelect} />

@@ -4,8 +4,9 @@ import { useEffect, useRef } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 
+import { readChartBaseline } from "@/components/charts/chartBaseline";
 import { TIME_X_AXIS } from "@/components/charts/timeAxis";
-import { panWindow, scaleWindowSec, zoomOutWindow } from "@/components/charts/timeWindow";
+import { panWindow, scaleWindowSec, zoomWindow } from "@/components/charts/timeWindow";
 
 export type ChartWindowHandler = (from: Date, to: Date) => void;
 
@@ -14,8 +15,8 @@ interface UPlotChartProps {
   readonly options: Omit<uPlot.Options, "width" | "height">;
   readonly height?: number;
   /**
-   * When set, wheel pans the time window and double-click zooms out.
-   * Callers typically write the new [from, to] into the URL.
+   * When set, wheel zooms the time window (Shift+wheel pans) and double-click
+   * resets to the Period baseline. Callers typically write [from, to] into the URL.
    */
   readonly onWindowChange?: ChartWindowHandler;
   /**
@@ -25,8 +26,10 @@ interface UPlotChartProps {
   readonly seriesVisibility?: readonly boolean[];
 }
 
-/** Fraction of the visible span to shift per wheel notch. */
+/** Fraction of the visible span to shift per Shift+wheel notch. */
 const PAN_FRACTION = 0.15;
+/** Per-notch scale factor for scroll zoom (out when scrolling down). */
+const ZOOM_FACTOR = 1.15;
 
 /** Merge shared time x-axis defaults; chart-specific axis fields still win. */
 function withTimeAxis(
@@ -103,7 +106,7 @@ export function UPlotChart({
       return scaleWindowSec(u.scales.x.min, u.scales.x.max);
     }
 
-    let lastPanAt = 0;
+    let lastGestureAt = 0;
 
     function handleWheel(event: WheelEvent): void {
       if (!onWindowChangeRef.current) return;
@@ -112,21 +115,29 @@ export function UPlotChart({
       event.preventDefault();
       const now = Date.now();
       // Throttle URL updates — trackpads emit many events per gesture.
-      if (now - lastPanAt < 100) return;
-      lastPanAt = now;
+      if (now - lastGestureAt < 100) return;
+      lastGestureAt = now;
       const win = currentWindow();
       if (!win) return;
-      const next = panWindow(win, Math.sign(delta) * PAN_FRACTION);
+
+      // Shift+wheel or horizontal scroll pans; plain vertical scroll zooms.
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        const next = panWindow(win, Math.sign(delta) * PAN_FRACTION);
+        onWindowChangeRef.current(next.from, next.to);
+        return;
+      }
+
+      const factor = delta > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
+      const next = zoomWindow(win, factor);
       onWindowChangeRef.current(next.from, next.to);
     }
 
     function handleDblClick(event: MouseEvent): void {
       if (!onWindowChangeRef.current) return;
       event.preventDefault();
-      const win = currentWindow();
-      if (!win) return;
-      const next = zoomOutWindow(win);
-      onWindowChangeRef.current(next.from, next.to);
+      const baseline = readChartBaseline();
+      if (baseline === null) return;
+      onWindowChangeRef.current(baseline.from, baseline.to);
     }
 
     container.addEventListener("wheel", handleWheel, { passive: false });
@@ -160,7 +171,9 @@ export function UPlotChart({
       data-testid="uplot-chart"
       className={onWindowChange ? "touch-pan-y" : undefined}
       title={
-        onWindowChange ? "Scroll to pan · drag to zoom in · double-click to zoom out" : undefined
+        onWindowChange
+          ? "Scroll to zoom · Shift+scroll to pan · drag to select · double-click to reset"
+          : undefined
       }
     />
   );

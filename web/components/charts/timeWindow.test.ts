@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { panWindow, scaleWindowSec, zoomOutWindow } from "@/components/charts/timeWindow";
+import {
+  panWindow,
+  scaleWindowSec,
+  zoomOutWindow,
+  zoomWindow,
+} from "@/components/charts/timeWindow";
 
 describe("timeWindow", () => {
   const base = {
@@ -18,6 +23,21 @@ describe("timeWindow", () => {
     const next = zoomOutWindow(base, 2);
     expect(next.from.toISOString()).toBe("2026-07-21T10:30:00.000Z");
     expect(next.to.toISOString()).toBe("2026-07-21T12:30:00.000Z");
+  });
+
+  it("zooms in about the midpoint", () => {
+    const next = zoomWindow(base, 0.5);
+    expect(next.from.toISOString()).toBe("2026-07-21T11:15:00.000Z");
+    expect(next.to.toISOString()).toBe("2026-07-21T11:45:00.000Z");
+  });
+
+  it("floors zoom-in at one minute", () => {
+    const tight = {
+      from: new Date("2026-07-21T12:00:00.000Z"),
+      to: new Date("2026-07-21T12:00:30.000Z"),
+    };
+    const next = zoomWindow(tight, 0.1);
+    expect(next.to.getTime() - next.from.getTime()).toBe(60_000);
   });
 
   it("caps zoom-out at six months", () => {

@@ -2,7 +2,7 @@
 
 import { parseAsBoolean, useQueryState } from "nuqs";
 import { useState } from "react";
-
+import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
@@ -61,7 +61,9 @@ export function DateRangeControls() {
         const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
 
         // Optimistic wall-clock snap so the select click is not blocked on bounds.
-        await setRange(windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live })));
+        const optimistic = windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live }));
+        rememberChartBaseline(optimistic.from, optimistic.to);
+        await setRange(optimistic);
 
         try {
           const bounds = await fetchReadingsBounds({ tenant, gh });
@@ -70,7 +72,9 @@ export function DateRangeControls() {
             maxTimestamp: new Date(bounds.max_timestamp),
             live,
           });
-          await setRange(windowForPeriod(hours, end));
+          const next = windowForPeriod(hours, end);
+          rememberChartBaseline(next.from, next.to);
+          await setRange(next);
         } catch {
           // Keep the optimistic wall-clock window.
         }
@@ -84,6 +88,7 @@ export function DateRangeControls() {
     void timed(
       "ui.time_window",
       async () => {
+        rememberChartBaseline(start, end);
         await setRange({ from: start, to: end });
       },
       { period: "custom" },

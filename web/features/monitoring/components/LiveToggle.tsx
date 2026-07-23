@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, useQueryState } from "nuqs";
-
+import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { resumeLiveScope } from "@/features/monitoring/api/live";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
@@ -42,13 +42,17 @@ export function LiveToggle() {
     // Flip live + optimistic wall-clock window immediately so the click is not
     // blocked on bounds / resume round-trips (those correct the window after).
     await setLive(true);
-    await setRange(windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live: true })));
+    const optimistic = windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live: true }));
+    rememberChartBaseline(optimistic.from, optimistic.to);
+    await setRange(optimistic);
 
     try {
       const bounds = await fetchReadingsBounds({ tenant, gh });
       const maxTimestamp = bounds.max_timestamp ? new Date(bounds.max_timestamp) : null;
       const end = periodWindowEnd({ maxTimestamp, live: true });
-      await setRange(windowForPeriod(hours, end));
+      const next = windowForPeriod(hours, end);
+      rememberChartBaseline(next.from, next.to);
+      await setRange(next);
     } catch {
       // Keep the optimistic wall-clock window.
     }
