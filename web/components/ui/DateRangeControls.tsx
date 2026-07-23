@@ -15,6 +15,7 @@ import {
   REFRESH_PRESETS,
   windowForPeriod,
 } from "@/lib/periodPresets";
+import { timed } from "@/lib/profiling";
 import { useDateRange } from "@/lib/useDateRange";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
 import { useScope } from "@/lib/useScope";
@@ -53,24 +54,36 @@ export function DateRangeControls() {
       return;
     }
     if (!periodId) return;
-    setIsCustomOpen(false);
-    const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
+    await timed(
+      "ui.time_window",
+      async () => {
+        setIsCustomOpen(false);
+        const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
 
-    let maxTimestamp: Date | null = null;
-    try {
-      const bounds = await fetchReadingsBounds({ tenant, gh });
-      if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
-    } catch {
-      // Fall back to wall-clock if bounds are unavailable.
-    }
+        let maxTimestamp: Date | null = null;
+        try {
+          const bounds = await fetchReadingsBounds({ tenant, gh });
+          if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
+        } catch {
+          // Fall back to wall-clock if bounds are unavailable.
+        }
 
-    const end = periodWindowEnd({ maxTimestamp, live });
-    void setRange(windowForPeriod(hours, end));
+        const end = periodWindowEnd({ maxTimestamp, live });
+        await setRange(windowForPeriod(hours, end));
+      },
+      { period: periodId },
+    );
   }
 
   function applyCustomRange(start: Date, end: Date): void {
     setIsCustomOpen(false);
-    void setRange({ from: start, to: end });
+    void timed(
+      "ui.time_window",
+      async () => {
+        await setRange({ from: start, to: end });
+      },
+      { period: "custom" },
+    );
   }
 
   function handlePeriodMouseDown(): void {

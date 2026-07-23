@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
+import { emitProfileLog } from "@/lib/profileLog";
+
 /**
  * SSE relay for live monitoring (Phase 5A): pipes the FastAPI
  * text/event-stream through the BFF so the API key never reaches the browser.
@@ -14,6 +16,7 @@ const API_KEY = process.env.API_KEY;
 export async function GET(req: NextRequest): Promise<Response> {
   const tenant = req.nextUrl.searchParams.get("tenant") ?? "";
   const gh = req.nextUrl.searchParams.get("gh") ?? "";
+  const start = performance.now();
 
   const target = new URL("/api/live/events", API_URL);
   if (tenant) target.searchParams.set("tenant_id", tenant);
@@ -26,6 +29,8 @@ export async function GET(req: NextRequest): Promise<Response> {
   const lastEventId = req.headers.get("last-event-id");
   if (lastEventId) headers.set("last-event-id", lastEventId);
 
+  let status = 502;
+  let ok = true;
   try {
     const upstream = await fetch(target.toString(), {
       headers,
@@ -34,12 +39,15 @@ export async function GET(req: NextRequest): Promise<Response> {
     });
 
     if (!upstream.ok || !upstream.body) {
+      status = upstream.status || 502;
+      ok = false;
       return NextResponse.json(
         { detail: `Live events unavailable (${upstream.status})` },
-        { status: upstream.status || 502 },
+        { status },
       );
     }
 
+    status = 200;
     return new Response(upstream.body, {
       status: 200,
       headers: {
@@ -50,6 +58,13 @@ export async function GET(req: NextRequest): Promise<Response> {
       },
     });
   } catch {
+    ok = false;
     return NextResponse.json({ detail: "Upstream API unreachable" }, { status: 502 });
+  } finally {
+    emitProfileLog("bff.sse.live", ok, performance.now() - start, {
+      tenant: tenant || "-",
+      gh: gh || "-",
+      status,
+    });
   }
 }

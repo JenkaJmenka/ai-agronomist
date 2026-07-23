@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
+import { emitProfileLog } from "@/lib/profileLog";
+
 /**
  * SSE relay for job progress (plan §6.1, G5): pipes the FastAPI
  * text/event-stream through the BFF so the API key never reaches the
@@ -17,10 +19,13 @@ interface RouteContext {
 export async function GET(req: NextRequest, ctx: RouteContext): Promise<Response> {
   const { id } = await ctx.params;
   const target = new URL(`/api/jobs/${encodeURIComponent(id)}/events`, API_URL);
+  const start = performance.now();
 
   const headers = new Headers({ accept: "text/event-stream" });
   if (API_KEY) headers.set("X-API-Key", API_KEY);
 
+  let status = 502;
+  let ok = true;
   try {
     const upstream = await fetch(target, {
       headers,
@@ -28,11 +33,14 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<Response
       signal: req.signal,
     });
     if (!upstream.ok || !upstream.body) {
+      status = upstream.status || 502;
+      ok = false;
       return NextResponse.json(
         { detail: `Job events unavailable (${upstream.status})` },
-        { status: upstream.status || 502 },
+        { status: status },
       );
     }
+    status = 200;
     return new Response(upstream.body, {
       status: 200,
       headers: {
@@ -43,6 +51,12 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<Response
       },
     });
   } catch {
+    ok = false;
     return NextResponse.json({ detail: "Upstream API unreachable" }, { status: 502 });
+  } finally {
+    emitProfileLog("bff.sse.jobs", ok, performance.now() - start, {
+      job_id: id,
+      status,
+    });
   }
 }

@@ -8,6 +8,7 @@ import { NAV_SECTIONS } from "@/features/shell/nav";
 import { TenantSelector } from "@/features/shell/TenantSelector";
 import { ThemeToggle } from "@/features/shell/ThemeToggle";
 import { withDashboardQuery } from "@/lib/dashboardQuery";
+import { measureInteraction } from "@/lib/profiling";
 
 function NavLinks() {
   const pathname = usePathname();
@@ -29,6 +30,10 @@ function NavLinks() {
                 key={entry.href}
                 href={withDashboardQuery(entry.href, search)}
                 aria-current={isActive ? "page" : undefined}
+                onClick={() => {
+                  if (isActive) return;
+                  measureInteraction("ui.nav", { from: pathname, to: entry.href });
+                }}
                 className={`block rounded-[var(--radius-control)] px-2 py-1.5 text-sm ${
                   isActive ? "bg-accent/15 font-medium text-accent" : "text-text hover:bg-border/50"
                 }`}

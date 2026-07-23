@@ -64,3 +64,24 @@ Zod v4 classic's `.refine()` returns `this` (same schema type), not `ZodEffects`
 - `pnpm test`: 135/135 (10 test files)
 - `pnpm build`: clean
 - `pnpm exec playwright test`: 49/49
+
+---
+
+## Performance profiling (2026-07-23)
+
+### What was done
+Added PROFILE logging to `web/`, gated by the same `PROFILE_LOGGING_ENABLED` env var as the Python backend (`1`/`true`/`yes`/`on`).
+
+- `lib/profileFlag.ts` — shared env parser
+- `lib/profileLog.ts` — server stdout emitter (`PROFILE phase=… ok=… elapsed_ms=…`)
+- `lib/profiling.ts` — client helpers (`timed`, `measureInteraction`, `profileEvent`) → POST `/api/profile`
+- `app/api/profile/route.ts` — GET `{enabled}` / POST ingest (no-op when disabled)
+- BFF proxy + SSE routes emit `bff.proxy` / `bff.sse.jobs` / `bff.sse.live`
+- UI: `ui.nav` (Sidebar), `ui.channel_toggle` (MonitoringView), `ui.time_window` (DateRangeControls)
+
+Railway `web` already has `PROFILE_LOGGING_ENABLED=yes` (set via CLI). Redeploy web to activate BFF/UI lines in logs.
+
+### Gates status (2026-07-23)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing infos only)
+- `pnpm test`: 178/178

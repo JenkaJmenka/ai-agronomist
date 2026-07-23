@@ -23,6 +23,7 @@ import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { filterRowsToWindow } from "@/lib/periodPresets";
+import { measureInteraction } from "@/lib/profiling";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
@@ -169,6 +170,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   }, [channels, hidden, channelParam]);
 
   function toggleChannel(ch: string): void {
+    measureInteraction("ui.channel_toggle", { channel: ch });
     setHidden(() => {
       const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
       if (next.has(ch)) next.delete(ch);
