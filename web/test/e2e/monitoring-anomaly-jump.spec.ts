@@ -106,6 +106,23 @@ test("clicking the jump opens Monitoring with the affected sensors selected", as
   await expect(toggles.getByRole("checkbox", { name: "co2" })).not.toBeChecked();
 });
 
+test("Gas keeps jump channel= but does not paint anomaly score highlights", async ({ page }) => {
+  const rows = makeRows(48);
+  await page.route("**/api/bff/readings/window**", (route) =>
+    route.fulfill({ json: { rows, count: rows.length } }),
+  );
+
+  await page.goto(
+    "/gas?from=2026-06-01T00:00:00.000Z&to=2026-06-03T00:00:00.000Z&threshold=0.15&channel=temperature%2Chumidity&live=false",
+  );
+
+  // No gas columns in mock data — still must not emphasize anomaly scores from the jump.
+  const flaggedCells = page.locator(
+    '[data-testid="data-table"] tbody td[class*="bg-sev-critical"]',
+  );
+  await expect(flaggedCells).toHaveCount(0);
+});
+
 test("monitoring highlights anomalous channel cells and renders the chart", async ({ page }) => {
   const rows = makeRows(48);
   await page.route("**/api/bff/readings/window**", (route) =>

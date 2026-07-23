@@ -29,6 +29,12 @@ interface SensorTimeSeriesChartProps {
    * [min, max] range is drawn as a subtle horizontal green band.
    */
   readonly setpoints?: Setpoints;
+  /** When false, skip anomaly time bands (jump sensors inactive / wrong page). */
+  readonly showAnomalyBands?: boolean;
+  /** Jump-focus channels currently visible — narrows which runs band. */
+  readonly anomalyFocusVisible?: readonly string[];
+  /** Detector-attributed sensors keyed by reading timestamp. */
+  readonly affectedByTimestamp?: ReadonlyMap<string, readonly string[]>;
 }
 
 /** Paints translucent bands behind the series over anomalous time spans. */
@@ -71,6 +77,9 @@ export function SensorTimeSeriesChart({
   threshold,
   onRangeSelect,
   setpoints,
+  showAnomalyBands = true,
+  anomalyFocusVisible,
+  affectedByTimestamp,
 }: SensorTimeSeriesChartProps) {
   const data = useMemo(() => {
     const xs = rows.map((r) => new Date(r.timestamp).getTime() / 1000);
@@ -83,7 +92,15 @@ export function SensorTimeSeriesChart({
     return [xs, ...series] as uPlot.AlignedData;
   }, [rows, channels]);
 
-  const bands = useMemo(() => computeAnomalyBands(rows, threshold), [rows, threshold]);
+  const bands = useMemo(
+    () =>
+      computeAnomalyBands(rows, threshold, {
+        enabled: showAnomalyBands,
+        focusVisible: anomalyFocusVisible,
+        affectedByTimestamp,
+      }),
+    [rows, threshold, showAnomalyBands, anomalyFocusVisible, affectedByTimestamp],
+  );
 
   const optimalRange = useMemo((): readonly [number, number] | null => {
     if (setpoints === undefined) return null;

@@ -28,6 +28,11 @@ interface ReadingsTableProps {
    * When present, only these channel cells highlight on a flagged row.
    */
   readonly affectedByTimestamp?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * When false, suppress anomaly score/cell emphasis (jump sensors inactive
+   * or not on this page).
+   */
+  readonly highlightAnomalies?: boolean;
 }
 
 /** Sensor columns that match ChannelToggles visibility (stable channel order). */
@@ -129,6 +134,7 @@ export function ReadingsTable({
   threshold,
   setpoints,
   affectedByTimestamp,
+  highlightAnomalies = true,
 }: ReadingsTableProps) {
   const displayChannels = useMemo(
     () => visibleSensorColumns(channels, visible),
@@ -188,6 +194,7 @@ export function ReadingsTable({
 
   const highlightByTs = useMemo(() => {
     const map = new Map<string, ReadonlySet<string>>();
+    if (!highlightAnomalies) return map;
     for (const row of recentRows) {
       const key = timestampKey(row.timestamp);
       const affected =
@@ -198,7 +205,14 @@ export function ReadingsTable({
       );
     }
     return map;
-  }, [recentRows, displayChannels, threshold, setpoints, affectedByTimestamp]);
+  }, [
+    recentRows,
+    displayChannels,
+    threshold,
+    setpoints,
+    affectedByTimestamp,
+    highlightAnomalies,
+  ]);
 
   return (
     <div className="space-y-2">
@@ -223,7 +237,7 @@ export function ReadingsTable({
         scrollY
         cellClassName={(row, columnId) => {
           if (columnId === "anomaly_score") {
-            return isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
+            return highlightAnomalies && isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
           }
           if (highlightByTs.get(row.timestamp)?.has(columnId)) {
             return ANOMALY_CELL;

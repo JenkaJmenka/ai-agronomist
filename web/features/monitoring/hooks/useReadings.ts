@@ -171,7 +171,9 @@ export function useReadings(): ReadingsState {
   return {
     rows,
     isLoading: query.isPending,
-    isRefetching: query.isFetching && !query.isPending,
+    // Placeholder = keepPreviousData for a new window — treat as refetch so
+    // RefetchingBlock dims while the client still shows the prior range.
+    isRefetching: query.isFetching && (!query.isPending || query.isPlaceholderData),
     isError: query.isError,
     error: query.error,
     downsampled: Boolean((query.data as { downsampled?: boolean } | undefined)?.downsampled),

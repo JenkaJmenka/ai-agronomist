@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -16,6 +16,7 @@ import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { useDateRange } from "@/lib/useDateRange";
+import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
 
 type ViewMode = "graphical" | "table";
 
@@ -50,6 +51,17 @@ function AnomaliesBody() {
     enabled: rows.length > 0,
     limit: SERVER_GROUPING_THRESHOLD,
   });
+  const { isDimmed, beginWindowChange } = useWindowBusyCue({
+    isReadingsBusy: isRefetching,
+    isEnrichmentBusy: enrichment.isFetching,
+  });
+  const onChartRangeSelect = useCallback(
+    (from: Date, to: Date) => {
+      beginWindowChange();
+      void setRange({ from, to });
+    },
+    [beginWindowChange, setRange],
+  );
   const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
   const tableAnomalies = enrichment.topRows ?? anomalies;
 
@@ -118,14 +130,14 @@ function AnomaliesBody() {
           </p>
         </Card>
       ) : view === "graphical" ? (
-        <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
+        <RefetchingBlock isRefetching={isDimmed} className="space-y-6">
           <Card title="Anomaly score timeline">
             <ScoreTimeline
               rows={rows}
               threshold={threshold}
               // Drag-selecting a span narrows the URL window, so the anomaly
               // tables below filter to the same range — and the Period control.
-              onRangeSelect={(from, to) => void setRange({ from, to })}
+              onRangeSelect={onChartRangeSelect}
             />
           </Card>
           <Card title="Top anomalies">
@@ -152,7 +164,7 @@ function AnomaliesBody() {
           </Card>
         </RefetchingBlock>
       ) : (
-        <RefetchingBlock isRefetching={isRefetching}>
+        <RefetchingBlock isRefetching={isDimmed}>
           <Card title="Detected anomalies (grouped)">
             <GroupedAnomalies
               anomalyCount={anomalyTotal}

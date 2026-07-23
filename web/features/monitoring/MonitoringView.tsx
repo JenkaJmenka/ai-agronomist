@@ -1,7 +1,15 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useDeferredValue, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -21,12 +29,17 @@ import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTi
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
+import {
+  matchChannelParam,
+  shouldPaintAnomalyHighlight,
+} from "@/features/monitoring/lib/anomalyHighlight";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { filterRowsToWindow } from "@/lib/periodPresets";
 import { measureInteraction } from "@/lib/profiling";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
+import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
 
 interface MonitoringViewProps {
   readonly title: string;
@@ -38,22 +51,6 @@ interface MonitoringViewProps {
    * - ``exact``: only exact channel names (gas page must not pick climate ``co2``)
    */
   readonly channelMatch?: "includes" | "exact";
-}
-
-function matchChannel(channels: string[], wanted: string): string[] {
-  const exact = channels.filter((ch) => ch === wanted);
-  if (exact.length > 0) return exact;
-  return channels.filter((ch) => ch.toLowerCase().includes(wanted.toLowerCase()));
-}
-
-/** `channel=` carries a comma-separated list when an anomaly touches several sensors. */
-function matchChannelParam(channels: string[], param: string): string[] {
-  const wantedList = param
-    .split(",")
-    .map((w) => w.trim())
-    .filter(Boolean);
-  const matched = new Set(wantedList.flatMap((wanted) => matchChannel(channels, wanted)));
-  return [...matched];
 }
 
 /**
@@ -111,6 +108,17 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     enabled: deferredRows.length > 0,
     limit: SERVER_GROUPING_THRESHOLD,
   });
+  const { isDimmed, beginWindowChange } = useWindowBusyCue({
+    isReadingsBusy: isRefetching,
+    isEnrichmentBusy: enrichment.isFetching,
+  });
+  const onChartRangeSelect = useCallback(
+    (from: Date, to: Date) => {
+      beginWindowChange();
+      void setRange({ from, to });
+    },
+    [beginWindowChange, setRange],
+  );
 
   /** Detector-attributed sensors per timestamp (enrichment + live SSE). */
   const affectedByTimestamp = useMemo(() => {
@@ -163,16 +171,46 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   }, [knownChannels, discoveredNow, channelFilter, channelMatch]);
 
   const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
+  const userToggledChannels = useRef(false);
+  // New tenant/gh/jump focus clears manual toggles so preselect can re-apply.
+  useEffect(() => {
+    userToggledChannels.current = false;
+    setHidden(null);
+  }, [tenant, gh, channelParam]);
+
+  // Anomaly jump: keep affected sensors from ``channel=`` pre-selected (and
+  // others off) until the user toggles a channel themselves.
+  useEffect(() => {
+    if (!channelParam || channels.length === 0 || userToggledChannels.current) return;
+    const matched = matchChannelParam(channels, channelParam);
+    if (matched.length === 0) return;
+    const matchedSet = new Set(matched);
+    setHidden(new Set(channels.filter((ch) => !matchedSet.has(ch))));
+  }, [channelParam, channels]);
+
+  const jumpFocus = useMemo(
+    () => (channelParam ? matchChannelParam(channels, channelParam) : []),
+    [channelParam, channels],
+  );
+
   const visible = useMemo(() => {
     if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
-    if (channelParam) {
-      const matched = matchChannelParam(channels, channelParam);
-      if (matched.length > 0) return new Set(matched);
-    }
+    if (jumpFocus.length > 0) return new Set(jumpFocus);
     return new Set(channels);
-  }, [channels, hidden, channelParam]);
+  }, [channels, hidden, jumpFocus]);
+
+  const paintAnomalyHighlight = shouldPaintAnomalyHighlight({
+    channelParam,
+    pageChannels: channels,
+    visible,
+  });
+  const anomalyFocusVisible = useMemo(
+    () => (jumpFocus.length > 0 ? jumpFocus.filter((ch) => visible.has(ch)) : undefined),
+    [jumpFocus, visible],
+  );
 
   function toggleChannel(ch: string): void {
+    userToggledChannels.current = true;
     setHidden(() => {
       const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
       if (next.has(ch)) next.delete(ch);
@@ -241,7 +279,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
           </p>
         </Card>
       ) : (
-        <RefetchingBlock isRefetching={isRefetching} className="space-y-6">
+        <RefetchingBlock isRefetching={isDimmed} className="space-y-6">
           {/* ── Live sensor tiles ── */}
           <SensorTiles
             rows={rows}
@@ -267,7 +305,10 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               visible={visible}
               threshold={threshold}
               setpoints={setpoints}
-              onRangeSelect={(from, to) => void setRange({ from, to })}
+              onRangeSelect={onChartRangeSelect}
+              showAnomalyBands={paintAnomalyHighlight}
+              anomalyFocusVisible={anomalyFocusVisible}
+              affectedByTimestamp={affectedByTimestamp}
             />
           </Card>
           <Card title={`Readings (${deferredRows.length.toLocaleString()} rows, newest first)`}>
@@ -278,6 +319,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               threshold={threshold}
               setpoints={setpoints}
               affectedByTimestamp={affectedByTimestamp}
+              highlightAnomalies={paintAnomalyHighlight}
             />
           </Card>
         </RefetchingBlock>

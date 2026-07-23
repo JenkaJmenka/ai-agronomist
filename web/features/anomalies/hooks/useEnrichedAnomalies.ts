@@ -34,6 +34,8 @@ export interface EnrichedAnomaliesState {
   /** Full-window flagged count from the server; null until loaded. */
   readonly anomalyCount: number | null;
   readonly isLoading: boolean;
+  /** True while a G4 request is in flight (incl. window changes after first load). */
+  readonly isFetching: boolean;
 }
 
 /**
@@ -104,5 +106,6 @@ export function useEnrichedAnomalies(params: {
     topRows,
     anomalyCount: query.data?.anomalyCount ?? null,
     isLoading: query.isPending && query.isFetching,
+    isFetching: query.isFetching,
   };
 }
