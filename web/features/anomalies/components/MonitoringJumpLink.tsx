@@ -5,10 +5,9 @@ import { useSearchParams } from "next/navigation";
 import { parseAsFloat, parseAsString, useQueryStates } from "nuqs";
 
 import { Button } from "@/components/ui/Button";
+import { anomalyJumpWindow } from "@/features/anomalies/lib/anomalyJumpWindow";
 import { pickDashboardSearchParams } from "@/lib/dashboardQuery";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
-
-const JUMP_WINDOW_HOURS = 12;
 
 interface MonitoringJumpLinkProps {
   readonly timestamp: string;
@@ -17,8 +16,9 @@ interface MonitoringJumpLinkProps {
 }
 
 /**
- * Anomaly → Monitoring jump: centers a window on the anomaly and carries
- * shared dashboard params (tenant/gh/live/refresh/threshold) plus channel=.
+ * Anomaly → Monitoring jump: opens a lookback centered on the anomaly (clamped
+ * so the window never extends into empty future), carries shared dashboard
+ * params, and forces live off so Live rolling does not replace the jump window.
  */
 export function MonitoringJumpLink({ timestamp, channels }: MonitoringJumpLinkProps) {
   const search = useSearchParams();
@@ -28,15 +28,17 @@ export function MonitoringJumpLink({ timestamp, channels }: MonitoringJumpLinkPr
     threshold: parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   });
 
-  const center = new Date(timestamp).getTime();
-  const from = new Date(center - JUMP_WINDOW_HOURS * 3_600_000).toISOString();
-  const to = new Date(center + JUMP_WINDOW_HOURS * 3_600_000).toISOString();
+  const window = anomalyJumpWindow(timestamp);
   const query = pickDashboardSearchParams(search);
   query.set("tenant", tenant);
   query.set("gh", gh);
-  query.set("from", from);
-  query.set("to", to);
+  if (window) {
+    query.set("from", window.from.toISOString());
+    query.set("to", window.to.toISOString());
+  }
   query.set("threshold", String(threshold));
+  // Historical investigation — Live lookback would overwrite the jump window.
+  query.set("live", "false");
   if (channels && channels.length > 0) query.set("channel", channels.join(","));
   else query.delete("channel");
 

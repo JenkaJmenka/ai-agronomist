@@ -3,24 +3,24 @@ import { describe, expect, it } from "vitest";
 import { paginateItems, TABLE_PAGE_SIZE } from "@/components/ui/TablePagination";
 
 describe("paginateItems", () => {
-  it("uses 24 as the default page size", () => {
-    expect(TABLE_PAGE_SIZE).toBe(24);
+  it("uses 10 as the default page size", () => {
+    expect(TABLE_PAGE_SIZE).toBe(10);
   });
 
   it("returns the first page of items", () => {
     const items = Array.from({ length: 50 }, (_, i) => i);
     const { pageItems, pageIndex, pageCount } = paginateItems(items, 0);
-    expect(pageItems).toEqual(items.slice(0, 24));
+    expect(pageItems).toEqual(items.slice(0, 10));
     expect(pageIndex).toBe(0);
-    expect(pageCount).toBe(3);
+    expect(pageCount).toBe(5);
   });
 
   it("clamps an out-of-range page index", () => {
     const items = Array.from({ length: 30 }, (_, i) => i);
     const { pageItems, pageIndex, pageCount } = paginateItems(items, 99);
-    expect(pageIndex).toBe(1);
-    expect(pageCount).toBe(2);
-    expect(pageItems).toEqual(items.slice(24));
+    expect(pageIndex).toBe(2);
+    expect(pageCount).toBe(3);
+    expect(pageItems).toEqual(items.slice(20));
   });
 
   it("returns a single empty page for an empty list", () => {

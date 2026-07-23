@@ -63,6 +63,7 @@ test("jump link carries every affected sensor and the threshold", async ({ page 
     .first();
   await expect(jump).toHaveAttribute("href", /channel=temperature%2Chumidity/);
   await expect(jump).toHaveAttribute("href", /threshold=0.15/);
+  await expect(jump).toHaveAttribute("href", /live=false/);
 });
 
 test("clicking the jump opens Monitoring with the affected sensors selected", async ({ page }) => {

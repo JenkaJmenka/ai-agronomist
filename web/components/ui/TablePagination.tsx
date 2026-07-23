@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/Button";
 
 /** Default page size for all dashboard data tables. */
-export const TABLE_PAGE_SIZE = 24;
+export const TABLE_PAGE_SIZE = 10;
 
 interface TablePaginationProps {
   readonly pageIndex: number;
