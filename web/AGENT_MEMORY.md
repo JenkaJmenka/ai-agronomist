@@ -85,3 +85,16 @@ Railway `web` already has `PROFILE_LOGGING_ENABLED=yes` (set via CLI). Redeploy 
 - `pnpm typecheck`: clean
 - `pnpm lint`: 0 errors (pre-existing infos only)
 - `pnpm test`: 178/178
+
+---
+
+## UI freeze mitigations (2026-07-23)
+
+Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:
+
+1. `useReadings`: no historical `refetchInterval` while live
+2. `MonitoringView`: `useDeferredValue` for chart/table; enrichment bounds from `from`/`to`
+3. `DataTable`: reset page on `rowCount` only
+4. `LiveToggle` + `DateRangeControls`: optimistic URL updates before bounds I/O
+
+Metrics write-up: `docs/refactor/performance-2026-07-23.md`.
