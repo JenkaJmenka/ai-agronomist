@@ -110,7 +110,6 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   });
   const { isDimmed, beginWindowChange } = useWindowBusyCue({
     isReadingsBusy: isRefetching,
-    isEnrichmentBusy: enrichment.isFetching,
   });
   const onChartRangeSelect = useCallback(
     (from: Date, to: Date) => {

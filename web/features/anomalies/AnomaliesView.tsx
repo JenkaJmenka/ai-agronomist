@@ -53,7 +53,6 @@ function AnomaliesBody() {
   });
   const { isDimmed, beginWindowChange } = useWindowBusyCue({
     isReadingsBusy: isRefetching,
-    isEnrichmentBusy: enrichment.isFetching,
   });
   const onChartRangeSelect = useCallback(
     (from: Date, to: Date) => {
