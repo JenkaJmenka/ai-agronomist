@@ -11,6 +11,10 @@ import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJu
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import type { AnomalyEnrichment } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import { FAULT_LABELS } from "@/lib/severity";
+import {
+  type SelectionWindowHandler,
+  useTimestampRowSelection,
+} from "@/lib/useTimestampRowSelection";
 
 /** Cap for the "Top anomalies" table (highest scores). */
 export const TOP_ANOMALIES_CAP = 50;
@@ -35,6 +39,11 @@ interface AnomalyTableProps {
    * `all` — every passed row, newest-first (paginated by DataTable).
    */
   readonly mode?: AnomalyTableMode;
+  /**
+   * Selecting rows updates the shared URL window so the score timeline
+   * zooms to the same span (click / ⌘·Ctrl-click / Shift-click).
+   */
+  readonly onWindowSelect?: SelectionWindowHandler;
 }
 
 function faultLabel(faultType: string | null | undefined): string | null {
@@ -52,7 +61,10 @@ export function AnomalyTable({
   enrichment,
   isEnrichmentLoading = false,
   mode = "top",
+  onWindowSelect,
 }: AnomalyTableProps) {
+  const { isSelected, handleRowClick } = useTimestampRowSelection(onWindowSelect);
+
   const columns = useMemo<ColumnDef<AnomalyRow, unknown>[]>(
     () => [
       {
@@ -167,7 +179,14 @@ export function AnomalyTable({
       className="space-y-2"
       data-testid={mode === "all" ? "all-anomalies-table" : "top-anomalies-table"}
     >
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {onWindowSelect ? (
+          <p className="text-xs text-text-muted">
+            Click a row to zoom the chart · ⌘/Ctrl-click adds · Shift-click selects a range
+          </p>
+        ) : (
+          <span />
+        )}
         <ExportCsvButton
           filename={exportFilename}
           headers={["timestamp", "score", "severity", "fault_type", "reasoning", "sensors"]}
@@ -180,6 +199,14 @@ export function AnomalyTable({
         rows={displayRows}
         alignTop
         emptyMessage="No anomalies above the threshold in this window. Widen the range or lower the threshold."
+        isRowSelected={onWindowSelect ? isSelected : undefined}
+        onRowClick={
+          onWindowSelect
+            ? (row, event) => {
+                handleRowClick(row, event, displayRows);
+              }
+            : undefined
+        }
       />
     </div>
   );

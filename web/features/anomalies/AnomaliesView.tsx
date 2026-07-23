@@ -145,6 +145,7 @@ function AnomaliesBody() {
               anomalies={tableAnomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
+              onWindowSelect={onChartRangeSelect}
             />
           </Card>
           <Card
@@ -159,6 +160,7 @@ function AnomaliesBody() {
               anomalies={tableAnomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
+              onWindowSelect={onChartRangeSelect}
             />
           </Card>
         </RefetchingBlock>

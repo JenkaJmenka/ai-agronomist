@@ -319,6 +319,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               setpoints={setpoints}
               affectedByTimestamp={affectedByTimestamp}
               highlightAnomalies={paintAnomalyHighlight}
+              onWindowSelect={onChartRangeSelect}
             />
           </Card>
         </RefetchingBlock>

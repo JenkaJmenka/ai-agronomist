@@ -10,6 +10,10 @@ import type { SensorRow } from "@/features/monitoring/api/readings";
 import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { getChannelStatus } from "@/features/monitoring/lib/channelMeta";
 import { getSeverity } from "@/lib/severity";
+import {
+  type SelectionWindowHandler,
+  useTimestampRowSelection,
+} from "@/lib/useTimestampRowSelection";
 
 interface ReadingsTableProps {
   readonly rows: SensorRow[];
@@ -33,6 +37,11 @@ interface ReadingsTableProps {
    * or not on this page).
    */
   readonly highlightAnomalies?: boolean;
+  /**
+   * Selecting rows updates the shared URL window so the time-series chart
+   * zooms to the same span (click / ⌘·Ctrl-click / Shift-click).
+   */
+  readonly onWindowSelect?: SelectionWindowHandler;
 }
 
 /** Sensor columns that match ChannelToggles visibility (stable channel order). */
@@ -135,7 +144,9 @@ export function ReadingsTable({
   setpoints,
   affectedByTimestamp,
   highlightAnomalies = true,
+  onWindowSelect,
 }: ReadingsTableProps) {
+  const { isSelected, handleRowClick } = useTimestampRowSelection(onWindowSelect);
   const displayChannels = useMemo(
     () => visibleSensorColumns(channels, visible),
     [channels, visible],
@@ -209,7 +220,14 @@ export function ReadingsTable({
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {onWindowSelect ? (
+          <p className="text-xs text-text-muted">
+            Click a row to zoom the chart · ⌘/Ctrl-click adds · Shift-click selects a range
+          </p>
+        ) : (
+          <span />
+        )}
         <ExportCsvButton
           filename="sensor-readings"
           headers={["timestamp", ...displayChannels, "anomaly_score"]}
@@ -228,6 +246,14 @@ export function ReadingsTable({
         rows={recentRows}
         scrollX
         scrollY
+        isRowSelected={onWindowSelect ? isSelected : undefined}
+        onRowClick={
+          onWindowSelect
+            ? (row, event) => {
+                handleRowClick(row, event, recentRows);
+              }
+            : undefined
+        }
         cellClassName={(row, columnId) => {
           if (columnId === "anomaly_score") {
             return highlightAnomalies && isAnomalousRow(row, threshold) ? ANOMALY_CELL : undefined;
