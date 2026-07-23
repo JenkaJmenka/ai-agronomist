@@ -1,14 +1,18 @@
 "use client";
 
-import { type RefObject, useEffect } from "react";
+import { useEffect, type RefObject } from "react";
+
+/** Pixels of pointer travel before a gesture counts as a horizontal drag. */
+const DRAG_THRESHOLD_PX = 10;
 
 /**
  * Click-drag pans the scrollport horizontally (grab + drag). Wheel/trackpad
  * still scrolls vertically. Suppresses the click that would fire after a drag
  * so row/cell handlers do not run.
  *
- * Important: pointer capture starts only after the drag threshold so a plain
- * click still reaches row ``onClick`` handlers (chart/window sync).
+ * Pointer capture starts only after the drag threshold so a plain click still
+ * reaches row ``onClick`` handlers (chart/window sync). Clicks are suppressed
+ * only when the scroll position actually changed (not on click jitter).
  */
 export function useTableDragPan(
   scrollRef: RefObject<HTMLDivElement | null>,
@@ -22,6 +26,7 @@ export function useTableDragPan(
 
     let active = false;
     let dragging = false;
+    let didPan = false;
     let startX = 0;
     let originLeft = 0;
     let pointerId: number | null = null;
@@ -34,6 +39,7 @@ export function useTableDragPan(
       // so row clicks (selection → chart window) still fire.
       active = true;
       dragging = false;
+      didPan = false;
       startX = event.clientX;
       originLeft = root.scrollLeft;
       pointerId = event.pointerId;
@@ -42,14 +48,18 @@ export function useTableDragPan(
     function onPointerMove(event: PointerEvent): void {
       if (!active || pointerId !== event.pointerId) return;
       const dx = event.clientX - startX;
-      if (!dragging && Math.abs(dx) > 3) {
+      if (!dragging && Math.abs(dx) > DRAG_THRESHOLD_PX) {
         dragging = true;
         root.setPointerCapture(event.pointerId);
         root.classList.add("cursor-grabbing");
         root.classList.remove("cursor-grab");
       }
       if (!dragging) return;
-      root.scrollLeft = originLeft - dx;
+      const nextLeft = originLeft - dx;
+      if (nextLeft !== root.scrollLeft) {
+        root.scrollLeft = nextLeft;
+        didPan = true;
+      }
     }
 
     function onPointerUp(event: PointerEvent): void {
@@ -61,14 +71,17 @@ export function useTableDragPan(
       root.classList.remove("cursor-grabbing");
       root.classList.add("cursor-grab");
       pointerId = null;
-      // ``dragging`` stays true until click-capture so the synthetic click
-      // after a drag is suppressed; reset there.
+      // ``didPan`` stays until click-capture so a post-drag click is suppressed.
     }
 
     function onClickCapture(event: MouseEvent): void {
-      if (!dragging) return;
+      if (!didPan) {
+        dragging = false;
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
+      didPan = false;
       dragging = false;
     }
 
