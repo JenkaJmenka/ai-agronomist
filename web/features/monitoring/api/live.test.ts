@@ -369,6 +369,6 @@ describe("toSensorRow", () => {
       anomaly_score: null,
     });
     // discoverChannels checks typeof value === "number"
-    expect(typeof (row as Record<string, unknown>)["co2"]).toBe("number");
+    expect(typeof (row as Record<string, unknown>).co2).toBe("number");
   });
 });

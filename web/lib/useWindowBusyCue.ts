@@ -21,9 +21,7 @@ export const WINDOW_BUSY_CUE_MAX_MS = 8_000;
  * excluded: ``/anomalies/enriched`` often takes tens of seconds and already
  * has its own table loading state.
  */
-export function useWindowBusyCue(options: {
-  readonly isReadingsBusy: boolean;
-}): {
+export function useWindowBusyCue(options: { readonly isReadingsBusy: boolean }): {
   readonly isDimmed: boolean;
   readonly beginWindowChange: () => void;
 } {

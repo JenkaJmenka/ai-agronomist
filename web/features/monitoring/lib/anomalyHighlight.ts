@@ -19,7 +19,9 @@ function matchOneChannel(channels: readonly string[], wanted: string): string[] 
 
 /** Map jump/sensor names onto channels present on this page. */
 export function matchChannelParam(channels: readonly string[], param: string): string[] {
-  const matched = new Set(parseChannelParam(param).flatMap((wanted) => matchOneChannel(channels, wanted)));
+  const matched = new Set(
+    parseChannelParam(param).flatMap((wanted) => matchOneChannel(channels, wanted)),
+  );
   return [...matched];
 }
 

@@ -205,14 +205,7 @@ export function ReadingsTable({
       );
     }
     return map;
-  }, [
-    recentRows,
-    displayChannels,
-    threshold,
-    setpoints,
-    affectedByTimestamp,
-    highlightAnomalies,
-  ]);
+  }, [recentRows, displayChannels, threshold, setpoints, affectedByTimestamp, highlightAnomalies]);
 
   return (
     <div className="space-y-2">
