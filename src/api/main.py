@@ -26,6 +26,8 @@ from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from redis import asyncio as aioredis
 
+from src.api.cache_keys import request_scoped_key_builder
+
 # Try to load formatted logging configurations from our devops setup
 try:
     from src.logging.config import setup_logging
@@ -107,7 +109,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Orphaned upload-job recovery failed: {e}", exc_info=True)
 
     redis = aioredis.from_url(REDIS_URL, encoding="utf8", decode_responses=True)
-    FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
+    # request_scoped_key_builder: default fastapi-cache keys hash Depends(db)
+    # session identity → permanent misses (duplicate Redis entries, full recompute).
+    FastAPICache.init(
+        RedisBackend(redis),
+        prefix="fastapi-cache",
+        key_builder=request_scoped_key_builder,
+    )
     logger.info("Redis cache initialized.")
 
     # Live runtime — resilient: API boots normally even if Redis / scoring
