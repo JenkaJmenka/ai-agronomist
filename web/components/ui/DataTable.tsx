@@ -8,15 +8,23 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { TABLE_PAGE_SIZE, TablePagination } from "@/components/ui/TablePagination";
+import { useTableDragPan } from "@/components/ui/useTableDragPan";
 
 /** Row count above which the body renders through the virtualizer. */
 const VIRTUALIZE_THRESHOLD = 100;
 const ESTIMATED_ROW_HEIGHT_PX = 37;
 const OVERSCAN_ROWS = 12;
 const VIRTUAL_VIEWPORT_MAX_HEIGHT = "max-h-[560px]";
+
+/** Modifier keys used for multi-select (avoids React MouseEvent vs DOM clash). */
+export interface RowClickModifiers {
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+}
 
 interface DataTableProps<T> {
   readonly columns: ColumnDef<T, unknown>[];
@@ -34,6 +42,14 @@ interface DataTableProps<T> {
   readonly scrollY?: boolean;
   /** Rows per page. Defaults to {@link TABLE_PAGE_SIZE}. */
   readonly pageSize?: number;
+  /**
+   * When set, rows are clickable (chart/window sync). Interactive children
+   * (links, buttons) still receive clicks without selecting the row.
+   * Event exposes modifier keys for multi-select.
+   */
+  readonly onRowClick?: (row: T, event: RowClickModifiers) => void;
+  /** Marks the row as selected for styling / aria-selected. */
+  readonly isRowSelected?: (row: T) => boolean;
 }
 
 /**
@@ -54,6 +70,8 @@ export function DataTable<T>({
   scrollX = false,
   scrollY = false,
   pageSize = TABLE_PAGE_SIZE,
+  onRowClick,
+  isRowSelected,
 }: DataTableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pageIndex, setPageIndex] = useState(0);
@@ -101,71 +119,7 @@ export function DataTable<T>({
     enabled: isVirtual,
   });
 
-  // Click-drag pans horizontally only — vertical movement stays with wheel /
-  // trackpad / scrollbar so pointer drag does not fight page or chart scroll.
-  useEffect(() => {
-    if (isEmpty) return;
-    const scrollEl = scrollRef.current;
-    if (scrollEl === null) return;
-    const root: HTMLDivElement = scrollEl;
-
-    let active = false;
-    let startX = 0;
-    let originLeft = 0;
-    let moved = false;
-
-    function onPointerDown(event: PointerEvent): void {
-      if (event.button !== 0) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("a, button, input, select, textarea, label")) return;
-      active = true;
-      moved = false;
-      startX = event.clientX;
-      originLeft = root.scrollLeft;
-      root.setPointerCapture(event.pointerId);
-      root.classList.add("cursor-grabbing");
-      root.classList.remove("cursor-grab");
-    }
-
-    function onPointerMove(event: PointerEvent): void {
-      if (!active) return;
-      const dx = event.clientX - startX;
-      if (Math.abs(dx) > 3) moved = true;
-      root.scrollLeft = originLeft - dx;
-    }
-
-    function onPointerUp(event: PointerEvent): void {
-      if (!active) return;
-      active = false;
-      root.releasePointerCapture(event.pointerId);
-      root.classList.remove("cursor-grabbing");
-      root.classList.add("cursor-grab");
-    }
-
-    // Suppress click after a drag so row/cell click handlers don't fire.
-    function onClickCapture(event: MouseEvent): void {
-      if (!moved) return;
-      event.preventDefault();
-      event.stopPropagation();
-      moved = false;
-    }
-
-    root.classList.add("cursor-grab");
-    root.addEventListener("pointerdown", onPointerDown);
-    root.addEventListener("pointermove", onPointerMove);
-    root.addEventListener("pointerup", onPointerUp);
-    root.addEventListener("pointercancel", onPointerUp);
-    root.addEventListener("click", onClickCapture, true);
-
-    return () => {
-      root.classList.remove("cursor-grab", "cursor-grabbing");
-      root.removeEventListener("pointerdown", onPointerDown);
-      root.removeEventListener("pointermove", onPointerMove);
-      root.removeEventListener("pointerup", onPointerUp);
-      root.removeEventListener("pointercancel", onPointerUp);
-      root.removeEventListener("click", onClickCapture, true);
-    };
-  }, [isEmpty]);
+  useTableDragPan(scrollRef, !isEmpty);
 
   if (isEmpty) {
     return <p className="py-8 text-center text-sm text-text-muted">{emptyMessage}</p>;
@@ -215,6 +169,8 @@ export function DataTable<T>({
             ) : null}
             {(virtualItems ?? tableRows.map((_, index) => ({ index }))).map(({ index }) => {
               const row = tableRows[index];
+              const selected = isRowSelected?.(row.original) ?? false;
+              const clickable = Boolean(onRowClick);
               return (
                 <tr
                   key={row.id}
@@ -224,9 +180,40 @@ export function DataTable<T>({
                   // virtualizer's offsets exact.
                   data-index={index}
                   ref={isVirtual ? virtualizer.measureElement : undefined}
+                  aria-selected={clickable ? selected : undefined}
+                  data-selected={selected || undefined}
+                  onClick={
+                    onRowClick
+                      ? (event) => {
+                          const target = event.target as HTMLElement | null;
+                          if (target?.closest("a, button, input, select, textarea, label")) {
+                            return;
+                          }
+                          onRowClick(row.original, event);
+                        }
+                      : undefined
+                  }
+                  onKeyDown={
+                    onRowClick
+                      ? (event: KeyboardEvent<HTMLTableRowElement>) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
+                          const target = event.target as HTMLElement | null;
+                          if (target?.closest("a, button, input, select, textarea, label")) {
+                            return;
+                          }
+                          event.preventDefault();
+                          onRowClick(row.original, {
+                            metaKey: false,
+                            ctrlKey: false,
+                            shiftKey: false,
+                          });
+                        }
+                      : undefined
+                  }
+                  tabIndex={clickable ? 0 : undefined}
                   className={`border-b border-border last:border-b-0 ${
-                    rowClassName?.(row.original) ?? ""
-                  }`}
+                    clickable ? "cursor-pointer hover:bg-accent/5 focus-visible:bg-accent/10" : ""
+                  } ${selected ? "bg-accent/15" : ""} ${rowClassName?.(row.original) ?? ""}`}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <td
