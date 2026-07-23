@@ -5,6 +5,7 @@ import {
   matchPeriodId,
   PERIOD_PRESETS,
   periodWindowEnd,
+  rowsForActiveWindow,
   windowForPeriod,
 } from "@/lib/periodPresets";
 
@@ -94,5 +95,27 @@ describe("filterRowsToWindow", () => {
       "2026-12-31T23:45:00.000Z",
       "2026-12-31T23:50:00.000Z",
     ]);
+  });
+});
+
+describe("rowsForActiveWindow", () => {
+  const rows = [
+    { timestamp: "2026-07-01T00:00:00.000Z" },
+    { timestamp: "2026-12-31T23:45:00.000Z" },
+    { timestamp: "2026-12-31T23:50:00.000Z" },
+  ];
+  const from = new Date("2026-12-31T23:40:00.000Z");
+  const to = new Date("2026-12-31T23:55:00.000Z");
+
+  it("skips client clip while refetching so brush-zoom keeps the prior payload", () => {
+    expect(
+      rowsForActiveWindow({ rows, from, to, isRefetching: true }).map((r) => r.timestamp),
+    ).toEqual(rows.map((r) => r.timestamp));
+  });
+
+  it("clips to the URL window once the fetch settles", () => {
+    expect(
+      rowsForActiveWindow({ rows, from, to, isRefetching: false }).map((r) => r.timestamp),
+    ).toEqual(["2026-12-31T23:45:00.000Z", "2026-12-31T23:50:00.000Z"]);
   });
 });
