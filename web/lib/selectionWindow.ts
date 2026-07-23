@@ -9,14 +9,17 @@ export const MULTI_ROW_EDGE_PAD_MS = 60 * 1000;
 export interface SelectionWindowOptions {
   readonly singlePadMs?: number;
   readonly edgePadMs?: number;
-  readonly now?: Date;
 }
 
 /**
  * Derive ``[from, to]`` from selected ISO timestamps.
  *
- * - One row → centered ±{@link SINGLE_ROW_PAD_MS} (clamped so ``to`` ≤ now).
+ * - One row → centered ±{@link SINGLE_ROW_PAD_MS}.
  * - Two or more → span from earliest to latest with a small edge pad.
+ *
+ * Does **not** clamp to wall-clock now — demo / uploaded data often sits in the
+ * future relative to the browser clock, and clamping would jump the chart away
+ * from the row the operator just selected.
  */
 export function windowFromSelectedTimestamps(
   timestamps: readonly string[],
@@ -30,7 +33,6 @@ export function windowFromSelectedTimestamps(
   if (times.length === 0) return null;
 
   times.sort((a, b) => a - b);
-  const nowMs = (options.now ?? new Date()).getTime();
   const singlePad = options.singlePadMs ?? SINGLE_ROW_PAD_MS;
   const edgePad = options.edgePadMs ?? MULTI_ROW_EDGE_PAD_MS;
 
@@ -38,23 +40,17 @@ export function windowFromSelectedTimestamps(
   let toMs: number;
 
   if (times.length === 1) {
-    const center = times[0];
-    const span = singlePad * 2;
-    fromMs = center - singlePad;
-    toMs = center + singlePad;
-    if (toMs > nowMs) {
-      toMs = nowMs;
-      fromMs = toMs - span;
-    }
+    fromMs = times[0] - singlePad;
+    toMs = times[0] + singlePad;
   } else {
     fromMs = times[0] - edgePad;
     toMs = times[times.length - 1] + edgePad;
-    if (toMs > nowMs) toMs = nowMs;
   }
 
+  // Duplicate timestamps → still give a usable pad around the point.
   if (!(toMs > fromMs)) {
-    toMs = nowMs;
-    fromMs = toMs - singlePad * 2;
+    fromMs = times[0] - singlePad;
+    toMs = times[0] + singlePad;
   }
 
   return { from: new Date(fromMs), to: new Date(toMs) };
