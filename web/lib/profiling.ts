@@ -95,11 +95,19 @@ export async function timed<T>(
  * Measure wall time from call until after the next two animation frames
  * (approximate interaction → paint). Use for sync UI updates that freeze
  * the main thread during render.
+ *
+ * Never starts the enabled-probe on this path — Providers warms the cache.
+ * If still unknown, warm in the background and skip this sample.
  */
 export function measureInteraction(phase: string, fields: ProfileFields = {}): void {
   const start = performance.now();
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
+      if (cachedEnabled === null) {
+        void isProfileEnabled();
+        return;
+      }
+      if (!cachedEnabled) return;
       void postProfile(phase, true, performance.now() - start, fields);
     });
   });

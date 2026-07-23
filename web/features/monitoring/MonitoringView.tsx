@@ -173,13 +173,14 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   }, [channels, hidden, channelParam]);
 
   function toggleChannel(ch: string): void {
-    measureInteraction("ui.channel_toggle", { channel: ch });
     setHidden(() => {
       const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
       if (next.has(ch)) next.delete(ch);
       else next.add(ch);
       return next;
     });
+    // Profile after scheduling state so the paint path is not delayed by the probe.
+    measureInteraction("ui.channel_toggle", { channel: ch });
   }
 
   if (isError) {

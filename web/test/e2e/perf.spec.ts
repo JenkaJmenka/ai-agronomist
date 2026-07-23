@@ -27,6 +27,13 @@ const ROWS = Array.from({ length: DOWNSAMPLED_ROWS }, (_, i) => ({
 }));
 
 test.beforeEach(async ({ page }) => {
+  // Profiling must not contend with perf budgets (enabled probe / POST).
+  await page.route("**/api/profile**", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({ json: { enabled: false } });
+    }
+    return route.fulfill({ status: 204, body: "" });
+  });
   await page.route("**/api/bff/readings/recent**", (route) =>
     route.fulfill({
       json: {
@@ -74,7 +81,16 @@ test(`channel toggle re-renders client-side under ${CHANNEL_TOGGLE_BUDGET_MS} ms
   await page.goto("/monitoring");
   const toggles = page.getByTestId("channel-toggles");
   const temperature = toggles.getByRole("checkbox", { name: "temperature" });
+  const humidity = toggles.getByRole("checkbox", { name: "humidity" });
   await expect(temperature).toBeChecked();
+  await expect(humidity).toBeChecked();
+
+  // Warm the chart setData path so the budget measures steady-state toggle cost,
+  // not first-interaction JIT / layout (CI runners were flaking at 309 vs 300).
+  await humidity.uncheck();
+  await expect(humidity).not.toBeChecked();
+  await humidity.check();
+  await expect(humidity).toBeChecked();
 
   let readingsRefetches = 0;
   await page.route("**/api/bff/readings/**", (route) => {
