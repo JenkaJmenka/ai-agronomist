@@ -158,7 +158,10 @@ export function useReadings(): ReadingsState {
           })
         : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
-    refetchInterval: live ? refreshSeconds * 1000 : false,
+    // Live ticks come from SSE (`useLiveReadings`); rolling `liveWindow` already
+    // changes the queryKey when the lookback re-anchors. A parallel refetchInterval
+    // doubled main-thread + network work and froze clicks during live mode.
+    refetchInterval: false,
     // Never keep a previous (often much wider) window while live — that is what
     // made "Last 15 min" charts stretch across months after Go Live.
     placeholderData: live ? undefined : keepPreviousData,

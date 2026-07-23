@@ -28,31 +28,37 @@ export function LiveToggle() {
 
   async function handleClick(): Promise<void> {
     const next = !live;
-    if (next) {
-      const matched = from && to ? matchPeriodId(from, to) : DEFAULT_PERIOD_ID;
-      const hours =
-        periodHours(matched === "custom" ? DEFAULT_PERIOD_ID : matched) ??
-        periodHours(DEFAULT_PERIOD_ID) ??
-        24;
+    if (!next) {
+      await setLive(false);
+      return;
+    }
 
-      let maxTimestamp: Date | null = null;
-      try {
-        const bounds = await fetchReadingsBounds({ tenant, gh });
-        if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
-      } catch {
-        // Wall-clock fallback via periodWindowEnd.
-      }
+    const matched = from && to ? matchPeriodId(from, to) : DEFAULT_PERIOD_ID;
+    const hours =
+      periodHours(matched === "custom" ? DEFAULT_PERIOD_ID : matched) ??
+      periodHours(DEFAULT_PERIOD_ID) ??
+      24;
+
+    // Flip live + optimistic wall-clock window immediately so the click is not
+    // blocked on bounds / resume round-trips (those correct the window after).
+    await setLive(true);
+    await setRange(windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live: true })));
+
+    try {
+      const bounds = await fetchReadingsBounds({ tenant, gh });
+      const maxTimestamp = bounds.max_timestamp ? new Date(bounds.max_timestamp) : null;
       const end = periodWindowEnd({ maxTimestamp, live: true });
       await setRange(windowForPeriod(hours, end));
-
-      // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
-      try {
-        await resumeLiveScope({ tenant, gh });
-      } catch {
-        // Still flip live on; stream may work if scope was never muted.
-      }
+    } catch {
+      // Keep the optimistic wall-clock window.
     }
-    await setLive(next);
+
+    // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
+    try {
+      await resumeLiveScope({ tenant, gh });
+    } catch {
+      // Stream may still work if scope was never muted.
+    }
   }
 
   return (

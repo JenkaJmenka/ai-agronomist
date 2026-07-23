@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -97,15 +97,18 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     [live, historicalRows, liveRows],
   );
   const rows = useMemo(() => filterRowsToWindow(mergedRows, from, to), [mergedRows, from, to]);
+  // Chart/table can lag a frame behind tiles so nav/clicks stay responsive under live SSE.
+  const deferredRows = useDeferredValue(rows);
 
-  // Envelope for G4 enrichment — rows are chronological after dedupe.
-  const windowStart = useMemo(() => rows[0]?.timestamp ?? null, [rows]);
-  const windowEnd = useMemo(() => rows.at(-1)?.timestamp ?? null, [rows]);
+  // Envelope for G4 enrichment — prefer URL/live lookback bounds so the queryKey
+  // does not churn on every SSE flush (rows[0]/at(-1) move every tick).
+  const windowStart = from?.toISOString() ?? deferredRows[0]?.timestamp ?? null;
+  const windowEnd = to?.toISOString() ?? deferredRows.at(-1)?.timestamp ?? null;
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: rows.length > 0,
+    enabled: deferredRows.length > 0,
     limit: SERVER_GROUPING_THRESHOLD,
   });
 
@@ -258,7 +261,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
 
           <Card title="Time series">
             <SensorTimeSeriesChart
-              rows={rows}
+              rows={deferredRows}
               channels={channels}
               visible={visible}
               threshold={threshold}
@@ -266,9 +269,9 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               onRangeSelect={(from, to) => void setRange({ from, to })}
             />
           </Card>
-          <Card title={`Readings (${rows.length.toLocaleString()} rows, newest first)`}>
+          <Card title={`Readings (${deferredRows.length.toLocaleString()} rows, newest first)`}>
             <ReadingsTable
-              rows={rows}
+              rows={deferredRows}
               channels={channels}
               threshold={threshold}
               setpoints={setpoints}

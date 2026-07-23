@@ -79,11 +79,13 @@ export function DataTable<T>({
     autoResetPageIndex: false,
   });
 
-  // Reset to first page when the row set changes (filter / window / live tick).
+  // Reset to first page when the row *count* changes (filter / window).
+  // Do not depend on `rows` identity — live SSE flushes a new array every
+  // 500ms with a similar length and was snapping the user back to page 0.
   const rowCount = rows.length;
   useEffect(() => {
     setPageIndex(0);
-  }, [rowCount, rows]);
+  }, [rowCount]);
 
   const tableRows = table.getRowModel().rows;
   const pageCount = table.getPageCount();

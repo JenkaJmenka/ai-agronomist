@@ -60,16 +60,20 @@ export function DateRangeControls() {
         setIsCustomOpen(false);
         const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
 
-        let maxTimestamp: Date | null = null;
+        // Optimistic wall-clock snap so the select click is not blocked on bounds.
+        await setRange(windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live })));
+
         try {
           const bounds = await fetchReadingsBounds({ tenant, gh });
-          if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
+          if (!bounds.max_timestamp) return;
+          const end = periodWindowEnd({
+            maxTimestamp: new Date(bounds.max_timestamp),
+            live,
+          });
+          await setRange(windowForPeriod(hours, end));
         } catch {
-          // Fall back to wall-clock if bounds are unavailable.
+          // Keep the optimistic wall-clock window.
         }
-
-        const end = periodWindowEnd({ maxTimestamp, live });
-        await setRange(windowForPeriod(hours, end));
       },
       { period: periodId },
     );
