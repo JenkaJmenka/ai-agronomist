@@ -343,7 +343,6 @@ function MonitoringBody({
               channels={channels}
               visible={visible}
               threshold={threshold}
-              setpoints={setpoints}
               onRangeSelect={onChartRangeSelect}
               viewWindow={effectiveChartWindow}
               showAnomalyBands={paintAnomalyHighlight}
