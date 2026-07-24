@@ -25,6 +25,12 @@ interface UPlotChartProps {
    */
   readonly onWindowChange?: ChartWindowHandler;
   /**
+   * Scope key for the chart baseline (e.g. `"monitoring:acme:gh1"`).
+   * Required when `onWindowChange` is set — double-click reset reads the
+   * baseline keyed by this scope so it never restores another page's window.
+   */
+  readonly chartBaselineScopeKey?: string;
+  /**
    * Local x-axis zoom (e.g. table row selection). Does not refetch or change
    * the URL — only the chart scale updates so the table can keep its rows.
    */
@@ -82,6 +88,7 @@ export function UPlotChart({
   options,
   height = 280,
   onWindowChange,
+  chartBaselineScopeKey,
   viewWindow = null,
   seriesVisibility,
 }: UPlotChartProps) {
@@ -89,6 +96,8 @@ export function UPlotChart({
   const chartRef = useRef<uPlot | null>(null);
   const onWindowChangeRef = useRef(onWindowChange);
   onWindowChangeRef.current = onWindowChange;
+  const chartBaselineScopeKeyRef = useRef(chartBaselineScopeKey);
+  chartBaselineScopeKeyRef.current = chartBaselineScopeKey;
   const dataRef = useRef(data);
   dataRef.current = data;
   const viewWindowRef = useRef(viewWindow);
@@ -155,9 +164,9 @@ export function UPlotChart({
     }
 
     function handleDblClick(event: MouseEvent): void {
-      if (!onWindowChangeRef.current) return;
+      if (!onWindowChangeRef.current || !chartBaselineScopeKeyRef.current) return;
       event.preventDefault();
-      const baseline = readChartBaseline();
+      const baseline = readChartBaseline(chartBaselineScopeKeyRef.current);
       if (baseline === null) return;
       onWindowChangeRef.current(baseline.from, baseline.to);
     }

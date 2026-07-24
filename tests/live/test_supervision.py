@@ -1,4 +1,4 @@
-"""Unit tests for src.live.supervision._supervised restart logic.
+"""Unit tests for src.live.supervision.supervised restart logic.
 
 Covers:
   (a) Normal return (clean exit) triggers backoff sleep and restart — not a tight loop.
@@ -6,7 +6,7 @@ Covers:
   (c) Backoff resets to 1.0 s after a run longer than _BACKOFF_RESET_THRESHOLD,
       for both normal-exit and exception paths.
   (d) CancelledError propagates immediately and is never swallowed.
-  (e) _run_connector calls connect() then streams readings via submit().
+  (e) run_connector calls connect() then streams readings via submit().
 
 asyncio.sleep is mocked so tests run in milliseconds rather than minutes.
 The real asyncio.sleep is captured at module import time so both the mock's
@@ -26,8 +26,8 @@ import pytest
 from src.live.supervision import (
     _BACKOFF_RESET_THRESHOLD,
     _MAX_BACKOFF_SECONDS,
-    _run_connector,
-    _supervised,
+    run_connector,
+    supervised,
 )
 
 # Capture the real function BEFORE any test patches it.
@@ -71,7 +71,7 @@ class TestNormalReturnTriggersBackoff:
             # else: return normally → should trigger sleep + restart
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_normal", coro))
+            task = asyncio.create_task(supervised("test_normal", coro))
             # Allow the first two normal exits + fake sleeps to complete, then
             # block on the event so we can assert state cleanly.
             await _REAL_SLEEP(0.05)  # type: ignore[call-arg]
@@ -102,7 +102,7 @@ class TestNormalReturnTriggersBackoff:
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
             with caplog.at_level(logging.WARNING, logger="live.supervision"):
-                task = asyncio.create_task(_supervised("my_live_task", coro))
+                task = asyncio.create_task(supervised("my_live_task", coro))
                 await _REAL_SLEEP(0.05)  # type: ignore[call-arg]
                 stop_event.set()
                 task.cancel()
@@ -136,7 +136,7 @@ class TestNormalReturnTriggersBackoff:
                 await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_doubles_normal", coro))
+            task = asyncio.create_task(supervised("test_doubles_normal", coro))
             await _REAL_SLEEP(0.1)  # type: ignore[call-arg]
             stop_event.set()
             task.cancel()
@@ -177,7 +177,7 @@ class TestExceptionTriggersBackoff:
             await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_exc", coro))
+            task = asyncio.create_task(supervised("test_exc", coro))
             await _REAL_SLEEP(0.05)  # type: ignore[call-arg]
             stop_event.set()
             task.cancel()
@@ -205,7 +205,7 @@ class TestExceptionTriggersBackoff:
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
             with caplog.at_level(logging.WARNING, logger="live.supervision"):
-                task = asyncio.create_task(_supervised("crash_task", coro))
+                task = asyncio.create_task(supervised("crash_task", coro))
                 await _REAL_SLEEP(0.05)  # type: ignore[call-arg]
                 stop_event.set()
                 task.cancel()
@@ -240,7 +240,7 @@ class TestExceptionTriggersBackoff:
             await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_cap", coro))
+            task = asyncio.create_task(supervised("test_cap", coro))
             await _REAL_SLEEP(0.1)  # type: ignore[call-arg]
             stop_event.set()
             task.cancel()
@@ -298,7 +298,7 @@ class TestBackoffResetAfterLongRun:
             await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_reset_normal", coro))
+            task = asyncio.create_task(supervised("test_reset_normal", coro))
             # Time budget: 2 fake sleeps (instant) + real 0.02 s + fake sleep + 4th call
             await _REAL_SLEEP(0.2)  # type: ignore[call-arg]
             stop_event.set()
@@ -340,7 +340,7 @@ class TestBackoffResetAfterLongRun:
             await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_reset_exc", coro))
+            task = asyncio.create_task(supervised("test_reset_exc", coro))
             await _REAL_SLEEP(0.2)  # type: ignore[call-arg]
             stop_event.set()
             task.cancel()
@@ -378,7 +378,7 @@ class TestBackoffResetAfterLongRun:
             await stop_event.wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("test_no_reset", coro))
+            task = asyncio.create_task(supervised("test_no_reset", coro))
             await _REAL_SLEEP(0.1)  # type: ignore[call-arg]
             stop_event.set()
             task.cancel()
@@ -399,10 +399,10 @@ class TestBackoffResetAfterLongRun:
 
 
 class TestCancelledErrorPropagates:
-    """CancelledError must never be swallowed by _supervised."""
+    """CancelledError must never be swallowed by supervised."""
 
     async def test_cancelled_during_coro_propagates(self) -> None:
-        """CancelledError raised inside the coro propagates out of _supervised.
+        """CancelledError raised inside the coro propagates out of supervised.
 
         asyncio.Event().wait() is used so the block is not subject to the
         sleep patch (this test runs without patching sleep at all).
@@ -416,7 +416,7 @@ class TestCancelledErrorPropagates:
             started.set()
             await asyncio.Event().wait()  # blocks until task is cancelled
 
-        task = asyncio.create_task(_supervised("cancel_test", coro))
+        task = asyncio.create_task(supervised("cancel_test", coro))
         await started.wait()  # ensure coro is running
         task.cancel()
 
@@ -444,7 +444,7 @@ class TestCancelledErrorPropagates:
             raise RuntimeError("crash to enter backoff sleep")
 
         with patch("asyncio.sleep", new=fake_sleep_then_signal):
-            task = asyncio.create_task(_supervised("cancel_backoff_test", coro))
+            task = asyncio.create_task(supervised("cancel_backoff_test", coro))
             await cancel_event.wait()   # coro crashed; we're now in backoff sleep
             task.cancel()
 
@@ -472,7 +472,7 @@ class TestCancelledErrorPropagates:
             await asyncio.Event().wait()
 
         with patch("asyncio.sleep", new=_make_fake_sleep(sleep_calls)):
-            task = asyncio.create_task(_supervised("no_restart_after_cancel", coro))
+            task = asyncio.create_task(supervised("no_restart_after_cancel", coro))
             await started.wait()  # ensure the coro has entered its wait
             task.cancel()
             try:
@@ -486,12 +486,12 @@ class TestCancelledErrorPropagates:
 
 
 # ---------------------------------------------------------------------------
-# (e) _run_connector: connect + stream + submit
+# (e) run_connector: connect + stream + submit
 # ---------------------------------------------------------------------------
 
 
 class TestRunConnector:
-    """_run_connector calls connector.connect(), then streams readings to merger.submit()."""
+    """run_connector calls connector.connect(), then streams readings to merger.submit()."""
 
     async def test_connect_then_stream_readings(self) -> None:
         """Calls connect, iterates stream(), and submits each reading to the merger."""
@@ -509,7 +509,7 @@ class TestRunConnector:
 
         merger = AsyncMock()
 
-        await _run_connector(connector, merger)
+        await run_connector(connector, merger)
 
         connector.connect.assert_awaited_once()
         assert merger.submit.await_count == 2
@@ -529,7 +529,7 @@ class TestRunConnector:
 
         merger = AsyncMock()
 
-        await _run_connector(connector, merger)
+        await run_connector(connector, merger)
 
         connector.connect.assert_awaited_once()
         merger.submit.assert_not_awaited()
@@ -542,4 +542,4 @@ class TestRunConnector:
         merger = AsyncMock()
 
         with pytest.raises(ConnectionError, match="refused"):
-            await _run_connector(connector, merger)
+            await run_connector(connector, merger)

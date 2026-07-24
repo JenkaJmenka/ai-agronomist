@@ -59,6 +59,7 @@ function ThresholdsBody() {
           <p className="text-sm text-text-muted tabular-nums">{windowLabel}</p>
         </div>
         <SharedViewControls
+          pageId="thresholds"
           channels={channels}
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}

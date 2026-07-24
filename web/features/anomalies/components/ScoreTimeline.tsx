@@ -19,6 +19,12 @@ interface ScoreTimelineProps {
   readonly onRangeSelect?: RangeSelectHandler;
   /** Local chart zoom from table row selection (does not change the table). */
   readonly viewWindow?: ChartViewWindow | null;
+  /**
+   * Scope key for the chart baseline (e.g. `"anomalies:acme:gh1"`).
+   * Passed to ChartResetButton and UPlotChart so Reset and double-click
+   * never restore another page's or scope's window.
+   */
+  readonly scopeKey: string;
 }
 
 /** Anomaly-score series with the threshold as a reference line. */
@@ -27,6 +33,7 @@ export function ScoreTimeline({
   threshold,
   onRangeSelect,
   viewWindow = null,
+  scopeKey,
 }: ScoreTimelineProps) {
   const data = useMemo(() => {
     const xs: number[] = [];
@@ -110,7 +117,7 @@ export function ScoreTimeline({
     <div className="space-y-2">
       {onRangeSelect ? (
         <div className="flex justify-end">
-          <ChartResetButton />
+          <ChartResetButton scopeKey={scopeKey} />
         </div>
       ) : null}
       <UPlotChart
@@ -118,6 +125,7 @@ export function ScoreTimeline({
         options={options}
         height={260}
         onWindowChange={onRangeSelect}
+        chartBaselineScopeKey={scopeKey}
         viewWindow={viewWindow}
       />
     </div>

@@ -37,6 +37,12 @@ interface SensorTimeSeriesChartProps {
   readonly anomalyFocusVisible?: readonly string[];
   /** Detector-attributed sensors keyed by reading timestamp. */
   readonly affectedByTimestamp?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Scope key for the chart baseline (e.g. `"monitoring:acme:gh1"`).
+   * Passed to ChartResetButton and UPlotChart so Reset and double-click
+   * never restore another page's or scope's window.
+   */
+  readonly scopeKey: string;
 }
 
 /** Paints translucent bands behind the series over anomalous time spans. */
@@ -83,6 +89,7 @@ export function SensorTimeSeriesChart({
   showAnomalyBands = true,
   anomalyFocusVisible,
   affectedByTimestamp,
+  scopeKey,
 }: SensorTimeSeriesChartProps) {
   const data = useMemo(() => {
     const xs = rows.map((r) => new Date(r.timestamp).getTime() / 1000);
@@ -172,7 +179,7 @@ export function SensorTimeSeriesChart({
     <div className="space-y-2">
       {onRangeSelect ? (
         <div className="flex justify-end">
-          <ChartResetButton />
+          <ChartResetButton scopeKey={scopeKey} />
         </div>
       ) : null}
       <UPlotChart
@@ -180,6 +187,7 @@ export function SensorTimeSeriesChart({
         options={options}
         height={320}
         onWindowChange={onRangeSelect}
+        chartBaselineScopeKey={scopeKey}
         viewWindow={viewWindow}
         seriesVisibility={seriesVisibility}
       />

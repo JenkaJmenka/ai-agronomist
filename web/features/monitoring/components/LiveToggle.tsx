@@ -15,16 +15,25 @@ import {
 import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 
+interface LiveToggleProps {
+  /**
+   * Page identifier (e.g. `"monitoring"`, `"climate"`).
+   * Combined with tenant/gh to scope the chart baseline per page and scope.
+   */
+  readonly pageId: string;
+}
+
 /**
  * Live toggle — drives the `live` URL param.
  * Enabling live resumes a scope muted by Clear all data, then streams.
  * Always re-snaps the current preset (or default 24h) to an end anchor of
  * max(now, newest stored reading) so the chart matches the Period control.
  */
-export function LiveToggle() {
+export function LiveToggle({ pageId }: LiveToggleProps) {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [{ from, to }, setRange] = useDateRange();
   const { tenant, gh } = useScope();
+  const scopeKey = `${pageId}:${tenant}:${gh}`;
 
   async function handleClick(): Promise<void> {
     const next = !live;
@@ -43,7 +52,7 @@ export function LiveToggle() {
     // blocked on bounds / resume round-trips (those correct the window after).
     await setLive(true);
     const optimistic = windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live: true }));
-    rememberChartBaseline(optimistic.from, optimistic.to);
+    rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
     await setRange(optimistic);
 
     try {
@@ -51,7 +60,7 @@ export function LiveToggle() {
       const maxTimestamp = bounds.max_timestamp ? new Date(bounds.max_timestamp) : null;
       const end = periodWindowEnd({ maxTimestamp, live: true });
       const next = windowForPeriod(hours, end);
-      rememberChartBaseline(next.from, next.to);
+      rememberChartBaseline(next.from, next.to, scopeKey);
       await setRange(next);
     } catch {
       // Keep the optimistic wall-clock window.

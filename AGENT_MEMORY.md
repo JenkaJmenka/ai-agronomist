@@ -3,6 +3,169 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**SCADA Config Engine — Architecture Plan (architect-scada) — COMPLETE (2026-07-24)**
+Agent: architect. Task: requirements analysis + gap matrix + phased plan for the SCADA
+Configuration & Anomaly Detection spec. Output: `docs/architecture/scada-config-engine-plan.md`.
+No implementation code written (docs/architecture/ only).
+
+Gap matrix highlights (spec is mostly already implemented — plan EXTENDS, not duplicates):
+- DONE: IsolationForest(0.04) Pass 1 + LSTM-VAE Pass 2 with τ=99th-pct MSE
+  (`src/models/bootstrap.py`); spec-exact spike velocity+reversal (`pattern_scores.score_spike`);
+  stuck (`stuck_fault_detector`), CUSUM with K=0.25σ/H=4.0σ already defined
+  (`cusum_drift_detector`), noise high-pass (`noise_detector`), dropout P=5
+  (`dropout_detector`). All "unspecified constants" (ε, P, α, Δ_max, windows) already
+  in `src/config.py`.
+- CONFIRMED BUG: `psychrometric_validator.py:80` uses hPa coefficient 216.7 with kPa
+  inputs → HD ~10× too small; `PSYCHROMETRIC_HD_TOLERANCE=0.05` also wrong (should be
+  ~0.4 g/m³ configurable). Fix = `2166.8·e[kPa]/T[K]`; recalibrate downstream
+  (`bootstrap._compute_physics_flags`, `DEHUMID_HD_CRIT_G_M3`).
+- MISSING: crop profiles (setpoints are frontend localStorage-only, `useSetpoints.ts`,
+  no backend/DB/scoring effect), month→season mapping, seasonal baselines, seasonal-σ
+  scaling of detector limits, MAD robust-z Pass-1 scrub stage, measured-HD channel
+  (blocks venting-downgrade — open question Q1).
+- Minor semantic gap: `DropoutDetector` fires on ANY-sensor-missing; spec says
+  all-missing (open question Q4).
+
+Plan: 7 phases — (P1 backend: alembic 018 crop_profiles/crop_profile_bounds/
+season_mappings/seasonal_baselines + config API ∥ P2 ml: HD fix + MAD scrub +
+spike-latency doc) → P3 ml: SeasonalScaleProvider + CropBoundsDetector +
+FaultType.SETPOINT_BREACH → P4 backend: pipeline/live wiring → P5 frontend:
+season-mapping UI + useSetpoints localStorage→API migration → P6 QA → P7 review.
+9 open product questions flagged for user (§5 of the plan) — Phase 1 dispatch should
+wait on answers to Q1/Q2/Q6 at minimum.
+Done signal: tasks/done/architect-scada.json.
+
+---
+
+## Previous Phase
+**Phase 7 Final Co-Review (architect half) — COMPLETE (2026-07-24)**
+Agent: architect-p7. Task: architect-lens final review of the full uncommitted diff
+(findings #3–#9) before push to main. Read-only on src/tests/web.
+
+Verdict: **PASS WITH NOTES** — no blocking findings. Report:
+`docs/architecture/phase7-final-review-architect.md`.
+
+Verified: routes→services→data layering clean (upload.py 292 lines, thin delegates);
+SensorReading.source/RawReading.source semantics consistent (both write literal 'live';
+wipe filters match; no read-path drift); alembic 017 idempotent + correct up/down;
+scope_control/hub docstrings honest (docs/live_scada_connectors.md §8 exists and matches);
+web hook extractions faithful (useChartRangeSelect, useChannelVisibility verbatim; scoped
+chart baseline is the intended behavior change, tsc-enforced threading); tenant scoping
+preserved predicate-by-predicate in tenant_data_wipe extraction.
+
+Non-blocking notes N1–N9, key ones:
+- N4: LIVE_RAW_SOURCE='live' duplicated between tenant_data_wipe.py and persistence.py
+  (hardcoded) — consolidate to one shared constant.
+- N7: alembic 017 deploy-ordering window — old workers writing anomaly_type='live' after
+  backfill produce straggler rows mis-owned by the new filters; mitigated by single-worker
+  deploy + idempotent backfill; add re-run step to deploy runbook.
+- N9: `${pageId}:${tenant}:${gh}` scope-key template duplicated in 4 web call sites —
+  extract chartScopeKey() helper.
+- Also: dead helpers _daily_cycle/_anomaly_value in synthetic_anomalies.py;
+  'live-backfill' rows not owned by live wipe (pre-existing); models/*.pt modified in
+  working tree — confirm intentional before push.
+
+Done signal: tasks/done/architect-p7.json.
+
+---
+
+## Previous Phase
+**Phase 4-6 Remaining Findings QA Validation — COMPLETE (2026-07-24)**
+Agent: qa-p6. Task: validate full uncommitted working tree before final review and push to main.
+
+Gates: backend pytest 2516 passed (0 regressions), alembic 017 static check PASS (up/down consistent
+with SensorReading.source model column), web lint PASS (172 files), web typecheck PASS, web vitest
+215 passed (26 test files). All green, no test-side fixes needed.
+
+Coverage on new modules: `tenant_data_wipe.py` 83%, `synthetic_anomalies.py` 87%.
+Web: `useChartRangeSelect` has 3 unit tests; `useChannelVisibility` has no dedicated test (recommended).
+Report: `docs/coverage/phase4-6-remaining-findings.md`. Done signal: `tasks/done/qa-p6.json`.
+
+---
+
+## Previous Phase
+**Upload Routes Split (tech-lead-p5, finding #4) — COMPLETE (2026-07-24)**
+Agent: tech-lead. Task: split `src/api/routes/upload.py` (815 lines) so routes handle I/O only.
+
+Decomposition (details in `docs/refactor/upload-split.md`):
+- New `src/api/services/tenant_data_wipe.py` (242 lines): `wipe_tenant_data()` (full cascade:
+  SensorReading/RawReading/Incident+IncidentAction/OperatorFeedback/LearningLog/MetricsSnapshot),
+  `wipe_live_demo_data()` (source='live' rows only), shared `_suppress_live_persistence()` +
+  `_clear_live_stream()` helpers (dedupes the two formerly-copied blocks), `LIVE_RAW_SOURCE`.
+  Routes pass `getattr(request.app.state, "live_runtime", None)` in — service stays framework-free.
+- New `src/api/services/synthetic_anomalies.py` (298 lines): `inject_synthetic_anomalies()` /
+  `delete_synthetic_anomalies()` + all generation helpers, `ANOMALY_TYPES`, `_CANONICAL_STATS`.
+  The five parallel per-type dicts consolidated into one `_TYPE_PROFILES` table (same values,
+  same key order — 422 messages byte-identical); new `_resolve_window()` extracted.
+- `src/api/routes/upload.py` now 292 lines: `upload_csv` unchanged (inline `bulk_upsert_rows`
+  imports hoisted to top), four thin routes delegate to services.
+
+Invariants held: same paths/params/response shapes; `invalidate_response_cache` calls in the
+exact same position relative to `db.commit()` with identical reason strings (408be3a + Phase 4);
+no external module imported the moved helpers (grep-verified).
+
+Tests: tests/api → 338 passed, 1 xfailed (test_upload_routes.py 16/16, assertions untouched);
+full suite → 2516 passed, 12 skipped, 2 xfailed. Zero regressions.
+Done signal: tasks/done/tech-lead-p5.json.
+
+---
+
+## Previous Phase
+**Architect Review Cleanup Batch (backend-p4) — COMPLETE (2026-07-24)**
+Agent: backend-engineer. Task: apply architect 2026-07-24 review findings #5, #3, #10, #11, #12, #14.
+
+**Finding #5 — Replace `anomaly_type='live'` sentinel with proper `source` column:**
+- `src/db/models.py`: Added nullable `source String(64)` column to `SensorReading`.
+- `alembic/versions/017_add_source_to_sensor_readings.py` (new, head `017` ← `016`):
+  Adds column, backfills `SET source='live', anomaly_type=NULL WHERE anomaly_type='live'`.
+  Downgrade reverses the backfill and drops the column. Batch mode for SQLite compat.
+- `src/live/persistence.py` `_event_to_row`: Changed `"anomaly_type": "live"` → `"source": "live"`.
+- `src/api/routes/upload.py`:
+  - Removed `_LIVE_ANOMALY_TYPE = "live"` constant; `_LIVE_RAW_SOURCE` now covers both tables.
+  - `remove_live_demo_data`: primary filter switched from `anomaly_type == _LIVE_ANOMALY_TYPE`
+    to `source == _LIVE_RAW_SOURCE`; timestamp fallback now also checks `source.is_(None)`.
+  - `remove_synthetic_anomalies`: removed redundant `anomaly_type != _LIVE_ANOMALY_TYPE` guard
+    (live rows have `anomaly_type=NULL` after migration, excluded by `is_not(None)` already).
+- Tests updated: `tests/live/test_persistence.py` (assertion), `tests/api/test_upload_routes.py`
+  (3 tests: rows updated to `source="live"`, assertions updated), `tests/api/test_cache_invalidation.py`.
+
+**Finding #3 — Process-local constraint documentation:**
+- `src/live/scope_control.py`: Module docstring updated to explicitly state `_suppressed_scopes`
+  is in-process only; suppress/resume does not propagate across workers; single-worker deployment
+  is a documented invariant.
+- `src/live/hub.py`: Module docstring softened — fan-out is worker-safe via Redis, but scope
+  suppression (`scope_control`) is NOT worker-safe, with pointer to `scope_control.py`.
+
+**Minor #10 — Rename underscore-private cross-module names:**
+- `src/live/supervision.py`: `_supervised` → `supervised`, `_run_connector` → `run_connector`.
+- `src/live/runtime_builder.py`: `_ScopeContext` → `ScopeContext`.
+- `src/live/runtime.py`: Updated all imports and usages.
+- `tests/live/test_supervision.py`: Updated imports and all call sites.
+- `tests/live/test_runtime.py`: Updated imports and all call sites.
+
+**Minor #11 — Fix `redis_factory` docstring in `hub.py`:**
+- Both class-level and parameter docstrings corrected from "async callable" → "synchronous
+  zero-arg callable that returns a fresh async Redis client (called without await)".
+
+**Minor #12 — Fix no-request fallback in `src/api/cache_keys.py`:**
+- Added `_safe_args_repr()` helper: primitive args (str/int/float/bool/None) repr'd verbatim;
+  any other type replaced by `type(arg).__name__` to avoid embedding memory addresses.
+- `request_scoped_key_builder` no-request path now calls `_safe_args_repr(args)` instead of
+  raw `args or ()`.
+- Extended `tests/api/test_cache_keys.py` with 8 new tests: `TestSafeArgsRepr` (6 tests) +
+  `TestFallbackKeyStabilityWithNonPrimitiveArgs` (2 tests).
+
+**Minor #14 — WHY comment on MetricsSnapshot delete in `clear_tenant_data`:**
+- Added comment explaining intentional wider blast radius: MetricsSnapshot has no greenhouse_id,
+  so all tenant-wide snapshots are wiped to prevent stale aggregates outliving cleared readings.
+
+Test results: 2516 passed, 12 skipped, 2 xfailed (zero regressions from 2508 pre-patch baseline).
+Alembic: migration 017 is the new head, chain verified via ScriptDirectory.
+Done signal: tasks/done/backend-p4.json.
+
+---
+
+## Previous Phase
 **Phase 1 QA Validation: Cache Invalidation + Supervision Hot-Loop — COMPLETE (2026-07-24)**
 Agent: qa-phase1. Task: validate two Phase 1 fixes before push to main.
 
@@ -1938,3 +2101,10 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
 - **No bugs found** in `handle_upload_finalize`'s guard logic or `extract_upload_results` — both behave exactly per the documented "both must be zero" / "only failed hides results" semantics.
 - **Gate**: `PYTHONPATH=. python3 -m pytest tests/ -k "persist or finalize or upload or extract" -q` → **156 passed**, 0 failed (198 warnings, all pre-existing pandas ChainedAssignmentError FutureWarnings from `src/`, unrelated to this change). Isolated run of just the touched files: `tests/workers/test_upload_finalize_persist_guard.py` + `tests/dashboard/test_async_upload_extract_results.py` → **10 passed**.
 - **Files touched (tests only, per instructions)**: `tests/workers/test_upload_finalize_persist_guard.py` (appended), `tests/dashboard/test_async_upload_extract_results.py` (new). No `src/` files modified.
+
+## Phase 7 — Final co-review, tech-lead half (2026-07-24)
+- **Task**: read-only co-review of the full uncommitted diff (findings #3–#9) before push to main; report at `docs/refactor/phase7-final-review-tech-lead.md`.
+- **Verdict**: **PASS WITH NOTES** — no blocking issues.
+- **Verified**: upload.py split (785→292 lines; services/tenant_data_wipe.py 242, services/synthetic_anomalies.py 298 — all ≤300) removes duplication genuinely (suppress/clear-stream helpers, 4 type dicts → one `_TYPE_PROFILES` table with all 9 profiles value-identical); migration 017 (anomaly_type→source) is linear 016→017, SQLite batch-mode, reversible backfill; supervision/runtime de-underscore renames complete with zero stale refs; cache_keys `_safe_args_repr` correct + tested; web extractions (useChannelVisibility, useChartRangeSelect) verbatim incl. profiling probe; chartBaseline scope keys threaded through all 6 call sites; drag-pan `data-row-selectable` contract has exactly one producer/consumer.
+- **Notes for follow-up**: (1) dead `_anomaly_value()` carried into synthetic_anomalies.py — delete; (2) `${pageId}:${tenant}:${gh}` key built by hand in 4 files — extract `buildChartScopeKey`; (3) deploy ordering: migration 017 must run before new code serves the DELETE /upload routes (un-migrated DB + new code would let remove_synthetic_anomalies match legacy anomaly_type='live' rows); (4) `live_runtime: Any` → small Protocol; (5) long lines synthetic_anomalies.py:210-213; (6) pre-existing `adapter._csv_props` private access.
+- **No files under src/, tests/, or web/ modified** (read-only mandate).

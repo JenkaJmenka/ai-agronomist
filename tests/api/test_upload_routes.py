@@ -261,7 +261,7 @@ class TestRemoveSyntheticAnomalies:
         assert await _count(test_database, RawReading) == 10
 
     async def test_remove_inject_keeps_live_tagged_rows(self, test_client, test_database):
-        """Inject cleanup must not own live demo rows (anomaly_type=live)."""
+        """Inject cleanup must not own live demo rows (source='live', anomaly_type=NULL)."""
         live_ts = NOW - datetime.timedelta(minutes=1)
         test_database.add(
             SensorReading(
@@ -272,7 +272,7 @@ class TestRemoveSyntheticAnomalies:
                 humidity=60.0,
                 co2=400.0,
                 light=500.0,
-                anomaly_type="live",
+                source="live",  # post-migration provenance tag on SensorReading
             )
         )
         test_database.add(
@@ -307,7 +307,7 @@ class TestRemoveSyntheticAnomalies:
         remaining = (
             await test_database.execute(select(SensorReading).where(SensorReading.tenant_id == TENANT))
         ).scalar_one()
-        assert remaining.anomaly_type == "live"
+        assert remaining.source == "live"
 
     def test_unknown_type_rejected(self, test_client):
         response = test_client.delete(
@@ -345,7 +345,7 @@ class TestRemoveLiveDemoData:
                 humidity=55.0,
                 co2=410.0,
                 light=480.0,
-                anomaly_type="live",
+                source="live",  # post-migration provenance tag (was anomaly_type='live')
             )
         )
         test_database.add(
@@ -357,7 +357,8 @@ class TestRemoveLiveDemoData:
                 data={"temperature": 23.0, "humidity": 55.0, "co2": 410.0, "light": 480.0},
             )
         )
-        # Pre-tag live SensorReading: untagged score sharing a live raw timestamp.
+        # Pre-tag live SensorReading: untagged row (source=None, anomaly_type=None)
+        # sharing a timestamp with a live RawReading — deleted by timestamp fallback.
         test_database.add(
             SensorReading(
                 tenant_id=TENANT,
@@ -399,7 +400,7 @@ class TestRemoveLiveDemoData:
         live_left = await test_database.execute(
             select(func.count(SensorReading.id)).where(
                 SensorReading.tenant_id == TENANT,
-                SensorReading.anomaly_type == "live",
+                SensorReading.source == "live",
             )
         )
         assert live_left.scalar() == 0
@@ -416,7 +417,7 @@ class TestRemoveLiveDemoData:
                     humidity=60.0,
                     co2=400.0,
                     light=500.0,
-                    anomaly_type="live",
+                    source="live",  # post-migration provenance tag
                 )
             )
             test_database.add(

@@ -28,8 +28,8 @@ from typing import Optional
 from src.live.hub import LiveHub
 from src.live.merge import ChannelMerger
 from src.live.persistence import PersistenceBatcher
-from src.live.runtime_builder import _ScopeContext, build_scopes_from_config
-from src.live.supervision import _run_connector, _supervised
+from src.live.runtime_builder import ScopeContext, build_scopes_from_config
+from src.live.supervision import run_connector, supervised
 
 logger = logging.getLogger("live.runtime")
 
@@ -43,7 +43,7 @@ class LiveRuntime:
     def __init__(
         self,
         hub: LiveHub,
-        scopes: list[_ScopeContext],
+        scopes: list[ScopeContext],
         batcher: Optional[PersistenceBatcher],
     ) -> None:
         self._hub = hub
@@ -81,7 +81,7 @@ class LiveRuntime:
         if self._batcher is not None:
             self._tasks.append(
                 asyncio.create_task(
-                    _supervised("persistence_flush", self._batcher.run),
+                    supervised("persistence_flush", self._batcher.run),
                     name="persistence_flush",
                 )
             )
@@ -91,7 +91,7 @@ class LiveRuntime:
 
             self._tasks.append(
                 asyncio.create_task(
-                    _supervised(f"{prefix}/merger", scope.merger.run),
+                    supervised(f"{prefix}/merger", scope.merger.run),
                     name=f"merger_{scope.tenant_id}_{scope.greenhouse_id}",
                 )
             )
@@ -100,7 +100,7 @@ class LiveRuntime:
                 label = f"{prefix}/{connector.config.source_id}"
                 self._tasks.append(
                     asyncio.create_task(
-                        _supervised(label, _run_connector, connector, scope.merger),
+                        supervised(label, run_connector, connector, scope.merger),
                         name=f"connector_{connector.config.source_id}",
                     )
                 )

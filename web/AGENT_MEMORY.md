@@ -88,6 +88,30 @@ Railway `web` already has `PROFILE_LOGGING_ENABLED=yes` (set via CLI). Redeploy 
 
 ---
 
+## Architect review cleanup batch (2026-07-24) — findings #6–#9
+
+### What was done
+
+**#6 — `useChannelVisibility` hook** (`features/monitoring/hooks/useChannelVisibility.ts`):
+Extracted the channel-visibility state machine out of `MonitoringBody`: knownChannels session memory, hidden/userToggledChannels/jumpFocus anomaly-jump pre-select, visible derivation, and toggleChannel. MonitoringView.tsx shrank from 370 → 296 lines (under 300). Behavior is identical.
+
+**#7 — `useChartRangeSelect` hook** (`lib/useChartRangeSelect.ts`):
+Extracted the duplicated `useWindowBusyCue + debounce(setRange, 200) + cancel-on-unmount + onChartRangeSelect` block that was identical in `MonitoringView` and `AnomaliesView`. Both now call `useChartRangeSelect({ isReadingsBusy })`. Named constant `RANGE_WRITE_DEBOUNCE_MS = 200` exported. Unit test added (`lib/useChartRangeSelect.test.ts`).
+
+**#8 — Explicit drag-pan DOM contract** (`components/ui/useTableDragPan.ts` + `DataTable.tsx`):
+`DataTable` now sets `data-row-selectable=""` on clickable body rows (keeping `tabIndex` for a11y). `useTableDragPan` checks `tbody tr[data-row-selectable]` instead of `tbody tr[tabindex]`.
+
+**#9 — Scoped `chartBaseline`** (`components/charts/chartBaseline.ts` + callers):
+All three functions (`rememberChartBaseline`, `readChartBaseline`, `ensureChartBaseline`) now take a `scopeKey: string` arg. Storage key is `ai-agronomist.chart-baseline:${scopeKey}`. `DateRangeControls` and `LiveToggle` each take a `pageId` prop and build `${pageId}:${tenant}:${gh}` internally. `ChartResetButton` takes `scopeKey` directly. `UPlotChart` takes `chartBaselineScopeKey` (ref-pattern) for the dblclick handler. `SensorTimeSeriesChart` and `ScoreTimeline` take `scopeKey` and thread it to both. `SharedViewControls` takes `pageId` and threads it to DateRangeControls + LiveToggle. All 4 MonitoringView pages (`monitoring`, `climate`, `gas`) pass `pageId`; `AnomaliesView` passes `"anomalies"`. `chartBaseline.test.ts` updated with cross-scope isolation tests.
+
+### Gates status (2026-07-24)
+- `pnpm lint`: clean (0 errors)
+- `pnpm typecheck`: clean
+- `pnpm test`: 215/215 (26 test files)
+- `pnpm build`: clean
+
+---
+
 ## UI freeze mitigations (2026-07-23)
 
 Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:

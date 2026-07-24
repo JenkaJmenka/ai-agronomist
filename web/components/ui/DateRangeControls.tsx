@@ -23,6 +23,14 @@ import { useScope } from "@/lib/useScope";
 const SELECT_CLASS =
   "h-8 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 text-sm text-text";
 
+interface DateRangeControlsProps {
+  /**
+   * Page identifier (e.g. `"monitoring"`, `"anomalies"`).
+   * Combined with tenant/gh to scope the chart baseline per page and scope.
+   */
+  readonly pageId: string;
+}
+
 /**
  * Period + refresh dropdowns (URL-driven). Replaces the old chip row so
  * Setpoints / Go Live share the same baseline as these controls.
@@ -31,8 +39,9 @@ const SELECT_CLASS =
  * matching `/api/readings/recent`, so historical uploads fill Last hour/24h/7d.
  * While Go Live is on, the end prefers wall-clock so incoming ticks stay in view.
  */
-export function DateRangeControls() {
+export function DateRangeControls({ pageId }: DateRangeControlsProps) {
   const { tenant, gh } = useScope();
+  const scopeKey = `${pageId}:${tenant}:${gh}`;
   const [{ from, to }, setRange] = useDateRange();
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [refresh, setRefresh] = useRefreshInterval();
@@ -62,7 +71,7 @@ export function DateRangeControls() {
 
         // Optimistic wall-clock snap so the select click is not blocked on bounds.
         const optimistic = windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live }));
-        rememberChartBaseline(optimistic.from, optimistic.to);
+        rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
         await setRange(optimistic);
 
         try {
@@ -73,7 +82,7 @@ export function DateRangeControls() {
             live,
           });
           const next = windowForPeriod(hours, end);
-          rememberChartBaseline(next.from, next.to);
+          rememberChartBaseline(next.from, next.to, scopeKey);
           await setRange(next);
         } catch {
           // Keep the optimistic wall-clock window.
@@ -88,7 +97,7 @@ export function DateRangeControls() {
     void timed(
       "ui.time_window",
       async () => {
-        rememberChartBaseline(start, end);
+        rememberChartBaseline(start, end, scopeKey);
         await setRange({ from: start, to: end });
       },
       { period: "custom" },

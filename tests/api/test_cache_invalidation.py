@@ -278,7 +278,7 @@ class TestRemoveLiveDemoDataResponseIncludesCacheKey:
                 humidity=60.0,
                 co2=400.0,
                 light=500.0,
-                anomaly_type="live",
+                source="live",  # post-migration provenance tag
             )
         )
         _ci_test_db.add(

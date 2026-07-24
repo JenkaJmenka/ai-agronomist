@@ -1,15 +1,7 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import {
-  Suspense,
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Suspense, useDeferredValue, useMemo } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -25,25 +17,22 @@ import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalySt
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
+import { useChannelVisibility } from "@/features/monitoring/hooks/useChannelVisibility";
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
-import {
-  matchChannelParam,
-  shouldPaintAnomalyHighlight,
-} from "@/features/monitoring/lib/anomalyHighlight";
+import { shouldPaintAnomalyHighlight } from "@/features/monitoring/lib/anomalyHighlight";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
-import { debounce } from "@/lib/debounce";
 import { rowsForActiveWindow } from "@/lib/periodPresets";
-import { measureInteraction } from "@/lib/profiling";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
+import { useChartRangeSelect } from "@/lib/useChartRangeSelect";
 import { useChartViewWindow } from "@/lib/useChartViewWindow";
-import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
-import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
 
 interface MonitoringViewProps {
   readonly title: string;
+  /** Stable page identifier used to scope the chart baseline (e.g. `"monitoring"`). */
+  readonly pageId: string;
   /** Restrict to these channels (e.g. climate → temp/humid prefixes). Empty = all. */
   readonly channelFilter?: readonly string[];
   /**
@@ -67,7 +56,12 @@ function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRo
   );
 }
 
-function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: MonitoringViewProps) {
+function MonitoringBody({
+  title,
+  pageId,
+  channelFilter,
+  channelMatch = "includes",
+}: MonitoringViewProps) {
   const {
     rows: historicalRows,
     isLoading,
@@ -84,7 +78,6 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
   const [live] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
-  const [, setRange] = useDateRange();
 
   const { rows: liveRows, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -119,24 +112,9 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     enabled: deferredRows.length > 0 && !isRefetching,
     limit: 50,
   });
-  const { isDimmed, beginWindowChange } = useWindowBusyCue({
-    isReadingsBusy: isRefetching,
-  });
-  const debouncedSetRange = useMemo(
-    () =>
-      debounce((nextFrom: Date, nextTo: Date) => {
-        void setRange({ from: nextFrom, to: nextTo });
-      }, 200),
-    [setRange],
-  );
-  useEffect(() => () => debouncedSetRange.cancel(), [debouncedSetRange]);
-  const onChartRangeSelect = useCallback(
-    (nextFrom: Date, nextTo: Date) => {
-      beginWindowChange();
-      debouncedSetRange(nextFrom, nextTo);
-    },
-    [beginWindowChange, debouncedSetRange],
-  );
+
+  // Dim + debounced URL write for chart drag-select / scroll-zoom.
+  const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({
     from,
     to,
@@ -161,66 +139,21 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     return map;
   }, [enrichment.byTimestamp, anomalies]);
 
+  // Live buffer alone can carry channels that the windowed history lost.
   const discoveredNow = useMemo(() => {
     const fromMerge = discoverChannels(mergedRows);
-    // Live buffer alone can still carry channels that the windowed history lost.
     return live ? mergeChannelLists(fromMerge, discoverChannels(liveRows)) : fromMerge;
   }, [mergedRows, live, liveRows]);
 
-  // Remember every channel seen this session so rolling Last 15/30 min windows
-  // do not remove sensors that only appear on some ticks.
-  const [knownChannels, setKnownChannels] = useState<string[]>([]);
-  useEffect(() => {
-    setKnownChannels([]);
-  }, [tenant, gh]);
-  useEffect(() => {
-    setKnownChannels((prev) => {
-      const next = mergeChannelLists(prev, discoveredNow);
-      if (next.length === prev.length && next.every((ch, i) => ch === prev[i])) return prev;
-      return next;
-    });
-  }, [discoveredNow]);
-
-  const channels = useMemo(() => {
-    const discovered = knownChannels.length > 0 ? knownChannels : discoveredNow;
-    if (!channelFilter || channelFilter.length === 0) return discovered;
-    if (channelMatch === "exact") {
-      const wanted = new Set(channelFilter);
-      return discovered.filter((ch) => wanted.has(ch));
-    }
-    return discovered.filter((ch) =>
-      channelFilter.some((f) => ch.toLowerCase().includes(f.toLowerCase())),
-    );
-  }, [knownChannels, discoveredNow, channelFilter, channelMatch]);
-
-  const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
-  const userToggledChannels = useRef(false);
-  // New tenant/gh/jump focus clears manual toggles so preselect can re-apply.
-  useEffect(() => {
-    userToggledChannels.current = false;
-    setHidden(null);
-  }, [tenant, gh, channelParam]);
-
-  // Anomaly jump: keep affected sensors from ``channel=`` pre-selected (and
-  // others off) until the user toggles a channel themselves.
-  useEffect(() => {
-    if (!channelParam || channels.length === 0 || userToggledChannels.current) return;
-    const matched = matchChannelParam(channels, channelParam);
-    if (matched.length === 0) return;
-    const matchedSet = new Set(matched);
-    setHidden(new Set(channels.filter((ch) => !matchedSet.has(ch))));
-  }, [channelParam, channels]);
-
-  const jumpFocus = useMemo(
-    () => (channelParam ? matchChannelParam(channels, channelParam) : []),
-    [channelParam, channels],
-  );
-
-  const visible = useMemo(() => {
-    if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
-    if (jumpFocus.length > 0) return new Set(jumpFocus);
-    return new Set(channels);
-  }, [channels, hidden, jumpFocus]);
+  // Channel visibility state machine (session memory + anomaly jump + manual toggles).
+  const { channels, visible, jumpFocus, toggleChannel } = useChannelVisibility({
+    discoveredNow,
+    channelParam,
+    tenant,
+    gh,
+    channelFilter,
+    channelMatch,
+  });
 
   const paintAnomalyHighlight = shouldPaintAnomalyHighlight({
     channelParam,
@@ -232,17 +165,8 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     [jumpFocus, visible],
   );
 
-  function toggleChannel(ch: string): void {
-    userToggledChannels.current = true;
-    setHidden(() => {
-      const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
-      if (next.has(ch)) next.delete(ch);
-      else next.add(ch);
-      return next;
-    });
-    // Profile after scheduling state so the paint path is not delayed by the probe.
-    measureInteraction("ui.channel_toggle", { channel: ch });
-  }
+  // Scope key ties the chart baseline to this page + tenant + greenhouse.
+  const scopeKey = `${pageId}:${tenant}:${gh}`;
 
   if (isError) {
     return (
@@ -253,6 +177,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
             <p className="text-sm text-text-muted tabular-nums">{windowLabel}</p>
           </div>
           <SharedViewControls
+            pageId={pageId}
             channels={channels}
             setpoints={setpoints}
             onUpdateSetpoint={updateSetpoint}
@@ -280,6 +205,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
           </p>
         </div>
         <SharedViewControls
+          pageId={pageId}
           channels={channels}
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}
@@ -333,6 +259,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               showAnomalyBands={paintAnomalyHighlight}
               anomalyFocusVisible={anomalyFocusVisible}
               affectedByTimestamp={affectedByTimestamp}
+              scopeKey={scopeKey}
             />
           </Card>
           <Card title={`Readings (${deferredRows.length.toLocaleString()} rows, newest first)`}>

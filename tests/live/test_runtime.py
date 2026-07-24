@@ -22,7 +22,7 @@ from fakeredis.aioredis import FakeRedis
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub, stream_key
 from src.live.runtime import LiveRuntime
-from src.live.supervision import _run_connector, _supervised
+from src.live.supervision import run_connector, supervised
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ class TestSupervisedRestart:
 
     @pytest.mark.asyncio
     async def test_restart_after_crash(self) -> None:
-        """_supervised restarts after a crash with backoff."""
+        """supervised restarts after a crash with backoff."""
         call_count = [0]
 
         async def crashing_coro():
@@ -265,7 +265,7 @@ class TestSupervisedRestart:
         # for actual backoff: 1.0 + 2.0 = 3.0s total — too slow.
         # Instead, test with a simpler approach: verify at least one restart
         # occurs within a reasonable time.
-        task = asyncio.create_task(_supervised("test", crashing_coro))
+        task = asyncio.create_task(supervised("test", crashing_coro))
         await asyncio.sleep(1.3)  # enough for first restart (1s backoff)
         task.cancel()
         try:
@@ -285,7 +285,7 @@ class TestSupervisedRestart:
             call_count[0] += 1
             await asyncio.sleep(999)
 
-        task = asyncio.create_task(_supervised("test", cancellable_coro))
+        task = asyncio.create_task(supervised("test", cancellable_coro))
         await asyncio.sleep(0.05)
         task.cancel()
         try:
@@ -404,7 +404,7 @@ class TestConnectorCrashRestart:
         crash_count = [0]
         original_stream = scope.connectors[0].stream
 
-        # The connector is already running inside _supervised, so
+        # The connector is already running inside supervised, so
         # we just verify the runtime is resilient and still publishes
         await asyncio.sleep(0.5)
         found = await _wait_for_stream_entry(fake_redis, _TENANT, _GH, timeout=2.0)
@@ -769,7 +769,7 @@ class TestScorerEmitIntervalWiring:
 
 
 class TestSupervisedBackoffReset:
-    """_supervised must reset backoff to 1.0 when the coroutine ran longer
+    """supervised must reset backoff to 1.0 when the coroutine ran longer
     than _BACKOFF_RESET_THRESHOLD before failing (F14 fix)."""
 
     @pytest.mark.asyncio
@@ -796,7 +796,7 @@ class TestSupervisedBackoffReset:
                 # reset to 1.0 — measure the gap from third crash to this start.
                 await asyncio.sleep(999)
 
-        task = asyncio.create_task(_supervised("test_backoff_reset", long_then_crash))
+        task = asyncio.create_task(supervised("test_backoff_reset", long_then_crash))
         # Wait long enough for:
         # - call 1 (immediate crash) + 1s backoff
         # - call 2 (immediate crash) + 2s backoff

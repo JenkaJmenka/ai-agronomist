@@ -39,7 +39,7 @@ logger = logging.getLogger("live.runtime_builder")
 
 
 @dataclass
-class _ScopeContext:
+class ScopeContext:
     """All live components for a single tenant/greenhouse scope."""
 
     tenant_id: str
@@ -51,7 +51,7 @@ class _ScopeContext:
 
 def build_scopes_from_config(
     hub: LiveHub,
-) -> tuple[list[_ScopeContext], Optional[PersistenceBatcher]]:
+) -> tuple[list[ScopeContext], Optional[PersistenceBatcher]]:
     """Build all scope contexts (and the shared batcher) from env config.
 
     Reads ``MOCK_SCADA_ENABLED``, ``MOCK_SCADA_SCOPES``, and
@@ -116,8 +116,8 @@ def _build_scope(
     greenhouse_id: str,
     connectors: list[LiveSourceConnector],
     batcher: Optional[PersistenceBatcher],
-) -> _ScopeContext:
-    """Build one _ScopeContext for a tenant/greenhouse pair."""
+) -> ScopeContext:
+    """Build one ScopeContext for a tenant/greenhouse pair."""
     source_configs = [c.config for c in connectors]
 
     # Derive per-scope timing from the actual source intervals FIRST,
@@ -200,7 +200,7 @@ def _build_scope(
         on_status=on_status,
     )
 
-    return _ScopeContext(
+    return ScopeContext(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         connectors=connectors,

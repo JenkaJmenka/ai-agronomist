@@ -38,7 +38,8 @@ export function useTableDragPan(
       // Selectable body rows own the gesture (chart/window sync). Starting a
       // drag-pan here would arm pointer-capture on tiny movement and swallow
       // the row click — especially on wide horizontally-scrollable tables.
-      if (target?.closest("tbody tr[tabindex]")) return;
+      // DataTable marks these rows with data-row-selectable (explicit contract).
+      if (target?.closest("tbody tr[data-row-selectable]")) return;
       // Do not capture yet — wait until movement exceeds the drag threshold
       // so plain clicks outside selectable rows still behave normally.
       active = true;

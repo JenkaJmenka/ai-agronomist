@@ -211,6 +211,9 @@ export function DataTable<T>({
                       : undefined
                   }
                   tabIndex={clickable ? 0 : undefined}
+                  // Explicit contract for useTableDragPan: selectable rows
+                  // own the pointer-down gesture so drag-pan does not fire.
+                  data-row-selectable={clickable ? "" : undefined}
                   className={`border-b border-border last:border-b-0 ${
                     clickable ? "cursor-pointer hover:bg-accent/5 focus-visible:bg-accent/10" : ""
                   } ${selected ? "bg-accent/15" : ""} ${rowClassName?.(row.original) ?? ""}`}

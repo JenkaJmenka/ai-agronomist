@@ -27,7 +27,7 @@ export default function HomePage() {
 
       <Card title="Window controls (URL-driven)">
         <Suspense fallback={<Skeleton className="h-8 w-full" />}>
-          <DateRangeControls />
+          <DateRangeControls pageId="home" />
         </Suspense>
       </Card>
 

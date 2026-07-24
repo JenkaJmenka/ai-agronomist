@@ -137,8 +137,8 @@ def _event_to_row(event: LiveReadingEvent) -> Optional[Dict[str, Any]]:
         "co2": safe_channels.get("co2", 0.0),
         "light": safe_channels.get("light", 0.0),
         "anomaly_score": event.anomaly_score,
-        # Tags mock/live demo rows so they can be wiped without clearing CSV uploads.
-        "anomaly_type": "live",
+        # Provenance tag so live rows can be wiped without clearing CSV uploads.
+        "source": "live",
     }
 
 

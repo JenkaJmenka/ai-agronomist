@@ -26,7 +26,7 @@ the floor (1.0 s) — the long healthy run indicates a transient failure,
 not a persistent crash loop."""
 
 
-async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
+async def supervised(label: str, coro_fn: Any, *args: Any) -> None:
     """Run *coro_fn* in a restart loop with exponential back-off.
 
     Propagates ``CancelledError`` immediately so the supervisor shuts down
@@ -83,7 +83,7 @@ async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
         backoff = min(backoff * 2.0, _MAX_BACKOFF_SECONDS)
 
 
-async def _run_connector(
+async def run_connector(
     connector: LiveSourceConnector,
     merger: ChannelMerger,
 ) -> None:

@@ -1,6 +1,13 @@
 """LiveHub — Redis Streams fan-out for live monitoring SSE.
 
-Multi-uvicorn-worker safe: fan-out goes through Redis, not process memory.
+Fan-out is worker-safe: events travel through Redis Streams, not process
+memory, so multiple readers on different uvicorn workers all see every event.
+
+**Scope suppression is not worker-safe.** ``src.live.scope_control`` stores
+the suppression set in process-local memory; suppress/resume calls do not
+propagate across workers.  Single-worker deployment is therefore a documented
+invariant of this application — see ``src/live/scope_control.py`` for details.
+
 Each subscriber gets its own ``XREAD`` loop; replay-gap detection yields a
 synthetic ``reset`` event so the SSE route can inform the client.
 
@@ -28,18 +35,20 @@ class LiveHub:
     """Publish and subscribe to live monitoring events via Redis Streams.
 
     Constructor accepts **either** a ready ``redis.asyncio.Redis`` client
-    (shared across publishers and subscribers) **or** a zero-arg async factory
-    that returns a new client per subscriber (avoids connection sharing in
-    multi-subscriber scenarios — useful with ``fakeredis`` in tests).
+    (shared across publishers and subscribers) **or** a zero-arg synchronous
+    factory that returns a new async client per subscriber (avoids connection
+    sharing in multi-subscriber scenarios — useful with ``fakeredis`` in tests).
 
     Parameters
     ----------
     redis_client:
         An existing async Redis client.  Mutually exclusive with *redis_factory*.
     redis_factory:
-        An async callable that returns a fresh ``redis.asyncio.Redis`` client.
-        Each :meth:`subscribe` invocation calls the factory once, so each
-        subscriber gets its own connection.
+        A **synchronous** zero-arg callable that returns a fresh
+        ``redis.asyncio.Redis`` client (the returned client is async; the
+        factory itself is called without ``await``).  Each :meth:`subscribe`
+        invocation calls the factory once so each subscriber gets its own
+        connection.
     block_ms:
         ``XREAD`` block timeout in milliseconds.  Defaults to the
         ``LIVE_HUB_BLOCK_MS`` config value.

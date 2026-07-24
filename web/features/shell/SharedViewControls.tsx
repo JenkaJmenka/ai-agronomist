@@ -8,6 +8,12 @@ import { SetpointsPanel } from "@/features/monitoring/components/SetpointsPanel"
 import type { SetpointRange, Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 
 interface SharedViewControlsProps {
+  /**
+   * Page identifier (e.g. `"monitoring"`, `"anomalies"`, `"thresholds"`).
+   * Threaded to LiveToggle and DateRangeControls so they can scope chart
+   * baselines by page + tenant + greenhouse.
+   */
+  readonly pageId: string;
   /** Channels for the setpoints editor (empty hides editable rows). */
   readonly channels?: readonly string[];
   readonly setpoints: Setpoints;
@@ -23,6 +29,7 @@ interface SharedViewControlsProps {
  * (localStorage) so chart tiles and the editor stay in sync.
  */
 export function SharedViewControls({
+  pageId,
   channels = [],
   setpoints,
   onUpdateSetpoint,
@@ -37,9 +44,9 @@ export function SharedViewControls({
         onUpdate={onUpdateSetpoint}
         onReset={onResetSetpoints}
       />
-      <LiveToggle />
+      <LiveToggle pageId={pageId} />
       {trailing}
-      <DateRangeControls />
+      <DateRangeControls pageId={pageId} />
     </div>
   );
 }

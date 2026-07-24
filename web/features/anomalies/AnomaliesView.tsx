@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -15,10 +15,10 @@ import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnom
 import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
-import { debounce } from "@/lib/debounce";
+import { useChartRangeSelect } from "@/lib/useChartRangeSelect";
 import { useChartViewWindow } from "@/lib/useChartViewWindow";
 import { useDateRange } from "@/lib/useDateRange";
-import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
+import { useScope } from "@/lib/useScope";
 
 type ViewMode = "graphical" | "table";
 
@@ -37,7 +37,8 @@ function AnomaliesBody() {
     originalCount,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
-  const [{ from, to }, setRange] = useDateRange();
+  const [{ from, to }] = useDateRange();
+  const { tenant, gh } = useScope();
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
   const channels = useMemo(() => discoverChannels(rows), [rows]);
 
@@ -52,27 +53,15 @@ function AnomaliesBody() {
     enabled: rows.length > 0 && !isRefetching,
     limit: SERVER_GROUPING_THRESHOLD,
   });
-  const { isDimmed, beginWindowChange } = useWindowBusyCue({
-    isReadingsBusy: isRefetching,
-  });
-  const debouncedSetRange = useMemo(
-    () =>
-      debounce((nextFrom: Date, nextTo: Date) => {
-        void setRange({ from: nextFrom, to: nextTo });
-      }, 200),
-    [setRange],
-  );
-  useEffect(() => () => debouncedSetRange.cancel(), [debouncedSetRange]);
-  const onChartRangeSelect = useCallback(
-    (nextFrom: Date, nextTo: Date) => {
-      beginWindowChange();
-      debouncedSetRange(nextFrom, nextTo);
-    },
-    [beginWindowChange, debouncedSetRange],
-  );
+
+  // Dim + debounced URL write for chart drag-select / scroll-zoom.
+  const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({ from, to });
   const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
   const tableAnomalies = enrichment.topRows ?? anomalies;
+
+  // Scope key ties the chart baseline to this page + tenant + greenhouse.
+  const scopeKey = `anomalies:${tenant}:${gh}`;
 
   if (isError) {
     throw error ?? new Error("Failed to load anomalies");
@@ -89,6 +78,7 @@ function AnomaliesBody() {
           </p>
         </div>
         <SharedViewControls
+          pageId="anomalies"
           channels={channels}
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}
@@ -148,6 +138,7 @@ function AnomaliesBody() {
               // tables below filter to the same range — and the Period control.
               onRangeSelect={onChartRangeSelect}
               viewWindow={chartViewWindow}
+              scopeKey={scopeKey}
             />
           </Card>
           <Card title="Top anomalies">

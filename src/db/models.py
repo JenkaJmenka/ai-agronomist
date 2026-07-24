@@ -86,6 +86,11 @@ class SensorReading(Base):
         nullable=True,
         doc="Synthetic anomaly type tag set by the inject endpoint; None for real sensor data"
     )
+    source: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="Provenance tag: 'live' for rows persisted by the live SCADA pipeline; None for CSV uploads"
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
