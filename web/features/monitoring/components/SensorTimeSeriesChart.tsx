@@ -144,6 +144,9 @@ export function SensorTimeSeriesChart({
           label: ch,
           stroke: channelColor(i),
           width: 1.5,
+          // Do not bridge multi-minute gaps — live lookback often has sparse
+          // history and connecting them flattens the left side of the chart.
+          spanGaps: false,
         })),
       ],
       legend: { show: false },

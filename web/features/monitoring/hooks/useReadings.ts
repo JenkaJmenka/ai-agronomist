@@ -154,8 +154,9 @@ export function useReadings(): ReadingsState {
       }
     }
 
-    // Immediate clip from URL/wall-clock so the chart moves before bounds return.
-    snapClip(urlToRef.current ?? new Date());
+    // Immediate clip from wall-clock — never urlTo (that may still be a
+    // historical Dec max during a period switch and flashes a wrong window).
+    snapClip(new Date());
     void snapFetch();
 
     const clipId = window.setInterval(() => {
