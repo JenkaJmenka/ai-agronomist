@@ -188,7 +188,7 @@ export function UPlotChart({
     const chart = chartRef.current;
     if (!chart) return;
     // Keep a table-driven local zoom across live/data ticks; reset scales when
-    // there is no local focus so Period changes still autofit.
+    // there is no local focus so Period / live clip changes still autofit.
     const keepFocus = viewWindow !== null && viewWindow !== undefined;
     chart.setData(data, !keepFocus);
     if (keepFocus) applyViewWindow(chart, viewWindow);
@@ -203,8 +203,28 @@ export function UPlotChart({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !seriesVisibility) return;
-    seriesVisibility.forEach((show, index) => {
-      chart.setSeries(index + 1, { show });
+    const keepFocus = viewWindowRef.current != null;
+    const xMin = chart.scales.x.min;
+    const xMax = chart.scales.x.max;
+    chart.batch(() => {
+      seriesVisibility.forEach((show, index) => {
+        chart.setSeries(index + 1, { show });
+      });
+      // setSeries alone does not refit Y — hide outdoor_radiation and the axis
+      // stayed at 0–1600 with climate lines crushed at the bottom.
+      chart.setData(dataRef.current, true);
+      if (
+        keepFocus &&
+        typeof xMin === "number" &&
+        typeof xMax === "number" &&
+        Number.isFinite(xMin) &&
+        Number.isFinite(xMax) &&
+        xMax > xMin
+      ) {
+        chart.setScale("x", { min: xMin, max: xMax });
+      } else if (viewWindowRef.current) {
+        applyViewWindow(chart, viewWindowRef.current);
+      }
     });
   }, [seriesVisibility]);
 

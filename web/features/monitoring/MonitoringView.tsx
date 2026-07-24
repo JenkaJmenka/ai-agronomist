@@ -15,7 +15,6 @@ import {
 } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
-import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
@@ -47,15 +46,30 @@ interface MonitoringViewProps {
 
 /**
  * Merge historical + live rows; live wins on duplicate timestamp.
- * Result is sorted chronologically (oldest → newest) for uPlot.
+ * Carry forward the latest known numeric channels onto each live tick so
+ * Connext-only columns do not render as "—" in the newest-first table while
+ * tiles still find historical values by scanning backwards.
  */
 function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRow[] {
   const map = new Map<string, SensorRow>();
   for (const row of historical) map.set(row.timestamp, row);
   for (const row of live) map.set(row.timestamp, row);
-  return Array.from(map.values()).sort((a, b) =>
+  const merged = Array.from(map.values()).sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
   );
+  if (live.length === 0) return merged;
+
+  const liveTs = new Set(live.map((row) => row.timestamp));
+  const carry: Record<string, number> = {};
+  return merged.map((row) => {
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "timestamp" || key === "anomaly_score") continue;
+      if (typeof value === "number") carry[key] = value;
+    }
+    if (!liveTs.has(row.timestamp)) return row;
+    const next: Record<string, unknown> = { ...carry, ...row };
+    return next as SensorRow;
+  });
 }
 
 function MonitoringBody({
@@ -81,7 +95,7 @@ function MonitoringBody({
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
 
-  const { rows: liveRowsRaw, anomalies, stale, transport, sourceStatuses } = useLiveReadings(live);
+  const { rows: liveRowsRaw, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
   const historicalAliased = useMemo(
@@ -136,7 +150,10 @@ function MonitoringBody({
   });
 
   // Dim + debounced URL write for chart drag-select / scroll-zoom.
-  const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
+  // While live, rolling lookback refetches must not pulse-dim the whole page.
+  const { isDimmed, onChartRangeSelect } = useChartRangeSelect({
+    isReadingsBusy: !live && isRefetching,
+  });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({
     from,
     to,
@@ -205,11 +222,6 @@ function MonitoringBody({
             setpoints={setpoints}
             onUpdateSetpoint={updateSetpoint}
             onResetSetpoints={resetToDefaults}
-            trailing={
-              live ? (
-                <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
-              ) : null
-            }
           />
         </div>
         <Card>
@@ -238,11 +250,6 @@ function MonitoringBody({
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}
           onResetSetpoints={resetToDefaults}
-          trailing={
-            live ? (
-              <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
-            ) : null
-          }
         />
       </div>
 
