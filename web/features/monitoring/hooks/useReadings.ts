@@ -65,8 +65,13 @@ export function useReadings(): ReadingsState {
   });
   const [refreshSeconds] = useRefreshInterval();
 
-  /** Live-only rolling window — must not touch the URL. */
+  /** Live-only rolling clip window — drives UI label + client filter. */
   const [liveWindow, setLiveWindow] = useState<{ from: Date; to: Date } | null>(null);
+  /**
+   * Stable fetch envelope while live. Rolls on a slower cadence so the 10s
+   * Refresh control does not rebuild the React Query key (skeleton / dim flicker).
+   */
+  const [liveFetchWindow, setLiveFetchWindow] = useState<{ from: Date; to: Date } | null>(null);
   /** One-shot historical re-anchor override (also written to URL carefully). */
   const [anchorWindow, setAnchorWindow] = useState<{ from: Date; to: Date } | null>(null);
 
@@ -85,34 +90,37 @@ export function useReadings(): ReadingsState {
 
   // Clear live/anchor overrides when leaving live or changing scope.
   useEffect(() => {
-    if (!live) setLiveWindow(null);
+    if (!live) {
+      setLiveWindow(null);
+      setLiveFetchWindow(null);
+    }
   }, [live]);
   useEffect(() => {
     setAnchorWindow(null);
   }, [tenant, gh]);
 
-  // Live: roll lookback in React state only (never setParams / router.replace).
-  // Re-run immediately when the Period lookback (or custom span) changes so
-  // switching "Last 15 min" ↔ "24h" while Live is on takes effect at once.
+  // Live: roll the clip window often (smooth chart follow) but only re-fetch
+  // history when the lookback changes or on a slow cadence (≥60s).
   useEffect(() => {
     if (!live) return;
 
     let cancelled = false;
 
-    // Sync lookback immediately from the current end — do not wait on bounds
-    // or keep a stale wider liveWindow during the async round-trip.
-    const hoursNow = lookbackRef.current ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
-    const urlTo = urlToRef.current;
-    const urlFrom = urlFromRef.current;
-    if (hoursNow !== null) {
-      const end = urlTo ?? new Date();
-      setLiveWindow(windowForPeriod(hoursNow, end));
-    } else if (urlFrom !== null && urlTo !== null) {
-      const spanMs = Math.max(urlTo.getTime() - urlFrom.getTime(), 60_000);
-      setLiveWindow({ from: new Date(urlTo.getTime() - spanMs), to: urlTo });
+    function snapClip(end: Date): void {
+      const hours = lookbackRef.current ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
+      const spanFrom = urlFromRef.current;
+      const spanTo = urlToRef.current;
+      if (hours !== null) {
+        setLiveWindow(windowForPeriod(hours, end));
+        return;
+      }
+      if (spanFrom !== null && spanTo !== null) {
+        const spanMs = Math.max(spanTo.getTime() - spanFrom.getTime(), 60_000);
+        setLiveWindow({ from: new Date(end.getTime() - spanMs), to: end });
+      }
     }
 
-    async function rollWindow(): Promise<void> {
+    async function snapFetch(): Promise<void> {
       const hours = lookbackRef.current ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
       const spanFrom = urlFromRef.current;
       const spanTo = urlToRef.current;
@@ -123,29 +131,43 @@ export function useReadings(): ReadingsState {
         rememberBoundsMax(scopeRef.current.tenant, scopeRef.current.gh, bounds.max_timestamp);
         if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
       } catch {
-        // Wall-clock / URL fallback via periodWindowEnd.
+        // Wall-clock via periodWindowEnd.
       }
       if (cancelled) return;
 
       const end = periodWindowEnd({ maxTimestamp, live: true });
+      snapClip(end);
 
       if (hours !== null) {
-        setLiveWindow(windowForPeriod(hours, end));
+        // Pad the fetch envelope so clipping can advance between refetches.
+        const paddedHours = hours + Math.max(hours * 0.25, 0.25);
+        setLiveFetchWindow(windowForPeriod(paddedHours, end));
         return;
       }
-
-      // Custom URL range while live: keep the same span, anchored at ``end``.
       if (spanFrom !== null && spanTo !== null) {
         const spanMs = Math.max(spanTo.getTime() - spanFrom.getTime(), 60_000);
-        setLiveWindow({ from: new Date(end.getTime() - spanMs), to: end });
+        const padMs = Math.max(spanMs * 0.25, 60_000);
+        setLiveFetchWindow({
+          from: new Date(end.getTime() - spanMs - padMs),
+          to: end,
+        });
       }
     }
 
-    void rollWindow();
-    const id = window.setInterval(() => void rollWindow(), refreshSeconds * 1000);
+    // Immediate clip from URL/wall-clock so the chart moves before bounds return.
+    snapClip(urlToRef.current ?? new Date());
+    void snapFetch();
+
+    const clipId = window.setInterval(() => {
+      snapClip(new Date());
+    }, 1_000);
+    const fetchEveryMs = Math.max(refreshSeconds, 60) * 1000;
+    const fetchId = window.setInterval(() => void snapFetch(), fetchEveryMs);
+
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.clearInterval(clipId);
+      window.clearInterval(fetchId);
     };
   }, [live, refreshSeconds, lookbackHours, from, to]);
 
@@ -180,44 +202,43 @@ export function useReadings(): ReadingsState {
 
   const effectiveFrom = live ? (liveWindow?.from ?? from) : (anchorWindow?.from ?? from);
   const effectiveTo = live ? (liveWindow?.to ?? to) : (anchorWindow?.to ?? to);
+  const fetchFrom = live ? (liveFetchWindow?.from ?? effectiveFrom) : effectiveFrom;
+  const fetchTo = live ? (liveFetchWindow?.to ?? effectiveTo) : effectiveTo;
   const hasWindow = effectiveFrom !== null && effectiveTo !== null;
+  const hasFetchWindow = fetchFrom !== null && fetchTo !== null;
 
   const query = useQuery<RecentReadingsResponse | WindowReadingsResponse, Error>({
     queryKey: [
       "readings",
       tenant,
       gh,
-      effectiveFrom?.toISOString() ?? "recent",
-      effectiveTo?.toISOString() ?? "",
+      fetchFrom?.toISOString() ?? "recent",
+      fetchTo?.toISOString() ?? "",
     ],
     queryFn: ({ signal }): Promise<RecentReadingsResponse | WindowReadingsResponse> =>
-      hasWindow
+      hasFetchWindow
         ? fetchWindowReadings({
             tenant,
             gh,
-            from: effectiveFrom,
-            to: effectiveTo,
+            from: fetchFrom,
+            to: fetchTo,
             maxPoints: DEFAULT_MAX_POINTS,
             signal,
           })
         : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS, signal }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
-    // Live ticks come from SSE (`useLiveReadings`); rolling `liveWindow` already
-    // changes the queryKey when the lookback re-anchors. A parallel refetchInterval
-    // doubled main-thread + network work and froze clicks during live mode.
+    // Live ticks come from SSE; clip window rolls in React state. Keep prior
+    // rows so rolling lookback never flashes skeletons / empty charts.
     refetchInterval: false,
-    // Never keep a previous (often much wider) window while live — that is what
-    // made "Last 15 min" charts stretch across months after Go Live.
-    placeholderData: live ? undefined : keepPreviousData,
+    placeholderData: keepPreviousData,
   });
 
   const rows = query.data?.rows ?? EMPTY_ROWS;
   return {
     rows,
-    isLoading: query.isPending,
-    // Placeholder = keepPreviousData for a new window — treat as refetch so
-    // RefetchingBlock dims while the client still shows the prior range.
-    isRefetching: query.isFetching && (!query.isPending || query.isPlaceholderData),
+    isLoading: query.isPending && !query.isPlaceholderData,
+    // Live clip rolls must not dim the page — only user period/scope changes.
+    isRefetching: !live && query.isFetching && (!query.isPending || query.isPlaceholderData),
     isError: query.isError,
     error: query.error,
     downsampled: Boolean((query.data as { downsampled?: boolean } | undefined)?.downsampled),
