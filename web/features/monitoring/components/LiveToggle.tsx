@@ -5,7 +5,7 @@ import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { resumeLiveScope } from "@/features/monitoring/api/live";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
-import { getCachedBoundsMax, rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
+import { rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
 import {
   DEFAULT_PERIOD_ID,
   matchPeriodId,
@@ -49,14 +49,10 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
       periodHours(DEFAULT_PERIOD_ID) ??
       24;
 
-    // Flip live + optimistic window immediately. Prefer current URL end /
-    // cached data max so demo timestamps (ahead of wall-clock) do not flash empty.
+    // Flip live + optimistic wall-clock window immediately so SSE ticks land
+    // inside the lookback (never anchor to a future historical CSV max).
     await setLive(true);
-    const cachedMax = getCachedBoundsMax(tenant, gh);
-    const optimisticEnd = periodWindowEnd({
-      maxTimestamp: to ?? cachedMax,
-      live: true,
-    });
+    const optimisticEnd = periodWindowEnd({ maxTimestamp: null, live: true });
     const optimistic = windowForPeriod(hours, optimisticEnd);
     rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
     await setRange(optimistic);
@@ -64,13 +60,13 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     try {
       const bounds = await fetchReadingsBounds({ tenant, gh });
       rememberBoundsMax(tenant, gh, bounds.max_timestamp);
-      const maxTimestamp = bounds.max_timestamp ? new Date(bounds.max_timestamp) : null;
-      const end = periodWindowEnd({ maxTimestamp, live: true });
+      // Live end stays wall-clock regardless of stored max.
+      const end = periodWindowEnd({ maxTimestamp: null, live: true });
       const next = windowForPeriod(hours, end);
       rememberChartBaseline(next.from, next.to, scopeKey);
       await setRange(next);
     } catch {
-      // Keep the optimistic data-anchored window.
+      // Keep the optimistic wall-clock window.
     }
 
     // Explicit resume after Clear all — SSE reconnect alone must not re-seed.

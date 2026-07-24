@@ -70,10 +70,10 @@ export function DateRangeControls({ pageId }: DateRangeControlsProps) {
         setIsCustomOpen(false);
         const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
 
-        // Prefer current URL end / cached data max — never optimistic wall-clock
-        // while Live is on (that flashes an empty "now" window before bounds).
+        // Prefer current URL end only when not live — while live, wall-clock wins
+        // so SSE ticks are never clipped behind a future historical max.
         const cachedMax = getCachedBoundsMax(tenant, gh);
-        const currentEnd = to ?? cachedMax;
+        const currentEnd = live ? null : (to ?? cachedMax);
         const optimisticEnd = periodWindowEnd({
           maxTimestamp: currentEnd,
           live,
@@ -85,16 +85,15 @@ export function DateRangeControls({ pageId }: DateRangeControlsProps) {
         try {
           const bounds = await fetchReadingsBounds({ tenant, gh });
           rememberBoundsMax(tenant, gh, bounds.max_timestamp);
-          if (!bounds.max_timestamp) return;
           const end = periodWindowEnd({
-            maxTimestamp: new Date(bounds.max_timestamp),
+            maxTimestamp: bounds.max_timestamp ? new Date(bounds.max_timestamp) : null,
             live,
           });
           const next = windowForPeriod(hours, end);
           rememberChartBaseline(next.from, next.to, scopeKey);
           await setRange(next);
         } catch {
-          // Keep the optimistic (data-anchored) window.
+          // Keep the optimistic window.
         }
       },
       { period: periodId },

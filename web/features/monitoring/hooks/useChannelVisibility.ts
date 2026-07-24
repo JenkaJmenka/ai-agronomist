@@ -15,6 +15,11 @@ interface UseChannelVisibilityOptions {
   /** Tenant/gh identity — resets session memory and manual toggles on change. */
   readonly tenant: string;
   readonly gh: string;
+  /**
+   * Live vs historical mode. Toggling live resets session channel memory so
+   * Connext raw headers do not stay mixed with mock/live canonical channels.
+   */
+  readonly live?: boolean;
   /** When set, only channels matching the filter are surfaced to the view. */
   readonly channelFilter?: readonly string[];
   /**
@@ -55,6 +60,7 @@ export function useChannelVisibility({
   channelParam,
   tenant,
   gh,
+  live = false,
   channelFilter,
   channelMatch = "includes",
 }: UseChannelVisibilityOptions): UseChannelVisibilityResult {
@@ -65,7 +71,7 @@ export function useChannelVisibility({
   const [knownChannels, setKnownChannels] = useState<string[]>([]);
   useEffect(() => {
     setKnownChannels([]);
-  }, [tenant, gh]);
+  }, [tenant, gh, live]);
   useEffect(() => {
     setKnownChannels((prev) => {
       const next = mergeChannelLists(prev, discoveredNow);

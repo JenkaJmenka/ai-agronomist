@@ -101,21 +101,26 @@ const DISPLAY_CHANNEL_ALIASES: Readonly<Record<string, string>> = {
 };
 
 /**
- * Copy aliased raw columns onto canonical names without dropping the originals.
- * Safe for already-persisted raw readings that predate CSV alias remapping.
+ * Promote aliased raw columns onto canonical names and drop the aliases so
+ * charts/tiles do not show duplicate mismatched series
+ * (e.g. ``measured_greenhouse_temp`` + ``temperature``).
  */
 export function applyDisplayChannelAliases(rows: readonly SensorRow[]): SensorRow[] {
   if (rows.length === 0) return [];
   return rows.map((row) => {
-    let next: SensorRow | null = null;
+    let changed = false;
+    const next: Record<string, unknown> = { ...row };
     for (const [alias, canonical] of Object.entries(DISPLAY_CHANNEL_ALIASES)) {
-      if (!(alias in row)) continue;
-      if (canonical in (next ?? row) && (next ?? row)[canonical] != null) continue;
-      const value = row[alias];
+      if (!(alias in next)) continue;
+      const value = next[alias];
       if (typeof value !== "number") continue;
-      next = { ...(next ?? row), [canonical]: value };
+      if (next[canonical] == null) {
+        next[canonical] = value;
+      }
+      delete next[alias];
+      changed = true;
     }
-    return next ?? row;
+    return changed ? (next as SensorRow) : row;
   });
 }
 
