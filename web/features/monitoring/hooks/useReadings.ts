@@ -12,7 +12,14 @@ import {
   type SensorRow,
   type WindowReadingsResponse,
 } from "@/features/monitoring/api/readings";
-import { matchPeriodId, periodHours, periodWindowEnd, windowForPeriod } from "@/lib/periodPresets";
+import { rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
+import {
+  DEFAULT_PERIOD_ID,
+  matchPeriodId,
+  periodHours,
+  periodWindowEnd,
+  windowForPeriod,
+} from "@/lib/periodPresets";
 import { STALE_TIME_MS } from "@/lib/query";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
 
@@ -63,7 +70,10 @@ export function useReadings(): ReadingsState {
   /** One-shot historical re-anchor override (also written to URL carefully). */
   const [anchorWindow, setAnchorWindow] = useState<{ from: Date; to: Date } | null>(null);
 
-  const lookbackHours = from !== null && to !== null ? periodHours(matchPeriodId(from, to)) : null;
+  const lookbackHours =
+    from !== null && to !== null
+      ? (periodHours(matchPeriodId(from, to)) ?? periodHours(DEFAULT_PERIOD_ID))
+      : periodHours(DEFAULT_PERIOD_ID);
   const lookbackRef = useRef(lookbackHours);
   lookbackRef.current = lookbackHours;
   const urlFromRef = useRef(from);
@@ -89,17 +99,31 @@ export function useReadings(): ReadingsState {
 
     let cancelled = false;
 
+    // Sync lookback immediately from the current end — do not wait on bounds
+    // or keep a stale wider liveWindow during the async round-trip.
+    const hoursNow = lookbackRef.current ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
+    const urlTo = urlToRef.current;
+    const urlFrom = urlFromRef.current;
+    if (hoursNow !== null) {
+      const end = urlTo ?? new Date();
+      setLiveWindow(windowForPeriod(hoursNow, end));
+    } else if (urlFrom !== null && urlTo !== null) {
+      const spanMs = Math.max(urlTo.getTime() - urlFrom.getTime(), 60_000);
+      setLiveWindow({ from: new Date(urlTo.getTime() - spanMs), to: urlTo });
+    }
+
     async function rollWindow(): Promise<void> {
-      const hours = lookbackRef.current;
-      const urlFrom = urlFromRef.current;
-      const urlTo = urlToRef.current;
+      const hours = lookbackRef.current ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
+      const spanFrom = urlFromRef.current;
+      const spanTo = urlToRef.current;
 
       let maxTimestamp: Date | null = null;
       try {
         const bounds = await fetchReadingsBounds(scopeRef.current);
+        rememberBoundsMax(scopeRef.current.tenant, scopeRef.current.gh, bounds.max_timestamp);
         if (bounds.max_timestamp) maxTimestamp = new Date(bounds.max_timestamp);
       } catch {
-        // Wall-clock fallback via periodWindowEnd.
+        // Wall-clock / URL fallback via periodWindowEnd.
       }
       if (cancelled) return;
 
@@ -111,8 +135,8 @@ export function useReadings(): ReadingsState {
       }
 
       // Custom URL range while live: keep the same span, anchored at ``end``.
-      if (urlFrom !== null && urlTo !== null) {
-        const spanMs = Math.max(urlTo.getTime() - urlFrom.getTime(), 60_000);
+      if (spanFrom !== null && spanTo !== null) {
+        const spanMs = Math.max(spanTo.getTime() - spanFrom.getTime(), 60_000);
         setLiveWindow({ from: new Date(end.getTime() - spanMs), to: end });
       }
     }

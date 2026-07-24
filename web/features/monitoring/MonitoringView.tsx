@@ -8,6 +8,7 @@ import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import {
+  applyDisplayChannelAliases,
   discoverChannels,
   mergeChannelLists,
   type SensorRow,
@@ -79,13 +80,19 @@ function MonitoringBody({
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
 
-  const { rows: liveRows, anomalies, stale } = useLiveReadings(live);
+  const { rows: liveRowsRaw, anomalies, stale } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
+
+  const historicalAliased = useMemo(
+    () => applyDisplayChannelAliases(historicalRows),
+    [historicalRows],
+  );
+  const liveRows = useMemo(() => applyDisplayChannelAliases(liveRowsRaw), [liveRowsRaw]);
 
   // Unfiltered merge drives channel discovery; period filter only clips once settled.
   const mergedRows = useMemo(
-    () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
-    [live, historicalRows, liveRows],
+    () => (live ? dedupeByTimestamp(historicalAliased, liveRows) : historicalAliased),
+    [live, historicalAliased, liveRows],
   );
   // While live, open the upper clip to the newest SSE tick (or wall-clock now)
   // so points arriving after the last liveWindow roll are not filtered out.

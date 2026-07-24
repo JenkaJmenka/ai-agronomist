@@ -6,6 +6,7 @@ import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { CustomDateRangeForm } from "@/components/ui/CustomDateRangeForm";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
+import { getCachedBoundsMax, rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
 import {
   DEFAULT_PERIOD_ID,
   matchPeriodId,
@@ -69,13 +70,21 @@ export function DateRangeControls({ pageId }: DateRangeControlsProps) {
         setIsCustomOpen(false);
         const hours = periodHours(periodId) ?? periodHours(DEFAULT_PERIOD_ID) ?? 24;
 
-        // Optimistic wall-clock snap so the select click is not blocked on bounds.
-        const optimistic = windowForPeriod(hours, periodWindowEnd({ maxTimestamp: null, live }));
+        // Prefer current URL end / cached data max — never optimistic wall-clock
+        // while Live is on (that flashes an empty "now" window before bounds).
+        const cachedMax = getCachedBoundsMax(tenant, gh);
+        const currentEnd = to ?? cachedMax;
+        const optimisticEnd = periodWindowEnd({
+          maxTimestamp: currentEnd,
+          live,
+        });
+        const optimistic = windowForPeriod(hours, optimisticEnd);
         rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
         await setRange(optimistic);
 
         try {
           const bounds = await fetchReadingsBounds({ tenant, gh });
+          rememberBoundsMax(tenant, gh, bounds.max_timestamp);
           if (!bounds.max_timestamp) return;
           const end = periodWindowEnd({
             maxTimestamp: new Date(bounds.max_timestamp),
@@ -85,7 +94,7 @@ export function DateRangeControls({ pageId }: DateRangeControlsProps) {
           rememberChartBaseline(next.from, next.to, scopeKey);
           await setRange(next);
         } catch {
-          // Keep the optimistic wall-clock window.
+          // Keep the optimistic (data-anchored) window.
         }
       },
       { period: periodId },

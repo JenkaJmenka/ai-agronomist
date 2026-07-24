@@ -137,30 +137,26 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
                   />
                 </td>
                 <td className="py-2 pr-3">
-                  {night == null ? (
-                    <span className="text-text-muted">—</span>
-                  ) : (
-                    <input
-                      type="number"
-                      step="any"
-                      className="w-24 rounded border border-border bg-surface px-2 py-1"
-                      value={night[0] ?? ""}
-                      onChange={(e) => updateBand(channel, "night", 0, e.target.value)}
-                    />
-                  )}
+                  <input
+                    type="number"
+                    step="any"
+                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    value={(night ?? day)[0] ?? ""}
+                    placeholder="Day min"
+                    aria-label={`${channel} night min`}
+                    onChange={(e) => updateBand(channel, "night", 0, e.target.value)}
+                  />
                 </td>
                 <td className="py-2">
-                  {night == null ? (
-                    <span className="text-text-muted">—</span>
-                  ) : (
-                    <input
-                      type="number"
-                      step="any"
-                      className="w-24 rounded border border-border bg-surface px-2 py-1"
-                      value={night[1] ?? ""}
-                      onChange={(e) => updateBand(channel, "night", 1, e.target.value)}
-                    />
-                  )}
+                  <input
+                    type="number"
+                    step="any"
+                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    value={(night ?? day)[1] ?? ""}
+                    placeholder="Day max"
+                    aria-label={`${channel} night max`}
+                    onChange={(e) => updateBand(channel, "night", 1, e.target.value)}
+                  />
                 </td>
               </tr>
             );

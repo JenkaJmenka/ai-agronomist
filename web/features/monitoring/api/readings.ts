@@ -89,6 +89,36 @@ export function fetchReadingsBounds(params: {
   return fetchJson(`/api/bff/readings/bounds?${q}`, params.signal);
 }
 
+/** Map Connext / SCADA header aliases onto canonical Monitoring channel names. */
+const DISPLAY_CHANNEL_ALIASES: Readonly<Record<string, string>> = {
+  measured_greenhouse_temp: "temperature",
+  greenhouse_temp: "temperature",
+  measured_relative_humidity: "humidity",
+  relative_humidity: "humidity",
+  light_intensity: "light",
+  measured_humidity_deficit: "measured_hd",
+  humidity_deficit: "measured_hd",
+};
+
+/**
+ * Copy aliased raw columns onto canonical names without dropping the originals.
+ * Safe for already-persisted raw readings that predate CSV alias remapping.
+ */
+export function applyDisplayChannelAliases(rows: readonly SensorRow[]): SensorRow[] {
+  if (rows.length === 0) return [];
+  return rows.map((row) => {
+    let next: SensorRow | null = null;
+    for (const [alias, canonical] of Object.entries(DISPLAY_CHANNEL_ALIASES)) {
+      if (!(alias in row)) continue;
+      if (canonical in (next ?? row) && (next ?? row)[canonical] != null) continue;
+      const value = row[alias];
+      if (typeof value !== "number") continue;
+      next = { ...(next ?? row), [canonical]: value };
+    }
+    return next ?? row;
+  });
+}
+
 /** Numeric sensor channels present in the rows, order-stable. */
 export function discoverChannels(rows: SensorRow[]): string[] {
   const channels: string[] = [];

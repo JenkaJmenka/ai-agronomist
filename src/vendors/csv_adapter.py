@@ -266,6 +266,12 @@ _RAW_COLUMN_ALIASES: Dict[str, str] = {
     "humidity_deficit": "measured_hd",
     "measured_humidity_deficit": "measured_hd",
     "hd": "measured_hd",
+    # Map Connext climate headers onto canonical Monitoring channel names.
+    "measured_greenhouse_temp": "temperature",
+    "greenhouse_temp": "temperature",
+    "measured_relative_humidity": "humidity",
+    "relative_humidity": "humidity",
+    "light_intensity": "light",
 }
 
 

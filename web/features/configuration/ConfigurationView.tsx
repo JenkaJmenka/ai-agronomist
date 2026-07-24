@@ -99,7 +99,7 @@ function ConfigurationBody() {
           </label>
           <p className="text-xs text-text-muted">
             Source: {sources.crop ?? "default"} · changing crop loads that profile&apos;s day/night
-            bands (tomato 18–26 °C / VPD 0.7–1.0; cucumber 24–28 °C / VPD 0.5–0.8).
+            bands (tomato / cucumber / sweet pepper / strawberry from the agronomic setpoint table).
           </p>
         </div>
       </Card>
