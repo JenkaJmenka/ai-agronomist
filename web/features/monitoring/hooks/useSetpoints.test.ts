@@ -1,16 +1,30 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
 
-// ---------------------------------------------------------------------------
-// Mock useScope to avoid needing the nuqs provider in unit tests.
-// ---------------------------------------------------------------------------
 vi.mock("@/lib/useScope", () => ({
   useScope: vi.fn(() => ({ tenant: "tenant_1", gh: "gh_A" })),
 }));
 
+vi.mock("@/features/configuration/api/operationalConfig", () => ({
+  fetchOperationalConfig: vi.fn(() => Promise.reject(new Error("offline"))),
+}));
+
 const STORAGE_KEY = "gh-setpoints:tenant_1:gh_A";
+
+function wrapper({ children }: { children: ReactNode }) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return createElement(QueryClientProvider, { client }, children);
+}
+
+function renderSetpoints() {
+  return renderHook(() => useSetpoints(), { wrapper });
+}
 
 // ---------------------------------------------------------------------------
 // Fake localStorage
@@ -50,14 +64,14 @@ afterEach(() => {
 
 describe("useSetpoints — defaults", () => {
   it("returns CHANNEL_META optimal ranges as defaults when no override exists", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
     for (const [ch, meta] of Object.entries(CHANNEL_META)) {
       expect(result.current.setpoints[ch]).toEqual(meta.optimal);
     }
   });
 
   it("has setpoints for all 7 known channels by default", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
     const keys = Object.keys(result.current.setpoints);
     expect(keys).toContain("temperature");
     expect(keys).toContain("humidity");
@@ -71,7 +85,7 @@ describe("useSetpoints — defaults", () => {
 
 describe("useSetpoints — updateSetpoint", () => {
   it("merges a user override into setpoints immediately", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     act(() => {
       result.current.updateSetpoint("temperature", [18, 30]);
@@ -83,7 +97,7 @@ describe("useSetpoints — updateSetpoint", () => {
   });
 
   it("persists the override to localStorage under the scope key", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     act(() => {
       result.current.updateSetpoint("co2", [300, 600]);
@@ -98,7 +112,7 @@ describe("useSetpoints — updateSetpoint", () => {
   });
 
   it("is a no-op when min >= max", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
     const before = { ...result.current.setpoints };
 
     act(() => {
@@ -110,7 +124,7 @@ describe("useSetpoints — updateSetpoint", () => {
   });
 
   it("is a no-op when min === max", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
     const before = { ...result.current.setpoints };
 
     act(() => {
@@ -125,7 +139,7 @@ describe("useSetpoints — restore from localStorage", () => {
   it("loads persisted overrides on mount", () => {
     fakeStorage[STORAGE_KEY] = JSON.stringify({ humidity: [50, 80] });
 
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     expect(result.current.setpoints.humidity).toEqual([50, 80]);
     // Defaults still present for other channels.
@@ -135,7 +149,7 @@ describe("useSetpoints — restore from localStorage", () => {
 
 describe("useSetpoints — resetToDefaults", () => {
   it("clears all overrides and reverts to CHANNEL_META defaults", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     act(() => {
       result.current.updateSetpoint("temperature", [15, 35]);
@@ -151,7 +165,7 @@ describe("useSetpoints — resetToDefaults", () => {
   });
 
   it("removes the localStorage key on reset", () => {
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     act(() => {
       result.current.updateSetpoint("temperature", [15, 35]);
@@ -169,7 +183,7 @@ describe("useSetpoints — corrupt localStorage ignored", () => {
   it("falls back to defaults when stored JSON is invalid", () => {
     fakeStorage[STORAGE_KEY] = "not-valid-json{{{";
 
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     // Should not throw, and should return defaults.
     expect(result.current.setpoints.temperature).toEqual(CHANNEL_META.temperature?.optimal);
@@ -179,7 +193,7 @@ describe("useSetpoints — corrupt localStorage ignored", () => {
     // humidity stored as a string instead of [number, number]
     fakeStorage[STORAGE_KEY] = JSON.stringify({ humidity: "too-warm" });
 
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     expect(result.current.setpoints.humidity).toEqual(CHANNEL_META.humidity?.optimal);
   });
@@ -187,7 +201,7 @@ describe("useSetpoints — corrupt localStorage ignored", () => {
   it("falls back to defaults when stored tuple has wrong length", () => {
     fakeStorage[STORAGE_KEY] = JSON.stringify({ temperature: [20, 25, 30] });
 
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     expect(result.current.setpoints.temperature).toEqual(CHANNEL_META.temperature?.optimal);
   });
@@ -197,7 +211,7 @@ describe("useSetpoints — corrupt localStorage ignored", () => {
     // the Zod refine rejects it so the whole stored object is discarded.
     fakeStorage[STORAGE_KEY] = JSON.stringify({ temperature: [80, 20] });
 
-    const { result } = renderHook(() => useSetpoints());
+    const { result } = renderSetpoints();
 
     expect(result.current.setpoints.temperature).toEqual(CHANNEL_META.temperature?.optimal);
   });

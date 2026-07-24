@@ -93,6 +93,8 @@ class NoiseDetector:
         self,
         series: np.ndarray,
         sensor: str,
+        *,
+        target_override: float | None = None,
     ) -> bool:
         """Return True if precision degradation detected (single flag).
 
@@ -103,6 +105,8 @@ class NoiseDetector:
         Args:
             series: 1-D float array of sensor readings (length = seq_len).
             sensor: Sensor name key.
+            target_override: Optional seasonal σ-scaled noise target
+                (physical units). When set, replaces SENSOR_NOISE_TARGETS.
 
         Returns:
             True if precision degradation detected.
@@ -119,7 +123,7 @@ class NoiseDetector:
             signal_var = float(np.var(signal))
             return signal_var / bv > self._ratio_threshold
 
-        target = SENSOR_NOISE_TARGETS.get(sensor)
+        target = target_override if target_override is not None else SENSOR_NOISE_TARGETS.get(sensor)
         if target is None:
             return False
         signal_std = float(np.std(signal))

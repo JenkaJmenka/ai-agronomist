@@ -31,6 +31,7 @@ from src.config import (
     POT_FPR,
     POT_Q,
     PSYCHROMETRIC_HD_TOLERANCE,
+    SENSOR_NOISE_TARGETS,
     SEQ_LEN,
     SENSOR_NAMES,
     SPIKE_MAD_FLOOR,
@@ -48,6 +49,7 @@ from src.models.bocpd_detector import BOCPDDetector
 from src.models.multivariate_mahalanobis_detector import (
     MultivariateMahalanobisDetector,
 )
+from src.models.band_breach_detector import BAND_TYPE_TO_VOTE, BandBreachDetector
 from src.models.confidence_scorer import ConfidenceScorer
 from src.models.correlation_breakdown_detector import CorrelationBreakdownDetector
 from src.models.data_utils import SENSOR_RANGES
@@ -61,6 +63,7 @@ from src.models.spike_mad_detector import SpikeMADDetector
 from src.models.ewma_tracker import EWMATracker
 from src.models.fault_classifier import FaultClassifier
 from src.models.inference import AnomalyDetector
+from src.models.operational_config_store import get_operational_config_store
 from src.models.pattern_detector import PatternDetector
 from src.models.physics_validator import PhysicsValidator
 from src.models.psychrometric_validator import (
@@ -71,6 +74,12 @@ from src.models.pot_threshold import POTThresholdFitter
 from src.models.recommendation_engine import RecommendationEngine
 from src.models.retraining_orchestrator import RetrainingOrchestrator
 from src.models.root_cause_analyzer import RootCauseAnalyzer
+from src.models.seasonal_scaler import (
+    SeasonalScaler,
+    build_scaler_from_baselines,
+    get_cached_seasonal_scaler,
+    put_cached_seasonal_scaler,
+)
 from src.models.setpoint_scada_detector import (
     DEHUMIDIFICATION_FAILURE,
     HUMIDITY_SATURATION_RISK,
@@ -87,6 +96,16 @@ from src.utils.lru import LRUDict
 logger = logging.getLogger(__name__)
 
 PIPELINE_VERSION = "2.0"
+
+
+def _season_for_timestamp(
+    ts: datetime,
+    season_map: dict[str, str],
+) -> str:
+    """Map a timestamp's calendar month onto summer|winter via season_map."""
+    month_key = str(int(ts.month))
+    season = str(season_map.get(month_key, "winter")).lower()
+    return season if season in {"summer", "winter"} else "winter"
 
 # Map PhysicsValidator reason strings to fault type values.
 _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
@@ -236,6 +255,62 @@ _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
             "Sensor flatline: {sensors} frozen (zero variance) for the "
             "configured multi-hour window"
         ),
+    },
+    "temp_band_high": {
+        "fault_type": "temp_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Temperature above configured crop day/night max on {sensors}",
+    },
+    "temp_band_low": {
+        "fault_type": "temp_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Temperature below configured crop day/night min on {sensors}",
+    },
+    "vpd_band_high": {
+        "fault_type": "vpd_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "VPD above configured crop day/night max (from {sensors})",
+    },
+    "vpd_band_low": {
+        "fault_type": "vpd_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "VPD below configured crop day/night min (from {sensors})",
+    },
+    "humidity_band_high": {
+        "fault_type": "humidity_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Humidity above configured crop day/night max on {sensors}",
+    },
+    "humidity_band_low": {
+        "fault_type": "humidity_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "Humidity below configured crop day/night min on {sensors}",
+    },
+    "co2_band_high": {
+        "fault_type": "co2_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "CO₂ above configured crop day/night max on {sensors}",
+    },
+    "co2_band_low": {
+        "fault_type": "co2_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "CO₂ below configured crop day/night min on {sensors}",
     },
 }
 
@@ -396,6 +471,7 @@ class ComprehensiveInferencePipeline:
         self._mahalanobis_detector = MultivariateMahalanobisDetector()
         self._bocpd_detector = BOCPDDetector()
         self._setpoint_scada_detector = SetpointAwareScadaDetector()
+        self._band_breach_detector = BandBreachDetector()
         # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
         self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
         # Component caching
@@ -626,9 +702,47 @@ class ComprehensiveInferencePipeline:
                     finding.reasoning,
                 )
 
+        # 0a++. Operator crop band breaches (day/night min–max from OperationalConfig).
+        _op_config = get_operational_config_store().get(customer_id, greenhouse_id)
+        _band_findings = self._band_breach_detector.detect(
+            _denormed_for_noise,
+            _op_config,
+            timestamp=seq_ts,
+        )
+        for finding in _band_findings:
+            scada_anomalies.append(finding.to_dict())
+            vote_key = BAND_TYPE_TO_VOTE.get(finding.anomaly_type)
+            if vote_key:
+                rule_votes.setdefault(vote_key, [])
+                for sensor in finding.affected_sensors:
+                    if sensor not in rule_votes[vote_key]:
+                        rule_votes[vote_key].append(sensor)
+                logger.warning(
+                    "Band breach %s for tenant %s: %s",
+                    finding.anomaly_type,
+                    customer_id,
+                    finding.reasoning,
+                )
+
+        # Seasonal σ scaler — factor 1.0 when baselines are sparse / absent.
+        _season_key = _season_for_timestamp(seq_ts, _op_config.get("season_map") or {})
+        _scaler = await self._get_seasonal_scaler(
+            customer_id, greenhouse_id, _season_key, _op_config, db
+        )
+
         noise_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if self._noise_detector.detect(_denormed_for_noise[:, s_idx], s_name):
+            base_target = SENSOR_NOISE_TARGETS.get(s_name)
+            target_override = (
+                None
+                if base_target is None
+                else base_target * _scaler.factor(_season_key, s_name)
+            )
+            if self._noise_detector.detect(
+                _denormed_for_noise[:, s_idx],
+                s_name,
+                target_override=target_override,
+            ):
                 noise_alarmed.append(s_name)
         if noise_alarmed:
             logger.warning(
@@ -663,9 +777,10 @@ class ComprehensiveInferencePipeline:
         # from alarming on ordinary measurement noise.
         spike_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            base_floor = SPIKE_MAD_FLOOR.get(s_name, 0.0)
             spike_flags = self._spike_mad_detector.detect(
                 _denormed_for_noise[:, s_idx],
-                mad_floor=SPIKE_MAD_FLOOR.get(s_name, 0.0),
+                mad_floor=base_floor * _scaler.factor(_season_key, s_name),
             )
             if any(spike_flags):
                 spike_alarmed.append(s_name)
@@ -780,6 +895,14 @@ class ComprehensiveInferencePipeline:
         cusum_alarmed_sensors: list[str] = []
         _cusum = self._cusum_cache.setdefault(
             customer_id, CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
+        )
+        # Mutate H only (never rebuild) so LearningState round-trips stay valid.
+        # Use mean factor across sensors as a single decision interval scale.
+        _cusum_factors = [
+            _scaler.factor(_season_key, s) for s in SENSOR_NAMES[: seq_array.shape[1]]
+        ]
+        _cusum.h = CUSUM_H_SIGMA * (
+            sum(_cusum_factors) / len(_cusum_factors) if _cusum_factors else 1.0
         )
         _ema = self._ema_cache.setdefault(
             customer_id, EMABaselineEstimator()
@@ -1149,6 +1272,44 @@ class ComprehensiveInferencePipeline:
             pipeline_version=PIPELINE_VERSION,
             scada_anomalies=[],
         )
+
+    async def _get_seasonal_scaler(
+        self,
+        tenant_id: str,
+        greenhouse_id: str,
+        season: str,
+        op_config: dict[str, Any],
+        db: AsyncSession,
+    ) -> SeasonalScaler:
+        """Return a cached SeasonalScaler (factor 1.0 when baselines are sparse)."""
+        cached = get_cached_seasonal_scaler(tenant_id, greenhouse_id, season)
+        if cached is not None:
+            return cached
+        try:
+            from src.api.services.seasonal_baseline_service import (
+                compute_seasonal_baselines,
+            )
+
+            baselines = await compute_seasonal_baselines(
+                db,
+                tenant_id=tenant_id,
+                greenhouse_id=greenhouse_id,
+                season_map=op_config.get("season_map"),
+            )
+            scaler = build_scaler_from_baselines(
+                baselines,
+                overrides=op_config.get("seasonal_overrides"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Seasonal baseline compute failed for %s/%s: %s — using factor 1.0",
+                tenant_id,
+                greenhouse_id,
+                exc,
+            )
+            scaler = SeasonalScaler()
+        put_cached_seasonal_scaler(tenant_id, greenhouse_id, season, scaler)
+        return scaler
 
     async def _ensure_diurnal_profiles(
         self,
