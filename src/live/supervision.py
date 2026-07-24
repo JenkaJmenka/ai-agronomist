@@ -32,10 +32,13 @@ async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
     Propagates ``CancelledError`` immediately so the supervisor shuts down
     cleanly when the enclosing ``asyncio.Task`` is cancelled.
 
+    Both clean exits (normal return) and crashes (unhandled exception) are
+    treated as transient faults: the coroutine is restarted after sleeping
+    the current backoff, which then doubles (capped at ``_MAX_BACKOFF_SECONDS``).
+
     Backoff resets to the floor (1.0 s) when the coroutine ran longer than
     ``_BACKOFF_RESET_THRESHOLD`` (2 × ``_MAX_BACKOFF_SECONDS``) before
-    failing — a long healthy run followed by a crash is transient, not a
-    persistent fault.
+    exiting — a long healthy run is transient, not a persistent fault.
 
     Parameters
     ----------
@@ -47,23 +50,37 @@ async def _supervised(label: str, coro_fn: Any, *args: Any) -> None:
     backoff: float = 1.0
     while True:
         run_start = asyncio.get_event_loop().time()
+        caught_exc: Exception | None = None
         try:
             await coro_fn(*args)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            run_duration = asyncio.get_event_loop().time() - run_start
-            if run_duration >= _BACKOFF_RESET_THRESHOLD:
-                backoff = 1.0
+            caught_exc = exc
+
+        run_duration = asyncio.get_event_loop().time() - run_start
+        if run_duration >= _BACKOFF_RESET_THRESHOLD:
+            # Long healthy run before exit — treat as transient, reset backoff.
+            backoff = 1.0
+
+        if caught_exc is not None:
             logger.warning(
                 "Live task %r crashed (%s) after %.1f s — restarting in %.1f s",
                 label,
-                exc,
+                caught_exc,
                 run_duration,
                 backoff,
             )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2.0, _MAX_BACKOFF_SECONDS)
+        else:
+            logger.warning(
+                "Live task %r exited cleanly after %.1f s — restarting in %.1f s",
+                label,
+                run_duration,
+                backoff,
+            )
+
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2.0, _MAX_BACKOFF_SECONDS)
 
 
 async def _run_connector(

@@ -13,6 +13,7 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.sensor_data import UploadResponse
+from src.api.services.cache_invalidation import invalidate_response_cache
 from src.db.models import RawReading, SensorReading
 from src.db.session import get_db
 from src.vendors.csv_adapter import CSVAdapter, pandas_csv_reader_kwargs, parse_raw_rows
@@ -280,6 +281,8 @@ async def upload_csv(
             ranges[col]["min"] = 0.0
             ranges[col]["max"] = 0.0
 
+    await invalidate_response_cache("upload_csv")
+
     return UploadResponse(
         uploaded=total_uploaded or total_raw_uploaded,
         errors=0,
@@ -385,6 +388,10 @@ async def clear_tenant_data(
     )
     await db.commit()
 
+    # Best-effort: invalidate cached readings/anomalies responses so wiped data
+    # is not served from Redis for up to the 300 s TTL window.
+    cache_invalidated = await invalidate_response_cache("clear_tenant_data")
+
     # Best-effort: drop the live replay buffer so cleared rows don't reappear
     # from Redis XREAD until fresh events are published after Go Live resume.
     live_stream_cleared = False
@@ -411,6 +418,7 @@ async def clear_tenant_data(
         "deleted_metrics_snapshots": metrics_result.rowcount or 0,
         "live_stream_cleared": live_stream_cleared,
         "live_persistence_suppressed": live_persistence_suppressed,
+        "cache_invalidated": cache_invalidated,
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }
@@ -487,6 +495,10 @@ async def remove_live_demo_data(
     raw_result = await db.execute(delete(RawReading).where(*live_raw_filter))
     await db.commit()
 
+    # Best-effort: invalidate cached readings/anomalies responses so wiped data
+    # is not served from Redis for up to the 300 s TTL window.
+    cache_invalidated = await invalidate_response_cache("remove_live_demo_data")
+
     live_stream_cleared = False
     try:
         from src.api.services.live_hub_provider import get_live_hub
@@ -506,6 +518,7 @@ async def remove_live_demo_data(
         "deleted_sensor": sensor_result.rowcount or 0,
         "live_stream_cleared": live_stream_cleared,
         "live_persistence_suppressed": live_persistence_suppressed,
+        "cache_invalidated": cache_invalidated,
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }
@@ -722,6 +735,7 @@ async def inject_test_anomalies(
     if raw_records:
         db.add_all(raw_records)
     await db.commit()
+    await invalidate_response_cache("inject_test_anomalies")
 
     return {
         "injected": len(sensor_records),
@@ -785,6 +799,7 @@ async def remove_synthetic_anomalies(
     sensor_result = await db.execute(delete(SensorReading).where(*sensor_where))
     raw_result = await db.execute(delete(RawReading).where(*raw_where))
     await db.commit()
+    await invalidate_response_cache("remove_synthetic_anomalies")
 
     return {
         "deleted_sensor": sensor_result.rowcount,

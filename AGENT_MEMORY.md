@@ -3,6 +3,110 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Phase 1 QA Validation: Cache Invalidation + Supervision Hot-Loop — COMPLETE (2026-07-24)**
+Agent: qa-phase1. Task: validate two Phase 1 fixes before push to main.
+
+Full suite: 2508 passed, 12 skipped, 2 xfailed (0 regressions from the two fixes).
+Coverage: `cache_invalidation.py` 100%, `supervision.py` 100%.
+
+Tests added (10 new, across 2 files):
+- `tests/api/test_cache_invalidation.py`: +5 tests (TimeoutError edge case, None return value,
+  warning log with reason, no warning on success, exc_info verification) + 2 endpoint integration
+  tests (cache_invalidated key in clear_tenant_data and remove_live_demo_data responses).
+- `tests/live/test_supervision.py`: +3 tests for `_run_connector` (connect+stream+submit,
+  empty stream, connect exception propagation) — pushed module from 87% to 100%.
+
+Bugs found: 0. Both fixes verified clean. Report: docs/coverage/phase1-cache-supervision.md.
+Done signal: tasks/done/qa-phase1.json.
+
+---
+
+## Previous Phase
+**Supervision Hot-Loop Fix — COMPLETE (2026-07-24)**
+Agent: backend-engineer. Task: fix `_supervised()` tight-loop when coro_fn returns normally
+(e.g. a connector's stream() exhausts because vendor closed cleanly).
+
+Bug: the old `while True` only applied backoff inside the `except Exception` branch. A clean
+exit (no exception) re-invoked `coro_fn` immediately — zero sleep, zero log, infinite connect()
+spam.
+
+Fix in `src/live/supervision.py`:
+- Restructured the try/except to capture any exception in `caught_exc: Exception | None = None`.
+  `CancelledError` is still re-raised immediately in its own `except` clause.
+- All backoff/reset logic moved AFTER the try/except so both code paths share it exactly once:
+  - `run_duration` measured, `_BACKOFF_RESET_THRESHOLD` checked → `backoff` reset to 1.0 if
+    the run was long enough.
+  - Logging: normal exit → `'Live task %r exited cleanly after %.1f s — restarting in %.1f s'`;
+    crash → existing `'… crashed (%s) …'` format.
+  - `await asyncio.sleep(backoff)` then double (capped at `_MAX_BACKOFF_SECONDS`).
+- Zero duplication — single backoff block covers both paths.
+- `_run_connector` and all other files unchanged.
+
+New test file `tests/live/test_supervision.py` (12 tests, all pass in ~1 s via mocked sleep):
+- `TestNormalReturnTriggersBackoff` (3 tests): clean exit sleeps 1.0 → 2.0 → 4.0, logs
+  'exited cleanly', backoff doubles identically to crash path.
+- `TestExceptionTriggersBackoff` (3 tests): crash sleeps 1.0 → 2.0, logs 'crashed',
+  backoff capped at `_MAX_BACKOFF_SECONDS`.
+- `TestBackoffResetAfterLongRun` (3 tests): normal exit after long run resets to 1.0;
+  exception after long run resets to 1.0; `_BACKOFF_RESET_THRESHOLD` patched to 0.005 s
+  for speed; short run does NOT reset.
+- `TestCancelledErrorPropagates` (3 tests): cancel during coro propagates, cancel during
+  backoff sleep propagates, no restart after cancel. All use `asyncio.Event().wait()` in
+  the coro (not `asyncio.sleep`) to avoid being swept by the sleep patch.
+
+asyncio.sleep mock strategy: module-level `_REAL_SLEEP = asyncio.sleep` captured before any
+patch; `_make_fake_sleep(sleep_calls)` returns a coroutine that records the delay then
+`await _REAL_SLEEP(0)` to yield without blocking; `_REAL_SLEEP` is also used inside test
+coroutines for genuine wall-clock waits (simulating long runs).
+
+Test results: 383 passed (383 -k "supervis or live"), 351 live tests pass. Zero regressions.
+Done signal: tasks/done/backend-supervision.json.
+
+---
+
+## Previous Phase
+**Redis Cache Invalidation on Data-Mutating Endpoints — COMPLETE (2026-07-24)**
+Agent: backend-engineer. Task: add best-effort FastAPICache.clear() after every successful DB commit
+in the five data-mutating endpoints in src/api/routes/upload.py, and expose the result in the two
+full-clear responses.
+
+Bug fixed: after DELETE /api/upload/data (clear_tenant_data), cached readings/anomalies responses
+served wiped data for up to 300 s because the 5-minute Redis TTL was never explicitly cleared.
+Same issue affected remove_live_demo_data.
+
+Key design decisions:
+- Full FastAPICache.clear() (not targeted invalidation) — justified because
+  request_scoped_key_builder keys are md5(route+URL); per-tenant targeted invalidation would
+  require a key registry that does not exist. Acceptable given 300 s TTL and low traffic.
+- Best-effort: on ANY exception (including FastAPICache not initialized in unit tests) the helper
+  logs a warning with the reason and returns False — never raises.
+- Follows the existing best-effort pattern in clear_tenant_data (Redis stream clear, ~line 391).
+
+Files created (1):
+- `src/api/services/cache_invalidation.py`: `async def invalidate_response_cache(reason: str) -> bool`
+  — imports FastAPICache at module level for easy mocking; wraps `await FastAPICache.clear()` in
+  a broad except; returns True on success, False on any exception.
+
+Files modified (1):
+- `src/api/routes/upload.py`: Added `from src.api.services.cache_invalidation import invalidate_response_cache`.
+  - upload_csv: call before return UploadResponse (after all chunk commits).
+  - clear_tenant_data: call after await db.commit(); added `cache_invalidated` key to response dict.
+  - remove_live_demo_data: call after await db.commit(); added `cache_invalidated` key to response dict.
+  - inject_test_anomalies: call after await db.commit() (no response key — plain call).
+  - remove_synthetic_anomalies: call after await db.commit() (no response key — plain call).
+
+Files created (1 test):
+- `tests/api/test_cache_invalidation.py` (6 tests): TestInvalidateResponseCacheUninitialized
+  (3 tests: AttributeError, RuntimeError, ConnectionError → False, no raise) +
+  TestInvalidateResponseCacheInitialized (3 tests: returns True, called once, called with no args).
+  All 6 pass via `patch("src.api.services.cache_invalidation.FastAPICache")`.
+
+Test results: 323 passed, 1 xfailed (pre-existing), 0 regressions. Full tests/api suite green.
+Done signal: tasks/done/backend-cache.json.
+
+---
+
+## Previous Phase
 **Live Monitoring Phase 11 — Extra-Channel Persistence (dual-write RawReading) — COMPLETE (2026-07-20)**
 Agent: backend-engineer. Task: implement `_event_to_raw_row` + dual-write in `PersistenceBatcher._flush()`,
 backfill script, and extended tests per architect's `docs/architecture/live-demo-v2-review.md` Part 2.
