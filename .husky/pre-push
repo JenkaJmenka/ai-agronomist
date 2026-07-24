@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Medium gate before push: same lint + typecheck + unit as web-ci (e2e stays in CI).
+set -e
+root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$root/web"
+corepack pnpm lint
+corepack pnpm typecheck
+corepack pnpm test

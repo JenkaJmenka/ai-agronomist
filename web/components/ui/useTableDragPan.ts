@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type RefObject } from "react";
+import { type RefObject, useEffect } from "react";
 
 /** Pixels of pointer travel before a gesture counts as a horizontal drag. */
 const DRAG_THRESHOLD_PX = 10;

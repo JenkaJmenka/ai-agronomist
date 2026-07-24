@@ -42,3 +42,6 @@ models/checkpoints/artifact_cache/
 
 # Claude Code worktrees (nested repos)
 .claude/worktrees/
+
+# Root tooling (husky / lint-staged) — commit pnpm-lock.yaml for reproducible hooks
+/node_modules/

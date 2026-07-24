@@ -24,6 +24,14 @@ The FastAPI backend stays; the browser only ever talks to the **BFF** under
 All five gates must be green before every push; CI (`.github/workflows/web-ci.yml`)
 enforces the same set including the §1.2 perf budgets in `test/e2e/perf.spec.ts`.
 
+Local Git hooks (repo root, after `corepack pnpm install` once):
+
+- **pre-commit** — `lint-staged` runs biome `--write` on staged `web/**/*.{ts,tsx,js,jsx,json}`
+- **pre-push** — `pnpm lint` + `typecheck` + `test` inside `web/` (e2e remains CI-only)
+
+Do not use `--no-verify` unless explicitly requested. Agent skill:
+`.cursor/skills/web-quality-gates/SKILL.md`.
+
 ## Architecture map
 
 - `app/<page>/page.tsx` — thin RSC shells; each renders a client view from features/

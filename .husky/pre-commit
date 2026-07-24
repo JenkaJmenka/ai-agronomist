@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Fast gate: format/lint only staged web files (biome via lint-staged).
+pnpm exec lint-staged

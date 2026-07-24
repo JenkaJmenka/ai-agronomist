@@ -1,0 +1,2 @@
+# Git hooks (Husky) — keep executable; do not ignore.
+.husky/_

@@ -1,0 +1,14 @@
+---
+description: Enforce web/ quality gates before commit and push; never skip husky
+globs: web/**/*
+alwaysApply: false
+---
+
+# Web commit / push gates
+
+Before finishing any change under `web/`:
+
+1. Run `corepack pnpm lint:fix` then `corepack pnpm lint` from `web/`
+2. Rely on Husky — do not use `git commit --no-verify` or `git push --no-verify` unless the user explicitly requests it
+3. Fix biome import order (`type` imports before values) and format errors locally; CI fails on the same checks
+4. Read `.cursor/skills/web-quality-gates/SKILL.md` when unsure which gates apply

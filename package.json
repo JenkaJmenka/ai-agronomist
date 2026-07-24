@@ -1,0 +1,20 @@
+{
+  "name": "ai-agronomist",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "prepare": "husky",
+    "lint:web": "pnpm --dir web lint",
+    "typecheck:web": "pnpm --dir web typecheck",
+    "test:web": "pnpm --dir web test"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.2"
+  },
+  "lint-staged": {
+    "web/**/*.{ts,tsx,js,jsx,json}": [
+      "pnpm --dir web exec biome check --write --files-ignore-unknown=true --no-errors-on-unmatched"
+    ]
+  }
+}
