@@ -212,36 +212,44 @@ async def test_spike_episode_adds_magnitude() -> None:
 # Tests — build_mock_sources_for_scope
 # ---------------------------------------------------------------------------
 
-def test_build_mock_sources_returns_three() -> None:
-    """Factory produces exactly three sources per scope."""
+def test_build_mock_sources_returns_four() -> None:
+    """Factory produces climate, CO₂, fertigation, and gas sources per scope."""
     sources = build_mock_sources_for_scope("t1", "gh_A")
-    assert len(sources) == 3
+    assert len(sources) == 4
 
 
 def test_build_mock_sources_channel_split() -> None:
-    """Climate covers temp/humidity/light; CO2 covers co2; fertigation covers soil."""
+    """Climate / CO2 / fertigation / gas cover complementary channel sets."""
     sources = build_mock_sources_for_scope("t1", "gh_A")
-    climate, co2, fertigation = sources
+    climate, co2, fertigation, gas = sources
 
     assert set(climate.config.channels) == {"temperature", "humidity", "light"}
     assert set(co2.config.channels) == {"co2"}
     assert set(fertigation.config.channels) == {"soil_moisture", "root_zone_temp"}
+    assert set(gas.config.channels) == {"c2h4", "gas_co2", "no", "no2", "nox", "co"}
 
 
 def test_build_mock_sources_priorities() -> None:
-    """Climate has the lowest (winning) priority, fertigation the highest."""
+    """Climate has the lowest (winning) priority, gas the highest."""
     sources = build_mock_sources_for_scope("t1", "gh_A")
-    climate, co2, fertigation = sources
+    climate, co2, fertigation, gas = sources
 
-    assert climate.config.priority < co2.config.priority < fertigation.config.priority
+    assert (
+        climate.config.priority
+        < co2.config.priority
+        < fertigation.config.priority
+        < gas.config.priority
+    )
 
 
 def test_build_mock_sources_different_intervals() -> None:
-    """CO2 runs at 1.5x and fertigation at 2x the climate interval."""
+    """CO2 1.5x, fertigation 2x, gas 2.5x the climate interval."""
     sources = build_mock_sources_for_scope("t1", "gh_A")
-    climate, co2, fertigation = sources
+    climate, co2, fertigation, gas = sources
 
     co2_ratio = co2.config.poll_interval_seconds / climate.config.poll_interval_seconds
     fert_ratio = fertigation.config.poll_interval_seconds / climate.config.poll_interval_seconds
+    gas_ratio = gas.config.poll_interval_seconds / climate.config.poll_interval_seconds
     assert abs(co2_ratio - 1.5) < 1e-9
     assert abs(fert_ratio - 2.0) < 1e-9
+    assert abs(gas_ratio - 2.5) < 1e-9

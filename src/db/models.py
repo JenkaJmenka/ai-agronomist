@@ -524,3 +524,53 @@ class ModelArtifact(Base):
 
     def __repr__(self) -> str:
         return f"<ModelArtifact(key={self.key!r}, size={self.size_bytes})>"
+
+
+class OperationalConfig(Base):
+    """Per-tenant/greenhouse operational config (crop setpoints, season map, day window).
+
+    Composite primary key ``(tenant_id, greenhouse_id)`` so each tenant can
+    maintain separate configs per greenhouse without a surrogate ID column.
+    ``config_json`` holds the full canonical SCADA operational document:
+    crop, setpoints, day_window, season_map, seasonal_overrides.
+    """
+
+    __tablename__ = "operational_config"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        doc="Multi-tenant customer identifier",
+    )
+    greenhouse_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        default="default",
+        doc="Greenhouse zone identifier; defaults to 'default'",
+    )
+    config_json: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        doc=(
+            "SCADA operational config: crop, setpoints{channel:{day:[lo,hi],"
+            " night:[lo,hi]|null}}, day_window{start_hour,end_hour},"
+            " season_map{'1'..'12':'summer'|'winter'},"
+            " seasonal_overrides{season:{detector_scale:float|null}}"
+        ),
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        doc="Last update timestamp (UTC)",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<OperationalConfig(tenant_id={self.tenant_id!r},"
+            f" greenhouse_id={self.greenhouse_id!r},"
+            f" crop={self.config_json.get('crop') if self.config_json else None!r})>"
+        )

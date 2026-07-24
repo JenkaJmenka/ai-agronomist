@@ -241,4 +241,18 @@ class MockScadaSource(LiveSourceConnector):
             base = LIGHT_AMPLITUDE * max(0.0, _diurnal_sine(hour_frac))
             return base + self._rng.gauss(0, LIGHT_NOISE_STD)
 
+        # Gas-panel baselines (bounded noise; Gas Monitoring exact filter).
+        if channel == "c2h4":
+            return max(0.0, 0.05 + 0.02 * _diurnal_sine(hour_frac) + self._rng.gauss(0, 0.005))
+        if channel == "gas_co2":
+            return 800.0 + 100.0 * _diurnal_sine(hour_frac) + self._rng.gauss(0, 15.0)
+        if channel == "no":
+            return max(0.0, 0.02 + self._rng.gauss(0, 0.005))
+        if channel == "no2":
+            return max(0.0, 0.03 + self._rng.gauss(0, 0.005))
+        if channel == "nox":
+            return max(0.0, 0.05 + self._rng.gauss(0, 0.008))
+        if channel == "co":
+            return max(0.0, 0.5 + 0.2 * max(0.0, _diurnal_sine(hour_frac)) + self._rng.gauss(0, 0.05))
+
         return self._rng.gauss(0, 1.0)

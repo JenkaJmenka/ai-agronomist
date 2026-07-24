@@ -68,6 +68,13 @@ _MATCH_RULES: List[Tuple[str, List[str], List[str], int]] = [
     ("light",            ["lux"],                              [],                                      80),
     ("light",            ["light"],                            ["day", "sun", "screen"],                50),
     ("light",            ["illuminance", "par", "ppfd"],       [],                                      50),
+
+    # Measured humidity deficit (opt-in climate-extras channel, not a model input).
+    # Lines 57-59 above intentionally EXCLUDE "deficit" from the humidity channel;
+    # these rules capture columns that contain the measured HD value (g/m³).
+    ("measured_hd",      ["humidity", "deficit"],              [],                                      90),
+    ("measured_hd",      ["hd", "g"],                         [],                                      70),
+    ("measured_hd",      ["hd"],                              [],                                      30),
 ]
 
 
@@ -241,6 +248,38 @@ def _clean_col_name(col: str) -> str:
     return col.strip("_")
 
 
+# Canonical gas / climate-extra remaps applied on the raw upload path so
+# Monitoring / Gas pages (exact channel filters) see predictable names.
+# IMPORTANT: plain ``co2`` must NEVER become ``gas_co2`` (climate CO₂).
+_RAW_COLUMN_ALIASES: Dict[str, str] = {
+    "measured_c2h4": "c2h4",
+    "c_2_h_4": "c2h4",
+    "ethylene": "c2h4",
+    "measured_ethylene": "c2h4",
+    "measured_no": "no",
+    "measured_no2": "no2",
+    "measured_nox": "nox",
+    "measured_co": "co",
+    "gas_co2": "gas_co2",
+    "gas_co_2": "gas_co2",
+    "measured_gas_co2": "gas_co2",
+    "humidity_deficit": "measured_hd",
+    "measured_humidity_deficit": "measured_hd",
+    "hd": "measured_hd",
+}
+
+
+def _canonicalize_raw_column(clean: str) -> str:
+    """Map cleaned CSV headers onto canonical channel names for raw storage."""
+    if clean in _RAW_COLUMN_ALIASES:
+        return _RAW_COLUMN_ALIASES[clean]
+    if clean.startswith("measured_") and clean[len("measured_"):] in {
+        "c2h4", "no", "no2", "nox", "co",
+    }:
+        return clean[len("measured_"):]
+    return clean
+
+
 def _to_float_robust(val: Any) -> Optional[float]:
     """Convert a value to float, handling comma decimals (European format)."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -268,7 +307,9 @@ def parse_raw_rows(
       - source: str (which timestamp column provided the timestamp)
       - one column per detected numeric sensor
 
-    Drops rows with no parseable timestamp.
+    Drops rows with no parseable timestamp. Gas / climate-extra aliases are
+    remapped onto canonical names (``measured_c2h4`` → ``c2h4``, etc.) so the
+    Gas Monitoring exact filter and live mock share the same keys.
     """
     # --- Detect timestamp columns ---
     ts_candidates = [
@@ -323,12 +364,15 @@ def parse_raw_rows(
         col_l = col.lower()
         if any(pat in col_l for pat in skip_patterns):
             continue
-        clean = _clean_col_name(col)
+        clean = _canonicalize_raw_column(_clean_col_name(col))
         if not clean or len(clean) < 2:
             continue
         floats = [_to_float_robust(v) for v in work[col]]
         if all(v is None for v in floats):
             continue  # entirely empty column for this chunk
+        # Prefer the first occurrence when aliases collide (e.g. no vs measured_no).
+        if clean in result_data:
+            continue
         result_data[clean] = floats
         if clean not in col_names:
             col_names.append(clean)

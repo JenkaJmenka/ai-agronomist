@@ -61,6 +61,12 @@ def calculate_humidity_deficit(t_air: float, rh: float) -> float:
     calculates the absolute humidity deficit from the difference between
     saturated and actual vapour pressures.
 
+    The standard psychrometric coefficient is **216.7** when vapour pressure
+    is given in **hPa**.  Because :func:`calculate_saturation_vapor_pressure`
+    returns kPa (the SI unit used throughout this codebase), the coefficient
+    is scaled by 10 → **2167.0** so that the result is directly in g/m³
+    without an intermediate unit conversion.
+
     Args:
         t_air: Air temperature in °C.
         rh: Relative humidity in % (0–100).
@@ -77,7 +83,8 @@ def calculate_humidity_deficit(t_air: float, rh: float) -> float:
     e_a = e_s * (rh / 100.0)
     t_kelvin = t_air + 273.15
 
-    return (216.7 * (e_s - e_a)) / t_kelvin
+    # 2167.0 = 216.7 × 10: corrects for kPa input (see docstring).
+    return (2167.0 * (e_s - e_a)) / t_kelvin
 
 
 def validate_row(

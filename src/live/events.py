@@ -33,6 +33,13 @@ CHANNEL_BOUNDS: Dict[str, Tuple[float, float]] = {
     "soil_moisture": (0.0, 100.0),       # %
     "root_zone_temp": (0.0, 45.0),       # °C
     "vpd": (0.0, 4.0),                   # kPa
+    # Gas-panel channels (Gas Monitoring page; exact-match filter).
+    "c2h4": (0.0, 5.0),                 # ppm ethylene
+    "gas_co2": (0.0, 5000.0),           # ppm gas-panel CO₂
+    "no": (0.0, 1.0),                   # ppm
+    "no2": (0.0, 1.0),                  # ppm
+    "nox": (0.0, 2.0),                  # ppm
+    "co": (0.0, 50.0),                  # ppm
 }
 
 # The four canonical channels consumed by the ML scorer (LSTM-VAE).

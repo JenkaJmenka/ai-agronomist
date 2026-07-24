@@ -76,6 +76,42 @@ export const CHANNEL_META: Readonly<Record<string, ChannelMeta>> = {
     decimals: 1,
     optimal: [18, 24],
   },
+  c2h4: {
+    label: "Ethylene (C₂H₄)",
+    unit: "ppm",
+    decimals: 3,
+    optimal: [0, 0.1],
+  },
+  gas_co2: {
+    label: "CO₂ (gas)",
+    unit: "ppm",
+    decimals: 0,
+    optimal: [400, 1200],
+  },
+  no: {
+    label: "NO",
+    unit: "ppm",
+    decimals: 3,
+    optimal: [0, 0.05],
+  },
+  no2: {
+    label: "NO₂",
+    unit: "ppm",
+    decimals: 3,
+    optimal: [0, 0.05],
+  },
+  nox: {
+    label: "NOx",
+    unit: "ppm",
+    decimals: 3,
+    optimal: [0, 0.1],
+  },
+  co: {
+    label: "CO",
+    unit: "ppm",
+    decimals: 2,
+    optimal: [0, 5],
+  },
 } as const;
 
 /**

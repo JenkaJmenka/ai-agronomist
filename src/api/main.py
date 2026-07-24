@@ -56,6 +56,7 @@ from src.api.routes import (
     models,
     monitoring,
     network_anomalies,
+    operational_config,
     readings,
     upload,
 )
@@ -338,6 +339,7 @@ app.include_router(readings.router)
 app.include_router(network_anomalies.router)
 app.include_router(anomalies.router)
 app.include_router(auth.router)
+app.include_router(operational_config.router)
 
 
 @app.get("/metrics", include_in_schema=False)

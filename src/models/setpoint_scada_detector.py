@@ -19,6 +19,7 @@ from src.config import (
     DEHUMID_HD_CRIT_G_M3,
     FLATLINE_IDENTICAL_STEPS,
     FLATLINE_VARIANCE_WINDOW,
+    MEASURED_HD_COLUMN_ALIASES,
     OUTDOOR_TEMP_COLUMN_ALIASES,
     OVERHEAT_OUTDOOR_TEMP_C,
     OVERHEAT_SOLAR_WM2,
@@ -72,6 +73,7 @@ class ClimateContext:
     t_plant: Optional[float] = None
     t_outdoor: Optional[float] = None
     i_solar: Optional[float] = None
+    measured_hd: Optional[float] = None
     # Optional full series for flatline on plant canopy.
     t_plant_series: Optional[np.ndarray] = field(default=None, repr=False)
 
@@ -100,6 +102,7 @@ def climate_context_from_mapping(mapping: Optional[Mapping[str, Any]]) -> Climat
         t_plant=_alias_lookup(mapping, PLANT_TEMP_COLUMN_ALIASES),
         t_outdoor=_alias_lookup(mapping, OUTDOOR_TEMP_COLUMN_ALIASES),
         i_solar=_alias_lookup(mapping, SOLAR_COLUMN_ALIASES),
+        measured_hd=_alias_lookup(mapping, MEASURED_HD_COLUMN_ALIASES),
     )
 
 

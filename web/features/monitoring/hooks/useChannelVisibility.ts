@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { parseAsString, useQueryState } from "nuqs";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { mergeChannelLists } from "@/features/monitoring/api/readings";
 import { matchChannelParam } from "@/features/monitoring/lib/anomalyHighlight";
@@ -34,13 +35,21 @@ interface UseChannelVisibilityResult {
   readonly visible: ReadonlySet<string>;
   /**
    * Channels that match the `channel=` jump param on the current page.
-   * Empty when no anomaly jump is active.
+   * Empty when no anomaly jump is active or when no match was found (fall
+   * back to showing all channels so the chart is never blank).
    */
   readonly jumpFocus: readonly string[];
   /** Toggle a channel on or off. Clears the anomaly jump pre-select on first call. */
   readonly toggleChannel: (ch: string) => void;
 }
 
+/**
+ * Channel visibility with pure jump focus.
+ *
+ * When `channel=` matches nothing on this page (wrong page / unmatched names),
+ * we show **all** page channels instead of an empty chart — operators used to
+ * see a blank series until they manually toggled a sensor.
+ */
 export function useChannelVisibility({
   discoveredNow,
   channelParam,
@@ -49,6 +58,8 @@ export function useChannelVisibility({
   channelFilter,
   channelMatch = "includes",
 }: UseChannelVisibilityOptions): UseChannelVisibilityResult {
+  const [, setChannelParam] = useQueryState("channel", parseAsString);
+
   // Remember every channel seen this session so rolling Last 15/30 min windows
   // do not remove sensors that only appear on some ticks.
   const [knownChannels, setKnownChannels] = useState<string[]>([]);
@@ -75,24 +86,13 @@ export function useChannelVisibility({
     );
   }, [knownChannels, discoveredNow, channelFilter, channelMatch]);
 
-  const [hidden, setHidden] = useState<ReadonlySet<string> | null>(null);
-  const userToggledChannels = useRef(false);
+  /** Manual override — null means "follow jump focus / show all". */
+  const [manualVisible, setManualVisible] = useState<ReadonlySet<string> | null>(null);
 
-  // New tenant / gh / jump focus clears manual toggles so preselect can re-apply.
+  // New tenant / gh / jump focus clears manual overrides so preselect re-applies.
   useEffect(() => {
-    userToggledChannels.current = false;
-    setHidden(null);
+    setManualVisible(null);
   }, [tenant, gh, channelParam]);
-
-  // Anomaly jump: keep affected sensors from `channel=` pre-selected (and others
-  // off) until the user toggles a channel themselves.
-  useEffect(() => {
-    if (!channelParam || channels.length === 0 || userToggledChannels.current) return;
-    const matched = matchChannelParam(channels, channelParam);
-    if (matched.length === 0) return;
-    const matchedSet = new Set(matched);
-    setHidden(new Set(channels.filter((ch) => !matchedSet.has(ch))));
-  }, [channelParam, channels]);
 
   const jumpFocus = useMemo(
     () => (channelParam ? matchChannelParam(channels, channelParam) : []),
@@ -100,24 +100,28 @@ export function useChannelVisibility({
   );
 
   const visible = useMemo(() => {
-    if (hidden !== null) return new Set(channels.filter((ch) => !hidden.has(ch)));
+    if (manualVisible !== null) {
+      // Keep only channels that still exist on this page.
+      return new Set(channels.filter((ch) => manualVisible.has(ch)));
+    }
+    // Matched jump sensors → focus them. Unmatched / no jump → show all.
     if (jumpFocus.length > 0) return new Set(jumpFocus);
     return new Set(channels);
-  }, [channels, hidden, jumpFocus]);
+  }, [channels, manualVisible, jumpFocus]);
 
   const toggleChannel = useCallback(
     (ch: string): void => {
-      userToggledChannels.current = true;
-      setHidden(() => {
-        const next = new Set(channels.filter((candidate) => !visible.has(candidate)));
-        if (next.has(ch)) next.delete(ch);
-        else next.add(ch);
-        return next;
+      setManualVisible(() => {
+        const current = new Set(visible);
+        if (current.has(ch)) current.delete(ch);
+        else current.add(ch);
+        return current;
       });
-      // Profile after scheduling state so the paint path is not delayed by the probe.
+      // Drop sticky jump focus so later Monitoring visits are not stuck filtered.
+      void setChannelParam(null);
       measureInteraction("ui.channel_toggle", { channel: ch });
     },
-    [channels, visible],
+    [visible, setChannelParam],
   );
 
   return { channels, visible, jumpFocus, toggleChannel };

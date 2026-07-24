@@ -365,29 +365,37 @@ class TestLifecycle:
 
 class TestBuildMockSources:
 
-    def test_returns_three_sources(self) -> None:
+    def test_returns_four_sources(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        assert len(sources) == 3
+        assert len(sources) == 4
 
     def test_channel_split(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2, fertigation = sources
+        climate, co2, fertigation, gas = sources
         assert set(climate.config.channels) == {"temperature", "humidity", "light"}
         assert set(co2.config.channels) == {"co2"}
         assert set(fertigation.config.channels) == {"soil_moisture", "root_zone_temp"}
+        assert set(gas.config.channels) == {"c2h4", "gas_co2", "no", "no2", "nox", "co"}
 
     def test_priorities(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2, fertigation = sources
-        assert climate.config.priority < co2.config.priority < fertigation.config.priority
+        climate, co2, fertigation, gas = sources
+        assert (
+            climate.config.priority
+            < co2.config.priority
+            < fertigation.config.priority
+            < gas.config.priority
+        )
 
     def test_interval_ratio(self) -> None:
         sources = build_mock_sources_for_scope("t1", "gh_A")
-        climate, co2, fertigation = sources
+        climate, co2, fertigation, gas = sources
         co2_ratio = co2.config.poll_interval_seconds / climate.config.poll_interval_seconds
         fert_ratio = fertigation.config.poll_interval_seconds / climate.config.poll_interval_seconds
+        gas_ratio = gas.config.poll_interval_seconds / climate.config.poll_interval_seconds
         assert abs(co2_ratio - 1.5) < 1e-9
         assert abs(fert_ratio - 2.0) < 1e-9
+        assert abs(gas_ratio - 2.5) < 1e-9
 
     def test_scope_propagated(self) -> None:
         sources = build_mock_sources_for_scope("tX", "ghY")
@@ -396,7 +404,7 @@ class TestBuildMockSources:
             assert s.config.greenhouse_id == "ghY"
 
     def test_deterministic_seeds(self) -> None:
-        """Both sources have deterministic seeds (42 and 137)."""
+        """Climate and CO₂ keep deterministic seeds (42 and 137)."""
         sources = build_mock_sources_for_scope("t1", "gh_A")
         assert sources[0].config.params.get("seed") == 42
         assert sources[1].config.params.get("seed") == 137
