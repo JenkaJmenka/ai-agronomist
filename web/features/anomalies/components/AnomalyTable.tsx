@@ -182,7 +182,8 @@ export function AnomalyTable({
       <div className="flex flex-wrap items-center justify-between gap-2">
         {onWindowSelect ? (
           <p className="text-xs text-text-muted">
-            Click a row to zoom the chart · ⌘/Ctrl-click adds · Shift-click selects a range
+            Click a row to zoom the chart (table stays) · ⌘/Ctrl-click adds · Shift-click selects a
+            range
           </p>
         ) : (
           <span />

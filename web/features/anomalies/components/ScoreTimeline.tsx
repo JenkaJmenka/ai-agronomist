@@ -9,7 +9,7 @@ import {
   type RangeSelectHandler,
   SELECT_ONLY_CURSOR,
 } from "@/components/charts/rangeSelect";
-import { UPlotChart } from "@/components/charts/UPlotChart";
+import { type ChartViewWindow, UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 
 interface ScoreTimelineProps {
@@ -17,10 +17,17 @@ interface ScoreTimelineProps {
   readonly threshold: number;
   /** Drag-selection / pan / zoom / reset update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
+  /** Local chart zoom from table row selection (does not change the table). */
+  readonly viewWindow?: ChartViewWindow | null;
 }
 
 /** Anomaly-score series with the threshold as a reference line. */
-export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineProps) {
+export function ScoreTimeline({
+  rows,
+  threshold,
+  onRangeSelect,
+  viewWindow = null,
+}: ScoreTimelineProps) {
   const data = useMemo(() => {
     const xs: number[] = [];
     const scores: (number | null)[] = [];
@@ -106,7 +113,13 @@ export function ScoreTimeline({ rows, threshold, onRangeSelect }: ScoreTimelineP
           <ChartResetButton />
         </div>
       ) : null}
-      <UPlotChart data={data} options={options} height={260} onWindowChange={onRangeSelect} />
+      <UPlotChart
+        data={data}
+        options={options}
+        height={260}
+        onWindowChange={onRangeSelect}
+        viewWindow={viewWindow}
+      />
     </div>
   );
 }

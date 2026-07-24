@@ -16,6 +16,7 @@ import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { debounce } from "@/lib/debounce";
+import { useChartViewWindow } from "@/lib/useChartViewWindow";
 import { useDateRange } from "@/lib/useDateRange";
 import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
 
@@ -36,7 +37,7 @@ function AnomaliesBody() {
     originalCount,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
-  const [, setRange] = useDateRange();
+  const [{ from, to }, setRange] = useDateRange();
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
   const channels = useMemo(() => discoverChannels(rows), [rows]);
 
@@ -69,6 +70,7 @@ function AnomaliesBody() {
     },
     [beginWindowChange, debouncedSetRange],
   );
+  const { chartViewWindow, onTableRowSelect } = useChartViewWindow({ from, to });
   const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
   const tableAnomalies = enrichment.topRows ?? anomalies;
 
@@ -145,6 +147,7 @@ function AnomaliesBody() {
               // Drag-selecting a span narrows the URL window, so the anomaly
               // tables below filter to the same range — and the Period control.
               onRangeSelect={onChartRangeSelect}
+              viewWindow={chartViewWindow}
             />
           </Card>
           <Card title="Top anomalies">
@@ -153,7 +156,7 @@ function AnomaliesBody() {
               anomalies={tableAnomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onChartRangeSelect}
+              onWindowSelect={onTableRowSelect}
             />
           </Card>
           <Card
@@ -168,7 +171,7 @@ function AnomaliesBody() {
               anomalies={tableAnomalies}
               enrichment={enrichment.byTimestamp}
               isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onChartRangeSelect}
+              onWindowSelect={onTableRowSelect}
             />
           </Card>
         </RefetchingBlock>
