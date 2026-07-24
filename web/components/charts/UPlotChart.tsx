@@ -187,10 +187,10 @@ export function UPlotChart({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    // Keep a table-driven local zoom across live/data ticks; reset scales when
-    // there is no local focus so Period / live clip changes still autofit.
+    // Always autofit Y for new data. When a local/live X window is set, re-pin
+    // X afterwards so Period/live zoom stays while series magnitude can change.
     const keepFocus = viewWindow !== null && viewWindow !== undefined;
-    chart.setData(data, !keepFocus);
+    chart.setData(data, true);
     if (keepFocus) applyViewWindow(chart, viewWindow);
   }, [data, viewWindow]);
 

@@ -46,30 +46,69 @@ interface MonitoringViewProps {
 
 /**
  * Merge historical + live rows; live wins on duplicate timestamp.
- * Carry forward the latest known numeric channels onto each live tick so
- * Connext-only columns do not render as "—" in the newest-first table while
- * tiles still find historical values by scanning backwards.
+ * Result is sorted chronologically (oldest → newest) for uPlot.
  */
 function dedupeByTimestamp(historical: SensorRow[], live: SensorRow[]): SensorRow[] {
   const map = new Map<string, SensorRow>();
   for (const row of historical) map.set(row.timestamp, row);
   for (const row of live) map.set(row.timestamp, row);
-  const merged = Array.from(map.values()).sort((a, b) =>
+  return Array.from(map.values()).sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
   );
-  if (live.length === 0) return merged;
+}
 
-  const liveTs = new Set(live.map((row) => row.timestamp));
+/**
+ * Fill missing Connext columns on live ticks for table/tiles only.
+ * Never feed this into the chart — carry-forward draws long flat polylines
+ * across the empty lookback and crushes real live activity at the right edge.
+ */
+function carryForwardChannels(rows: readonly SensorRow[]): SensorRow[] {
   const carry: Record<string, number> = {};
-  return merged.map((row) => {
+  return rows.map((row) => {
+    const next: Record<string, unknown> = { ...row };
+    let changed = false;
+    for (const [key, value] of Object.entries(carry)) {
+      if (next[key] == null) {
+        next[key] = value;
+        changed = true;
+      }
+    }
     for (const [key, value] of Object.entries(row)) {
       if (key === "timestamp" || key === "anomaly_score") continue;
       if (typeof value === "number") carry[key] = value;
     }
-    if (!liveTs.has(row.timestamp)) return row;
-    const next: Record<string, unknown> = { ...carry, ...row };
-    return next as SensorRow;
+    return changed ? (next as SensorRow) : row;
   });
+}
+
+/** Min live chart span so a few SSE ticks are not stretched edge-to-edge. */
+const LIVE_CHART_MIN_SPAN_MS = 2 * 60_000;
+/** Pad around live data when auto-fitting X. */
+const LIVE_CHART_PAD_MS = 15_000;
+
+/**
+ * When live lookback is mostly empty (demo CSV is far from wall-clock), zoom X
+ * to the actual data span so the graphic is not a flat desert with a blip on the right.
+ */
+function liveChartViewWindow(options: {
+  readonly rows: readonly SensorRow[];
+  readonly from: Date | null;
+  readonly to: Date | null;
+}): { from: Date; to: Date } | null {
+  const { rows, from, to } = options;
+  if (rows.length === 0 || from === null || to === null) return null;
+  const firstMs = Date.parse(rows[0]?.timestamp ?? "");
+  const lastMs = Date.parse(rows[rows.length - 1]?.timestamp ?? "");
+  if (!Number.isFinite(firstMs) || !Number.isFinite(lastMs) || lastMs < firstMs) return null;
+
+  const lookbackMs = Math.max(to.getTime() - from.getTime(), LIVE_CHART_MIN_SPAN_MS);
+  const dataSpanMs = lastMs - firstMs;
+  // Data already fills most of the lookback — keep the nominal window.
+  if (dataSpanMs >= lookbackMs * 0.5) return { from, to };
+
+  const spanMs = Math.max(dataSpanMs + LIVE_CHART_PAD_MS * 2, LIVE_CHART_MIN_SPAN_MS);
+  const endMs = Math.max(lastMs + LIVE_CHART_PAD_MS, to.getTime());
+  return { from: new Date(endMs - spanMs), to: new Date(endMs) };
 }
 
 function MonitoringBody({
@@ -133,19 +172,22 @@ function MonitoringBody({
       }),
     [mergedRows, from, clipTo, isRefetching],
   );
-  // Chart/table can lag a frame behind tiles so nav/clicks stay responsive under live SSE.
-  const deferredRows = useDeferredValue(rows);
+  // Chart stays on raw merged rows (no carry-forward polylines).
+  const deferredChartRows = useDeferredValue(rows);
+  // Table/tiles carry Connext columns onto live ticks so cells are not "—".
+  const tableRows = useMemo(() => carryForwardChannels(rows), [rows]);
+  const deferredTableRows = useDeferredValue(tableRows);
 
   // Envelope for G4 enrichment — prefer URL/live lookback bounds so the queryKey
   // does not churn on every SSE flush (rows[0]/at(-1) move every tick).
-  const windowStart = from?.toISOString() ?? deferredRows[0]?.timestamp ?? null;
-  const windowEnd = to?.toISOString() ?? deferredRows.at(-1)?.timestamp ?? null;
+  const windowStart = from?.toISOString() ?? deferredChartRows[0]?.timestamp ?? null;
+  const windowEnd = to?.toISOString() ?? deferredChartRows.at(-1)?.timestamp ?? null;
   // Defer G4 until readings settle; cap at 50 so Monitoring never waits on limit=500.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: deferredRows.length > 0 && !isRefetching,
+    enabled: deferredChartRows.length > 0 && !isRefetching,
     limit: 50,
   });
 
@@ -159,6 +201,14 @@ function MonitoringBody({
     to,
     scopeKey: `${tenant}/${gh}`,
   });
+  const liveFitWindow = useMemo(
+    () =>
+      live && chartViewWindow === null
+        ? liveChartViewWindow({ rows: deferredChartRows, from, to: clipTo })
+        : null,
+    [live, chartViewWindow, deferredChartRows, from, clipTo],
+  );
+  const effectiveChartWindow = chartViewWindow ?? liveFitWindow;
 
   /** Detector-attributed sensors per timestamp (enrichment + live SSE). */
   const affectedByTimestamp = useMemo(() => {
@@ -271,7 +321,7 @@ function MonitoringBody({
         <RefetchingBlock isRefetching={isDimmed} className="space-y-6">
           {/* ── Live sensor tiles ── */}
           <SensorTiles
-            rows={rows}
+            rows={tableRows}
             channels={channels}
             setpoints={setpoints}
             isLive={live}
@@ -289,22 +339,24 @@ function MonitoringBody({
 
           <Card title="Time series">
             <SensorTimeSeriesChart
-              rows={deferredRows}
+              rows={deferredChartRows}
               channels={channels}
               visible={visible}
               threshold={threshold}
               setpoints={setpoints}
               onRangeSelect={onChartRangeSelect}
-              viewWindow={chartViewWindow}
+              viewWindow={effectiveChartWindow}
               showAnomalyBands={paintAnomalyHighlight}
               anomalyFocusVisible={anomalyFocusVisible}
               affectedByTimestamp={affectedByTimestamp}
               scopeKey={scopeKey}
             />
           </Card>
-          <Card title={`Readings (${deferredRows.length.toLocaleString()} rows, newest first)`}>
+          <Card
+            title={`Readings (${deferredTableRows.length.toLocaleString()} rows, newest first)`}
+          >
             <ReadingsTable
-              rows={deferredRows}
+              rows={deferredTableRows}
               channels={channels}
               visible={visible}
               threshold={threshold}
