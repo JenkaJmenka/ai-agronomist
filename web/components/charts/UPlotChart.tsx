@@ -10,6 +10,11 @@ import { panWindow, scaleWindowSec, zoomWindow } from "@/components/charts/timeW
 
 export type ChartWindowHandler = (from: Date, to: Date) => void;
 
+export interface ChartViewWindow {
+  readonly from: Date;
+  readonly to: Date;
+}
+
 interface UPlotChartProps {
   readonly data: uPlot.AlignedData;
   readonly options: Omit<uPlot.Options, "width" | "height">;
@@ -20,10 +25,23 @@ interface UPlotChartProps {
    */
   readonly onWindowChange?: ChartWindowHandler;
   /**
+   * Local x-axis zoom (e.g. table row selection). Does not refetch or change
+   * the URL — only the chart scale updates so the table can keep its rows.
+   */
+  readonly viewWindow?: ChartViewWindow | null;
+  /**
    * Per-series visibility for indices 1..n (x-axis is 0). Updated via
    * ``setSeries`` so channel toggles do not recreate the chart.
    */
   readonly seriesVisibility?: readonly boolean[];
+}
+
+function applyViewWindow(chart: uPlot, viewWindow: ChartViewWindow | null | undefined): void {
+  if (!viewWindow) return;
+  const min = viewWindow.from.getTime() / 1000;
+  const max = viewWindow.to.getTime() / 1000;
+  if (!(Number.isFinite(min) && Number.isFinite(max) && max > min)) return;
+  chart.setScale("x", { min, max });
 }
 
 /** Fraction of the visible span to shift per Shift+wheel notch. */
@@ -64,6 +82,7 @@ export function UPlotChart({
   options,
   height = 280,
   onWindowChange,
+  viewWindow = null,
   seriesVisibility,
 }: UPlotChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +91,8 @@ export function UPlotChart({
   onWindowChangeRef.current = onWindowChange;
   const dataRef = useRef(data);
   dataRef.current = data;
+  const viewWindowRef = useRef(viewWindow);
+  viewWindowRef.current = viewWindow;
   const seriesVisibilityRef = useRef(seriesVisibility);
   seriesVisibilityRef.current = seriesVisibility;
 
@@ -86,6 +107,7 @@ export function UPlotChart({
       container,
     );
     chartRef.current = chart;
+    applyViewWindow(chart, viewWindowRef.current);
 
     const visibility = seriesVisibilityRef.current;
     if (visibility) {
@@ -154,8 +176,20 @@ export function UPlotChart({
   }, [options, height]);
 
   useEffect(() => {
-    chartRef.current?.setData(data);
-  }, [data]);
+    const chart = chartRef.current;
+    if (!chart) return;
+    // Keep a table-driven local zoom across live/data ticks; reset scales when
+    // there is no local focus so Period changes still autofit.
+    const keepFocus = viewWindow !== null && viewWindow !== undefined;
+    chart.setData(data, !keepFocus);
+    if (keepFocus) applyViewWindow(chart, viewWindow);
+  }, [data, viewWindow]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    applyViewWindow(chart, viewWindow);
+  }, [viewWindow]);
 
   useEffect(() => {
     const chart = chartRef.current;

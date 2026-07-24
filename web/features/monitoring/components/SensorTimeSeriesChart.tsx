@@ -9,7 +9,7 @@ import {
   type RangeSelectHandler,
   SELECT_ONLY_CURSOR,
 } from "@/components/charts/rangeSelect";
-import { UPlotChart } from "@/components/charts/UPlotChart";
+import { type ChartViewWindow, UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { type AnomalyBand, computeAnomalyBands } from "@/features/monitoring/lib/anomalyBands";
@@ -24,6 +24,8 @@ interface SensorTimeSeriesChartProps {
   readonly threshold: number;
   /** Drag-selection / pan / zoom / reset update the URL window. */
   readonly onRangeSelect?: RangeSelectHandler;
+  /** Local chart zoom from table row selection (does not change the table). */
+  readonly viewWindow?: ChartViewWindow | null;
   /**
    * Effective setpoints. When exactly one channel is visible its optimal
    * [min, max] range is drawn as a subtle horizontal green band.
@@ -76,6 +78,7 @@ export function SensorTimeSeriesChart({
   visible,
   threshold,
   onRangeSelect,
+  viewWindow = null,
   setpoints,
   showAnomalyBands = true,
   anomalyFocusVisible,
@@ -177,6 +180,7 @@ export function SensorTimeSeriesChart({
         options={options}
         height={320}
         onWindowChange={onRangeSelect}
+        viewWindow={viewWindow}
         seriesVisibility={seriesVisibility}
       />
     </div>

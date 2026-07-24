@@ -9,13 +9,15 @@ export type TimestampRow = { readonly timestamp: string };
 export type SelectionWindowHandler = (from: Date, to: Date) => void;
 
 /**
- * Multi-select rows by timestamp and push a chart/URL window when the
- * selection changes.
+ * Multi-select rows by timestamp and zoom the chart to that span.
  *
  * - Click → select only that row
  * - Meta/Ctrl+click → toggle row in the selection
  * - Shift+click → select the inclusive range between the anchor and this row
  *   (using the current display order)
+ *
+ * Callers should treat ``onWindowSelect`` as a chart-only focus (not a URL
+ * period change) so the table keeps its current rows.
  */
 export function useTimestampRowSelection(
   onWindowSelect: SelectionWindowHandler | undefined,

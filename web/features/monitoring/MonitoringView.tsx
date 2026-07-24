@@ -37,6 +37,7 @@ import { debounce } from "@/lib/debounce";
 import { rowsForActiveWindow } from "@/lib/periodPresets";
 import { measureInteraction } from "@/lib/profiling";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
+import { useChartViewWindow } from "@/lib/useChartViewWindow";
 import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 import { useWindowBusyCue } from "@/lib/useWindowBusyCue";
@@ -136,6 +137,11 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
     },
     [beginWindowChange, debouncedSetRange],
   );
+  const { chartViewWindow, onTableRowSelect } = useChartViewWindow({
+    from,
+    to,
+    scopeKey: `${tenant}/${gh}`,
+  });
 
   /** Detector-attributed sensors per timestamp (enrichment + live SSE). */
   const affectedByTimestamp = useMemo(() => {
@@ -323,6 +329,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               threshold={threshold}
               setpoints={setpoints}
               onRangeSelect={onChartRangeSelect}
+              viewWindow={chartViewWindow}
               showAnomalyBands={paintAnomalyHighlight}
               anomalyFocusVisible={anomalyFocusVisible}
               affectedByTimestamp={affectedByTimestamp}
@@ -337,7 +344,7 @@ function MonitoringBody({ title, channelFilter, channelMatch = "includes" }: Mon
               setpoints={setpoints}
               affectedByTimestamp={affectedByTimestamp}
               highlightAnomalies={paintAnomalyHighlight}
-              onWindowSelect={onChartRangeSelect}
+              onWindowSelect={onTableRowSelect}
             />
           </Card>
         </RefetchingBlock>
