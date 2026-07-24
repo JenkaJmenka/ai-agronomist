@@ -844,6 +844,23 @@ BOOTSTRAP_PHYSICS_HD_MAX: float = float(
     os.environ.get("BOOTSTRAP_PHYSICS_HD_MAX", "35.0")
 )
 
+# Pass-1 MAD robust Z-score cull (Iglewicz–Hoaglin). Rows with any channel
+# |z| above this threshold are scrubbed before IsolationForest fit.
+BOOTSTRAP_MAD_Z_THRESHOLD: float = float(
+    os.environ.get("BOOTSTRAP_MAD_Z_THRESHOLD", "3.5")
+)
+
+# Seasonal baseline / scaler (σ_season relative to global σ).
+SEASONAL_MIN_SAMPLES: int = int(os.environ.get("SEASONAL_MIN_SAMPLES", "500"))
+SEASONAL_SCALE_MIN: float = float(os.environ.get("SEASONAL_SCALE_MIN", "0.5"))
+SEASONAL_SCALE_MAX: float = float(os.environ.get("SEASONAL_SCALE_MAX", "2.0"))
+SEASONAL_BASELINE_ROW_CAP: int = int(
+    os.environ.get("SEASONAL_BASELINE_ROW_CAP", "50000")
+)
+
+# Band-breach detector: last-k mean debounce before comparing to [min, max].
+BAND_BREACH_DEBOUNCE_K: int = int(os.environ.get("BAND_BREACH_DEBOUNCE_K", "3"))
+
 # Spike detector velocity limits per sensor (physical units per 5-min step).
 SPIKE_DELTA_MAX: Dict[str, float] = {
     "temperature": 5.0,   # °C

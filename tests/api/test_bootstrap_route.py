@@ -79,6 +79,7 @@ def _make_pass1_result(n_rows: int = _N_ROWS) -> BootstrapPass1Result:
         clean_df=clean_df,
         anomaly_df=anomaly_df,
         physics_flags=physics_flags,
+        mad_flags=pd.Series(False, index=idx),
         if_flags=if_flags,
         gas_mask_cols=frozenset(),
     )

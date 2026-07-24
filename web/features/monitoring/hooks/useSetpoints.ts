@@ -1,43 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 
+import { fetchOperationalConfig } from "@/features/configuration/api/operationalConfig";
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
+import { STALE_TIME_MS } from "@/lib/query";
 import { useScope } from "@/lib/useScope";
 
 export type SetpointRange = readonly [number, number];
 export type Setpoints = Readonly<Record<string, SetpointRange>>;
 
-// ---------------------------------------------------------------------------
-// Zod schema — validate user-controlled localStorage data at runtime.
-// ---------------------------------------------------------------------------
-
 const setpointRangeSchema = z
   .tuple([z.number(), z.number()])
-  // F10: reject inverted ranges ([80, 20]) that would produce nonsense statuses.
   .refine(([min, max]) => min < max, "min must be less than max");
 
 const setpointsSchema = z.record(z.string(), setpointRangeSchema);
 
-// ---------------------------------------------------------------------------
-// Module-scope defaults — CHANNEL_META is static; compute once on load.
-// ---------------------------------------------------------------------------
-
-// F9: hoisted to module scope so the hook never rebuilds defaults on every render.
 const DEFAULT_SETPOINTS: Setpoints = Object.fromEntries(
   Object.entries(CHANNEL_META).map(([ch, meta]) => [ch, meta.optimal]),
 ) as Setpoints;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const MIGRATED_KEY_PREFIX = "gh-setpoints-migrated:";
 
 function buildStorageKey(tenant: string, gh: string): string {
   return `gh-setpoints:${tenant}:${gh}`;
 }
 
-/** SSR-safe localStorage read; returns empty object on any parse/access error. */
+function buildMigratedKey(tenant: string, gh: string): string {
+  return `${MIGRATED_KEY_PREFIX}${tenant}:${gh}`;
+}
+
 function loadOverrides(key: string): Partial<Setpoints> {
   if (typeof window === "undefined") return {};
   try {
@@ -46,14 +40,12 @@ function loadOverrides(key: string): Partial<Setpoints> {
     const parsed = JSON.parse(raw) as unknown;
     const result = setpointsSchema.safeParse(parsed);
     if (!result.success) return {};
-    // Cast via unknown — Zod output type narrowed to readonly tuple above.
     return result.data as Partial<Setpoints>;
   } catch {
     return {};
   }
 }
 
-/** SSR-safe localStorage write; silently ignores errors (private-mode, quota). */
 function persistOverrides(key: string, overrides: Partial<Setpoints>): void {
   if (typeof window === "undefined") return;
   try {
@@ -63,7 +55,6 @@ function persistOverrides(key: string, overrides: Partial<Setpoints>): void {
   }
 }
 
-/** SSR-safe localStorage remove. */
 function removeOverrides(key: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -73,53 +64,87 @@ function removeOverrides(key: string): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Hook
-// ---------------------------------------------------------------------------
+/** Flatten operational day bands into Monitoring's [min,max] map. */
+function dayBandsFromConfig(
+  setpoints: Record<string, { day?: number[] | null; night?: number[] | null }> | undefined,
+): Partial<Setpoints> {
+  if (!setpoints) return {};
+  const out: Record<string, SetpointRange> = {};
+  for (const [channel, band] of Object.entries(setpoints)) {
+    const day = band?.day;
+    if (!Array.isArray(day) || day.length !== 2) continue;
+    const min = Number(day[0]);
+    const max = Number(day[1]);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) continue;
+    out[channel] = [min, max];
+  }
+  return out;
+}
 
 export interface UseSetpointsResult {
-  /** Effective setpoints: CHANNEL_META defaults merged with user overrides. */
+  /** Effective setpoints: CHANNEL_META ∪ server day bands ∪ local overrides. */
   readonly setpoints: Setpoints;
   /** Persist a new [min, max] for `channel`; no-op when min ≥ max. */
   readonly updateSetpoint: (channel: string, range: SetpointRange) => void;
-  /** Clear all user overrides and revert to CHANNEL_META defaults. */
+  /** Clear all user overrides and revert to server/CHANNEL_META defaults. */
   readonly resetToDefaults: () => void;
 }
 
 /**
- * Manages per-tenant/greenhouse setpoint overrides, persisted to localStorage.
+ * Setpoints with server hydrate + localStorage offline fallback.
  *
- * Defaults come from `CHANNEL_META`. User overrides are merged on top and
- * stored under `gh-setpoints:{tenant}:{gh}`. Corrupted/invalid JSON is
- * silently discarded and falls back to defaults.
- *
- * F3: initializes to {} to avoid server/client hydration mismatch — localStorage
- * is unavailable on the server so a lazy useState initializer would differ between
- * SSR and hydration. The existing useEffect on [storageKey] loads overrides post-mount.
+ * Priority (highest last): CHANNEL_META → operational-config day bands →
+ * local overrides. Existing local overrides are kept as the offline cache;
+ * a one-time migration flag marks that server config has been seen.
  */
 export function useSetpoints(): UseSetpointsResult {
   const { tenant, gh } = useScope();
   const storageKey = buildStorageKey(tenant, gh);
-
-  // F3: initialize to {} (not via lazy initializer) to avoid SSR/client hydration
-  // mismatch. The useEffect below loads overrides after mount.
+  const migratedKey = buildMigratedKey(tenant, gh);
   const [overrides, setOverrides] = useState<Partial<Setpoints>>({});
+  const migratedRef = useRef(false);
 
-  // Reload overrides when scope changes (tenant or gh switched), and on initial mount.
+  const serverQuery = useQuery({
+    queryKey: ["operational-config-setpoints", tenant, gh],
+    queryFn: ({ signal }) => fetchOperationalConfig({ tenant, gh, signal }),
+    staleTime: STALE_TIME_MS.windowedReadings,
+    retry: 1,
+  });
+
   useEffect(() => {
     setOverrides(loadOverrides(storageKey));
-  }, [storageKey]);
+    migratedRef.current =
+      typeof window !== "undefined" && window.localStorage.getItem(migratedKey) === "1";
+  }, [storageKey, migratedKey]);
 
-  // F9: merge is memoized — only recomputes when overrides change (not every SSE tick).
+  // One-time: if local overrides exist and we have never marked migration,
+  // keep them (offline wins) but stamp migration so later server edits can
+  // refresh defaults underneath when overrides are cleared.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (migratedRef.current) return;
+    if (!serverQuery.data) return;
+    try {
+      window.localStorage.setItem(migratedKey, "1");
+      migratedRef.current = true;
+    } catch {
+      // ignore
+    }
+  }, [serverQuery.data, migratedKey]);
+
+  const serverBands = useMemo(
+    () => dayBandsFromConfig(serverQuery.data?.config.setpoints),
+    [serverQuery.data],
+  );
+
   const setpoints = useMemo(
-    () => ({ ...DEFAULT_SETPOINTS, ...overrides }) as Setpoints,
-    [overrides],
+    () => ({ ...DEFAULT_SETPOINTS, ...serverBands, ...overrides }) as Setpoints,
+    [serverBands, overrides],
   );
 
   const updateSetpoint = useCallback(
     (channel: string, range: SetpointRange): void => {
       const [min, max] = range;
-      // Guard: min must be strictly less than max.
       if (min >= max) return;
       setOverrides((prev) => {
         const next = { ...prev, [channel]: range };

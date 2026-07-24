@@ -150,16 +150,11 @@ def validate_operational_config(config: dict[str, Any]) -> None:
 
 
 async def invalidate_seasonal_caches(tenant_id: str) -> None:
-    """No-op placeholder — Phase 4 will reset seasonal baselines.
+    """Flush cached seasonal σ scalers after an operational-config mutation."""
+    from src.models.seasonal_scaler import clear_seasonal_scaler_cache
 
-    TODO(scada-p4): flush cached per-season sigma multipliers and setpoint bands
-    for the SeasonalScaleProvider and CropBoundsDetector when the tenant changes
-    their operational config mid-season.
-    """
-    logger.debug(
-        "invalidate_seasonal_caches called for tenant=%s (no-op until Phase 4)",
-        tenant_id,
-    )
+    clear_seasonal_scaler_cache(tenant_id)
+    logger.info("Invalidated seasonal scaler cache for tenant=%s", tenant_id)
 
 
 async def upsert_operational_config(

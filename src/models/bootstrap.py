@@ -39,6 +39,7 @@ from src.models.data_utils import (
     preprocess_sequences,
 )
 from src.models.lstm_vae import LSTMVAE
+from src.models.mad_scrub import compute_mad_flags
 from src.models.psychrometric_validator import calculate_humidity_deficit
 from src.utils.profiling import timed
 
@@ -64,6 +65,7 @@ class BootstrapPass1Result:
     clean_df: pd.DataFrame
     anomaly_df: pd.DataFrame
     physics_flags: pd.Series  # bool — True when row failed psychrometric check
+    mad_flags: pd.Series      # bool — True when MAD robust Z cull flagged the row
     if_flags: pd.Series       # bool — True when IsolationForest marked as outlier
     gas_mask_cols: frozenset  # gas columns dropped due to high null fraction
 
@@ -82,7 +84,7 @@ class BootstrapRowResult:
 
 
 class ColdStartBootstrap:
-    """Pass 1: physics check + IsolationForest outlier filtering."""
+    """Pass 1: physics + MAD scrub + IsolationForest outlier filtering."""
 
     def __init__(self, *, clean_path: str, anomaly_path: str) -> None:
         self._clean_path = clean_path
@@ -94,10 +96,13 @@ class ColdStartBootstrap:
             ctx["rows"] = len(df)
         with timed(logger, "bootstrap.pass1.physics_flags", rows=len(df)):
             physics_flags = _compute_physics_flags(df)
+        with timed(logger, "bootstrap.pass1.mad_scrub", rows=len(df)):
+            mad_flags = compute_mad_flags(df, _SENSOR_COLS)
         with timed(logger, "bootstrap.pass1.isolation_forest", rows=len(df)):
-            gas_mask_cols, if_flags = _compute_if_flags(df)
+            # Spec: MAD-flagged rows are excluded from IF *fit*, then OR-ed in.
+            gas_mask_cols, if_flags = _compute_if_flags(df, exclude_mask=mad_flags)
 
-        combined = physics_flags | if_flags
+        combined = physics_flags | mad_flags | if_flags
         clean_df = df[~combined]
         anomaly_df = df[combined]
 
@@ -114,6 +119,7 @@ class ColdStartBootstrap:
             clean_df=clean_df,
             anomaly_df=anomaly_df,
             physics_flags=physics_flags,
+            mad_flags=mad_flags,
             if_flags=if_flags,
             gas_mask_cols=frozenset(gas_mask_cols),
         )
@@ -328,7 +334,10 @@ def _compute_physics_flags(df: pd.DataFrame) -> pd.Series:
     return flags
 
 
-def _compute_if_flags(df: pd.DataFrame) -> tuple[list[str], pd.Series]:
+def _compute_if_flags(
+    df: pd.DataFrame,
+    exclude_mask: pd.Series | None = None,
+) -> tuple[list[str], pd.Series]:
     flags = pd.Series(False, index=df.index)
     feature_cols = list(_SENSOR_COLS)
     gas_mask: list[str] = []
@@ -338,13 +347,22 @@ def _compute_if_flags(df: pd.DataFrame) -> tuple[list[str], pd.Series]:
             feature_cols.remove(col)
             gas_mask.append(col)
 
-    sub = df[feature_cols].dropna()
+    fit_df = df
+    if exclude_mask is not None and len(exclude_mask) == len(df):
+        fit_df = df.loc[~exclude_mask.reindex(df.index, fill_value=False)]
+
+    sub = fit_df[feature_cols].dropna()
     if len(sub) < BOOTSTRAP_MIN_IF_ROWS:
         return gas_mask, flags
 
     clf = IsolationForest(contamination=BOOTSTRAP_IF_CONTAMINATION, random_state=42)
     preds = clf.fit_predict(sub.to_numpy())
-    flags[sub.index[preds == -1]] = True
+    # Score the full (non-excluded) frame so MAD-culled rows stay MAD-only.
+    score_df = df[feature_cols].dropna()
+    if len(score_df) == 0:
+        return gas_mask, flags
+    score_preds = clf.predict(score_df.to_numpy())
+    flags[score_df.index[score_preds == -1]] = True
     return gas_mask, flags
 
 
