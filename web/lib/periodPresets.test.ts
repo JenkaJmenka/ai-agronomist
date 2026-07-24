@@ -39,10 +39,11 @@ describe("periodWindowEnd", () => {
     );
   });
 
-  it("uses stored max when it is ahead of wall-clock (live or not)", () => {
+  it("uses wall-clock while live even when stored max is ahead of now", () => {
     const ahead = new Date("2026-12-31T23:55:00.000Z");
+    // Live SCADA ticks use wall-clock — never clip them behind a future CSV max.
     expect(periodWindowEnd({ maxTimestamp: ahead, live: true, now }).toISOString()).toBe(
-      "2026-12-31T23:55:00.000Z",
+      "2026-07-21T14:00:00.000Z",
     );
     expect(periodWindowEnd({ maxTimestamp: ahead, live: false, now }).toISOString()).toBe(
       "2026-12-31T23:55:00.000Z",

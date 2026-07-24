@@ -15,6 +15,7 @@ import {
 } from "@/features/monitoring/api/readings";
 import { ChannelToggles } from "@/features/monitoring/components/ChannelToggles";
 import { LiveAnomalyStrip } from "@/features/monitoring/components/LiveAnomalyStrip";
+import { LiveBadge } from "@/features/monitoring/components/LiveBadge";
 import { ReadingsTable } from "@/features/monitoring/components/ReadingsTable";
 import { SensorTiles } from "@/features/monitoring/components/SensorTiles";
 import { SensorTimeSeriesChart } from "@/features/monitoring/components/SensorTimeSeriesChart";
@@ -80,7 +81,7 @@ function MonitoringBody({
   const [channelParam] = useQueryState("channel", parseAsString);
   const [threshold] = useQueryState("threshold", parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD));
 
-  const { rows: liveRowsRaw, anomalies, stale } = useLiveReadings(live);
+  const { rows: liveRowsRaw, anomalies, stale, transport, sourceStatuses } = useLiveReadings(live);
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
 
   const historicalAliased = useMemo(
@@ -172,6 +173,7 @@ function MonitoringBody({
     channelParam,
     tenant,
     gh,
+    live,
     channelFilter,
     channelMatch,
   });
@@ -203,6 +205,11 @@ function MonitoringBody({
             setpoints={setpoints}
             onUpdateSetpoint={updateSetpoint}
             onResetSetpoints={resetToDefaults}
+            trailing={
+              live ? (
+                <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
+              ) : null
+            }
           />
         </div>
         <Card>
@@ -231,6 +238,11 @@ function MonitoringBody({
           setpoints={setpoints}
           onUpdateSetpoint={updateSetpoint}
           onResetSetpoints={resetToDefaults}
+          trailing={
+            live ? (
+              <LiveBadge transport={transport} stale={stale} sourceStatuses={sourceStatuses} />
+            ) : null
+          }
         />
       </div>
 

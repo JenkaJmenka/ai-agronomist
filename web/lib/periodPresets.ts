@@ -44,10 +44,12 @@ export function windowForPeriod(hours: number, end: Date = new Date()): { from: 
 /**
  * Choose the end of a preset lookback.
  *
- * Historical uploads (and mock SCADA) often sit far from wall-clock "now".
- * Always prefer the newest known data timestamp when it is ahead of now so
- * "Last 15/30 min" stays filled. While live with data behind the clock, use
- * now so incoming ticks remain in range.
+ * Historical uploads often sit far from wall-clock "now" — prefer the newest
+ * stored timestamp so "Last 15/30 min" stays filled.
+ *
+ * While Live is on, always use wall-clock ``now``. Mock/live SCADA emits
+ * wall-clock ticks; anchoring to a future historical max (demo CSV) clips
+ * every incoming reading out of the chart window.
  */
 export function periodWindowEnd(options: {
   readonly maxTimestamp: Date | null;
@@ -55,10 +57,8 @@ export function periodWindowEnd(options: {
   readonly now?: Date;
 }): Date {
   const now = options.now ?? new Date();
-  const maxTs = options.maxTimestamp;
-  if (maxTs !== null && maxTs.getTime() > now.getTime()) return maxTs;
   if (options.live) return now;
-  return maxTs ?? now;
+  return options.maxTimestamp ?? now;
 }
 
 /** Match a from/to span to a preset id when within ~2% tolerance; else "custom". */
