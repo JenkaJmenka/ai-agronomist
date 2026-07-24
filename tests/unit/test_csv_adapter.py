@@ -282,3 +282,46 @@ def test_validate_out_of_bounds_raises_error(sample_csv_out_of_bounds_data, defa
     })
     with pytest.raises(DataValidationError, match="Column 'temperature' contains values above allowed maximum"):
         adapter.get_data()
+
+
+# ---------------------------------------------------------------------------
+# Measured HD column detection (climate-extras, not a model input)
+# ---------------------------------------------------------------------------
+
+
+class TestMeasuredHDColumnMapping:
+    """Verify that 'Humidity deficit g/m3' maps to measured_hd, NOT humidity."""
+
+    def test_humidity_deficit_maps_to_measured_hd(self) -> None:
+        """A column named 'Humidity deficit g/m3' maps to measured_hd."""
+        from src.vendors.csv_adapter import _smart_column_map
+        cols = ["timestamp", "temperature", "Relative Humidity %", "Humidity deficit g/m3", "co2", "light"]
+        mapping = _smart_column_map(cols)
+        assert mapping.get("Humidity deficit g/m3") == "measured_hd"
+
+    def test_humidity_deficit_does_not_map_to_humidity(self) -> None:
+        """'Humidity deficit g/m3' must NOT steal the humidity channel."""
+        from src.vendors.csv_adapter import _smart_column_map
+        cols = ["timestamp", "temperature", "Relative Humidity %", "Humidity deficit g/m3", "co2", "light"]
+        mapping = _smart_column_map(cols)
+        # humidity should map from 'Relative Humidity %', not from the deficit column
+        assert mapping.get("Relative Humidity %") == "humidity"
+
+    def test_normal_humidity_still_maps_correctly(self) -> None:
+        """A plain 'humidity' column still maps to the humidity channel."""
+        from src.vendors.csv_adapter import _smart_column_map
+        cols = ["timestamp", "temperature", "humidity", "co2", "light"]
+        mapping = _smart_column_map(cols)
+        assert mapping.get("humidity") == "humidity"
+
+    def test_measured_hd_not_in_sensor_cols(self) -> None:
+        """measured_hd must not appear in SENSOR_COLS (model stays 4-dim)."""
+        from src.vendors.csv_adapter import SENSOR_COLS
+        assert "measured_hd" not in SENSOR_COLS
+
+    def test_hd_exact_maps_to_measured_hd(self) -> None:
+        """An exact 'hd' column header maps to measured_hd (low score)."""
+        from src.vendors.csv_adapter import _smart_column_map
+        cols = ["timestamp", "temperature", "humidity", "co2", "light", "hd"]
+        mapping = _smart_column_map(cols)
+        assert mapping.get("hd") == "measured_hd"

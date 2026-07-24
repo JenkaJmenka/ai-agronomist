@@ -215,3 +215,56 @@ class TestHelpers:
         assert "temperature" in sensors
         assert "humidity" in sensors
         assert "light" in sensors
+
+
+class TestPhysicsHDGate:
+    """Verify the physics gate on the correct HD scale (BOOTSTRAP_PHYSICS_HD_MAX)."""
+
+    def test_impossible_row_flagged(self) -> None:
+        """RH 5% at 40 C -> HD >> 35 g/m3 -> exactly that row is flagged."""
+        idx = pd.date_range("2026-06-01", periods=5, freq="5min", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "temperature": [22.0, 22.0, 40.0, 22.0, 22.0],
+                "humidity": [60.0, 60.0, 5.0, 60.0, 60.0],
+                "co2": [400.0] * 5,
+                "light": [300.0] * 5,
+            },
+            index=idx,
+        )
+        flags = _compute_physics_flags(df)
+        # Only the row with T=40, RH=5 should be flagged (HD ~ 40+ g/m3 > 35)
+        assert flags.sum() == 1
+        assert flags.iloc[2] is True or flags.iloc[2] == True  # noqa: E712
+
+    def test_normal_rows_not_flagged(self) -> None:
+        """Normal greenhouse conditions (T=22, RH=60) produce HD ~ 7 g/m3 — well under 35."""
+        idx = pd.date_range("2026-06-01", periods=5, freq="5min", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "temperature": [22.0] * 5,
+                "humidity": [60.0] * 5,
+                "co2": [400.0] * 5,
+                "light": [300.0] * 5,
+            },
+            index=idx,
+        )
+        flags = _compute_physics_flags(df)
+        assert flags.sum() == 0
+
+    def test_uses_config_constant(self, monkeypatch) -> None:
+        """Verify _compute_physics_flags uses BOOTSTRAP_PHYSICS_HD_MAX from config."""
+        # With a very low threshold, even normal rows should flag.
+        monkeypatch.setattr(bootstrap_module, "BOOTSTRAP_PHYSICS_HD_MAX", 1.0)
+        idx = pd.date_range("2026-06-01", periods=3, freq="5min", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "temperature": [25.0] * 3,
+                "humidity": [50.0] * 3,  # HD ~ 11.5 g/m3 >> 1.0
+                "co2": [400.0] * 3,
+                "light": [300.0] * 3,
+            },
+            index=idx,
+        )
+        flags = _compute_physics_flags(df)
+        assert flags.sum() == 3  # all flagged with threshold=1.0

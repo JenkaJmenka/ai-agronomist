@@ -30,6 +30,7 @@ from src.config import (
     POT_BUFFER_SIZE,
     POT_FPR,
     POT_Q,
+    PSYCHROMETRIC_HD_TOLERANCE,
     SEQ_LEN,
     SENSOR_NAMES,
     SPIKE_MAD_FLOOR,
@@ -62,6 +63,10 @@ from src.models.fault_classifier import FaultClassifier
 from src.models.inference import AnomalyDetector
 from src.models.pattern_detector import PatternDetector
 from src.models.physics_validator import PhysicsValidator
+from src.models.psychrometric_validator import (
+    calculate_humidity_deficit,
+    validate_row as psychrometric_validate_row,
+)
 from src.models.pot_threshold import POTThresholdFitter
 from src.models.recommendation_engine import RecommendationEngine
 from src.models.retraining_orchestrator import RetrainingOrchestrator
@@ -86,6 +91,7 @@ PIPELINE_VERSION = "2.0"
 # Map PhysicsValidator reason strings to fault type values.
 _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
     "psychrometric_impossibility": "spike_fault",
+    "psychrometric_inconsistency": "humidity_fault",
     "nocturnal_light": "spike_fault",
     "co2_out_of_range": "calibration_drift",
     "temperature_out_of_range": "spike_fault",
@@ -795,7 +801,7 @@ class ComprehensiveInferencePipeline:
         # only quiets the model signal: a fired rule detector is direct
         # evidence of a sensor fault, so rule votes survive suppression
         # (pre-fusion, gates returned before physics ever ran).
-        physics_result = self._run_physics_check(seq_array, now)
+        physics_result = self._run_physics_check(seq_array, now, climate_context)
         if physics_result.suppressed:
             if rule_votes:
                 logger.info(
@@ -867,6 +873,26 @@ class ComprehensiveInferencePipeline:
                 first_rule = next(iter(rule_votes))
                 rule_profile = _RULE_VOTE_PROFILES[first_rule]
                 fault_type = rule_profile["fault_type"]
+
+        # 5d. Psychrometric consistency suppression — when the measured HD
+        # cross-checks cleanly and the ML anomaly's primary implicated
+        # channel is humidity, downgrade to suppressed (same seam as
+        # PhysicsValidator diurnal suppression). Rule votes survive.
+        if (
+            physics_result.reason == "psychrometric_consistent"
+            and is_anomaly
+            and not rule_votes
+            and "humidity" in attribution_result.get("affected_sensors", [])
+        ):
+            logger.info(
+                "Psychrometric-consistent suppression for tenant %s: "
+                "humidity-implicated anomaly downgraded",
+                customer_id,
+            )
+            return self._suppressed_result(
+                anomaly_score=anomaly_score,
+                reason="psychrometric_consistent",
+            )
 
         # 6. Persist updated tracker scores.
         try:
@@ -1197,11 +1223,58 @@ class ComprehensiveInferencePipeline:
         return raw_score, anomaly_score, embedding, uncertainty
 
     def _run_physics_check(
-        self, seq_array: np.ndarray, now: datetime
+        self,
+        seq_array: np.ndarray,
+        now: datetime,
+        climate_context: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Denormalize sequence and run PhysicsValidator.validate()."""
+        """Denormalize sequence and run PhysicsValidator.validate().
+
+        When *climate_context* carries a ``measured_hd`` value, the last
+        timestep's denormalized temperature and humidity are cross-checked
+        against the measured humidity deficit via
+        :func:`~src.models.psychrometric_validator.validate_row`.
+        A ``FAILED_PSYCHROMETRIC_LIMIT`` result overrides any trend-based
+        outcome with ``confirmed=True, reason='psychrometric_inconsistency'``.
+        """
+        from src.models.physics_validator import ValidationResult as _VR
+
         denormed = _denormalize_sequence(seq_array)
-        return PhysicsValidator.validate(denormed, now)
+        result = PhysicsValidator.validate(denormed, now)
+
+        # --- Psychrometric cross-check (opt-in, requires measured_hd) --------
+        if climate_context:
+            hd_measured = climate_context.get("measured_hd")
+            if hd_measured is not None:
+                try:
+                    hd_val = float(hd_measured)
+                except (TypeError, ValueError):
+                    hd_val = None
+                if hd_val is not None:
+                    last_step = denormed[-1]
+                    t_air = float(last_step[0])   # temperature
+                    rh = float(last_step[1])       # humidity
+                    try:
+                        status = psychrometric_validate_row(t_air, rh, hd_val)
+                    except ValueError:
+                        # Unphysical inputs — skip psychrometric overlay.
+                        status = "OK"
+                    if status == "FAILED_PSYCHROMETRIC_LIMIT":
+                        return _VR(
+                            suppressed=False,
+                            confirmed=True,
+                            reason="psychrometric_inconsistency",
+                        )
+                    # Consistent HD is recorded on the result so the caller
+                    # can suppress humidity-implicated ML anomalies later.
+                    if not result.confirmed and not result.suppressed:
+                        return _VR(
+                            suppressed=False,
+                            confirmed=False,
+                            reason="psychrometric_consistent",
+                        )
+
+        return result
 
     def _run_attribution_pattern(
         self,

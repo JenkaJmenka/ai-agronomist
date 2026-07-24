@@ -66,6 +66,10 @@ export function useReadings(): ReadingsState {
   const lookbackHours = from !== null && to !== null ? periodHours(matchPeriodId(from, to)) : null;
   const lookbackRef = useRef(lookbackHours);
   lookbackRef.current = lookbackHours;
+  const urlFromRef = useRef(from);
+  urlFromRef.current = from;
+  const urlToRef = useRef(to);
+  urlToRef.current = to;
   const scopeRef = useRef({ tenant, gh });
   scopeRef.current = { tenant, gh };
 
@@ -78,6 +82,8 @@ export function useReadings(): ReadingsState {
   }, [tenant, gh]);
 
   // Live: roll lookback in React state only (never setParams / router.replace).
+  // Re-run immediately when the Period lookback (or custom span) changes so
+  // switching "Last 15 min" ↔ "24h" while Live is on takes effect at once.
   useEffect(() => {
     if (!live) return;
 
@@ -85,7 +91,9 @@ export function useReadings(): ReadingsState {
 
     async function rollWindow(): Promise<void> {
       const hours = lookbackRef.current;
-      if (hours === null) return;
+      const urlFrom = urlFromRef.current;
+      const urlTo = urlToRef.current;
+
       let maxTimestamp: Date | null = null;
       try {
         const bounds = await fetchReadingsBounds(scopeRef.current);
@@ -94,8 +102,19 @@ export function useReadings(): ReadingsState {
         // Wall-clock fallback via periodWindowEnd.
       }
       if (cancelled) return;
+
       const end = periodWindowEnd({ maxTimestamp, live: true });
-      setLiveWindow(windowForPeriod(hours, end));
+
+      if (hours !== null) {
+        setLiveWindow(windowForPeriod(hours, end));
+        return;
+      }
+
+      // Custom URL range while live: keep the same span, anchored at ``end``.
+      if (urlFrom !== null && urlTo !== null) {
+        const spanMs = Math.max(urlTo.getTime() - urlFrom.getTime(), 60_000);
+        setLiveWindow({ from: new Date(end.getTime() - spanMs), to: end });
+      }
     }
 
     void rollWindow();
@@ -104,7 +123,7 @@ export function useReadings(): ReadingsState {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [live, refreshSeconds]);
+  }, [live, refreshSeconds, lookbackHours, from, to]);
 
   // Historical: one-shot re-anchor of stale wall-clock presets onto data max.
   // Prefer local override; URL sync is deferred and aborted if the user navigates.

@@ -764,6 +764,13 @@ SOLAR_COLUMN_ALIASES: Tuple[str, ...] = (
     "solar",
     "radiation",
 )
+MEASURED_HD_COLUMN_ALIASES: Tuple[str, ...] = (
+    "measured_hd",
+    "humidity_deficit",
+    "hd",
+    "humidity_deficit_g_m3",
+    "hd_g_m3",
+)
 
 # =============================================================================
 # Noise / Precision Degradation Detection (SCADA spec section 1.4)
@@ -818,9 +825,24 @@ BOOTSTRAP_MAX_TRAIN_SEQUENCES: int = int(
 
 # Psychrometric validation (Tetens equation): max allowable absolute error
 # between measured humidity deficit and the value computed from T_air + RH.
-# spec ref: theta_thermo=0.15 g/m³ (docs/anomaly_framework_spec.md §8);
-# production uses 0.05 (3x stricter cross-validation).
-PSYCHROMETRIC_HD_TOLERANCE: float = 0.05  # g/m³
+# Recalibrated from 0.05 to 0.5 g/m³ after fixing the HD coefficient
+# (216.7 → 2167.0 for kPa inputs): the correct-scale HD for typical
+# greenhouse conditions (20-30°C, 50-80% RH) ranges ~3-12 g/m³, so
+# 0.5 g/m³ tolerance is ≈ 5-15% relative — comparable to the previous
+# 0.05 tolerance on the 10x-too-small scale.
+# Override via PSYCHROMETRIC_HD_TOLERANCE env var.
+PSYCHROMETRIC_HD_TOLERANCE: float = float(
+    os.environ.get("PSYCHROMETRIC_HD_TOLERANCE", "0.5")
+)  # g/m³
+
+# Bootstrap Pass 1 physics gate: computed HD values above this ceiling are
+# considered physically impossible (e.g. RH 5% at 40°C → HD ≈ 40 g/m³).
+# Calibrated to the correct HD scale (post-fix); the highest physically
+# plausible HD (hot + very dry greenhouse) is ~30 g/m³. Override via
+# BOOTSTRAP_PHYSICS_HD_MAX env var.
+BOOTSTRAP_PHYSICS_HD_MAX: float = float(
+    os.environ.get("BOOTSTRAP_PHYSICS_HD_MAX", "35.0")
+)
 
 # Spike detector velocity limits per sensor (physical units per 5-min step).
 SPIKE_DELTA_MAX: Dict[str, float] = {
@@ -1088,4 +1110,72 @@ MOCK_SCADA_DEMO_COMPOUND_MIN_TICKS: int = int(
 )
 MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS: int = int(
     os.environ.get("MOCK_SCADA_DEMO_COMPOUND_MAX_TICKS", "12")
+)
+
+# =============================================================================
+# SCADA Operational Config (Phase P1)
+# =============================================================================
+import json as _json
+
+
+def _parse_json_env(name: str, default: dict) -> dict:
+    """Parse a JSON env var; fall back to *default* on missing or parse errors."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return default
+
+
+# Crop setpoint profiles: per-channel day/night [lo, hi] bands.
+# ``night: null`` means no separate night band — callers fall back to the day band.
+# Env-overridable via CROP_SETPOINT_PROFILES (JSON string).
+CROP_SETPOINT_PROFILES: dict = _parse_json_env(
+    "CROP_SETPOINT_PROFILES",
+    {
+        "tomato": {
+            "temperature": {"day": [18.0, 26.0], "night": [15.0, 20.0]},
+            "vpd":         {"day": [0.7, 1.0],   "night": None},
+            "humidity":    {"day": [60.0, 85.0],  "night": None},
+            "co2":         {"day": [400.0, 900.0],"night": None},
+        },
+        "cucumber": {
+            "temperature": {"day": [24.0, 28.0], "night": [19.0, 22.0]},
+            "vpd":         {"day": [0.5, 0.8],   "night": None},
+            "humidity":    {"day": [70.0, 90.0],  "night": None},
+            "co2":         {"day": [400.0, 900.0],"night": None},
+        },
+    },
+)
+
+# Month → season mapping (string keys "1".."12").
+# Transition months 4 (April) and 10 (October) are conservatively mapped to
+# 'winter' so season-dependent detector limits use tighter cold-season thresholds
+# during ambiguous shoulder periods.
+# Env-overridable via DEFAULT_SEASON_MAP (JSON string).
+DEFAULT_SEASON_MAP: dict = _parse_json_env(
+    "DEFAULT_SEASON_MAP",
+    {
+        "1": "winter",
+        "2": "winter",
+        "3": "winter",
+        "4": "winter",   # transition — conservative
+        "5": "summer",
+        "6": "summer",
+        "7": "summer",
+        "8": "summer",
+        "9": "summer",
+        "10": "winter",  # transition — conservative
+        "11": "winter",
+        "12": "winter",
+    },
+)
+
+# Photoperiod window defining "day" vs "night" setpoint selection (0–23 hours).
+# Env-overridable via DEFAULT_DAY_WINDOW (JSON string).
+DEFAULT_DAY_WINDOW: dict = _parse_json_env(
+    "DEFAULT_DAY_WINDOW",
+    {"start_hour": 6, "end_hour": 22},
 )

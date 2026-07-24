@@ -31,6 +31,7 @@ export const NAV_SECTIONS: readonly NavSection[] = [
   {
     title: "Operations",
     entries: [
+      { href: "/configuration", label: "Configuration" },
       { href: "/operations", label: "Upload & Operations" },
       { href: "/jobs", label: "Job Monitoring" },
     ],

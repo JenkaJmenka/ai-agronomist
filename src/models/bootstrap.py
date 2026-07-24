@@ -25,6 +25,7 @@ from src.config import (
     BOOTSTRAP_MAX_TRAIN_SEQUENCES,
     BOOTSTRAP_MIN_CLEAN_ROWS,
     BOOTSTRAP_MIN_IF_ROWS,
+    BOOTSTRAP_PHYSICS_HD_MAX,
     BOOTSTRAP_RESAMPLE_INTERVAL,
     BOOTSTRAP_THRESHOLD_PERCENTILE,
     DEVICE,
@@ -53,7 +54,7 @@ _GAS_COLS: frozenset[str] = frozenset({"co2", "light"})
 _TRAIN_EPOCHS: int = 10
 _TRAIN_BATCH: int = 256
 _TRAIN_LR: float = 1e-3
-_PHYSICS_HD_MAX: float = 50.0  # g/m³ — above this the T+RH combination is impossible
+# _PHYSICS_HD_MAX is now BOOTSTRAP_PHYSICS_HD_MAX in src.config (env-overridable).
 
 
 @dataclass
@@ -320,7 +321,7 @@ def _compute_physics_flags(df: pd.DataFrame) -> pd.Series:
             if pd.isna(t_air) or pd.isna(rh) or rh < 0.0 or rh > 100.0:
                 continue
             hd = calculate_humidity_deficit(t_air, rh)
-            if abs(hd) > _PHYSICS_HD_MAX:
+            if abs(hd) > BOOTSTRAP_PHYSICS_HD_MAX:
                 flags[ts] = True
         except Exception:
             pass

@@ -1,7 +1,7 @@
 """Factory and sanitization helpers for mock SCADA sources.
 
-``build_mock_sources_for_scope`` assembles the standard three-source mock
-scope; ``_clamp_and_sanitize`` is the shared output guard used by
+``build_mock_sources_for_scope`` assembles climate, CO₂, fertigation, and gas
+mock sources; ``_clamp_and_sanitize`` is the shared output guard used by
 ``MockScadaSource._generate_channels``.
 """
 
@@ -33,7 +33,7 @@ def build_mock_sources_for_scope(
     tenant_id: str,
     greenhouse_id: str,
 ) -> List["MockScadaSource"]:
-    """Build three complementary mock sources for a tenant/greenhouse scope.
+    """Build complementary mock sources for a tenant/greenhouse scope.
 
     Returns
     -------
@@ -43,9 +43,8 @@ def build_mock_sources_for_scope(
         - ``mock_co2``: co2 only (priority 20, 1.5x interval offset).
         - ``mock_fertigation``: soil_moisture, root_zone_temp (priority 30,
           2x interval offset).
-
-    The three sources prove multi-source merge with different priorities
-    and cadences.
+        - ``mock_gas``: c2h4, gas_co2, no, no2, nox, co (priority 40,
+          2.5x interval offset) — feeds the Gas Monitoring page.
     """
     # Imported here, not at module top: mock.py imports _clamp_and_sanitize
     # from this module, so a top-level import of MockScadaSource would be
@@ -82,4 +81,19 @@ def build_mock_sources_for_scope(
         poll_interval_seconds=MOCK_SCADA_INTERVAL_SECONDS * 2,
         params={"seed": 256},
     )
-    return [MockScadaSource(climate), MockScadaSource(co2), MockScadaSource(fertigation)]
+    gas = SourceConfig(
+        source_id=f"{tenant_id}_{greenhouse_id}_mock_gas",
+        vendor="mock",
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        channels=["c2h4", "gas_co2", "no", "no2", "nox", "co"],
+        priority=40,
+        poll_interval_seconds=MOCK_SCADA_INTERVAL_SECONDS * 2.5,
+        params={"seed": 404},
+    )
+    return [
+        MockScadaSource(climate),
+        MockScadaSource(co2),
+        MockScadaSource(fertigation),
+        MockScadaSource(gas),
+    ]

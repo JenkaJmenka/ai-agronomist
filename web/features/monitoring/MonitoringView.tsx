@@ -87,15 +87,29 @@ function MonitoringBody({
     () => (live ? dedupeByTimestamp(historicalRows, liveRows) : historicalRows),
     [live, historicalRows, liveRows],
   );
+  // While live, open the upper clip to the newest SSE tick (or wall-clock now)
+  // so points arriving after the last liveWindow roll are not filtered out.
+  const newestLiveMs = useMemo(() => {
+    if (!live || liveRows.length === 0) return null;
+    const ms = Date.parse(liveRows[liveRows.length - 1]?.timestamp ?? "");
+    return Number.isFinite(ms) ? ms : null;
+  }, [live, liveRows]);
+  const clipTo = useMemo(() => {
+    if (!to) return null;
+    if (!live) return to;
+    const candidates = [to.getTime(), Date.now()];
+    if (newestLiveMs !== null) candidates.push(newestLiveMs);
+    return new Date(Math.max(...candidates));
+  }, [to, live, newestLiveMs]);
   const rows = useMemo(
     () =>
       rowsForActiveWindow({
         rows: mergedRows,
         from,
-        to,
+        to: clipTo,
         isRefetching,
       }),
-    [mergedRows, from, to, isRefetching],
+    [mergedRows, from, clipTo, isRefetching],
   );
   // Chart/table can lag a frame behind tiles so nav/clicks stay responsive under live SSE.
   const deferredRows = useDeferredValue(rows);

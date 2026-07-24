@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 
 from src.live.events import LiveReadingEvent
+from src.models.psychrometric_validator import calculate_saturation_vapor_pressure
 
 
 def attach_derived_channels(event: LiveReadingEvent) -> None:
@@ -47,14 +48,19 @@ def compute_vpd(temperature_c: float, relative_humidity_pct: float) -> float:
 
     References
     ----------
-    Magnus formula:
-        SVP = 0.6108 * exp(17.27 * T / (T + 237.3))
+    Magnus/Tetens formula (single source in
+    :func:`~src.models.psychrometric_validator.calculate_saturation_vapor_pressure`):
+        SVP = 0.61078 * exp(17.27 * T / (T + 237.3))
         VPD = SVP * (1 - RH/100)
     """
     if not math.isfinite(temperature_c) or not math.isfinite(relative_humidity_pct):
         return 0.0
 
-    svp_kpa = 0.6108 * math.exp(17.27 * temperature_c / (temperature_c + 237.3))
+    # Single source for the Magnus/Tetens saturation vapour pressure —
+    # uses 0.61078 (the canonical Tetens constant shared with the
+    # psychrometric validator).  Previous local constant was 0.6108;
+    # live VPD values shift only in the 4th decimal place.
+    svp_kpa = calculate_saturation_vapor_pressure(temperature_c)
     vpd = svp_kpa * (1.0 - relative_humidity_pct / 100.0)
 
     if not math.isfinite(vpd):
