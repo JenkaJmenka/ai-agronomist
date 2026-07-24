@@ -92,10 +92,10 @@ export function filterRowsToWindow<T extends { readonly timestamp: string }>(
 /**
  * Chart/table rows for the active URL window.
  *
- * While a new window is refetching, keepPreviousData still holds the *previous*
- * (often wider, LTTB-downsampled) payload. Client-clipping that to the new
- * ``from``/``to`` produces a sparse misleading preview (e.g. 55 pts) that then
- * pops to full resolution — skip the clip until the fetch settles.
+ * Always clip to ``from``/``to``. During refetch, keepPreviousData may still
+ * hold a wider prior payload — clipping prevents the chart from flashing that
+ * stale wider range (period-switch flicker). The RefetchingBlock dims the UI
+ * until the fetch settles.
  */
 export function rowsForActiveWindow<T extends { readonly timestamp: string }>(params: {
   readonly rows: readonly T[];
@@ -103,6 +103,6 @@ export function rowsForActiveWindow<T extends { readonly timestamp: string }>(pa
   readonly to: Date | null;
   readonly isRefetching: boolean;
 }): T[] {
-  if (params.isRefetching) return [...params.rows];
+  void params.isRefetching;
   return filterRowsToWindow(params.rows, params.from, params.to);
 }

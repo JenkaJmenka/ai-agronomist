@@ -1148,21 +1148,34 @@ def _parse_json_env(name: str, default: dict) -> dict:
 
 # Crop setpoint profiles: per-channel day/night [lo, hi] bands.
 # ``night: null`` means no separate night band — callers fall back to the day band.
+# Seeded from Table 1 (Tomato / Cucumber / Sweet Pepper / Strawberry).
 # Env-overridable via CROP_SETPOINT_PROFILES (JSON string).
 CROP_SETPOINT_PROFILES: dict = _parse_json_env(
     "CROP_SETPOINT_PROFILES",
     {
         "tomato": {
             "temperature": {"day": [18.0, 26.0], "night": [15.0, 20.0]},
+            "humidity":    {"day": [60.0, 80.0], "night": None},
             "vpd":         {"day": [0.7, 1.0],   "night": None},
-            "humidity":    {"day": [60.0, 85.0],  "night": None},
-            "co2":         {"day": [400.0, 900.0],"night": None},
+            "co2":         {"day": [600.0, 1100.0], "night": None},
         },
         "cucumber": {
             "temperature": {"day": [24.0, 28.0], "night": [19.0, 22.0]},
+            "humidity":    {"day": [70.0, 90.0], "night": None},
             "vpd":         {"day": [0.5, 0.8],   "night": None},
-            "humidity":    {"day": [70.0, 90.0],  "night": None},
-            "co2":         {"day": [400.0, 900.0],"night": None},
+            "co2":         {"day": [800.0, 1000.0], "night": None},
+        },
+        "sweet_pepper": {
+            "temperature": {"day": [24.0, 28.0], "night": [18.0, 22.0]},
+            "humidity":    {"day": [60.0, 75.0], "night": None},
+            "vpd":         {"day": [0.6, 0.9],   "night": None},
+            "co2":         {"day": [600.0, 1000.0], "night": None},
+        },
+        "strawberry": {
+            "temperature": {"day": [18.0, 24.0], "night": [10.0, 16.0]},
+            "humidity":    {"day": [65.0, 75.0], "night": None},
+            "vpd":         {"day": [0.2, 0.4],   "night": None},
+            "co2":         {"day": [800.0, 1000.0], "night": None},
         },
     },
 )

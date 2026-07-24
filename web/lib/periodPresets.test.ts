@@ -107,10 +107,10 @@ describe("rowsForActiveWindow", () => {
   const from = new Date("2026-12-31T23:40:00.000Z");
   const to = new Date("2026-12-31T23:55:00.000Z");
 
-  it("skips client clip while refetching so brush-zoom keeps the prior payload", () => {
+  it("clips to the URL window even while refetching (avoids period-switch flicker)", () => {
     expect(
       rowsForActiveWindow({ rows, from, to, isRefetching: true }).map((r) => r.timestamp),
-    ).toEqual(rows.map((r) => r.timestamp));
+    ).toEqual(["2026-12-31T23:45:00.000Z", "2026-12-31T23:50:00.000Z"]);
   });
 
   it("clips to the URL window once the fetch settles", () => {
