@@ -25,6 +25,7 @@ from fakeredis.aioredis import FakeRedis
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub
 from src.live.runtime import LiveRuntime
+from tests.live.conftest import _safe_redis_close
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,7 +45,7 @@ _SCOPE = f"{_TENANT}:{_GH}"
 async def fake_redis() -> AsyncGenerator[FakeRedis, None]:
     client = FakeRedis()
     yield client
-    await client.aclose()
+    await _safe_redis_close(client)
 
 
 @pytest_asyncio.fixture

@@ -125,6 +125,11 @@ class BandBreachDetector:
         setpoints = config.get("setpoints") or {}
         findings: list[ScadaAnomalyRecord] = []
 
+        # Read co2_enrichment defensively: a missing key means the document pre-dates
+        # this flag — treat as False (the conservative default) so old configs silently
+        # gain the alarm-fatigue protection without any migration.
+        co2_enrichment: bool = bool(config.get("co2_enrichment", False))
+
         # Scalar channels present in the model window.
         for channel, high_type, low_type in (
             ("temperature", TEMP_BAND_HIGH, TEMP_BAND_LOW),
@@ -149,8 +154,17 @@ class BandBreachDetector:
                 timestamp=ts,
                 phase="day" if is_day else "night",
             )
-            if finding is not None:
-                findings.append(finding)
+            if finding is None:
+                continue
+            # CO2_BAND_LOW is only meaningful when the greenhouse has CO2 enrichment
+            # equipment that is supposed to maintain the lower bound. Without enrichment,
+            # ambient air (~420 ppm) sits permanently below typical band minimums and
+            # the signal fires on every reading — zero diagnostic value. CO2_BAND_HIGH
+            # (excess buildup from respiration) is always actionable and is never
+            # suppressed.
+            if finding.anomaly_type == CO2_BAND_LOW and not co2_enrichment:
+                continue
+            findings.append(finding)
 
         # Derived VPD from temp + humidity.
         t_idx = _channel_index("temperature")

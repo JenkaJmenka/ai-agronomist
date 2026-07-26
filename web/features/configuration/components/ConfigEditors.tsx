@@ -167,6 +167,45 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
   );
 }
 
+interface Co2EnrichmentToggleProps {
+  readonly value: boolean;
+  readonly onChange: (next: boolean) => void;
+}
+
+/**
+ * Toggle for the CO2 enrichment flag.
+ *
+ * Ambient outdoor CO2 is ~420 ppm while crop lower bounds start around 600–800 ppm.
+ * Without enrichment equipment the greenhouse runs permanently below the lower band,
+ * so the backend suppresses CO2_BAND_LOW breaches when this flag is off (preventing
+ * alarm fatigue). Turning it ON enables 'CO2 enrichment underperforming' detection
+ * while still reporting CO2_BAND_HIGH (ventilation failure / respiration buildup).
+ */
+export function Co2EnrichmentToggle({ value, onChange }: Co2EnrichmentToggleProps) {
+  return (
+    <div className="flex flex-col gap-2">
+      <label htmlFor="co2-enrichment" className="flex cursor-pointer items-center gap-3">
+        <input
+          id="co2-enrichment"
+          type="checkbox"
+          checked={value}
+          data-testid="co2-enrichment-toggle"
+          className="h-4 w-4 accent-[var(--color-brand,#16a34a)]"
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="text-sm font-medium">CO₂ enrichment equipment installed</span>
+      </label>
+      <p className="text-xs text-text-muted">
+        Ambient outdoor CO₂ is ~420 ppm; crop bands start around 600–800 ppm. When{" "}
+        <strong>off</strong>, CO₂-low anomalies are suppressed (no enrichment equipment →
+        permanently below band). When <strong>on</strong>, enables &ldquo;CO₂ enrichment
+        underperforming&rdquo; detection; CO₂-high anomalies (ventilation failure) are always
+        reported.
+      </p>
+    </div>
+  );
+}
+
 /** Clone a server document into editable local draft state. */
 export function cloneConfig(doc: OperationalConfigDocument): OperationalConfigDocument {
   return structuredClone(doc);

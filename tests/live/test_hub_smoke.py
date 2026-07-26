@@ -26,6 +26,7 @@ from src.live.events import (
     sanitize_channels,
 )
 from src.live.hub import LiveHub
+from tests.live.conftest import _safe_redis_close
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ async def redis_client() -> FakeRedis:
     """Shared fakeredis client for a single test."""
     client = FakeRedis()
     yield client
-    await client.aclose()
+    await _safe_redis_close(client)
 
 
 @pytest_asyncio.fixture

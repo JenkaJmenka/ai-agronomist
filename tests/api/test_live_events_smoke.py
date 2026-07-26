@@ -59,7 +59,9 @@ async def fake_redis() -> AsyncGenerator[FakeRedis, None]:
     """Shared fakeredis client for a single test."""
     client = FakeRedis()
     yield client
-    await client.aclose()
+    # Version-safe close: redis-py 4.x has close(), 5.x added aclose().
+    close_fn = getattr(client, "aclose", None) or client.close
+    await close_fn()
 
 
 @pytest_asyncio.fixture

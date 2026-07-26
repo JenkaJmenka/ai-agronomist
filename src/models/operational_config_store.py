@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
     CROP_SETPOINT_PROFILES,
+    DEFAULT_CO2_ENRICHMENT,
     DEFAULT_DAY_WINDOW,
     DEFAULT_SEASON_MAP,
 )
@@ -58,6 +59,11 @@ def default_operational_config(crop: str | None = None) -> dict[str, Any]:
             "summer": {"detector_scale": None},
             "winter": {"detector_scale": None},
         },
+        # False = conservative default. Without CO2 enrichment equipment the greenhouse
+        # runs at ambient (~420 ppm), permanently below typical lower bounds. Setting
+        # this to false suppresses CO2_BAND_LOW to prevent alarm fatigue; see
+        # src/config.py DEFAULT_CO2_ENRICHMENT for the full rationale.
+        "co2_enrichment": DEFAULT_CO2_ENRICHMENT,
     }
 
 

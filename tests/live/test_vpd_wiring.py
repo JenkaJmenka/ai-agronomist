@@ -42,7 +42,7 @@ _GH = "vpd_gh"
 async def fake_redis() -> AsyncGenerator[FakeRedis, None]:
     client = FakeRedis()
     yield client
-    await client.aclose()
+    await client.close()
 
 
 @pytest_asyncio.fixture

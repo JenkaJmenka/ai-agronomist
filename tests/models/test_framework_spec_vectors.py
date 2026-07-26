@@ -358,30 +358,30 @@ class TestSpec07CorrelationBreakdown:
 
 
 class TestSpec08Thermodynamic:
-    """Spec §8 Table 9: Psychrometric contradiction (theta_thermo=0.15 g/m³).
+    """Spec §8 Table 9: Psychrometric contradiction (theta_thermo=0.5 g/m³).
 
-    validate_row() uses the global PSYCHROMETRIC_HD_TOLERANCE from config
-    (0.05), not the spec's 0.15.  To express spec intent precisely, we call
-    calculate_humidity_deficit() directly and compare against theta=0.15.
-    Both tolerances produce the same flag for Table 9's extreme values
-    (delta=0.0 or 1.5411), so results are unambiguous.
+    The production tolerance (``PSYCHROMETRIC_HD_TOLERANCE=0.5``) matches the
+    spec's corrected theta_thermo.  We call ``calculate_humidity_deficit()``
+    directly and compare against theta=0.5.
 
-    Implementation note: the spec formula text states the constant 2166.7 but
-    the code uses 216.7.  The worked Table 9 values reproduce ONLY with 216.7
-    (confirmed by the audit), so the code is correct and the spec prose is
-    erroneous.
+    Implementation note: the spec originally used 2166.7 and the code used
+    216.7 (the hPa coefficient) with kPa vapour pressures, producing HD
+    values 10× too small.  Both have been corrected: the code now uses
+    **2167.0** (= 216.7 × 10, the kPa coefficient) and Table 9 values have
+    been updated to the corrected g/m³ scale.
     """
 
-    _THETA_THERMO: float = 0.15  # spec §8
+    _THETA_THERMO: float = 0.5  # corrected spec §8 (was 0.15 on old 10× scale)
 
     # (T °C, RH %, HD_meas g/m³, expected_anomalous)
+    # HD values on corrected g/m³ scale (coefficient 2167.0 for kPa inputs).
     _TABLE_9 = [
-        (20.0, 60.0, 0.6914, False),   # 12:00  delta=0.0000
-        (20.5, 62.0, 0.6763, False),   # 12:01  delta=0.0000
-        (21.0, 58.0, 0.7695, False),   # 12:02  delta=0.0000
-        (21.5, 55.0, 0.8487, False),   # 12:03  delta=0.0000
-        (22.0, 50.0, 0.9706, False),   # 12:04  delta=0.0000
-        (22.5, 52.0, 2.5000, True),    # 12:05  delta=1.5411 >> 0.15
+        (20.0, 60.0, 6.9137, False),   # 12:00  delta=0.0000
+        (20.5, 62.0, 6.7626, False),   # 12:01  delta=0.0000
+        (21.0, 58.0, 7.6949, False),   # 12:02  delta=0.0000
+        (21.5, 55.0, 8.4867, False),   # 12:03  delta=0.0000
+        (22.0, 50.0, 9.7056, False),   # 12:04  delta=0.0000
+        (22.5, 52.0, 25.000, True),    # 12:05  delta=15.411 >> 0.5
     ]
 
     def _is_anomalous(self, t: float, rh: float, hd_meas: float) -> bool:
@@ -389,26 +389,28 @@ class TestSpec08Thermodynamic:
         return abs(hd_meas - hd_calc) > self._THETA_THERMO
 
     def test_table9_normal_rows_12_00_to_12_04(self):
-        """12:00-12:04 — HD_meas matches HD_calc; delta=0.0 < 0.15."""
+        """12:00-12:04 — HD_meas matches HD_calc; delta=0.0 < 0.5."""
         for t, rh, hd_meas, expected in self._TABLE_9[:5]:
             result = self._is_anomalous(t, rh, hd_meas)
             assert result is expected, f"T={t}, RH={rh}, HD_meas={hd_meas}"
 
     def test_table9_anomalous_row_12_05(self):
-        """12:05 — HD_meas=2.5 vs HD_calc=0.9589; delta=1.54 >> 0.15; must flag."""
+        """12:05 — HD_meas=25.0 vs HD_calc=9.5889; delta=15.41 >> 0.5; must flag."""
         t, rh, hd_meas, _ = self._TABLE_9[5]
         assert self._is_anomalous(t, rh, hd_meas) is True
 
     def test_table9_tetens_constant_matches_worked_table(self):
-        """Code uses constant 216.7; spec prose erroneously states 2166.7.
+        """Code uses coefficient 2167.0 (kPa scale); Table 9 values are on
+        the corrected g/m³ scale.
 
-        Only 216.7 reproduces Table 9's HD_calc column (verified by audit).
+        The constant 2167.0 = 216.7 × 10 corrects for kPa vapour-pressure
+        inputs (the standard 216.7 assumes hPa).
         """
         hd_calc = calculate_humidity_deficit(20.0, 60.0)
-        # Table 9 states HD_calc=0.6914 at T=20.0, RH=60%
-        assert abs(hd_calc - 0.6914) < 0.001, (
-            f"Expected ~0.6914 (constant 216.7); got {hd_calc:.4f} — "
-            f"if this fails the code may have been changed to use 2166.7"
+        # Table 9 states HD_calc=6.9137 at T=20.0, RH=60% (corrected scale)
+        assert abs(hd_calc - 6.9137) < 0.01, (
+            f"Expected ~6.9137 (coefficient 2167.0 for kPa); got {hd_calc:.4f} — "
+            f"if this fails the code may have been changed back to 216.7"
         )
 
 

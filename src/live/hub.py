@@ -26,6 +26,18 @@ from pydantic import BaseModel
 from src.config import LIVE_HUB_BLOCK_MS, LIVE_REPLAY_BUFFER_SIZE
 
 
+async def _safe_aclose(client: aioredis.Redis) -> None:
+    """Close an async Redis client, compatible with redis-py 4.x and 5.x.
+
+    redis-py 5.0.1 introduced ``aclose()``; the 4.x series only has
+    ``close()``.  This helper prefers ``aclose()`` when present and falls
+    back to ``close()`` so the code works across the declared dependency
+    range (``redis>=4.2.0,<5.0.0``).
+    """
+    close_fn = getattr(client, "aclose", None) or getattr(client, "close")
+    await close_fn()
+
+
 def stream_key(tenant_id: str, greenhouse_id: str) -> str:
     """Build the Redis stream key for a tenant/greenhouse pair."""
     return f"live:{tenant_id}:{greenhouse_id}"
@@ -192,7 +204,7 @@ class LiveHub:
                         yield parsed
         finally:
             if is_owned:
-                await client.aclose()
+                await _safe_aclose(client)
 
     # ------------------------------------------------------------------
     # Internals
@@ -216,7 +228,7 @@ class LiveHub:
         caller owns its lifecycle.
         """
         if self._pub_client is not None:
-            await self._pub_client.aclose()
+            await _safe_aclose(self._pub_client)
             self._pub_client = None
 
     async def _subscriber_client(self) -> Tuple[aioredis.Redis, bool]:

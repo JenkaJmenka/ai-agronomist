@@ -165,12 +165,22 @@ class TestA1StoreIncidentGating:
     async def test_no_incident_for_normal_reading(
         self, pipeline, db_session, patch_normal_score, patch_physics_neutral
     ):
-        """Normal reading: incident_id must be None, no DB write."""
-        result = await pipeline.run(
-            customer_id="a1_normal",
-            sequence=_sample_sequence(),
-            db=db_session,
-        )
+        """Normal reading (no sensor fault, no band breach): incident_id must be None.
+
+        Band detection is patched to return no findings so this test isolates
+        the A1 contract: when both the ensemble score is low and no rule fires,
+        store_incident() must not be called.  Band-breach last-resort behaviour
+        is covered by TestBandVsSensorFaultPrecedence.
+        """
+        with patch(
+            "src.api.services.comprehensive_pipeline.BandBreachDetector.detect",
+            return_value=[],
+        ):
+            result = await pipeline.run(
+                customer_id="a1_normal",
+                sequence=_sample_sequence(),
+                db=db_session,
+            )
         assert result["incident_id"] is None, (
             "A1 regression: store_incident() called for non-anomaly"
         )
@@ -869,8 +879,16 @@ class TestOnlineLearnerException:
     async def test_learner_not_called_for_normal_reading(
         self, pipeline, db_session, patch_normal_score, patch_physics_neutral
     ):
-        """Online learner is NOT called when is_anomaly=False."""
+        """Online learner is NOT called when is_anomaly=False.
+
+        Band detection is patched to return no findings so this test isolates
+        the learner-gating contract: when ensemble score is low and no rule or
+        band fires, _observe_online_learner must not be called.
+        """
         with patch(
+            "src.api.services.comprehensive_pipeline.BandBreachDetector.detect",
+            return_value=[],
+        ), patch(
             "src.api.services.comprehensive_pipeline._observe_online_learner"
         ) as mock_observe:
             await pipeline.run(

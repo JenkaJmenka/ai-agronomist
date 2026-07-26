@@ -1,5 +1,6 @@
 """Shared pytest fixtures for model and pipeline testing."""
 
+import logging
 import os
 
 # Limit OpenMP threads to avoid pytest shutdown deadlock from leaked torch threads.
@@ -13,6 +14,27 @@ import pytest
 import torch
 from src.models.lstm_vae import LSTMVAE
 from src.config import MODEL_CONFIG
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logger_handlers():
+    """Snapshot the root logger's handler list and level before each test,
+    then restore them afterwards.
+
+    This prevents any import-time or in-test logging reconfiguration
+    (e.g. ``setup_logging()`` calling ``dictConfig``) from leaking across
+    tests and silently removing pytest's ``LogCaptureHandler``.
+
+    The fixture restores the *list contents* only — it does not close
+    handlers it did not create, so pytest's own caplog handler management
+    is unaffected.
+    """
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    yield
+    root.handlers = list(original_handlers)
+    root.setLevel(original_level)
 
 
 @pytest.fixture
