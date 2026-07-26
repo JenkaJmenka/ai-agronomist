@@ -1,7 +1,7 @@
 """Cold-run upload inference integration tests."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
@@ -17,6 +17,23 @@ from src.db.models import Base, RawReading, SensorReading
 from src.db.session import get_db
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "greenhouse_connext.csv"
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_runtime():
+    """Prevent LiveRuntime from starting during TestClient lifespan.
+
+    The LiveRuntime spawns supervised background tasks (merger, connectors)
+    that connect to Redis.  Without a running Redis, shutdown waits for the
+    exponential-backoff retry loop to exhaust — causing a 60 s+ teardown
+    hang followed by a timeout ERROR.  Patching ``build_from_config`` to
+    raise makes the lifespan's try/except set ``live_runtime = None``.
+    """
+    with patch(
+        "src.live.runtime.LiveRuntime",
+        side_effect=RuntimeError("disabled in test"),
+    ):
+        yield
 
 
 def _make_enriched_side_effect(score_fn):
@@ -88,7 +105,10 @@ def test_inference_upload_cold_run_greenhouse_fixture(test_client, patch_detecto
     assert data["statistical_summary"] is not None
     stat_cols = data["statistical_summary"]["baseline_columns"]
     assert "outdoor_temp" in stat_cols
-    assert "measured_greenhouse_temp" in stat_cols
+    # Connext CSV "Measured Greenhouse Temp" is consumed as canonical
+    # "temperature" via _RAW_COLUMN_ALIASES in csv_adapter.py — it does NOT
+    # appear as a separate stat column.  The canonical name must be present.
+    assert "temperature" in stat_cols
     assert data["data_persisted"] is False
     assert data["rows_uploaded"] == 0
 
