@@ -3,6 +3,16 @@ import { expect, type Page, test } from "@playwright/test";
 /**
  * Live monitoring SSE integration — Phase 5A + Phase 8 (sensor tiles, setpoints).
  * All BFF calls are mocked (page.route). No real backend needed.
+ *
+ * CLOCK NOTE: Live mode anchors the visible window to wall-clock `now`
+ * (periodWindowEnd returns new Date() when live=true). Fixture rows at
+ * 2026-07-18 would fall outside [now-24h, now] at real wall-clock time,
+ * stranding all data and hitting the empty state. mockAllRoutes /
+ * mockAllRoutesV2 freeze the browser clock to 2026-07-18T10:30:00Z —
+ * strictly after the newest fixture timestamp (minute 21, 10:21:00Z) — so
+ * every fixture row stays inside the active window. setFixedTime is used
+ * instead of clock.install so setTimeout/setInterval keep running normally;
+ * the SSE flush interval and live timers depend on real timer execution.
  */
 
 function isoAtMinute(minuteOffset: number): string {
@@ -133,7 +143,24 @@ const SSE_BODY_CRITICAL =
 // ---------------------------------------------------------------------------
 
 async function mockAllRoutes(page: Page) {
+  // Freeze Date.now()/new Date() to the fixture era so live-mode's 24h window
+  // includes all fixture rows (2026-07-18T10:00–10:09). Must run before goto.
+  await page.clock.setFixedTime(new Date("2026-07-18T10:30:00Z"));
+  await page.route("**/api/bff/readings/bounds**", (route) =>
+    route.fulfill({
+      json: {
+        min_timestamp: HISTORICAL_ROWS[0]?.timestamp ?? null,
+        max_timestamp: HISTORICAL_ROWS.at(-1)?.timestamp ?? null,
+      },
+    }),
+  );
   await page.route("**/api/bff/readings/recent**", (route) => route.fulfill({ json: MOCK_RECENT }));
+  // Live mode derives a concrete from/to from the bounds above, so readings are
+  // fetched via /window rather than /recent. Unmocked it escapes to the real
+  // BFF proxy and the page renders "Readings request failed (502)".
+  await page.route("**/api/bff/readings/window**", (route) =>
+    route.fulfill({ json: { rows: HISTORICAL_ROWS, count: HISTORICAL_ROWS.length } }),
+  );
   await page.route("**/api/bff/live/resume**", (route) =>
     route.fulfill({
       json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
@@ -156,8 +183,23 @@ async function mockAllRoutes(page: Page) {
 
 /** Mock routes with Phase 8 channels (v2 rows + vpd). */
 async function mockAllRoutesV2(page: Page, sseBody = SSE_BODY_V2) {
+  // Freeze Date.now()/new Date() to the fixture era so live-mode's 24h window
+  // includes all fixture rows (2026-07-18T10:00–10:09). Must run before goto.
+  await page.clock.setFixedTime(new Date("2026-07-18T10:30:00Z"));
+  await page.route("**/api/bff/readings/bounds**", (route) =>
+    route.fulfill({
+      json: {
+        min_timestamp: HISTORICAL_ROWS_V2[0]?.timestamp ?? null,
+        max_timestamp: HISTORICAL_ROWS_V2.at(-1)?.timestamp ?? null,
+      },
+    }),
+  );
   await page.route("**/api/bff/readings/recent**", (route) =>
     route.fulfill({ json: MOCK_RECENT_V2 }),
+  );
+  // See mockAllRoutes: live mode fetches /window once bounds give it from/to.
+  await page.route("**/api/bff/readings/window**", (route) =>
+    route.fulfill({ json: { rows: HISTORICAL_ROWS_V2, count: HISTORICAL_ROWS_V2.length } }),
   );
   await page.route("**/api/bff/live/resume**", (route) =>
     route.fulfill({
