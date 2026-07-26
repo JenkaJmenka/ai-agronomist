@@ -3,6 +3,102 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**CO2 Enrichment Flag + Migration Test Isolation (fix-co2-band) — COMPLETE (2026-07-26)**
+Agent: backend-engineer. Two changes: (1) CO2_BAND_LOW detection precision gap fix;
+(2) migration test isolation bug fix. All 43 target tests green; full tests/api+models
+suite: 1441 passed, 2 xfailed, 1 pre-existing failure in test_inference_upload_cold_run.py.
+
+**FIX 1 — CO2 enrichment flag: suppress CO2_BAND_LOW for unenriched greenhouses**
+
+Governing principle: ambient outdoor CO2 (~420 ppm) sits permanently below typical
+enriched-greenhouse lower bounds (~600-800 ppm). Without enrichment equipment,
+CO2_BAND_LOW fires on every reading, carrying zero diagnostic value and causing alarm
+fatigue. CO2_BAND_HIGH (excess buildup from respiration) is always actionable.
+
+Changes:
+- `src/config.py`: Added `DEFAULT_CO2_ENRICHMENT: bool = False` constant with
+  rationale comment near `BAND_BREACH_DEBOUNCE_K`.
+- `src/models/operational_config_store.py`: Imported `DEFAULT_CO2_ENRICHMENT`;
+  added `"co2_enrichment": DEFAULT_CO2_ENRICHMENT` to `default_operational_config()`
+  return dict with explanatory comment.
+- `src/models/band_breach_detector.py`: In `detect()`, reads
+  `co2_enrichment: bool = bool(config.get("co2_enrichment", False))` defensively
+  (missing key → False). After `_compare_band()`, if `finding.anomaly_type == CO2_BAND_LOW`
+  and `not co2_enrichment`, skips the finding. CO2_BAND_HIGH always emitted.
+- `src/api/routes/operational_config.py`: Added `co2_enrichment: StrictBool = Field(False)`
+  to `OperationalConfigRequest` (StrictBool rejects int/string coercion at the Pydantic layer).
+- `src/api/services/operational_config_service.py`: Added validation in
+  `validate_operational_config()` — rejects `co2_enrichment` present but not a `bool`;
+  absent = valid (defaults to False).
+
+**FIX 2 — Migration test isolation: prevent "table already exists" failure**
+
+Root cause: `tests/conftest.py` sets `DATABASE_URL=sqlite+aiosqlite:///./test_global.db`.
+`alembic/env.py` reads this env var and overrides the config URL the test sets, directing
+migrations to `test_global.db` which already has all tables from `Base.metadata.create_all`.
+
+Fix in `tests/api/test_operational_config.py::TestMigration::test_upgrade_creates_table_and_downgrade_drops_it`:
+- Added `monkeypatch` fixture parameter.
+- Added `monkeypatch.delenv("DATABASE_URL", raising=False)` before alembic calls so
+  `env.py` falls back to the `cfg.set_main_option("sqlalchemy.url", db_url)` pointing to
+  the `tmp_path` scratch file. Assertions unchanged; upgrade/downgrade chain verified.
+
+**New tests (in tests/models/test_band_breach_and_scaler.py):**
+- `test_unenriched_house_at_420ppm_no_co2_band_low` — default config → no CO2_BAND_LOW
+- `test_unenriched_house_at_1500ppm_co2_band_high_fires` — CO2_BAND_HIGH still emitted
+- `test_enriched_house_at_420ppm_co2_band_low_fires` — co2_enrichment=True → CO2_BAND_LOW fires
+- `test_other_channels_unaffected_by_co2_enrichment_flag` — humidity/temp independent
+- `test_co2_enrichment_missing_key_treated_as_false` — pre-flag configs safe
+
+**New tests (in tests/api/test_operational_config.py):**
+- `TestCo2EnrichmentConfig` (5 tests): PUT/GET round-trip (True, False), integer rejected,
+  string rejected, absent key valid.
+
+**NOTE**: The web config UI still needs a toggle for the new `co2_enrichment` flag.
+Done signal: tasks/done/fix-co2-band.json.
+
+---
+
+## Previous Phase
+**Test Infrastructure Fixes (fix-testinfra) — COMPLETE (2026-07-26)**
+Agent: backend-engineer. Two surgical fixes to unblock 88 failing tests.
+
+**FIX 1 — alembic/env.py: fileConfig disabling all loggers (root cause)**
+- `alembic/env.py` line 21: added `disable_existing_loggers=False` to the
+  `fileConfig(config.config_file_name, ...)` call.
+- Without this, `logging.config.fileConfig` defaults to
+  `disable_existing_loggers=True`, which sets `.disabled=True` on EVERY
+  logger already created in the process. After `test_operational_config.py`
+  ran alembic in-process, all subsequent caplog assertions in test_replay_buffer,
+  test_online_learner, test_catastrophic_forgetting, test_embedding_utils,
+  test_incident_memory, and test_supervision captured nothing.
+- Fix is correct for production too: a migration run must not silence application loggers.
+
+**FIX 2 — tests/: version-safe Redis aclose() (82 teardown errors)**
+- `tests/live/conftest.py`: Added `_safe_redis_close(client)` async helper
+  (mirrors hub.py's `_safe_aclose`): prefers `aclose()` when present (redis 5.x),
+  falls back to `close()` (redis 4.x / FakeRedis pinned by requirements.txt).
+- Updated teardown in: `test_hub_smoke.py`, `test_runtime_smoke.py`,
+  `test_runtime.py`, `test_scoring.py` — all import and call `_safe_redis_close`.
+- `tests/api/test_live_events.py`, `tests/api/test_live_events_smoke.py`:
+  inlined the same version-safe pattern (no shared import needed for api/ tests).
+
+**Defence-in-depth (prior agent's partial edits — kept, they are sound)**
+- `src/logging/config.py`: idempotency guard (`_logging_configured`), pytest
+  detection (skips file handler + logs/ dir creation in test runs), re-attaches
+  pre-existing handlers that dictConfig removed.
+- `tests/conftest.py`: `_restore_root_logger_handlers` autouse fixture snapshots
+  and restores root logger handlers + level around each test.
+
+Verification results:
+- `venv/bin/python -m pytest tests/live -q`: **362 passed, 0 errors** ✅
+- `venv/bin/python -m pytest tests/api/test_operational_config.py tests/models/test_replay_buffer.py tests/models/test_online_learner.py tests/models/test_catastrophic_forgetting.py tests/models/test_embedding_utils.py tests/db/test_incident_memory.py tests/live/test_supervision.py -q`: **167 passed, 0 failures** ✅
+
+Done signal: tasks/done/fix-testinfra.json.
+
+---
+
+## Previous Phase
 **SCADA Config Engine — Architecture Plan (architect-scada) — COMPLETE (2026-07-24)**
 Agent: architect. Task: requirements analysis + gap matrix + phased plan for the SCADA
 Configuration & Anomaly Detection spec. Output: `docs/architecture/scada-config-engine-plan.md`.
@@ -15,10 +111,11 @@ Gap matrix highlights (spec is mostly already implemented — plan EXTENDS, not 
   (`cusum_drift_detector`), noise high-pass (`noise_detector`), dropout P=5
   (`dropout_detector`). All "unspecified constants" (ε, P, α, Δ_max, windows) already
   in `src/config.py`.
-- CONFIRMED BUG: `psychrometric_validator.py:80` uses hPa coefficient 216.7 with kPa
-  inputs → HD ~10× too small; `PSYCHROMETRIC_HD_TOLERANCE=0.05` also wrong (should be
-  ~0.4 g/m³ configurable). Fix = `2166.8·e[kPa]/T[K]`; recalibrate downstream
-  (`bootstrap._compute_physics_flags`, `DEHUMID_HD_CRIT_G_M3`).
+- ~~CONFIRMED BUG~~ **FIXED (2026-07):** `psychrometric_validator.py` now uses
+  coefficient **2167.0** (= 216.7 × 10 for kPa inputs); `PSYCHROMETRIC_HD_TOLERANCE`
+  recalibrated from 0.05 → **0.5 g/m³**; `DEHUMID_HD_CRIT_G_M3` rescaled 0.5 → 5.0.
+  Guard: `tests/models/test_framework_spec_vectors.py`. Spec doc (§8, Table 9, errata)
+  and all downstream review/architecture docs updated to corrected scale.
 - MISSING: crop profiles (setpoints are frontend localStorage-only, `useSetpoints.ts`,
   no backend/DB/scoring effect), month→season mapping, seasonal baselines, seasonal-σ
   scaling of detector limits, MAD robust-z Pass-1 scrub stage, measured-HD channel
@@ -826,7 +923,7 @@ Class-by-class results:
 | 5 | TestSpec05Noise | 1 XFAIL + 3 PASSED | DEVIATES: HP filter + warm-up bug (max(w-1,9) floor) suppresses indices 5-8; only index 9 evaluated |
 | 6 | TestSpec06BiasDualSensor | 3 PASSED | Table 6: w=3, theta=1.5 |
 | 7 | TestSpec07CorrelationBreakdown | 3 PASSED | Table 8: w=5, theta=0.70; rho drops far below 0.70 |
-| 8 | TestSpec08Thermodynamic | 3 PASSED | Table 9: 216.7 constant correct; spec prose (2166.7) is erroneous |
+| 8 | TestSpec08Thermodynamic | 3 PASSED | Table 9: corrected 2026-07 — code uses 2167.0 (kPa coefficient), tolerance 0.5 g/m³ |
 | 9 | TestSpec09DiurnalProfile | 3 PASSED | Table 10: theta=3.0 |
 | 10 | TestSpec10RTTJitter | 3 PASSED | Table 11: baseline=2ms, mult=3, jitter=50ms |
 | 11 | TestSpec11IATCV | 4 PASSED | Table 12: spacing rule at 12:05; row 12:07 skipped (spec arithmetic error) |
@@ -837,7 +934,8 @@ Class-by-class results:
 
 **Detectors whose constructor cannot accept spec params (list for fix phase):**
 - psychrometric_validator: validate_row() uses global PSYCHROMETRIC_HD_TOLERANCE from config (no
-  tolerance param); test calls calculate_humidity_deficit() directly and applies theta=0.15 inline.
+  tolerance param); test calls calculate_humidity_deficit() directly and applies theta=0.5 inline
+  (corrected 2026-07 from 0.15).
 - NoiseDetector: HP filter and hardcoded warm-up floor max(w-1,9) are structural (not configurable)
   — test notes them in comments; warm_up_suppresses test documents the bug explicitly.
 - ServiceResponseDetector: no rolling-window P99 API; test_table15_dynamic_p99_api_exists asserts
@@ -846,8 +944,9 @@ Class-by-class results:
 **Spec document errata found during test authoring:**
 1. Table 12 (IAT CV): sigma/CV values at rows 12:06 and 12:07 do not reproduce under ddof=0 or ddof=1
    with the given IAT series — spec's arithmetic is internally inconsistent; row 12:07 assertion skipped.
-2. psychrometric_validator.py §8: spec prose states constant 2166.7 but worked Table 9 reproduces only
-   with 216.7 (code is correct; spec prose is erroneous).
+2. ~~psychrometric_validator.py §8: spec prose states constant 2166.7 but worked Table 9 reproduces only
+   with 216.7~~ **RESOLVED (2026-07):** the code's 216.7 was a 10× unit bug (hPa coefficient with kPa
+   inputs). Code now uses 2167.0; spec, Table 9, and tolerance all corrected.
 
 **Pre-existing failure (not introduced by this task):**
 tests/models/test_ensemble_fit_spy.py::test_pipeline_reuses_baseline_object_reference
@@ -1273,7 +1372,7 @@ Endpoint live: `POST /api/v1/bootstrap/run`.
 - `src/api/schemas/bootstrap.py` — `BootstrapRowResult`, `BootstrapRunResponse` Pydantic models
 
 ### New Config Constants (src/config.py)
-`BOOTSTRAP_GAS_NULL_THRESHOLD=0.95`, `BOOTSTRAP_IF_CONTAMINATION=0.04`, `BOOTSTRAP_RESAMPLE_INTERVAL="5min"`, `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE=99.0`, `BOOTSTRAP_MIN_CLEAN_ROWS=100`, `BOOTSTRAP_MIN_IF_ROWS=10`, `PSYCHROMETRIC_HD_TOLERANCE=0.05`, `SPIKE_DELTA_MAX` (per-sensor dict)
+`BOOTSTRAP_GAS_NULL_THRESHOLD=0.95`, `BOOTSTRAP_IF_CONTAMINATION=0.04`, `BOOTSTRAP_RESAMPLE_INTERVAL="5min"`, `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE=99.0`, `BOOTSTRAP_MIN_CLEAN_ROWS=100`, `BOOTSTRAP_MIN_IF_ROWS=10`, `PSYCHROMETRIC_HD_TOLERANCE=0.5` (was 0.05, corrected 2026-07), `SPIKE_DELTA_MAX` (per-sensor dict)
 
 ### Key Design Decisions
 - LSTM-VAE reused (not a new deterministic AE) — VAE's KL regularisation avoids overfitting to noise in the clean baseline
@@ -1410,7 +1509,7 @@ Done signal: `tasks/done/ml-engineer-p1.json`.
 
 **Files modified:**
 
-- **`src/config.py`**: Added "Two-Pass Cold-Start Bootstrap" section with 8 constants: `BOOTSTRAP_GAS_NULL_THRESHOLD` (0.95), `BOOTSTRAP_IF_CONTAMINATION` (0.04), `BOOTSTRAP_RESAMPLE_INTERVAL` ("5min"), `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE` (99.0), `PSYCHROMETRIC_HD_TOLERANCE` (0.05 g/m³), `SPIKE_DELTA_MAX` (per-sensor velocity limits).
+- **`src/config.py`**: Added "Two-Pass Cold-Start Bootstrap" section with 8 constants: `BOOTSTRAP_GAS_NULL_THRESHOLD` (0.95), `BOOTSTRAP_IF_CONTAMINATION` (0.04), `BOOTSTRAP_RESAMPLE_INTERVAL` ("5min"), `BOOTSTRAP_CLEAN_PATH`, `BOOTSTRAP_ANOMALY_PATH`, `BOOTSTRAP_THRESHOLD_PERCENTILE` (99.0), `PSYCHROMETRIC_HD_TOLERANCE` (0.5 g/m³; was 0.05 at ship, corrected 2026-07), `SPIKE_DELTA_MAX` (per-sensor velocity limits).
 
 **Design decisions:**
 - Timestamp parsing uses auto-detection: tries ISO/standard first, falls back to `dayfirst=True` for European SCADA exports — prevents month/day swap on ISO timestamps.
@@ -1427,7 +1526,7 @@ Done signal: `tasks/done/architect-p1.json`.
 **Output:** [docs/architecture/cold_start_bootstrap.md](docs/architecture/cold_start_bootstrap.md)
 
 **Design:** Two-Pass Cold-Start Bootstrap pipeline for new greenhouse tenant onboarding:
-- **Pass 1** — Physics-aware cleaning: gas column null audit (drop >95% null), psychrometric humidity deficit check (Magnus formula, HD_TOLERANCE=0.05), spike-delta pre-filter (per-sensor SPIKE_DELTA_MAX), Isolation Forest (contamination=0.04). Outputs `bootstrapped_clean.csv` + `pass1_suspected_anomalies.csv`.
+- **Pass 1** — Physics-aware cleaning: gas column null audit (drop >95% null), psychrometric humidity deficit check (Magnus formula, HD_TOLERANCE=0.5; was 0.05 at ship, corrected 2026-07), spike-delta pre-filter (per-sensor SPIKE_DELTA_MAX), Isolation Forest (contamination=0.04). Outputs `bootstrapped_clean.csv` + `pass1_suspected_anomalies.csv`.
 - **Pass 2** — LSTM-VAE training on clean subset → full-file inference → percentile-99 threshold calibration → univariate fault classifiers (spike, stuck, dropout, CUSUM, noise) → JSON response.
 
 **New files designed (6):**

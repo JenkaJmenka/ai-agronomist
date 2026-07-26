@@ -34,12 +34,23 @@ NOW = datetime.now(timezone.utc)
 # ---------------------------------------------------------------------------
 
 
+async def _safe_redis_close(client: FakeRedis) -> None:
+    """Close a redis/FakeRedis client in a version-safe way.
+
+    redis-py 5.x introduced ``aclose()``; the 4.x series (pinned in
+    requirements.txt) only has ``close()``.  Prefer ``aclose()`` when present
+    so the helper works on both versions without deprecation warnings.
+    """
+    close_fn = getattr(client, "aclose", None) or client.close
+    await close_fn()
+
+
 @pytest_asyncio.fixture
 async def redis_client() -> AsyncGenerator[FakeRedis, None]:
     """Shared fakeredis client for a single test."""
     client = FakeRedis()
     yield client
-    await client.aclose()
+    await _safe_redis_close(client)
 
 
 @pytest_asyncio.fixture

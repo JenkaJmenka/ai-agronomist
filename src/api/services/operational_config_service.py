@@ -112,7 +112,7 @@ def _validate_day_window(day_window: dict[str, Any]) -> None:
 def validate_operational_config(config: dict[str, Any]) -> None:
     """Validate a full operational config document; raise 422 on any violation.
 
-    Validates in order: crop → setpoints → season_map → day_window.
+    Validates in order: crop → setpoints → season_map → day_window → co2_enrichment.
     """
     crop = config.get("crop")
     if crop not in CROP_SETPOINT_PROFILES:
@@ -147,6 +147,19 @@ def validate_operational_config(config: dict[str, Any]) -> None:
             detail="day_window must be an object",
         )
     _validate_day_window(day_window)
+
+    # co2_enrichment is optional (absent means use the code default = False).
+    # When present it must be a strict boolean — integers like 0/1 are rejected
+    # so a misconfigured JSON payload is caught early rather than silently coerced.
+    co2_enrichment = config.get("co2_enrichment")
+    if co2_enrichment is not None and not isinstance(co2_enrichment, bool):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"co2_enrichment must be a boolean (true/false),"
+                f" got {type(co2_enrichment).__name__!r}"
+            ),
+        )
 
 
 async def invalidate_seasonal_caches(tenant_id: str) -> None:

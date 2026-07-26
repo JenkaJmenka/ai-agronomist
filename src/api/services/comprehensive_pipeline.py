@@ -703,26 +703,29 @@ class ComprehensiveInferencePipeline:
                 )
 
         # 0a++. Operator crop band breaches (day/night min–max from OperationalConfig).
+        # Band breaches are process/climate deviations, NOT sensor-fault evidence.
+        # Collected in band_findings (separate from rule_votes) to preserve
+        # fault-type precedence:
+        #   (1) sensor-fault rule votes → (2) physics → (3) ensemble/LSTM → (4) band LAST
+        # Sensor-trust gate and last-resort fusion happen after all sensor-fault
+        # detectors have voted (step 5c-gate / 5c-last below).
         _op_config = get_operational_config_store().get(customer_id, greenhouse_id)
         _band_findings = self._band_breach_detector.detect(
             _denormed_for_noise,
             _op_config,
             timestamp=seq_ts,
         )
+        band_findings: list[dict[str, Any]] = []
         for finding in _band_findings:
-            scada_anomalies.append(finding.to_dict())
-            vote_key = BAND_TYPE_TO_VOTE.get(finding.anomaly_type)
-            if vote_key:
-                rule_votes.setdefault(vote_key, [])
-                for sensor in finding.affected_sensors:
-                    if sensor not in rule_votes[vote_key]:
-                        rule_votes[vote_key].append(sensor)
-                logger.warning(
-                    "Band breach %s for tenant %s: %s",
-                    finding.anomaly_type,
-                    customer_id,
-                    finding.reasoning,
-                )
+            finding_dict = finding.to_dict()
+            scada_anomalies.append(finding_dict)
+            band_findings.append(finding_dict)
+            logger.warning(
+                "Band breach %s for tenant %s: %s",
+                finding.anomaly_type,
+                customer_id,
+                finding.reasoning,
+            )
 
         # Seasonal σ scaler — factor 1.0 when baselines are sparse / absent.
         _season_key = _season_for_timestamp(seq_ts, _op_config.get("season_map") or {})
@@ -996,6 +999,61 @@ class ComprehensiveInferencePipeline:
                 first_rule = next(iter(rule_votes))
                 rule_profile = _RULE_VOTE_PROFILES[first_rule]
                 fault_type = rule_profile["fault_type"]
+
+        # 5c-gate. Sensor-trust gate: a band value measured by a sensor that a
+        # sensor-fault detector flagged is untrustworthy — discard the finding.
+        # Runs here because rule_votes is now final (all sensor-fault detectors
+        # voted during the detection loop; steps 5a/5b set is_anomaly but do
+        # not add to rule_votes).
+        _fault_sensors: set[str] = {
+            s for sensors in rule_votes.values() for s in sensors
+        }
+        if band_findings and _fault_sensors:
+            _trusted_band: list[dict[str, Any]] = []
+            _dropped_ids: set[int] = set()
+            for _bf in band_findings:
+                _bf_sensors = set(_bf.get("affected_sensors") or [])
+                if _bf_sensors & _fault_sensors:
+                    logger.info(
+                        "Band finding %s dropped for tenant %s: sensors %s "
+                        "overlap fault-sensor set %s",
+                        _bf.get("anomaly_type"),
+                        customer_id,
+                        sorted(_bf_sensors),
+                        sorted(_fault_sensors),
+                    )
+                    _dropped_ids.add(id(_bf))
+                else:
+                    _trusted_band.append(_bf)
+            if _dropped_ids:
+                scada_anomalies[:] = [
+                    f for f in scada_anomalies if id(f) not in _dropped_ids
+                ]
+            band_findings = _trusted_band
+
+        # 5c-last. Band-breach last resort: a configured-band breach is a
+        # categorical anomaly per product spec, but only after all higher-
+        # precedence detectors have had their say and found nothing.
+        # Conditions (ALL must hold): physics did not suppress, no sensor-fault
+        # rule fired, and the ensemble/LSTM/CUSUM statistical path did not flag.
+        # BAND_TYPE_TO_VOTE provides the fault_type lookup; the profile is set
+        # on rule_profile so the root-cause block (step 8) picks up the band's
+        # severity/urgency and the reasoning is drawn from scada_anomalies.
+        if (
+            band_findings
+            and not physics_result.suppressed
+            and not rule_votes
+            and not is_anomaly
+        ):
+            _first_band = band_findings[0]
+            _band_vote_key = BAND_TYPE_TO_VOTE.get(
+                str(_first_band.get("anomaly_type", ""))
+            )
+            _band_profile = _RULE_VOTE_PROFILES.get(_band_vote_key or "")
+            if _band_profile:
+                is_anomaly = True
+                fault_type = _band_profile["fault_type"]
+                rule_profile = _band_profile
 
         # 5d. Psychrometric consistency suppression — when the measured HD
         # cross-checks cleanly and the ML anomaly's primary implicated

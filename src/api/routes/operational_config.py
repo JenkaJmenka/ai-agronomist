@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
@@ -63,6 +63,16 @@ class OperationalConfigRequest(BaseModel):
     day_window: DayWindow = Field(default_factory=DayWindow)
     season_map: dict[str, Literal["summer", "winter"]] = Field(default_factory=dict)
     seasonal_overrides: dict[str, SeasonalOverride] = Field(default_factory=dict)
+    # StrictBool rejects integer/string coercion (1, "true") at the Pydantic layer
+    # so misconfigured payloads are caught before they reach the service.
+    co2_enrichment: StrictBool = Field(
+        False,
+        description=(
+            "True when the greenhouse has CO2 enrichment equipment. "
+            "Enables CO2_BAND_LOW alarms; defaults to false to prevent "
+            "alarm fatigue in unenriched greenhouses (~420 ppm ambient)."
+        ),
+    )
 
 
 class OperationalConfigResponse(BaseModel):

@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { TwoStepConfirm } from "@/components/ui/TwoStepConfirm";
 import {
+  Co2EnrichmentToggle,
   SeasonMapEditor,
   SetpointsEditor,
   useConfigDraft,
@@ -139,6 +140,15 @@ function ConfigurationBody() {
             />
           </label>
         </div>
+      </Card>
+
+      <Card title="CO₂ enrichment">
+        <Co2EnrichmentToggle
+          value={draft.co2_enrichment}
+          onChange={(co2_enrichment) =>
+            setDraft((prev) => (prev ? { ...prev, co2_enrichment } : prev))
+          }
+        />
       </Card>
 
       <Card title="Product-specific setpoints">

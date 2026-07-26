@@ -152,13 +152,13 @@ class TestPublish:
 
         def factory() -> FakeRedis:
             c = FakeRedis()
-            original_close = c.aclose
+            original_close = c.close  # FakeRedis (redis 4.x) has close(), not aclose()
 
             async def tracked_close():
                 closed.append(True)
                 await original_close()
 
-            c.aclose = tracked_close
+            c.close = tracked_close
             return c
 
         hub = LiveHub(redis_factory=factory, block_ms=100)
@@ -416,13 +416,13 @@ class TestCancellationSafety:
 
         def factory() -> FakeRedis:
             c = FakeRedis()
-            original_close = c.aclose
+            original_close = c.close  # FakeRedis (redis 4.x) has close(), not aclose()
 
             async def tracked_close():
                 closed.append(True)
                 await original_close()
 
-            c.aclose = tracked_close
+            c.close = tracked_close
             created_clients.append(c)
             return c
 

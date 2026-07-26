@@ -21,6 +21,9 @@ const configDocumentSchema = z
     seasonal_overrides: z
       .record(z.string(), z.object({ detector_scale: z.number().nullable().optional() }).loose())
       .default({}),
+    // Absent on older stored documents → defaults to false (conservative).
+    // False suppresses CO2_BAND_LOW; true enables 'CO2 enrichment underperforming' detection.
+    co2_enrichment: z.boolean().default(false),
   })
   .loose();
 

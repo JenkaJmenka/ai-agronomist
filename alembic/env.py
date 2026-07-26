@@ -18,7 +18,11 @@ from src.db.session import _normalize_database_url
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False prevents alembic's ini config from
+    # calling .disabled=True on every logger already created in this process.
+    # Without this, running migrations in-process (e.g. in tests) silences
+    # all application loggers for the remainder of the test session.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

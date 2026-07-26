@@ -41,7 +41,7 @@ from src.live.events import LiveAnomalyEvent, LiveReadingEvent
 from src.live.hub import LiveHub
 from src.live.scoring import LiveScorer
 
-from tests.live.conftest import GREENHOUSE, NOW, TENANT, make_reading
+from tests.live.conftest import GREENHOUSE, NOW, TENANT, _safe_redis_close, make_reading
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ from tests.live.conftest import GREENHOUSE, NOW, TENANT, make_reading
 async def redis_client() -> FakeRedis:
     client = FakeRedis()
     yield client
-    await client.aclose()
+    await _safe_redis_close(client)
 
 
 @pytest_asyncio.fixture

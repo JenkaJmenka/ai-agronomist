@@ -390,22 +390,128 @@ class TestGetEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# 6. Alembic migration upgrade / downgrade on SQLite
+# 6. co2_enrichment flag — validation and round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestCo2EnrichmentConfig:
+    """co2_enrichment is accepted as a bool; non-bool values are rejected."""
+
+    def test_co2_enrichment_roundtrip(self, api_client: TestClient) -> None:
+        """PUT with co2_enrichment=True; GET returns it as true in the config."""
+        cfg = _valid_config("tomato")
+        cfg["co2_enrichment"] = True
+
+        put_resp = api_client.put(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+            json=cfg,
+        )
+        assert put_resp.status_code == status.HTTP_200_OK, put_resp.text
+
+        get_resp = api_client.get(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+        )
+        assert get_resp.status_code == status.HTTP_200_OK, get_resp.text
+        body = get_resp.json()
+        assert body["config"]["co2_enrichment"] is True
+
+    def test_co2_enrichment_false_roundtrip(self, api_client: TestClient) -> None:
+        """PUT with co2_enrichment=False; GET returns it as false."""
+        cfg = _valid_config("tomato")
+        cfg["co2_enrichment"] = False
+
+        api_client.put(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+            json=cfg,
+        )
+        get_resp = api_client.get(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+        )
+        body = get_resp.json()
+        assert body["config"]["co2_enrichment"] is False
+
+    def test_co2_enrichment_integer_rejected(self, api_client: TestClient) -> None:
+        """co2_enrichment=1 (integer, not boolean) must return 422."""
+        cfg = _valid_config("tomato")
+        cfg["co2_enrichment"] = 1  # integer, not bool
+
+        response = api_client.put(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+            json=cfg,
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert "co2_enrichment" in response.text
+
+    def test_co2_enrichment_string_rejected(self, api_client: TestClient) -> None:
+        """co2_enrichment='true' (string, not boolean) must return 422."""
+        cfg = _valid_config("tomato")
+        cfg["co2_enrichment"] = "true"  # string, not bool
+
+        response = api_client.put(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+            json=cfg,
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert "co2_enrichment" in response.text
+
+    def test_co2_enrichment_absent_is_valid(self, api_client: TestClient) -> None:
+        """A config without co2_enrichment key is valid; GET defaults to False."""
+        cfg = _valid_config("tomato")
+        # Deliberately omit co2_enrichment
+
+        put_resp = api_client.put(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+            json=cfg,
+        )
+        assert put_resp.status_code == status.HTTP_200_OK, put_resp.text
+
+        get_resp = api_client.get(
+            "/api/config/operational",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GH},
+        )
+        body = get_resp.json()
+        # Default is False; either absent or explicitly False is acceptable.
+        assert body["config"].get("co2_enrichment", False) is False
+
+
+# ---------------------------------------------------------------------------
+# 7. Alembic migration upgrade / downgrade on SQLite
 # ---------------------------------------------------------------------------
 
 
 class TestMigration:
     """018_add_operational_config upgrades and downgrades cleanly on SQLite."""
 
-    def test_upgrade_creates_table_and_downgrade_drops_it(self, tmp_path) -> None:
-        """Run alembic upgrade to 018 then downgrade to 017 on a scratch DB."""
-        import os
+    def test_upgrade_creates_table_and_downgrade_drops_it(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Run alembic upgrade to 018 then downgrade to 017 on a scratch DB.
+
+        Uses a tmp_path file DB to guarantee a pristine empty database.
+        DATABASE_URL is temporarily unset so alembic/env.py does not redirect
+        migrations to the shared test database (test_global.db), which already
+        has all tables created by Base.metadata.create_all via conftest.py and
+        would therefore raise 'table sensor_readings already exists' on the
+        first migration step.
+        """
         from alembic.config import Config
         from alembic import command
         import sqlalchemy
 
         db_path = tmp_path / "test_migration.db"
         db_url = f"sqlite:///{db_path}"
+
+        # Prevent alembic/env.py from overriding sqlalchemy.url with the conftest
+        # DATABASE_URL (sqlite+aiosqlite:///./test_global.db), which already has all
+        # tables and would make upgrade head fail with "table already exists".
+        monkeypatch.delenv("DATABASE_URL", raising=False)
 
         cfg = Config("alembic.ini")
         cfg.set_main_option("sqlalchemy.url", db_url)

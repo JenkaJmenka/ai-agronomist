@@ -722,7 +722,13 @@ OVERHEAT_OUTDOOR_TEMP_C: float = float(os.environ.get("OVERHEAT_OUTDOOR_TEMP_C",
 RH_CRIT_PERCENT: float = float(os.environ.get("RH_CRIT_PERCENT", "95.0"))
 RH_ABSOLUTE_MAX_PERCENT: float = float(os.environ.get("RH_ABSOLUTE_MAX_PERCENT", "98.0"))
 # Humidity deficit (g/m³) at/below which dehumidification is considered failed.
-DEHUMID_HD_CRIT_G_M3: float = float(os.environ.get("DEHUMID_HD_CRIT_G_M3", "0.5"))
+# Corrected 2026-07: rescaled 10× (was 0.5) after psychrometric HD coefficient
+# fix (216.7 → 2167.0 for kPa inputs).  The old 0.5 was calibrated to an HD
+# scale that was 10× too small; 5.0 preserves the same physical meaning on the
+# corrected g/m³ scale.  At RH ≥ 95% (the gate for this rule), typical HD
+# values are 0.5–2.0 g/m³ — well below this ceiling — so all near-saturation
+# conditions correctly trigger DEHUMIDIFICATION_FAILURE.
+DEHUMID_HD_CRIT_G_M3: float = float(os.environ.get("DEHUMID_HD_CRIT_G_M3", "5.0"))
 
 # Crop microclimate: canopy vs greenhouse air (°C).
 THERMAL_DIVERGENCE_CRIT_C: float = float(
@@ -860,6 +866,20 @@ SEASONAL_BASELINE_ROW_CAP: int = int(
 
 # Band-breach detector: last-k mean debounce before comparing to [min, max].
 BAND_BREACH_DEBOUNCE_K: int = int(os.environ.get("BAND_BREACH_DEBOUNCE_K", "3"))
+
+# CO2 enrichment flag default — conservative False so un-enriched greenhouses are
+# never flooded by CO2_BAND_LOW alarms.
+#
+# Rationale: tomato/cucumber lower CO2 bounds (~600-800 ppm) sit well above ambient
+# outdoor air (~420 ppm).  A greenhouse WITHOUT CO2 enrichment equipment runs at
+# ambient, so CO2_BAND_LOW would fire on literally every reading, carrying zero
+# diagnostic information and causing alarm fatigue.  CO2_BAND_HIGH (excess CO2
+# buildup from respiration) needs no special equipment to be actionable and is
+# always emitted regardless of this flag.
+#
+# Growers with enrichment hardware opt in by setting co2_enrichment=true in their
+# operational config, unlocking the "enrichment system underperforming" signal.
+DEFAULT_CO2_ENRICHMENT: bool = False
 
 # Spike detector velocity limits per sensor (physical units per 5-min step).
 SPIKE_DELTA_MAX: Dict[str, float] = {
