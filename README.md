@@ -146,6 +146,17 @@ export TENANT_API_KEYS=demo_tenant:your_secret_key
 
 See [docs/DOCKER_SETUP.md](docs/DOCKER_SETUP.md) for ivfflat index maintenance after loading incident data.
 
+#### Database migrations
+
+Run `alembic upgrade head` **before or simultaneously with** the application code deploy — the running app will error on a missing column, table, or constraint if migrations lag. The migration chain is linear with a single head (`019`); verify with `venv/bin/alembic heads`.
+
+Migrations that must be in place before the current code version:
+- `017` — adds `sensor_readings.source` column with backfill (live-path persistence and wipe filters depend on it)
+- `018` — creates the `operational_config` table (CO₂ enrichment flag and band-breach config API depend on it)
+- `019` — adds band-breach `fault_type` CHECK constraint values (band-breach detector writes these values)
+
+**Authoritative migrations tree:** `alembic/versions/`. `src/db/migrations/` is a dead legacy tree (single initial-schema stub) — do not run it; use only the `alembic/` tree.
+
 ---
 
 ## Architecture overview

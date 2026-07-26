@@ -59,3 +59,5 @@ fakeredis>=2.21,<3              # in-process Redis for stream tests (redis-py 4.
 redis>=4.2.0,<5.0.0
 fastapi-cache2[redis]==0.2.1
 respx>=0.20                     # httpx mock transport for SCADA connector tests
+tensorboard>=2.14,<3            # required at collection time: src/models/training.py and src/utils/metrics_logger.py import torch.utils.tensorboard.SummaryWriter; tests/test_training.py imports the training module before any patch runs
+pytest-timeout>=2.3,<3         # bounds hanging tests; no global default set — enable with --timeout=N or @pytest.mark.timeout(N) per test

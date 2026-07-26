@@ -3,6 +3,71 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Cold-Run Upload Test Fix (fix-coldrun) — COMPLETE (2026-07-26)**
+Agent: qa-engineer. Task: diagnose and fix the failing assertion in
+`test_inference_upload_cold_run_greenhouse_fixture` (line 91).
+
+**Diagnosis: Case (a) — STALE TEST, not a product bug.**
+Evidence: `_RAW_COLUMN_ALIASES` in `csv_adapter.py` line 270 maps
+`"measured_greenhouse_temp" → "temperature"`. The fixture CSV column
+`Measured Greenhouse Temp` is intentionally consumed as the canonical
+temperature channel. It never appears as a separate stat column.
+Psychrometric HD channel mapping (lines 75-77) targets `"measured_hd"`,
+did NOT shadow or reorder the greenhouse-temp match.
+
+**Fixes (test file only):**
+1. Line 91: `assert "temperature" in stat_cols` (was `measured_greenhouse_temp`)
+   with comment explaining the Connext→canonical mapping.
+2. Added `_disable_live_runtime` autouse fixture to prevent 60s+ teardown hang
+   from LiveRuntime's supervised merger task retrying Redis without local Redis.
+
+**Pre-existing bug reported:** LiveRuntime teardown hang blocks any TestClient(app)
+test without Redis. Product-level fix needed in `src/api/main.py`.
+
+Verification: 3 passed (2.1s), full tests/api+vendors 374 passed, 1 xfailed, 0 failures (21.6s).
+Done signal: tasks/done/fix-coldrun.json.
+
+---
+
+## Previous Phase
+**Reproducibility/Versioning Gaps (fix-repro-gaps) — COMPLETE (2026-07-26)**
+Agent: devops-lead. Three surgical fixes; no src/**, tests/**, or web/** touched.
+
+**GAP 1 — requirements.txt: declare tensorboard + pytest-timeout**
+- `requirements.txt`: Added `tensorboard>=2.14,<3` and `pytest-timeout>=2.3,<3` to the
+  Testing block (after respx, following the same floor+major-ceiling style).
+- Root cause: `src/models/training.py` and `src/utils/metrics_logger.py` import
+  `torch.utils.tensorboard.SummaryWriter` at module load time, so `tests/test_training.py`
+  fails to COLLECT on a clean machine without tensorboard. The patch in the test file fires
+  after collection, so undeclared tensorboard = CI collection failure.
+- pytest-timeout not previously declared; a test recently hung a CI-length run with no
+  diagnostic. Plugin now available; no global default set — enable with `--timeout=N` or
+  `@pytest.mark.timeout(N)` per test (a sensible default, e.g. 120 s, can be added to
+  pytest.ini later).
+- Verified: `venv/bin/python -c "import tensorboard, pytest_timeout"` ✅;
+  `tests/test_training.py` collects 9 tests without error ✅.
+
+**GAP 2 — .gitignore: version-control anomaly_framework_spec.md**
+- Changed `docs/` → `docs/*` (exclude contents, not directory) so a negation can re-include
+  one tracked file; added `!docs/anomaly_framework_spec.md` with explanatory comment.
+- Verified: `git check-ignore -v docs/anomaly_framework_spec.md` → matches negation rule
+  (not ignored) ✅; `git check-ignore -v docs/coverage` and `docs/architecture/*.md` →
+  still match `docs/*` (ignored) ✅.
+- Staged: `git add docs/anomaly_framework_spec.md`; `git status --short docs/` shows only
+  `A  docs/anomaly_framework_spec.md` ✅. DO NOT commit — orchestrator commits.
+
+**GAP 3 — README.md: Database migrations subsection**
+- Added `#### Database migrations` subsection in section 6 (Production deployment), after the
+  existing Docker+alembic code block.
+- Content: run `alembic upgrade head` before or with deploy; single head (019) verified;
+  migrations 017/018/019 described with their dependencies; `alembic/versions/` is the
+  authoritative tree; `src/db/migrations/` is a dead legacy stub — do not use.
+
+Done signal: tasks/done/fix-repro-gaps.json.
+
+---
+
+## Previous Phase
 **CO2 Enrichment Flag + Migration Test Isolation (fix-co2-band) — COMPLETE (2026-07-26)**
 Agent: backend-engineer. Two changes: (1) CO2_BAND_LOW detection precision gap fix;
 (2) migration test isolation bug fix. All 43 target tests green; full tests/api+models

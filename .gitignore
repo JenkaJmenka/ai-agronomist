@@ -18,7 +18,11 @@ results/
 .pytest_cache/
 
 # Project docs & planning (local only)
-docs/
+# Use docs/* (not docs/) so we can negate individual tracked files below.
+# docs/anomaly_framework_spec.md is version-controlled — tests/models/test_framework_spec_vectors.py
+# asserts its Table 9 worked values; a fresh clone must have the spec its tests conform to.
+docs/*
+!docs/anomaly_framework_spec.md
 implementation plan/
 tasks/
 
