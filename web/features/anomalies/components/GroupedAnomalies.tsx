@@ -22,6 +22,7 @@ import {
   useEnrichedAnomalies,
 } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import { useFlaggedWindow } from "@/features/anomalies/hooks/useFlaggedWindow";
+import { fetchErrorHint } from "@/features/anomalies/lib/classifyFetchError";
 import {
   formatSensorList,
   formatSensorValues,
@@ -383,9 +384,10 @@ export function GroupedAnomalies({ windowStart, windowEnd, threshold }: GroupedA
   }
 
   if (countState.isError || countState.count === null) {
+    const hint = fetchErrorHint(countState.error);
     return (
       <p role="alert" className="py-4 text-center text-sm text-sev-critical">
-        Could not determine anomaly count — narrow the window or retry.
+        Could not determine anomaly count ({hint}).
       </p>
     );
   }
@@ -398,9 +400,10 @@ export function GroupedAnomalies({ windowStart, windowEnd, threshold }: GroupedA
   }
 
   if (mode === "client" && flagged.isError) {
+    const hint = fetchErrorHint(flagged.error);
     return (
       <p role="alert" className="py-4 text-center text-sm text-sev-critical">
-        Could not load the window's anomalies — narrow the window or retry.
+        Could not load the window&apos;s anomalies ({hint}).
       </p>
     );
   }
@@ -443,7 +446,7 @@ export function GroupedAnomalies({ windowStart, windowEnd, threshold }: GroupedA
           <Skeleton className="h-40 w-full" />
         ) : serverState.isError ? (
           <p role="alert" className="py-4 text-center text-sm text-sev-critical">
-            Could not load server groups — narrow the window or retry.
+            Could not load server groups ({fetchErrorHint(serverState.error)}).
           </p>
         ) : (
           <ServerGroupedList

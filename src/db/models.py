@@ -574,3 +574,40 @@ class OperationalConfig(Base):
             f" greenhouse_id={self.greenhouse_id!r},"
             f" crop={self.config_json.get('crop') if self.config_json else None!r})>"
         )
+
+
+class Greenhouse(Base):
+    """Registry of tenant greenhouses — exists independently of sensor readings.
+
+    A greenhouse row is created when a tenant is provisioned for a demo or
+    when the operator calls POST /api/readings/greenhouses.  This decouples
+    greenhouse existence from data upload: a greenhouse can be registered with
+    zero readings so that the FE can render the selector and the live stream
+    can report meaningful empty-state status rather than silently showing nothing.
+    """
+
+    __tablename__ = "greenhouses"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        doc="Multi-tenant customer identifier",
+    )
+    greenhouse_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        doc="Greenhouse zone identifier",
+    )
+    registered_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        doc="When this greenhouse was registered",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Greenhouse(tenant_id={self.tenant_id!r},"
+            f" greenhouse_id={self.greenhouse_id!r})>"
+        )
