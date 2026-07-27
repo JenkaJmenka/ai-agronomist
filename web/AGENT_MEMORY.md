@@ -142,6 +142,41 @@ All three functions (`rememberChartBaseline`, `readChartBaseline`, `ensureChartB
 
 ---
 
+## P0 fix: Anomaly table 100% broken — max_points=1 → HTTP 422 (2026-07-27)
+
+### Root cause
+`fetchAnomalyCount` in `flaggedWindow.ts` sent `max_points=1` as a cheap count trick, but the backend declares `max_points` with `ge=DOWNSAMPLE_MAX_POINTS_FLOOR` (= 100, `src/config.py:1053`). Every count request returned 422, so `useAnomalyCount` always `isError=true`, and `GroupedAnomalies` always showed "Could not determine anomaly count — narrow the window or retry."
+
+### Fix
+**`features/anomalies/api/flaggedWindow.ts`:**
+- Added `export const DOWNSAMPLE_MAX_POINTS_FLOOR = 100` (mirrors `src/config.py`; include a comment to keep in sync).
+- Changed `query.set("max_points", "1")` → `query.set("max_points", String(DOWNSAMPLE_MAX_POINTS_FLOOR))`.
+- Also corrected the JSDoc comment (the old comment was a lie: "max_points=1 so only one row is transferred").
+
+**Three error strings in `GroupedAnomalies.tsx`:** Replaced "narrow the window or retry" (misleading for a 422) with a classified hint via `fetchErrorHint(error)`.
+
+**New lib: `features/anomalies/lib/classifyFetchError.ts`:**
+- `classifyFetchError(error): FetchErrorClass` — parses `"... failed (STATUS)"` pattern in error messages; 422/4xx → "validation", 408/504 → "timeout", 5xx → "server", no-status → "network".
+- `fetchErrorHint(error): string` — human-readable parenthetical e.g. "invalid request params — this is a bug, please report it".
+
+**Hooks — added `error: Error | null` field** to `AnomalyCountState`, `FlaggedWindowState`, `AnomalyGroupsState` (hooks now return `query.error`).
+
+**New regression test: `features/anomalies/api/flaggedWindow.test.ts`:**
+- Asserts `DOWNSAMPLE_MAX_POINTS_FLOOR === 100`.
+- Asserts `fetchAnomalyCount` sends `max_points >= DOWNSAMPLE_MAX_POINTS_FLOOR`.
+- Asserts `fetchAnomalyCount` does NOT send `max_points=1`.
+- Asserts `fetchFlaggedWindow` sends `max_points >= DOWNSAMPLE_MAX_POINTS_FLOOR`.
+
+### Key rule
+Never send `max_points` below `DOWNSAMPLE_MAX_POINTS_FLOOR` to `/readings/anomalies-in-window`. The backend SQL COUNT for `anomaly_count` runs on the full window regardless, so the floor is the minimum for minimal data transfer.
+
+### Gates status (2026-07-27)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing deprecated biome.json field info only)
+- `pnpm test`: 231/231 (29 test files — 8 new tests in flaggedWindow.test.ts)
+
+---
+
 ## UI freeze mitigations (2026-07-23)
 
 Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:

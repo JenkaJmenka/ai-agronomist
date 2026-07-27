@@ -16,6 +16,8 @@ export interface AnomalyGroupsState {
   /** Group-by/threshold changed; stale groups stay on screen while loading. */
   readonly isRefetching: boolean;
   readonly isError: boolean;
+  /** The thrown Error when isError is true; null otherwise. */
+  readonly error: Error | null;
 }
 
 /**
@@ -54,5 +56,6 @@ export function useAnomalyGroups(params: {
     isLoading: query.isPending && query.isFetching,
     isRefetching: query.isFetching && !query.isPending,
     isError: query.isError,
+    error: query.error,
   };
 }

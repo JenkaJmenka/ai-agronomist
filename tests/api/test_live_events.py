@@ -17,10 +17,13 @@ import pytest
 import pytest_asyncio
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.auth import clear_test_api_keys, register_test_api_key
 from src.api.main import app
 from src.api.services.live_hub_provider import get_live_hub
+from src.db.models import Base
+from src.db.session import get_db
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub
 
@@ -42,6 +45,26 @@ _MAX_STREAM_S = 0.05
 
 
 @pytest_asyncio.fixture
+async def test_db() -> AsyncGenerator[AsyncSession, None]:
+    """In-memory SQLite with full schema.
+
+    ASGITransport does not trigger the FastAPI lifespan (no lifespan.startup
+    ASGI event), so init_db() is never called and test_global.db only carries
+    the alembic_version table.  Any endpoint that queries the DB (e.g.
+    /api/live/status → greenhouse_exists) would receive 'no such table'.
+    This fixture creates a fresh in-memory DB with Base.metadata.create_all
+    and exposes it via the get_db dependency override in async_client below.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
 async def fake_redis() -> AsyncGenerator[FakeRedis, None]:
     client = FakeRedis()
     yield client
@@ -56,12 +79,18 @@ async def hub(fake_redis: FakeRedis) -> LiveHub:
 
 
 @pytest_asyncio.fixture
-async def async_client(hub: LiveHub) -> AsyncGenerator[AsyncClient, None]:
+async def async_client(
+    hub: LiveHub, test_db: AsyncSession
+) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_live_hub] = lambda: hub
+    # Override get_db so routes that query the DB (e.g. /api/live/status)
+    # use the in-memory DB created by test_db rather than test_global.db.
+    app.dependency_overrides[get_db] = lambda: test_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     app.dependency_overrides.pop(get_live_hub, None)
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture(autouse=True)
@@ -448,7 +477,7 @@ class TestStatusEndpoint:
     async def test_status_no_runtime_returns_empty(
         self, async_client: AsyncClient
     ) -> None:
-        """When live_runtime is None, status returns empty sources."""
+        """When live_runtime is None, status returns not_registered for unknown greenhouse."""
         # Remove any existing runtime from app.state
         if hasattr(app.state, "live_runtime"):
             delattr(app.state, "live_runtime")
@@ -460,13 +489,16 @@ class TestStatusEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data == {"sources": []}
+        # greenhouse_status discriminates the empty-source states; sources preserved
+        assert data["sources"] == []
+        # The test DB has no rows for _TENANT/_GREENHOUSE so it is not registered.
+        assert data["greenhouse_status"] == "not_registered"
 
     @pytest.mark.asyncio
     async def test_status_with_runtime_returns_sources(
         self, async_client: AsyncClient
     ) -> None:
-        """When runtime is present, status returns source list with vendor + last_seen."""
+        """When runtime is present with sources, status returns 'live' + source list."""
         mock_runtime = MagicMock()
         mock_runtime.source_statuses.return_value = [
             {
@@ -491,6 +523,7 @@ class TestStatusEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
+        assert data["greenhouse_status"] == "live"
         assert len(data["sources"]) == 2
         assert data["sources"][0]["source_id"] == "climate"
         assert data["sources"][0]["vendor"] == "mock", "vendor field required by FE schema (N6)"
@@ -499,9 +532,10 @@ class TestStatusEndpoint:
         delattr(app.state, "live_runtime")
 
     @pytest.mark.asyncio
-    async def test_status_unknown_scope_returns_empty(
+    async def test_status_unknown_scope_returns_not_registered(
         self, async_client: AsyncClient
     ) -> None:
+        """Runtime present but scope unknown → not_registered (greenhouse has no rows)."""
         mock_runtime = MagicMock()
         mock_runtime.source_statuses.return_value = []
         app.state.live_runtime = mock_runtime
@@ -513,6 +547,7 @@ class TestStatusEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data == {"sources": []}
+        assert data["sources"] == []
+        assert data["greenhouse_status"] == "not_registered"
 
         delattr(app.state, "live_runtime")

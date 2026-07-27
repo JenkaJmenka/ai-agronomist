@@ -16,7 +16,7 @@ from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import READINGS_MAX_ROWS
-from src.db.models import Incident, RawReading, SensorReading
+from src.db.models import Greenhouse, Incident, RawReading, SensorReading
 
 
 def _cap(limit: Optional[int]) -> int:
@@ -350,7 +350,24 @@ async def raw_readings_exist(
 
 
 async def list_greenhouses(db: AsyncSession, *, tenant_id: str) -> list[str]:
-    rows = (
+    """Return sorted distinct greenhouse_ids for a tenant.
+
+    Merges the standalone registry (Greenhouse table) with readings-based
+    discovery so demo tenants with zero readings still appear.
+    """
+    registry_rows = set(
+        (
+            await db.execute(
+                select(distinct(Greenhouse.greenhouse_id)).where(
+                    Greenhouse.tenant_id == tenant_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    raw_rows = (
         (
             await db.execute(
                 select(distinct(RawReading.greenhouse_id)).where(
@@ -361,8 +378,8 @@ async def list_greenhouses(db: AsyncSession, *, tenant_id: str) -> list[str]:
         .scalars()
         .all()
     )
-    if not rows:
-        rows = (
+    if not raw_rows:
+        raw_rows = (
             (
                 await db.execute(
                     select(distinct(SensorReading.greenhouse_id)).where(
@@ -373,7 +390,102 @@ async def list_greenhouses(db: AsyncSession, *, tenant_id: str) -> list[str]:
             .scalars()
             .all()
         )
-    return sorted(rows)
+
+    return sorted(registry_rows | set(raw_rows))
+
+
+async def greenhouse_exists(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+) -> bool:
+    """Return True if the greenhouse is in the registry or has any readings.
+
+    Checked in order: registry → raw_readings → sensor_readings, returning
+    early on the first hit.  Used by /api/live/status to distinguish
+    'greenhouse does not exist' from 'greenhouse exists but no source'.
+    """
+    for model in (Greenhouse, RawReading, SensorReading):
+        stmt = (
+            select(func.count())
+            .select_from(model)
+            .where(
+                model.tenant_id == tenant_id,
+                model.greenhouse_id == greenhouse_id,
+            )
+        )
+        if (await db.execute(stmt)).scalar():
+            return True
+    return False
+
+
+async def register_greenhouse(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+) -> bool:
+    """Idempotently register a greenhouse.
+
+    Returns True if a new row was created, False if it already existed.
+    Uses a read-then-write pattern to stay portable across SQLite and
+    PostgreSQL without dialect-specific ON CONFLICT syntax.
+    """
+    existing = (
+        await db.execute(
+            select(Greenhouse).where(
+                Greenhouse.tenant_id == tenant_id,
+                Greenhouse.greenhouse_id == greenhouse_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return False
+    db.add(Greenhouse(tenant_id=tenant_id, greenhouse_id=greenhouse_id))
+    await db.commit()
+    return True
+
+
+async def fetch_top_flagged_rows_by_score(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+    threshold: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Top-N flagged rows ordered by anomaly_score DESC.
+
+    Used by /enriched to avoid fetching all flagged rows and selecting the
+    highest-scoring ones in Python (the old approach fetched up to 50 000 rows
+    then called top_anomalies() to discard all but 50).
+
+    The query returns at most *limit* rows pre-sorted by score so Python only
+    needs to enrich those rows, not the entire flagged window.
+    """
+    stmt = (
+        select(SensorReading)
+        .where(
+            *_window_filters(SensorReading, tenant_id, greenhouse_id, start, end),
+            SensorReading.anomaly_score >= threshold,
+        )
+        .order_by(SensorReading.anomaly_score.desc())
+        .limit(limit)
+    )
+    records = (await db.execute(stmt)).scalars().all()
+    # Dedup by timestamp (safety net — unique constraint should prevent dups).
+    best: dict[str, dict[str, Any]] = {}
+    for row in _canonical_records_to_rows(records):
+        key = _iso(row["timestamp"])
+        row["timestamp"] = key
+        prev = best.get(key)
+        if prev is None or (row["anomaly_score"] or 0.0) > (prev["anomaly_score"] or 0.0):
+            best[key] = row
+    # Return in score-descending order (preserve the SQL ordering).
+    return sorted(best.values(), key=lambda r: r["anomaly_score"] or 0.0, reverse=True)
 
 
 async def fetch_incidents(

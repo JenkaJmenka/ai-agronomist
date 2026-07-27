@@ -12,6 +12,8 @@ export interface AnomalyCountState {
   /** True during the initial in-flight fetch (not refetches). */
   readonly isLoading: boolean;
   readonly isError: boolean;
+  /** The thrown Error when isError is true; null otherwise. */
+  readonly error: Error | null;
 }
 
 /**
@@ -51,5 +53,6 @@ export function useAnomalyCount(params: {
     count: query.data ?? null,
     isLoading: query.isPending && query.isFetching,
     isError: query.isError,
+    error: query.error,
   };
 }

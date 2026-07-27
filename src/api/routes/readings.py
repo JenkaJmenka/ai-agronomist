@@ -245,9 +245,28 @@ async def get_greenhouses(
     tenant_id: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, list[str]]:
+    """List registered greenhouses plus any with readings, merged and sorted."""
     return {
         "greenhouses": await readings_service.list_greenhouses(db, tenant_id=tenant_id)
     }
+
+
+@router.post("/greenhouses")
+async def register_greenhouse(
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Register a greenhouse so it appears in the selector with zero readings.
+
+    Idempotent: calling this multiple times for the same
+    (tenant_id, greenhouse_id) pair is safe and returns ``created: false``
+    on subsequent calls.
+    """
+    created = await readings_service.register_greenhouse(
+        db, tenant_id=tenant_id, greenhouse_id=greenhouse_id
+    )
+    return {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id, "created": created}
 
 
 @router.get("/incidents")

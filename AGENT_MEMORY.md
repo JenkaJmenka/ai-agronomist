@@ -3,6 +3,187 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**P1 Timezone Correctness Hardening (perf-be-tz) — COMPLETE (2026-07-28)**
+Agent: backend-engineer. Task: fix silent UTC-day-boundary bug in SQL date grouping for Postgres.
+
+**Root Cause:**
+`_groups_by_date` used `func.date(SensorReading.timestamp)` at 5 sites (SELECT label, GROUP BY,
+ORDER BY, PARTITION BY, and inner subquery SELECT).  On SQLite this compiles to `date(col)` which
+operates on ISO strings already in UTC — correct.  On PostgreSQL, `date(timestamptz)` uses the
+session `TimeZone` GUC, so non-UTC sessions shift day boundaries and rows land in the wrong date
+group.  Because the SQL text is identical on both dialects, no SQLite test can ever detect this.
+
+**Fix — 2 files changed (1 production, 1 new test):**
+
+1. `src/api/services/anomaly_group_service.py`:
+   - New imports: `from sqlalchemy import types as sqltypes`, `from sqlalchemy.ext.compiler
+     import compiles`, `from sqlalchemy.sql.expression import FunctionElement`.
+   - New `class utc_date(FunctionElement)` in the SQL helpers section (before `_base_conditions`).
+     `inherit_cache = True` (required by SQLAlchemy 2.x for query cache compatibility).
+   - `@compiles(utc_date, "postgresql")` → `date((col) AT TIME ZONE 'UTC')` — pins day boundary
+     to UTC regardless of the session TimeZone GUC.
+   - `@compiles(utc_date)` (default) → `date(col)` — SQLite ISO strings are always UTC; emitting
+     `AT TIME ZONE` would raise `no such function` at SQLite runtime.
+   - All 5 `func.date(SensorReading.timestamp)` call sites replaced with `utc_date(...)`:
+     (a) `day_col = utc_date(...).label("day")` in agg SELECT,
+     (b) `.group_by(utc_date(...))` in agg query,
+     (c) `.order_by(utc_date(...).desc())` in agg query,
+     (d) `partition_by=utc_date(...)` in ROW_NUMBER() OVER() window function,
+     (e) `utc_date(...).label("day")` in inner subquery SELECT.
+   - Response shape unchanged: `str(r.day)` / isoformat guard (line ~79) continues to normalise
+     `datetime.date` (Postgres) vs `str` (SQLite) return values exactly as before.
+
+2. `tests/api/test_utc_date_dialect.py` (NEW, 10 tests):
+   - Compile-level tests only — no live Postgres needed.  Asserts on SQL text because that is the
+     only observable layer for this class of dialect mismatch.
+   - `TestUtcDatePostgresDialect` (4): AT TIME ZONE 'UTC' present in SELECT; starts with
+     `date(`; timestamp column referenced; GROUP BY also carries UTC anchor (≥2 occurrences).
+   - `TestUtcDateSqliteDialect` (3): no AT TIME ZONE; plain `date(` unchanged; column referenced.
+   - `TestUtcDateDialectSymmetry` (3): both dialects reference timestamp column; PG and SQLite
+     output differ (guard that the fix is actually applied); `inherit_cache = True` asserted.
+
+**Test results:**
+- Dialect regression tests: 10/10 passed ✅
+- Parity tests: 19/19 passed (unchanged) ✅
+- Full tests/api/ suite: 414 passed, 1 xfailed (pre-existing), 0 failures ✅
+  (xfail: TestMigration::test_upgrade_creates_table_and_downgrade_drops_it — alembic not on
+   system Python; pre-existing from before this task)
+
+Done signal: tasks/done/perf-be-tz.json.
+
+---
+
+## Previous Phase
+**P0 /api/anomalies/groups Performance Fix (perf-be-groups) — COMPLETE (2026-07-27)**
+Agent: backend-engineer. Task: fix 33-second full-range grouping query in production.
+
+**Root Cause:**
+`get_anomaly_groups()` fetched ALL flagged rows (up to 50 000 full ORM objects), then called
+`enrich_anomaly_rows` (pandas DataFrame + `iterrows()` ~5ms/row × N) and `group_anomaly_rows`
+entirely in Python. For a full-year window: 45 000 rows × 5ms = 225 s worst-case; production
+measured at 33 s. `/enriched` had the same shape (7.5 s).
+
+**Fix — 5 files changed + 2 new + 1 migration:**
+
+1. `src/api/services/anomaly_group_service.py` (NEW, ~435 lines):
+   - `by=date`: SQL `GROUP BY date(timestamp)` (aggregate query) + SQL `ROW_NUMBER() OVER
+     (PARTITION BY date ORDER BY score DESC)` (sample query). Fetches only
+     N_days + N_days × 5 rows (~1825 for full year) vs. 45 000. Enrichment uses
+     `_enrich_samples_fast` (fast path — no pandas).
+   - `by=type` / `by=sensor`: Column-projection query (6 cols, not full ORM objects).
+     Binary-search incident lookup (`_nearest_incident_fast`, O(log N) vs O(N) linear scan).
+     Groups in Python dict, enriches only top-N sample rows via `_enrich_samples_fast`.
+   - `_enrich_samples_fast` / `_enrich_sample_fast`: bypass pandas DataFrame construction
+     and `iterrows()`. Uses `_infer_fault_type_from_values` and `_infer_sensors_from_values`
+     to mirror `enrich_row` fallback path when no incident matched.
+   - `_build_sorted_incidents`: pre-sorts incidents by detected_at for O(log N) bisect lookup.
+   - Parity-verified: 19 pytest tests in `tests/api/test_anomaly_groups_parity.py` confirm
+     grouped keys, counts, top_scores, and sample_ids are IDENTICAL between old and new paths.
+
+2. `src/api/routes/anomalies.py` (REWRITTEN):
+   - `/groups`: fetches incidents once, calls `count_flagged_rows` (exact, uncapped), delegates
+     to `fetch_anomaly_groups`. Removed `_load_flagged_window` helper (not needed).
+   - `/enriched`: uses `fetch_top_flagged_rows_by_score` (ORDER BY score DESC LIMIT N) instead
+     of full-table scan. `count_flagged_rows` still returns full uncapped count.
+
+3. `src/api/services/readings_service.py` (+1 function):
+   - Added `fetch_top_flagged_rows_by_score`: bounded SELECT (ORDER BY anomaly_score DESC LIMIT N).
+
+4. `alembic/versions/021_add_anomaly_score_index.py` (NEW):
+   - Chains from 020 (current head). Creates two indexes with `IF NOT EXISTS`:
+     - `ix_sensor_readings_tenant_gh_time` on (tenant_id, greenhouse_id, timestamp)
+     - `ix_sensor_readings_anomaly_covering` on (tenant_id, greenhouse_id, timestamp, anomaly_score)
+   - Note: dead-branch migration 419da3d53b22 (off 015) already creates the first index;
+     `IF NOT EXISTS` makes 021 safe regardless.
+
+5. `tests/api/test_anomaly_groups_parity.py` (NEW, 19 tests):
+   - 5-row, 3-day, 3-incident fixture (spike_fault/calibration_drift/stuck_fault).
+   - Classes: TestGroupByDateParity (7), TestGroupByTypeParity (6), TestGroupBySensorParity (6).
+   - Tests keys, counts, top_scores, sample_ids, ordering, and per-group row counts.
+
+**Performance results (332 flagged rows, 53 incidents, local SQLite):**
+- `by=type`:  old 2.0s → new 0.08s = **25× speedup** ✓
+- `by=sensor`: old 2.0s → new 0.12s = **17× speedup** ✓
+- `by=date`:  old 2.1s → new ~0.05s = **~42× speedup** ✓ (fast enrichment wired)
+- `_enrich_samples_fast` vs `enrich_anomaly_rows` (1825 samples): 11.4s → 0.23s = **49× speedup**
+- Full-range group_by=type: well under 1.0 s target ✓
+
+**Test results:**
+- Parity tests: 19/19 passed ✅
+- Full suite: 2614 passed, 12 skipped, 2 xfailed, 2 pre-existing failures ✅
+  (test_upgrade_creates_table_and_downgrade_drops_it: alembic not on system Python;
+   test_aclose_closes_memoized_publisher: pre-existing hub logic failure)
+
+**Response semantics preserved exactly:**
+- groups[], group_by, anomaly_count fields identical.
+- sample_ids = ISO timestamps of top-scoring rows per group.
+- by=type/sensor: same fault_type labels as /enriched (same incident-join logic mirrored).
+- by=date: newest day first; by=type/sensor: highest count first then alphabetical key.
+
+Done signal: tasks/done/perf-be-groups.json.
+
+---
+
+## Previous Phase
+**Empty-Tenant Live Status Fix (perf-be-tenant) — COMPLETE (2026-07-27)**
+Agent: backend-engineer. Task: fix 2 failing tests + verify the half-done greenhouse registry
+design from a killed session.
+
+**Root Cause Diagnosed:**
+`tests/api/test_live_events.py::TestStatusEndpoint::test_status_no_runtime_returns_empty` and
+`test_status_unknown_scope_returns_not_registered` failed with
+`sqlalchemy.exc.OperationalError: no such table: greenhouses`.
+
+The `async_client` fixture in `test_live_events.py` uses `httpx.ASGITransport(app=app)`.
+`ASGITransport` does NOT send the ASGI lifespan startup event (confirmed from httpx 0.28.1
+source: `handle_async_request` only handles `"type": "http"` scopes). Therefore the FastAPI
+lifespan — and with it `init_db()` / `Base.metadata.create_all` — is never invoked.
+`test_global.db` (the file-based test DB set by `tests/conftest.py`) contains only
+`alembic_version` at test start, so the `Greenhouse` table does not exist when the
+`/api/live/status` endpoint queries it via `readings_service.greenhouse_exists()`.
+
+**Fix applied (1 file, minimal):**
+- `tests/api/test_live_events.py`:
+  1. Added imports: `AsyncSession`, `async_sessionmaker`, `create_async_engine` (SQLAlchemy);
+     `Base` (src.db.models); `get_db` (src.db.session).
+  2. Added `test_db` async fixture: creates an in-memory SQLite DB with
+     `Base.metadata.create_all` and yields an open `AsyncSession`. Docstring explains the
+     ASGITransport / lifespan gap so future readers understand why this is needed.
+  3. Updated `async_client` fixture signature to accept `test_db: AsyncSession` and added
+     `app.dependency_overrides[get_db] = lambda: test_db` / cleanup. This is the identical
+     pattern used correctly in `test_empty_tenant_live.py` and `test_readings_api.py`.
+
+**Previous agent's design verified as correct (no rework needed):**
+- `src/api/routes/live.py` `/api/live/status` — three discriminated `greenhouse_status` values
+  (`not_registered`, `no_source`, `live`) are implemented and documented correctly.
+- `src/db/models.py` — `Greenhouse` model added cleanly; `Base.metadata.create_all` creates it.
+- `src/api/services/readings_service.py` — `greenhouse_exists()`, `list_greenhouses()`,
+  `register_greenhouse()` are all correct and tested.
+- `src/api/routes/readings.py` — `GET /api/readings/greenhouses` and
+  `POST /api/readings/greenhouses` are correctly wired.
+- `alembic/versions/020_add_greenhouse_registry.py` — migration exists (not verified end-to-end
+  since alembic module is not on system Python path; works in venv).
+
+**Live ingestion with zero historical readings — CONFIRMED SAFE:**
+`tests/api/test_empty_tenant_live.py::TestLiveIngestionWithZeroReadings` (2 tests, passing):
+- `DetectorResolver` falls back to baseline detector when no tenant checkpoint — no DB query
+  is needed for a fresh demo tenant.
+- `LiveScorer` warms up from live ticks only — does not query DB for historical data.
+
+**Test results:**
+- Target tests: 2 passed (was 2 failed) ✅
+- Full test file `test_live_events.py`: 17 passed ✅
+- New file `test_empty_tenant_live.py`: 12 passed ✅
+- Full suite: 2595 passed, 12 skipped, 2 xfailed, 2 pre-existing failures
+  (test_upgrade_creates_table_and_downgrade_drops_it: alembic not on system Python path;
+   test_aclose_closes_memoized_publisher: pre-existing hub logic failure). Neither caused by
+   this task.
+
+Done signal: tasks/done/perf-be-tenant.json.
+
+---
+
+## Previous Phase
 **Cold-Run Upload Test Fix (fix-coldrun) — COMPLETE (2026-07-26)**
 Agent: qa-engineer. Task: diagnose and fix the failing assertion in
 `test_inference_upload_cold_run_greenhouse_fixture` (line 91).

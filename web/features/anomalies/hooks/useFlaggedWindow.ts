@@ -19,6 +19,8 @@ export interface FlaggedWindowState {
   /** Threshold/window changed; stale rows stay on screen while loading. */
   readonly isRefetching: boolean;
   readonly isError: boolean;
+  /** The thrown Error when isError is true; null otherwise. */
+  readonly error: Error | null;
 }
 
 /**
@@ -67,5 +69,6 @@ export function useFlaggedWindow(params: {
     isLoading: query.isPending && query.isFetching,
     isRefetching: query.isFetching && !query.isPending,
     isError: query.isError,
+    error: query.error,
   };
 }
