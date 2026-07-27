@@ -82,6 +82,11 @@ test("grouped view switches to G3 server groups at 500+ anomalies", async ({ pag
   await page.route("**/api/bff/anomalies/enriched**", (route) =>
     route.fulfill({ json: { rows: [], count: 0, anomaly_count: 600 } }),
   );
+  // Cheap count fetch (max_points=1) — tells GroupedAnomalies to take the
+  // server path without waiting for the slow G4 enriched response.
+  await page.route("**/api/bff/readings/anomalies-in-window**", (route) =>
+    route.fulfill({ json: { rows: [], anomaly_count: 600, total_count: 600 } }),
+  );
   let requestedGroupBy: string | null = null;
   await page.route("**/api/bff/anomalies/groups**", (route) => {
     requestedGroupBy = new URL(route.request().url()).searchParams.get("group_by");
@@ -145,6 +150,54 @@ test("grouped view counts exact G2 flagged rows, not downsampled chart rows", as
   await page.goto("/anomalies");
   await page.getByRole("tab", { name: "Table view" }).click();
   await expect(page.getByText("5 anomalies · 3 groups")).toBeVisible();
+});
+
+test("table view sensors cell never renders empty while enrichment is in flight", async ({
+  page,
+}) => {
+  // Client path (2 < 500): flagged rows load quickly; enrichment is held in
+  // flight so the component must show a loading skeleton, not empty text.
+  const rows = makeRows(48, 24); // 2 anomalies from chart
+  await page.route("**/api/bff/readings/recent**", (route) =>
+    route.fulfill({ json: mockRecent(rows) }),
+  );
+
+  // Hold the enriched endpoint in-flight for the duration of the assertions.
+  let resolveEnriched = () => {};
+  await page.route("**/api/bff/anomalies/enriched**", async (route) => {
+    await new Promise<void>((resolve) => {
+      resolveEnriched = resolve;
+    });
+    await route.fulfill({ json: { rows: [], count: 0, anomaly_count: 2 } });
+  });
+
+  // Count + full flagged rows (client path; count=2 < 500).
+  const flaggedRows = [isoAtHour(0), isoAtHour(24)].map((timestamp) => ({
+    timestamp,
+    temperature: 30,
+    anomaly_score: 0.9,
+  }));
+  await page.route("**/api/bff/readings/anomalies-in-window**", (route) =>
+    route.fulfill({ json: { rows: flaggedRows, anomaly_count: 2, total_count: 48 } }),
+  );
+
+  await page.goto("/anomalies");
+  await page.getByRole("tab", { name: "Table view" }).click();
+
+  // Wait for at least one grouped row to appear (flagged data is available).
+  await expect(page.getByTestId("grouped-anomaly-row").first()).toBeVisible();
+
+  // Enrichment is still in flight — sensors cell must NOT be blank.
+  // The fix renders an animate-pulse skeleton (aria-hidden) inside the span.
+  const sensorsCell = page.getByTestId("grouped-anomaly-sensors").first();
+  await expect(sensorsCell.locator('[aria-hidden="true"]')).toBeVisible();
+
+  // Reasoning cell likewise must show a loading skeleton.
+  const reasoningCell = page.getByTestId("grouped-anomaly-reasoning").first();
+  await expect(reasoningCell.locator('[aria-hidden="true"]')).toBeVisible();
+
+  // Unblock the enriched request so Playwright can clean up the route handler.
+  resolveEnriched();
 });
 
 test("large readings table paginates instead of capping rows", async ({ page }) => {

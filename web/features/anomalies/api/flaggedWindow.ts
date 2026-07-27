@@ -46,3 +46,19 @@ export async function fetchFlaggedWindow(
   const body = flaggedResponseSchema.parse(await res.json());
   return { rows: body.rows, anomalyCount: body.anomaly_count };
 }
+
+/**
+ * Cheap count-only variant: max_points=1 so only one row is transferred.
+ * The response always carries the full exact anomaly_count regardless of
+ * max_points, so this is far faster than fetching the full row payload.
+ */
+export async function fetchAnomalyCount(params: AnomalyWindowParams): Promise<number> {
+  const query = windowQuery(params);
+  query.set("max_points", "1");
+  const res = await fetch(`/api/bff/readings/anomalies-in-window?${query}`);
+  if (!res.ok) {
+    throw new Error(`Anomaly count request failed (${res.status})`);
+  }
+  const body = flaggedResponseSchema.parse(await res.json());
+  return body.anomaly_count;
+}

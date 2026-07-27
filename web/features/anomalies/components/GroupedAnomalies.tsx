@@ -15,6 +15,7 @@ import type {
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
+import { useAnomalyCount } from "@/features/anomalies/hooks/useAnomalyCount";
 import { useAnomalyGroups } from "@/features/anomalies/hooks/useAnomalyGroups";
 import {
   type AnomalyEnrichment,
@@ -25,6 +26,7 @@ import {
   formatSensorList,
   formatSensorValues,
 } from "@/features/anomalies/lib/formatAnomalyDetails";
+import { resolveGroupingMode } from "@/features/anomalies/lib/groupingDecision";
 import { FAULT_LABELS } from "@/lib/severity";
 
 const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
@@ -36,8 +38,6 @@ const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
 type ClientGroupBy = "date" | "severity";
 
 interface GroupedAnomaliesProps {
-  /** Full-window flagged total (server-side) — decides client vs G3 grouping. */
-  readonly anomalyCount: number;
   readonly windowStart: string | null;
   readonly windowEnd: string | null;
   readonly threshold: number;
@@ -101,9 +101,18 @@ function AnomalyDetailRow(props: {
   readonly values: Readonly<Record<string, unknown>>;
   readonly reasoning: string | null;
   readonly jumpChannels: readonly string[] | null;
+  /**
+   * When true, enrichment data (sensors, reasoning) is still being fetched.
+   * Renders a loading skeleton instead of an empty/dash placeholder so an
+   * in-flight 43 s request can never be mistaken for missing data.
+   */
+  readonly isEnrichmentLoading?: boolean;
 }) {
   const sensorLabel = formatSensorList(props.sensors);
   const valueLabel = formatSensorValues(props.values, props.sensors);
+  const showSensorSkeleton = (props.isEnrichmentLoading ?? false) && props.sensors.length === 0;
+  const showReasoningSkeleton = (props.isEnrichmentLoading ?? false) && props.reasoning === null;
+
   return (
     <li className="flex flex-col gap-1 px-4 py-2 text-sm" data-testid="grouped-anomaly-row">
       <div className="flex flex-wrap items-center gap-3">
@@ -124,13 +133,21 @@ function AnomalyDetailRow(props: {
       </div>
       <div className="grid gap-0.5 text-xs text-text-muted sm:grid-cols-[7rem_1fr]">
         <span className="font-medium text-text">Sensors</span>
-        <span data-testid="grouped-anomaly-sensors">{sensorLabel}</span>
+        <span data-testid="grouped-anomaly-sensors">
+          {showSensorSkeleton ? <Skeleton className="h-3.5 w-32" /> : sensorLabel}
+        </span>
         <span className="font-medium text-text">Values</span>
         <span className="tabular-nums" data-testid="grouped-anomaly-values">
           {valueLabel || "—"}
         </span>
         <span className="font-medium text-text">Reasoning</span>
-        <span data-testid="grouped-anomaly-reasoning">{props.reasoning?.trim() || "—"}</span>
+        <span data-testid="grouped-anomaly-reasoning">
+          {showReasoningSkeleton ? (
+            <Skeleton className="h-3.5 w-48" />
+          ) : (
+            props.reasoning?.trim() || "—"
+          )}
+        </span>
       </div>
     </li>
   );
@@ -259,50 +276,63 @@ function ServerGroupedList(props: {
  * Grouped table view (plan §6.2 AnomalyGroupedTable). Under
  * SERVER_GROUPING_THRESHOLD flagged rows grouping is client compute over the
  * exact G2 flagged rows; above it the G3 endpoint aggregates server-side.
+ *
+ * The routing decision is derived from the cheap count fetch
+ * (/readings/anomalies-in-window?max_points=1), NOT from the slow G4 enriched
+ * endpoint. This breaks the circular dependency that previously caused the
+ * client path to activate prematurely (enrichment count null → fallback to
+ * downsampled 35 → 35 < 500 → client path → enrichment misses → blank cells).
  */
-export function GroupedAnomalies({
-  anomalyCount,
-  windowStart,
-  windowEnd,
-  threshold,
-}: GroupedAnomaliesProps) {
+export function GroupedAnomalies({ windowStart, windowEnd, threshold }: GroupedAnomaliesProps) {
   const [clientGroupBy, setClientGroupBy] = useState<ClientGroupBy>("date");
   const [serverGroupBy, setServerGroupBy] = useState<ServerGroupBy>("date");
-  const useServer = anomalyCount >= SERVER_GROUPING_THRESHOLD;
+
+  // Always-enabled cheap count fetch — breaks the circularity.
+  const countState = useAnomalyCount({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: windowStart !== null && windowEnd !== null,
+  });
+  const mode = resolveGroupingMode(countState.count);
+  const isServer = mode === "server";
 
   const serverState = useAnomalyGroups({
     windowStart,
     windowEnd,
     threshold,
     groupBy: serverGroupBy,
-    enabled: useServer,
+    enabled: isServer,
   });
+  // useFlaggedWindow is now gated on mode === "client" (not !useServer).
+  // Previously it was enabled: !useServer, but useServer itself depended on
+  // anomalyCount which came from the slow enriched endpoint — circular.
   const flagged = useFlaggedWindow({
     windowStart,
     windowEnd,
     threshold,
-    enabled: !useServer,
+    enabled: mode === "client",
   });
   // Enrichment for client groups — same window, up to the client-side cap.
   const enrichment = useEnrichedAnomalies({
     windowStart,
     windowEnd,
     threshold,
-    enabled: !useServer && flagged.anomalies.length > 0,
+    enabled: mode === "client" && flagged.anomalies.length > 0,
     limit: SERVER_GROUPING_THRESHOLD,
   });
   const clientGroups = useMemo(
-    () => (useServer ? [] : groupClientSide(flagged.anomalies, clientGroupBy)),
-    [flagged.anomalies, clientGroupBy, useServer],
+    () => (isServer ? [] : groupClientSide(flagged.anomalies, clientGroupBy)),
+    [flagged.anomalies, clientGroupBy, isServer],
   );
 
   const [groupsPageIndex, setGroupsPageIndex] = useState(0);
   useEffect(() => {
     setGroupsPageIndex(0);
-  }, [clientGroupBy, serverGroupBy, useServer, anomalyCount, flagged.anomalies.length]);
+  }, [clientGroupBy, serverGroupBy, isServer, countState.count, flagged.anomalies.length]);
 
   const exportRows = useMemo(() => {
-    if (useServer) {
+    if (isServer) {
       const rows: unknown[][] = [];
       for (const group of serverState.groups) {
         const samples: AnomalyGroupSample[] =
@@ -344,21 +374,38 @@ export function GroupedAnomalies({
       }
     }
     return rows;
-  }, [useServer, serverState.groups, clientGroups, enrichment.byTimestamp]);
+  }, [isServer, serverState.groups, clientGroups, enrichment.byTimestamp]);
 
-  if (!useServer && flagged.isLoading) {
+  // Show a loading skeleton while the cheap count fetch is in flight so we
+  // never render either grouping path before the routing decision is valid.
+  if (countState.isLoading) {
     return <Skeleton className="h-40 w-full" />;
   }
 
-  if (!useServer && flagged.isError) {
+  if (countState.isError || countState.count === null) {
     return (
       <p role="alert" className="py-4 text-center text-sm text-sev-critical">
-        Could not load the window’s anomalies — narrow the window or retry.
+        Could not determine anomaly count — narrow the window or retry.
       </p>
     );
   }
 
-  if (!useServer && flagged.anomalies.length === 0) {
+  // countState.count is now a number; TypeScript narrowed via the null guard above.
+  const exactCount = countState.count;
+
+  if (mode === "client" && flagged.isLoading) {
+    return <Skeleton className="h-40 w-full" />;
+  }
+
+  if (mode === "client" && flagged.isError) {
+    return (
+      <p role="alert" className="py-4 text-center text-sm text-sev-critical">
+        Could not load the window's anomalies — narrow the window or retry.
+      </p>
+    );
+  }
+
+  if (mode === "client" && flagged.anomalies.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-text-muted">
         No anomalies to group in this window.
@@ -368,21 +415,21 @@ export function GroupedAnomalies({
 
   const exportHeaders = ["group", "timestamp", "score", "sensors", "values", "reasoning"] as const;
 
-  if (useServer) {
+  if (isServer) {
     return (
       <div className="space-y-3" data-testid="server-grouped">
         <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="group-by">
           <span className="text-text-muted">Group by</span>
-          {(Object.keys(SERVER_GROUP_LABELS) as ServerGroupBy[]).map((mode) => (
+          {(Object.keys(SERVER_GROUP_LABELS) as ServerGroupBy[]).map((m) => (
             <GroupModeButton
-              key={mode}
-              label={SERVER_GROUP_LABELS[mode]}
-              isActive={serverGroupBy === mode}
-              onClick={() => setServerGroupBy(mode)}
+              key={m}
+              label={SERVER_GROUP_LABELS[m]}
+              isActive={serverGroupBy === m}
+              onClick={() => setServerGroupBy(m)}
             />
           ))}
           <span className="ml-auto flex items-center gap-2 text-xs text-text-muted tabular-nums">
-            {anomalyCount.toLocaleString()} anomalies · grouped server-side
+            {exactCount.toLocaleString()} anomalies · grouped server-side
             <ExportCsvButton
               filename="anomalies-grouped"
               headers={exportHeaders}
@@ -421,12 +468,12 @@ export function GroupedAnomalies({
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="group-by">
         <span className="text-text-muted">Group by</span>
-        {(["date", "severity"] as const).map((mode) => (
+        {(["date", "severity"] as const).map((m) => (
           <GroupModeButton
-            key={mode}
-            label={mode === "date" ? "Date" : "Severity"}
-            isActive={clientGroupBy === mode}
-            onClick={() => setClientGroupBy(mode)}
+            key={m}
+            label={m === "date" ? "Date" : "Severity"}
+            isActive={clientGroupBy === m}
+            onClick={() => setClientGroupBy(m)}
           />
         ))}
         <span className="ml-auto flex items-center gap-2 text-xs text-text-muted tabular-nums">
@@ -467,6 +514,7 @@ export function GroupedAnomalies({
                     values={clientRowValues(row)}
                     reasoning={detail?.reasoning ?? null}
                     jumpChannels={sensors}
+                    isEnrichmentLoading={enrichment.isLoading}
                   />
                 );
               }}

@@ -112,6 +112,36 @@ All three functions (`rememberChartBaseline`, `readChartBaseline`, `ensureChartB
 
 ---
 
+## Fix: blank Sensors/Reasoning in Table view (2026-07-27)
+
+### Root cause
+`AnomaliesView` computed `anomalyTotal = enrichment.anomalyCount ?? anomalies.length`. While the slow G4 `/enriched` request was in flight (43–96 s in production), `enrichment.anomalyCount` was null, so `anomalyTotal` fell back to the downsampled chart row count (≈35). `GroupedAnomalies` received that 35, computed `35 >= 500 = false`, and took the client grouping path — but enrichment only covers the top-500 by score while the client path lists rows by date. The row subsets barely intersect, so `enrichmentFor()` map misses on every displayed row → blank Sensors and Reasoning cells.
+
+### Fix
+
+**New files:**
+- `features/anomalies/hooks/useAnomalyCount.ts` — Always-enabled hook that fetches `/readings/anomalies-in-window?max_points=1` to get the exact count cheaply (one row transferred; response always includes `anomaly_count`). Query key `["anomaly-count", ...]` distinct from `["flagged-window", ...]`.
+- `features/anomalies/lib/groupingDecision.ts` — Pure `resolveGroupingMode(count: number | null): 'server' | 'client' | 'loading'`. Returns `'loading'` when null so callers never prematurely commit to a rendering path.
+- `features/anomalies/lib/groupingDecision.test.ts` — 5 tests covering null→loading, count≥500→server, count<500→client.
+- `features/anomalies/api/flaggedWindow.ts` — Added `fetchAnomalyCount` (max_points=1 variant).
+
+**Modified:**
+- `GroupedAnomalies.tsx`: removed `anomalyCount` prop; calls `useAnomalyCount` internally (always enabled); routes via `resolveGroupingMode`; shows `<Skeleton>` while count is unknown so no rendering path is ever taken prematurely. `AnomalyDetailRow` gained `isEnrichmentLoading?: boolean` — when true and sensors/reasoning are absent, renders `<Skeleton>` inside the span (preserving `data-testid`s) instead of empty string.
+- `AnomaliesView.tsx`: `anomalyTotal` is now `number | null` (`enrichment.anomalyCount ?? (enrichment.isLoading ? null : anomalies.length)`); headline shows "—" while null; "All anomalies" card title uses null-safe guard; `anomalyCount` prop removed from `<GroupedAnomalies>`.
+- `test/e2e/anomalies-deferred.spec.ts`: added `anomalies-in-window` mock (returning count=600) to "grouped view switches to G3" test; added new test "table view sensors cell never renders empty while enrichment is in flight".
+
+### Key pattern: cheap count gate
+`useAnomalyCount` (`max_points=1`) is far faster than G4 `/enriched` (43 s). Wire it always to `GroupedAnomalies`; the G4 result is only used for display (headline), not for routing. Any time these two can diverge, prefer the cheap count for routing decisions.
+
+### Gates status (2026-07-27)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing deprecated biome.json field only)
+- `pnpm test`: 223/223 (28 test files — 5 new tests in groupingDecision.test.ts)
+- `pnpm build`: clean
+- `pnpm exec playwright test`: 54/54 (1 new test)
+
+---
+
 ## UI freeze mitigations (2026-07-23)
 
 Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:

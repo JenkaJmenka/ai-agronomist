@@ -57,7 +57,12 @@ function AnomaliesBody() {
   // Dim + debounced URL write for chart drag-select / scroll-zoom.
   const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({ from, to });
-  const anomalyTotal = enrichment.anomalyCount ?? anomalies.length;
+  // Use the exact count from the enriched response once known; while the slow
+  // G4 request is in flight show null (not the downsampled anomalies.length
+  // which can be 35 instead of the true 2649, causing GroupedAnomalies to
+  // pick the wrong routing path and render silently-blank enrichment cells).
+  const anomalyTotal: number | null =
+    enrichment.anomalyCount ?? (enrichment.isLoading ? null : anomalies.length);
   const tableAnomalies = enrichment.topRows ?? anomalies;
 
   // Scope key ties the chart baseline to this page + tenant + greenhouse.
@@ -108,7 +113,11 @@ function AnomaliesBody() {
             ))}
           </div>
           <p className="text-sm tabular-nums">
-            <span className="font-semibold">{anomalyTotal}</span>
+            {anomalyTotal !== null ? (
+              <span className="font-semibold">{anomalyTotal.toLocaleString()}</span>
+            ) : (
+              <span className="font-semibold text-text-muted">—</span>
+            )}
             <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} in </span>
             <span className="font-semibold">{originalCount.toLocaleString()}</span>
             <span className="text-text-muted"> points</span>
@@ -152,7 +161,7 @@ function AnomaliesBody() {
           </Card>
           <Card
             title={
-              anomalyTotal > 0
+              anomalyTotal !== null && anomalyTotal > 0
                 ? `All anomalies (${anomalyTotal.toLocaleString()})`
                 : "All anomalies"
             }
@@ -170,7 +179,6 @@ function AnomaliesBody() {
         <RefetchingBlock isRefetching={isDimmed}>
           <Card title="Detected anomalies (grouped)">
             <GroupedAnomalies
-              anomalyCount={anomalyTotal}
               windowStart={windowStart}
               windowEnd={windowEnd}
               threshold={threshold}
