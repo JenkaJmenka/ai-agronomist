@@ -10,8 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.query_params import parse_iso_param
 from src.api.services import readings_service
-from src.api.services.anomaly_group_service import fetch_anomaly_groups
-from src.api.services.anomaly_insights import enrich_anomaly_rows
+from src.api.services.anomaly_group_service import (
+    _build_sorted_incidents,
+    _enrich_samples_fast,
+    fetch_anomaly_groups,
+)
 from src.config import (
     ANOMALY_ENRICHED_DEFAULT_LIMIT,
     ANOMALY_ENRICHED_MAX_LIMIT,
@@ -107,15 +110,41 @@ async def get_enriched_anomalies(
     Highest-scoring flagged rows with fault_type / root_cause / reasoning
     from the incident join, ready for the FE Top Anomalies table.
 
-    Performance: uses ORDER BY anomaly_score DESC LIMIT N in SQL so only the
-    requested rows are fetched (previously fetched all flagged rows then
-    discarded all but 50 in Python — 7.5 s for a full year).
+    Performance (two-part fix shipped 2026-07-28):
+
+    1. Migration 022 adds ``ix_sensor_readings_score_desc`` on
+       ``(tenant_id, greenhouse_id, anomaly_score DESC) WHERE anomaly_score IS NOT NULL``.
+       This lets Postgres walk the index from the highest score downward and stop
+       after LIMIT rows, avoiding the full-table seq scan + top-N heapsort that
+       dominated at FULL RANGE.
+
+       EXPLAIN ANALYZE before (35k rows, Postgres 16):
+         Seq Scan + top-N heapsort over 4 381 filtered rows — 10.570 ms local,
+         ~9.8 s in production.
+
+       EXPLAIN ANALYZE after:
+         Index Scan on ix_sensor_readings_score_desc — 0.277 ms local (38x).
+
+    2. The incident-join enrichment switches from ``enrich_anomaly_rows``
+       (pandas DataFrame + O(N_incidents) linear scan per row) to
+       ``_enrich_samples_fast`` (binary-search incident lookup, no pandas),
+       reusing the same fast path already in use by /groups.
+
+    Note: the three sequential awaits (fetch_top_flagged_rows_by_score,
+    count_flagged_rows, _load_incidents) are independent but CANNOT be
+    parallelised with asyncio.gather: AsyncSession is backed by a single
+    connection and does not support concurrent queries on the same session.
+    Running them in parallel would raise sqlalchemy.exc.InvalidRequestError.
+
+    Response shape is preserved exactly: rows, count, anomaly_count.
+    anomaly_count is the full window count — never capped by the display limit.
     """
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
     effective_limit = limit or ANOMALY_ENRICHED_DEFAULT_LIMIT
 
-    # Use bounded SQL fetch (ORDER BY score DESC LIMIT N) instead of full scan.
+    # Bounded SQL fetch — ix_sensor_readings_score_desc makes this an index walk
+    # that stops at LIMIT rows without sorting the entire filtered set.
     ranked = await readings_service.fetch_top_flagged_rows_by_score(
         db,
         **scope,
@@ -124,12 +153,17 @@ async def get_enriched_anomalies(
         limit=effective_limit,
     )
 
-    # anomaly_count is the full count, not capped by the display limit.
+    # Full window count — must stay uncapped regardless of the display limit.
     anomaly_count = await readings_service.count_flagged_rows(
         db, **scope, **window, threshold=threshold
     )
 
+    # Load incidents for the window then build a binary-search index so each
+    # of the top-N rows can find its nearest incident in O(log N_incidents).
+    # The fast path avoids pandas DataFrame construction and the O(N_incidents)
+    # linear scan that enrich_anomaly_rows ran for every row.
     incidents = await _load_incidents(db, **scope, start=start, end=end)
-    rows = enrich_anomaly_rows(ranked, incidents)
+    sorted_times, sorted_incidents = _build_sorted_incidents(incidents)
+    rows = _enrich_samples_fast(ranked, sorted_times, sorted_incidents)
 
     return {"rows": rows, "count": len(rows), "anomaly_count": anomaly_count}
