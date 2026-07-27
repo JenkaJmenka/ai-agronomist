@@ -3,6 +3,90 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**P1 /api/anomalies/enriched Performance Fix (perf-be-enriched) — COMPLETE (2026-07-28)**
+Agent: backend-engineer. Task: fix 9.8s FULL RANGE latency for /api/anomalies/enriched.
+
+**Root Cause:**
+`get_enriched_anomalies()` calls `fetch_top_flagged_rows_by_score()` which issues:
+```sql
+SELECT * FROM sensor_readings
+WHERE tenant_id=? AND greenhouse_id=?
+  AND timestamp BETWEEN ? AND ?
+  AND anomaly_score >= ?
+ORDER BY anomaly_score DESC LIMIT 50
+```
+At FULL RANGE (year-wide timestamp window), the existing 021 covering index
+`(tenant_id, greenhouse_id, timestamp, anomaly_score)` cannot serve the
+`ORDER BY anomaly_score DESC` — `timestamp` is the leading range column, so
+Postgres falls back to a full sequential scan + top-N heapsort over all flagged
+rows (4,381 locally, far more in production), measured at 9.8s in production.
+
+**Investigation of the three suspects:**
+
+1. ✅ **ORDER BY anomaly_score DESC** — CONFIRMED DOMINANT. EXPLAIN ANALYZE proved:
+   BEFORE (35k rows, Postgres 16.14 local):
+   ```
+   Seq Scan on sensor_readings
+     Filter: tenant_id + greenhouse_id + timestamp BETWEEN + anomaly_score >= 0.5
+     Rows Removed by Filter: 30659
+   Sort: top-N heapsort, 4381 candidate rows
+   Execution Time: 10.570 ms (local) → 9.8 s production
+   ```
+   AFTER adding ix_sensor_readings_score_desc:
+   ```
+   Index Scan using ix_sensor_readings_score_desc
+     Index Cond: tenant_id='demo' AND greenhouse_id='default' AND anomaly_score >= 0.5
+     Filter: timestamp range (passes almost all at FULL RANGE; 3 rows removed)
+   Execution Time: 0.277 ms  (38x speedup local; ratio grows with dataset size)
+   ```
+   Narrow windows (1d/7d/30d) continue using ix_sensor_readings_anomaly_covering — verified.
+
+2. ✅ **_load_incidents() unbounded** — Fixed by replacing `enrich_anomaly_rows`
+   (pandas DataFrame + O(N_incidents) linear scan per row) with `_enrich_samples_fast`
+   (binary-search incident lookup, no pandas). Reuses the same fast path already
+   used by /groups. Python processing goes from O(N_rows × N_incidents) to O(N_rows × log N_incidents).
+
+3. 📝 **Sequential awaits** — Cannot parallelize. AsyncSession is backed by a single
+   connection; concurrent queries on the same session raise InvalidRequestError.
+   Documented in the route docstring. No code change.
+
+**Fix — 3 files changed + 1 new migration + 1 new test file:**
+
+1. `alembic/versions/022_add_score_desc_index.py` (NEW, chains from 021):
+   - Partial index: `ix_sensor_readings_score_desc ON sensor_readings
+     (tenant_id, greenhouse_id, anomaly_score DESC) WHERE anomaly_score IS NOT NULL`
+   - DESC ordering stored so Postgres walks high→low without reversal.
+   - Partial (IS NOT NULL) keeps the index small — un-scored rows never appear
+     in flagged-row queries.
+
+2. `src/api/routes/anomalies.py`:
+   - Removed `enrich_anomaly_rows` import (no longer used).
+   - Added `_build_sorted_incidents`, `_enrich_samples_fast` imports from
+     `anomaly_group_service`.
+   - `get_enriched_anomalies`: replaced `enrich_anomaly_rows(ranked, incidents)`
+     with `_build_sorted_incidents(incidents)` + `_enrich_samples_fast(ranked, ...)`.
+   - Route docstring explains both fixes and the asyncio.gather non-fix.
+
+3. `tests/api/test_enriched_parity.py` (NEW, 14 tests):
+   - `TestEnrichedPathParity` (10): old path vs new path side-by-side on a 5-row
+     3-incident fixture. Asserts: row count, timestamps (same order), anomaly scores,
+     fault_type on matched rows, root_cause, incident_id match/none, affected_sensors
+     on matched rows, root_cause=None on unmatched, fault_type inferred on unmatched,
+     score-descending ordering, reasoning truthy for all rows.
+   - `TestEnrichedResponseShape` (4): top-level keys present, count correctness, each
+     row has required frontend fields.
+
+**Test results:**
+- New parity tests: 14/14 passed ✅
+- Existing test_anomalies_api.py: 9/9 passed ✅
+- Full suite: 2638 passed, 12 skipped, 2 xfailed, 2 pre-existing failures ✅
+  (test_upgrade_creates_table_and_downgrade_drops_it, test_aclose_closes_memoized_publisher)
+
+Done signal: tasks/done/perf-be-enriched.json.
+
+---
+
+## Previous Phase
 **P1 Timezone Correctness Hardening (perf-be-tz) — COMPLETE (2026-07-28)**
 Agent: backend-engineer. Task: fix silent UTC-day-boundary bug in SQL date grouping for Postgres.
 
