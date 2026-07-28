@@ -120,6 +120,11 @@ PATHS: dict = {
     "log_dir": "logs/tensorboard/",
 }
 
+# Directory where per-customer fine-tuned model checkpoints are saved.
+# Override via CUSTOMER_MODEL_DIR env var (e.g. point at a persistent volume
+# in containerised deploys, or at tmp_path in tests).
+CUSTOMER_MODEL_DIR: str = os.environ.get("CUSTOMER_MODEL_DIR", "models/")
+
 # =============================================================================
 # Synthetic Data Generation & Normalization
 # =============================================================================

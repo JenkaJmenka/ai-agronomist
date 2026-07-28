@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 
 from src.models.lstm_vae import LSTMVAE
-from src.config import DEVICE, SEQ_LEN
+from src.config import CUSTOMER_MODEL_DIR, DEVICE, SEQ_LEN
 
 class TransferLearner:
     """
@@ -73,7 +73,7 @@ class TransferLearner:
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size)
         
         best_loss = float('inf')
-        save_path = f"models/{customer_id}_model.pt"
+        save_path = os.path.join(CUSTOMER_MODEL_DIR, f"{customer_id}_model.pt")
         
         for epoch in range(epochs):
             self.model.train()
@@ -137,7 +137,7 @@ class TransferLearner:
         )
 
         best_loss = float("inf")
-        save_path = f"models/{customer_id}_model.pt"
+        save_path = os.path.join(CUSTOMER_MODEL_DIR, f"{customer_id}_model.pt")
 
         for epoch in range(epochs):
             self.model.train()
