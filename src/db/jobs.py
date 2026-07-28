@@ -7,18 +7,89 @@ into double-counting or double-finalizing.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, types as sqltypes, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.expression import FunctionElement
 
 from src.config import STALE_PREPARE_MINUTES
 from src.db.models import Job, JobPortion
 
 logger = logging.getLogger(__name__)
+
+# Per-row arrays stored in Job.result for upload jobs — each can hold one entry
+# per processed sequence (~105k on a full greenhouse day), making the full result
+# blob several MB per job.  The list endpoint must never ship these; callers that
+# need the arrays fetch the single job detail (GET /api/jobs/{id}).
+# NOTE: "embeddings" and "uncertainties" are excluded *before* the worker stores
+# the result (see upload_consumer.py), but kept here as a belt-and-suspenders
+# guard for older rows that may have been stored before that exclusion was added.
+_HEAVY_RESULT_KEYS: tuple[str, ...] = (
+    "anomaly_scores",
+    "sequence_timestamps",
+    "embeddings",
+    "uncertainties",
+    "high_anomalies",
+    "statistical_summary",
+)
+
+
+class _JsonStripHeavyKeys(FunctionElement):
+    """Strip heavy per-sequence arrays from Job.result at the SQL layer.
+
+    Compiled output
+    ---------------
+    PostgreSQL : (result::jsonb - '{k1,k2,...}'::text[])::text
+                 Casts json → jsonb (enables the array-remove operator),
+                 removes the heavy keys, casts back to text so asyncpg
+                 returns a plain string that SQLAlchemy's JSON result
+                 processor can json.loads() into a dict.
+    All others : json_remove(json_remove(…, '$.k1'), '$.k2', …)
+                 (SQLite 3.9+ json_remove, chained one key at a time)
+
+    Why text, not jsonb, for the Postgres cast
+    -------------------------------------------
+    asyncpg registers JSONB with binary codec and returns Python dicts
+    directly — bypassing SQLAlchemy's JSON result_processor entirely.
+    Casting to TEXT forces asyncpg to return a string, which
+    SQLAlchemy's JSON result_processor then json.loads() into a dict.
+    For NULL input both dialects correctly return NULL → Python None.
+
+    Any key absent from the result JSON is silently ignored by both
+    json_remove() (SQLite) and the jsonb - operator (PostgreSQL).
+    """
+
+    type = sqltypes.JSON()
+    inherit_cache = True
+
+
+@compiles(_JsonStripHeavyKeys, "postgresql")
+def _pg_strip_heavy_keys(
+    element: _JsonStripHeavyKeys, compiler: Any, **kw: Any
+) -> str:
+    (col,) = list(element.clauses)
+    col_sql = compiler.process(col, **kw)
+    keys_literal = "{" + ",".join(_HEAVY_RESULT_KEYS) + "}"
+    return f"(({col_sql})::jsonb - '{keys_literal}'::text[])::text"
+
+
+@compiles(_JsonStripHeavyKeys)  # default = SQLite and any other dialect
+def _default_strip_heavy_keys(
+    element: _JsonStripHeavyKeys, compiler: Any, **kw: Any
+) -> str:
+    (col,) = list(element.clauses)
+    col_sql = compiler.process(col, **kw)
+    # Chain json_remove() calls — SQLite applies them left-to-right
+    for key in _HEAVY_RESULT_KEYS:
+        col_sql = f"json_remove({col_sql}, '$.{key}')"
+    return col_sql
+
 
 _DIALECT_INSERTS = {
     "postgresql": postgresql.insert,
@@ -75,6 +146,70 @@ async def list_jobs(
     stmt = stmt.order_by(Job.created_at.desc()).limit(limit).execution_options(populate_existing=True)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_jobs_light(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: Optional[str] = None,
+    job_type: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List jobs with heavy result keys stripped server-side.
+
+    Replaces the former pattern of fetching full Job ORM objects (including the
+    large payload and result blobs) and then discarding the heavy data in Python.
+
+    Differences from list_jobs():
+    - payload column is NOT fetched — it is never included in list responses.
+    - result is stripped of _HEAVY_RESULT_KEYS at the SQL layer via
+      _JsonStripHeavyKeys, so only the light subset is transferred.
+    - Returns plain dicts rather than ORM objects (the route constructs
+      JobStatusResponse directly, avoiding any lazy-load trigger).
+
+    The detail view (get_job + GET /api/jobs/{id}) continues to load the full
+    result via the standard ORM path — only the list view is optimised here.
+    """
+    stmt = (
+        select(
+            Job.id,
+            Job.tenant_id,
+            Job.greenhouse_id,
+            Job.job_type,
+            Job.status,
+            Job.total_portions,
+            Job.completed_portions,
+            Job.failed_portions,
+            # payload: deliberately omitted — never included in list responses.
+            _JsonStripHeavyKeys(Job.result).label("result"),
+            Job.error,
+            Job.created_at,
+            Job.updated_at,
+            Job.finished_at,
+        )
+        .where(Job.tenant_id == tenant_id)
+    )
+    if greenhouse_id:
+        stmt = stmt.where(Job.greenhouse_id == greenhouse_id)
+    if job_type:
+        stmt = stmt.where(Job.job_type == job_type)
+    if status:
+        stmt = stmt.where(Job.status == status)
+    stmt = stmt.order_by(Job.created_at.desc()).limit(limit)
+    result = await db.execute(stmt)
+    rows: list[dict[str, Any]] = []
+    for mapping in result.mappings().all():
+        row = dict(mapping)
+        # Ensure result is a dict — SQLAlchemy's JSON result_processor handles
+        # this automatically, but an explicit guard keeps us safe across driver
+        # versions that may return raw JSON text instead of a parsed object.
+        raw_result = row.get("result")
+        if isinstance(raw_result, str):
+            row["result"] = json.loads(raw_result)
+        rows.append(row)
+    return rows
 
 
 async def record_portion_result(
