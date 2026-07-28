@@ -12,6 +12,7 @@ runtime wires the ``on_reading`` / ``on_status`` callbacks.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 from src.config import LIVE_MERGE_GRACE_SECONDS
 from src.live.events import LiveReadingEvent, SourceReading, SourceStatusEvent
 from src.live.sources.base import SourceConfig
+
+logger = logging.getLogger("live.merge")
 
 # Health thresholds (multiples of a source's poll_interval_seconds)
 _DEGRADED_MULTIPLIER: float = 3.0
@@ -161,7 +164,23 @@ class ChannelMerger:
                 await self._sweep_health()
                 await asyncio.sleep(self._emit_interval / 4.0)
         except asyncio.CancelledError:
-            await self._flush_all_buckets()
+            # Always attempt a final flush so buffered sensor data is preserved on
+            # clean shutdown.  If the flush itself raises (Redis unavailable, DB
+            # blip, …), log the failure and continue — the CancelledError MUST
+            # still be re-raised so the supervised() wrapper does not mistake this
+            # for a crash and restart the task, which would cause LiveRuntime.stop()
+            # to hang indefinitely (asyncio.gather never returns).
+            try:
+                await self._flush_all_buckets()
+            except Exception as flush_exc:
+                logger.error(
+                    "ChannelMerger(%s/%s): flush failed during shutdown"
+                    " — some buffered events may be lost: %s",
+                    self._tenant_id,
+                    self._greenhouse_id,
+                    flush_exc,
+                    exc_info=True,
+                )
             raise
 
     # ------------------------------------------------------------------

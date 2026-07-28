@@ -257,7 +257,21 @@ class PersistenceBatcher:
                 await asyncio.sleep(self._flush_interval)
                 await self._flush()
         except asyncio.CancelledError:
-            await self._flush()
+            # Always attempt a final flush so buffered sensor data is preserved on
+            # clean shutdown.  If the flush itself raises (Redis unavailable, DB
+            # blip, …), log the failure and continue — the CancelledError MUST
+            # still be re-raised so the supervised() wrapper does not mistake this
+            # for a crash and restart the task, which would cause LiveRuntime.stop()
+            # to hang indefinitely (asyncio.gather never returns).
+            try:
+                await self._flush()
+            except Exception as flush_exc:
+                logger.error(
+                    "PersistenceBatcher: flush failed during shutdown"
+                    " — some buffered events may be lost: %s",
+                    flush_exc,
+                    exc_info=True,
+                )
             raise
 
     async def close(self) -> None:
