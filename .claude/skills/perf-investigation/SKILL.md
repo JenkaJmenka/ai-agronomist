@@ -54,6 +54,36 @@ Exit `0` within budget · `1` budget breach · `2` contract violation.
   range. The deployed value wins: those limits are env-overridable, so the
   running service can disagree with both checked-in constants.
 
+### Layer 1.5 — `scripts/perf_flows.py` (run whenever the complaint is about a *page*)
+
+```bash
+python3 scripts/perf_flows.py [tenant_id] [greenhouse_id]   # default tenant_1 gh_A
+```
+
+Exit `0` within budget · `1` a flow breached · `2` a request failed.
+
+Layer 1 times endpoints in isolation. **Users do not experience endpoints, they
+experience journeys.** A page built entirely from sub-second endpoints can
+still take four seconds to become usable, because it fires several in sequence.
+This replays each real user journey, running a step's requests concurrently the
+way a browser would, and reports the critical path.
+
+It goes through the **web BFF**, not the API directly, so the Next.js proxy hop
+is included and BFF-only regressions are visible.
+
+Covered journeys: anomaly cold-load with no window · switch to table view ·
+cycle group-by · narrow to 7 days · raise threshold · monitoring cold load ·
+scrub to a historical window · metrics · configuration · jobs · **empty-tenant
+monitoring** (the silent-hang journey).
+
+A non-200 in any flow is reported as a **request failure, not a slow flow** —
+that is how a contract regression like the `max_points=1` 422 surfaces here.
+
+**Keep the flow definitions honest.** They are hand-written request sequences,
+so they drift when the FE changes what it fetches. Layer 3 is the ground truth:
+when the browser is available, capture the real waterfall with
+`list_network_requests` and reconcile it against `build_flows()`.
+
 ### Layer 3 — browser metrics via `chrome-devtools` MCP
 
 Only after Layer 1 is clean, or to attribute a slow page between XHR and render.
