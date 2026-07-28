@@ -10,6 +10,17 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 # Ensure test DB is used globally before any app imports
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_global.db"
 
+# Disable LiveRuntime mock SCADA sources and live-to-DB persistence in tests.
+# The supervised mock connector tasks attempt to publish to Redis, which is
+# unavailable in test environments. When the TestClient shuts down, the
+# merger's CancelledError handler tries to flush remaining buckets to Redis,
+# fails with ConnectionError, and the supervisor restarts the task instead
+# of terminating it — causing asyncio.gather() in LiveRuntime.stop() to hang
+# forever, which blocks TestClient.__exit__(). Tests that exercise the live
+# pipeline use monkeypatch to re-enable these per-test.
+os.environ.setdefault("MOCK_SCADA_ENABLED", "false")
+os.environ.setdefault("LIVE_PERSIST_ENABLED", "false")
+
 import pytest
 import torch
 from src.models.lstm_vae import LSTMVAE
@@ -59,10 +70,30 @@ def model(device: str) -> LSTMVAE:
 @pytest.fixture
 def sample_input() -> torch.Tensor:
     """Returns a random synthetic tensor representing a batch of greenhouse readings.
-    
+
     Shape: (batch_size=8, seq_len, input_dim).
     """
     batch_size = 8
     seq_len = MODEL_CONFIG["seq_len"]
     input_dim = MODEL_CONFIG["input_dim"]
     return torch.randn(batch_size, seq_len, input_dim)
+
+
+@pytest.fixture
+def baseline_checkpoint(tmp_path: "pathlib.Path") -> str:
+    """Create a minimal LSTM-VAE checkpoint in tmp_path for tests that need a
+    baseline model.
+
+    The model is freshly initialised (random weights) and saved through the
+    standard ``save_checkpoint`` API so the file contains all metadata fields
+    (model_state_dict, epoch, loss, accuracy, timestamp, model_config) that
+    downstream code expects.
+
+    Returns the path to the saved ``.pt`` file.
+    """
+    import pathlib  # noqa: F811 — guarded above for type hint
+
+    mdl = LSTMVAE(**MODEL_CONFIG)
+    ckpt_path = str(tmp_path / "baseline_test.pt")
+    mdl.save_checkpoint(ckpt_path, epoch=0, loss=0.0, accuracy=0.0)
+    return ckpt_path
