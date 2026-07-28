@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobListResponse, JobStatusResponse
 from src.config import JOB_EVENTS_MAX_SECONDS, JOB_EVENTS_POLL_SECONDS
-from src.db.jobs import get_job, list_jobs, set_job_result
+from src.db.jobs import _HEAVY_RESULT_KEYS, get_job, list_jobs_light, set_job_result
 from src.db.models import Job
 from src.db.session import get_db
 
@@ -21,27 +21,45 @@ router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 
 _TERMINAL_STATUSES: tuple[str, ...] = ("completed", "failed", "partially_failed")
 
-# Per-row arrays a cold-run upload job stores in `result`. Each holds one entry
-# per processed sequence (~105k on a full greenhouse day) — a few MB per job.
-# The list endpoint must never ship these: the job-monitoring poller lists 20
-# jobs every 5 s, and the recent-results fallback lists 5, so inlining them made
-# each poll download tens of MB. Callers that need the scores fetch the single
-# job's detail (GET /api/jobs/{id}), which keeps the full result.
-_HEAVY_RESULT_KEYS: tuple[str, ...] = (
-    "anomaly_scores",
-    "sequence_timestamps",
-    "embeddings",
-    "uncertainties",
-    "high_anomalies",
-    "statistical_summary",
-)
+# _HEAVY_RESULT_KEYS is imported from src.db.jobs where it is also used by
+# _JsonStripHeavyKeys to strip the same keys at the SQL layer — single source
+# of truth for which keys are "heavy" and must not appear in list responses.
 
 
-def _lighten_result(result: Optional[dict]) -> Optional[dict]:
-    """Return *result* without the large per-sequence arrays (for list views)."""
-    if not result:
-        return result
-    return {k: v for k, v in result.items() if k not in _HEAVY_RESULT_KEYS}
+def _list_row_to_response(row: dict[str, Any]) -> JobStatusResponse:
+    """Build a JobStatusResponse from a light job dict (from list_jobs_light).
+
+    The result dict has already been stripped of _HEAVY_RESULT_KEYS at the SQL
+    layer — no further lightening is needed here.  progress_pct is recomputed
+    from the scalar counter columns (same formula as _to_response).
+    """
+    total: Optional[int] = row["total_portions"]
+    completed: int = row["completed_portions"]
+    failed: int = row["failed_portions"]
+    status_val: str = row["status"]
+
+    progress_pct: Optional[float] = None
+    if total:
+        progress_pct = round(100.0 * (completed + failed) / total, 2)
+    elif status_val in _TERMINAL_STATUSES:
+        progress_pct = 100.0
+
+    return JobStatusResponse(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        greenhouse_id=row["greenhouse_id"],
+        job_type=row["job_type"],
+        status=status_val,
+        total_portions=total,
+        completed_portions=completed,
+        failed_portions=failed,
+        progress_pct=progress_pct,
+        result=row["result"],
+        error=row["error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        finished_at=row["finished_at"],
+    )
 
 
 def _to_response(job: Job) -> JobStatusResponse:
@@ -157,7 +175,15 @@ async def get_jobs(
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ) -> JobListResponse:
-    jobs = await list_jobs(
+    """List jobs — heavy result arrays stripped server-side at the SQL layer.
+
+    payload is never fetched (not in the list response schema).
+    result is returned without _HEAVY_RESULT_KEYS (anomaly_scores,
+    sequence_timestamps, high_anomalies, statistical_summary, …).
+    Both exclusions happen in the SELECT, so the DB never sends the large
+    blobs to Python.  The full result is available via GET /api/jobs/{id}.
+    """
+    job_rows = await list_jobs_light(
         db,
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -165,9 +191,4 @@ async def get_jobs(
         status=status,
         limit=limit,
     )
-    responses = []
-    for job in jobs:
-        resp = _to_response(job)
-        resp.result = _lighten_result(resp.result)
-        responses.append(resp)
-    return JobListResponse(jobs=responses)
+    return JobListResponse(jobs=[_list_row_to_response(row) for row in job_rows])

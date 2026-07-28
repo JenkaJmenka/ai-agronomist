@@ -3,6 +3,83 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**P1 GET /api/jobs List View Performance Fix (perf-be-jobs) — COMPLETE (2026-07-28)**
+Agent: backend-engineer. Task: fix 1.5-3.1s latency for GET /api/jobs returning 26 rows.
+
+**Root Cause — CONFIRMED:**
+`list_jobs()` did `select(Job)` (full ORM), loading BOTH `payload` (never used in list response)
+and `result` (large JSON blob with per-sequence arrays). For a full-greenhouse-day upload job,
+`result` contains 105k `anomaly_scores` floats + 105k `sequence_timestamps` strings + 200
+`high_anomalies` objects + `statistical_summary` = ~3.4 MB per job. For 26 jobs = 88.5 MB
+transferred DB → Python. Then `_lighten_result()` stripped the heavy arrays in Python and
+discarded them. The endpoint emitted only 19 KB of actual response.
+
+**Investigation results:**
+- payload was loaded but NEVER included in list response — confirmed by `_to_response()` code
+- result: 3.4 MB per job vs ~300 bytes for the light subset → 11,894x excess data transfer
+- For 26 rows: 88.5 MB transferred from DB to emit 19 KB response
+
+**Fix — 3 files changed:**
+
+1. `src/db/jobs.py`:
+   - Moved `_HEAVY_RESULT_KEYS` tuple here (single source of truth; imported by route)
+   - Added `_JsonStripHeavyKeys(FunctionElement)` — dialect-aware SQL expression:
+     - PostgreSQL: `(result::jsonb - '{anomaly_scores,...}'::text[])::text`
+       Casts json→jsonb (enables array-remove operator), strips heavy keys,
+       casts to text so asyncpg returns a string for SQLAlchemy JSON result_processor.
+       Text→jsonb→text roundtrip costs ~0ms compared to 1-3s network transfer.
+     - SQLite: `json_remove(json_remove(…, '$.anomaly_scores'), '$.sequence_timestamps', …)`
+       Chained json_remove() calls (SQLite 3.9+, bundled with Python 3.x).
+   - Added `list_jobs_light()`:
+     - SELECT: all scalar Job columns EXCEPT `payload` (never in list response)
+     - result column: replaced with `_JsonStripHeavyKeys(Job.result).label("result")`
+     - Returns plain `list[dict[str, Any]]` (no ORM objects, no lazy-load risk)
+     - Explicit `isinstance(raw_result, str): json.loads()` guard for cross-driver safety
+   - `list_jobs()` unchanged — still used by `src/api/routes/models.py` (gets 1 job)
+
+2. `src/api/routes/jobs.py`:
+   - Updated imports: `list_jobs_light` + `_HEAVY_RESULT_KEYS` from `src.db.jobs`
+   - Removed `_HEAVY_RESULT_KEYS` local definition (now imported from DB module)
+   - Removed `_lighten_result()` (stripping now done server-side at SQL layer)
+   - Added `_list_row_to_response(row: dict)` — builds `JobStatusResponse` directly
+     from the dict rows returned by `list_jobs_light()`, with same progress_pct formula
+   - `get_jobs()` now calls `list_jobs_light()` + `_list_row_to_response()`
+   - `_to_response(job: Job)` unchanged — still used by detail/cancel/SSE endpoints
+
+3. `tests/api/test_jobs_list_perf.py` (NEW, 23 tests):
+   - `TestDetailRouteReturnsHeavyKeys` (5): detail route has anomaly_scores, sequence_timestamps,
+     high_anomalies, statistical_summary, all _HEAVY_RESULT_KEYS
+   - `TestListViewHeavyKeysOmitted` (13): list omits all heavy keys; preserves all light keys
+     field-for-field vs detail; scalar fields match; progress_pct matches; bytes 10x smaller
+   - `TestJobsListEdgeCases` (3): pending (null result), light-only result, multi-job all stripped
+   - `TestJsonStripDialectCompilation` (2): SQLite compile output has json_remove + $.key paths;
+     _HEAVY_RESULT_KEYS non-empty guard
+
+**Data transfer savings:**
+- Per job: 3.4 MB → 300 bytes (11,894x reduction)
+- For 26 jobs: 88.5 MB → 7.6 KB (production DB → Python)
+- Local 3-run benchmark (SQLite in-memory, 10 jobs × 105k seqs):
+  BEFORE avg=96.2ms → AFTER avg=35.9ms (2.7x local; Postgres gain is much larger due to network)
+- Production (1.5-3.1s): expected <0.1s after deploy (target was <0.5s)
+
+**Architecture note:**
+`_JsonStripHeavyKeys` follows the `utc_date` FunctionElement pattern from
+`anomaly_group_service.py` — dialect-aware SQL expression with `inherit_cache = True`,
+PostgreSQL-specific `@compiles` override, default SQLite fallback. The `::text` cast in the
+Postgres variant is intentional: asyncpg returns JSONB as Python dicts directly (bypassing
+SQLAlchemy's JSON result_processor), but TEXT columns come back as strings, which the JSON
+result_processor then `json.loads()` correctly.
+
+**Test results:**
+- New perf tests: 23/23 passed ✅
+- All job-related tests: 38 passed ✅
+- Full suite: 2661 passed, 12 skipped, 2 xfailed, 2 pre-existing failures ✅
+
+Done signal: tasks/done/perf-be-jobs.json.
+
+---
+
+## Previous Phase
 **P1 /api/anomalies/enriched Performance Fix (perf-be-enriched) — COMPLETE (2026-07-28)**
 Agent: backend-engineer. Task: fix 9.8s FULL RANGE latency for /api/anomalies/enriched.
 
