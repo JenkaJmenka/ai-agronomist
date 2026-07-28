@@ -3,6 +3,58 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**P0 LiveRuntime shutdown hang fix (live-cancel-fix) — COMPLETE (2026-07-28)**
+Agent: backend-engineer. Task: fix CancelledError swallowed by failing cleanup flush
+causing LiveRuntime.stop() to hang indefinitely.
+
+**Root Cause:**
+Two identical sites where the `except asyncio.CancelledError` handler called the flush
+without guarding against flush failure:
+- `src/live/merge.py:163` — `ChannelMerger.run()`: `_flush_all_buckets()` could raise
+- `src/live/persistence.py:259` — `PersistenceBatcher.run()`: `_flush()` could raise
+
+If the flush raised, the RuntimeError replaced the in-flight CancelledError. `supervised()`
+caught it as a crash and RESTARTED the task. The newly-running task meant that
+`asyncio.gather(*self._tasks, return_exceptions=True)` in `LiveRuntime.stop()` never
+returned — hanging the process indefinitely (STAT=S, 0.0% CPU).
+
+**Fix — 3 files changed:**
+
+1. `src/live/merge.py`:
+   - Added `import logging` and module-level `logger = logging.getLogger("live.merge")`
+   - Wrapped `_flush_all_buckets()` call in `except asyncio.CancelledError` in try/except:
+     flush still attempted (preserves buffered data), failure caught+logged at ERROR with
+     tenant/greenhouse context, CancelledError always re-raised via bare `raise`
+
+2. `src/live/persistence.py`:
+   - Wrapped `_flush()` call in `except asyncio.CancelledError` in try/except:
+     same pattern — flush attempted, failure caught+logged at ERROR, CancelledError
+     always re-raised
+
+3. `tests/live/test_cancel_flush_error.py` (NEW, 6 tests):
+   - `TestMergerCancelFlushError` (3 tests):
+     - `test_gather_completes_when_flush_raises`: wraps in `supervised()` (production path),
+       bounded with `asyncio.wait_for(5s)` — TimeoutError on regression, not infinite hang
+     - `test_flush_is_attempted_on_cancel`: asserts flush is still called despite failure
+     - `test_flush_failure_is_logged`: asserts ERROR log with "flush failed during shutdown"
+   - `TestPersistenceCancelFlushError` (3 tests): same structure for persistence.py
+
+**supervised() verdict:**
+Left unchanged. After the two-site fix, CancelledError always propagates correctly from
+`run()`, so `supervised()` never misclassifies a cancelled task as a crash. Adding a
+shutdown guard would require threading a "shutting down" flag through the code (invasive)
+or using `asyncio.current_task().cancelling()` (Python 3.11+ only). Neither is needed
+since the root cause is eliminated at the source.
+
+**Test results:**
+- New cancel-flush tests: 6/6 passed ✅
+- Full suite: 2667 passed, 12 skipped, 2 xfailed, 2 pre-existing failures (unchanged) ✅
+
+Done signal: tasks/done/live-cancel-fix.json.
+
+---
+
+## Previous Phase
 **P1 GET /api/jobs List View Performance Fix (perf-be-jobs) — COMPLETE (2026-07-28)**
 Agent: backend-engineer. Task: fix 1.5-3.1s latency for GET /api/jobs returning 26 rows.
 
