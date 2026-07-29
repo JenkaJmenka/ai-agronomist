@@ -1,8 +1,9 @@
 """Empirical verification: compound demo episodes score >= 0.08 on baseline.
 
-This test loads the real LSTM-VAE baseline detector and verifies that the
+This test loads the real LSTM-VAE baseline detector from a committed test
+fixture (trained checkpoint, epoch 72, loss=0.0054) and verifies that the
 compound episode offsets (as computed by MockScadaSource in demo mode)
-reliably cross the scoring threshold. Requires a model checkpoint on disk.
+reliably cross the scoring threshold.
 
 Marked ``@pytest.mark.slow`` — skipped in normal CI; run explicitly with
 ``pytest -m slow tests/live/test_demo_compound_score.py``.
@@ -10,9 +11,9 @@ Marked ``@pytest.mark.slow`` — skipped in normal CI; run explicitly with
 
 from __future__ import annotations
 
-import glob
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -35,14 +36,14 @@ from src.live.sources.mock_episodes import _NOISE_STD, _CompoundEpisode
 from src.live.sources.base import SourceConfig
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 
-# Skip the entire module if no checkpoint is available.
-_checkpoints = sorted(glob.glob("models/checkpoints/epoch_*.pt"))
-_HAS_CHECKPOINT = len(_checkpoints) > 0
+# Committed test fixture: trained LSTM-VAE checkpoint (epoch 72, loss=0.0054).
+# This is a real trained model — not random weights — so assertion thresholds
+# are meaningful.  If this file is missing, the checkout is broken.
+TRAINED_FIXTURE_PATH: str = str(
+    Path(__file__).resolve().parents[1] / "fixtures" / "epoch_0072_trained_baseline.pt"
+)
 
-pytestmark = [
-    pytest.mark.slow,
-    pytest.mark.skipif(not _HAS_CHECKPOINT, reason="No model checkpoint on disk"),
-]
+pytestmark = [pytest.mark.slow]
 
 # Channel order for the model input (must match SENSOR_NAMES[:4]).
 CHANNEL_ORDER: List[str] = list(SENSOR_NAMES[:4])
@@ -117,9 +118,9 @@ def _apply_compound_offsets(
 
 
 def _get_detector():
-    """Load the baseline detector (latest checkpoint)."""
+    """Load the baseline detector from the committed test fixture."""
     from src.api.services.detector_cache import get_cached_detector
-    return get_cached_detector(None)
+    return get_cached_detector(TRAINED_FIXTURE_PATH)
 
 
 def _score_window(detector, window: np.ndarray) -> float:

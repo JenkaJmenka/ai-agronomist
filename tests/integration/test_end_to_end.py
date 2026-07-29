@@ -81,9 +81,14 @@ def test_client(test_database):
 
 @pytest.fixture
 def patch_detector():
-    """Autouse fixture that patches the global detector with a predictable mock."""
+    """Patches model loading and scoring so tests never depend on checkpoint files.
+
+    _load_model is patched to return a fresh random-weight LSTMVAE (the actual
+    weights don't matter because predict_batch_enriched is also mocked).
+    """
     from unittest.mock import patch
-    from src.config import LATENT_DIM
+    from src.config import LATENT_DIM, MODEL_CONFIG
+    from src.models.lstm_vae import LSTMVAE
 
     def enriched_side_effect(seqs):
         # returns 1.5 raw score so that clipped score is 0.75
@@ -92,7 +97,10 @@ def patch_detector():
         uncertainties = np.full(len(scores), 0.1, dtype=np.float32)
         return scores, embeddings, uncertainties
 
-    with patch("src.models.inference.AnomalyDetector.predict_batch_enriched") as mock_enriched:
+    with patch(
+        "src.models.inference.AnomalyDetector._load_model",
+        return_value=LSTMVAE(**MODEL_CONFIG).eval(),
+    ), patch("src.models.inference.AnomalyDetector.predict_batch_enriched") as mock_enriched:
         mock_enriched.side_effect = enriched_side_effect
         yield mock_enriched
 
