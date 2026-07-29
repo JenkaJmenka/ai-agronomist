@@ -1,201 +1,267 @@
 # AI Agronomist
 
-ML-powered greenhouse anomaly detection: unsupervised LSTM-VAE, semantic incident memory, operator-driven active learning, and online model adaptation.
+Multi-layer anomaly detection for greenhouse SCADA telemetry: deterministic rule
+detectors, crop setpoint bands, an unsupervised LSTM-VAE trained per tenant,
+semantic incident memory, and operator-driven active learning.
 
-**Release:** Phase 4.1 complete (June 2026) — **1029 tests passing**.  
-**Release notes:** [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md)  
-**Operator guide:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md)  
-**Deployment:** [docs/deployment/phase-4.1-deployment-checklist.md](docs/deployment/phase-4.1-deployment-checklist.md)
-
----
-
-## What you can do today
-
-| Goal | How |
-|------|-----|
-| **Ingest sensor data** | Upload CSV via API or use synthetic training data |
-| **Detect anomalies** | Score 20-step sensor sequences (temp, humidity, CO₂, light) |
-| **Full diagnosis pipeline** | Pattern type, root cause, confidence, recommendations in one call |
-| **Remember past incidents** | Store embeddings; search similar cases; suggest fixes from history |
-| **Close the loop with operators** | Label incidents in Streamlit or via API; real retrain with promote/rollback |
-| **Ensemble detection (Gap 4)** | Four detectors with weighted vote and agreement in comprehensive API |
-| **Explore visually** | Streamlit dashboard: anomalies, operator feedback, pipeline metrics |
-| **Monitor pipeline health** | Metrics API + Streamlit Metrics page (detections, FP rate, pattern distribution) |
-| **Deploy securely** | Optional API-key auth; PostgreSQL + pgvector; ops runbook + deployment checklist |
+**📖 [User Guide](docs/USER_GUIDE.md)** — every page and screen, upload and training workflows
+**🔍 [Anomaly Catalog](docs/ANOMALY_CATALOG.md)** — every anomaly type, how it's detected, what to do
+**📐 [Framework spec](docs/anomaly_framework_spec.md)** — detector formulas and verification datasets
 
 ---
 
-## Quick start (5 minutes)
+## What it detects
+
+**30+ anomaly types** across five families:
+
+| Family | Count | Examples |
+|--------|-------|----------|
+| **Physical sensor faults** | 9 | Spike, out-of-bounds, stuck/flatline, calibration drift, noise, bias offset, correlation breakdown, thermodynamic contradiction, diurnal deviation |
+| **Crop setpoint breaches** | 8 | Temperature / humidity / VPD / CO₂, each high and low, day and night |
+| **SCADA climate faults** | 6 | Under-heating, over-heating, dehumidification failure, saturation risk, thermal divergence, polling dropout |
+| **Gas anomalies** | 6 channels | Ethylene, NO, NO₂, NOₓ, CO, gas CO₂ |
+| **OT network anomalies** | 6 | RTT/jitter, IAT CV, TCP handshake, DHCP fingerprint, service latency, Isolation Forest threat score |
+
+Plus multivariate implausibility (Mahalanobis), a learned LSTM-VAE detector, and
+seven pattern classifications (drift, spike, dependency, lag, saturation, cyclic,
+cascade).
+
+Full descriptions in the **[Anomaly Catalog](docs/ANOMALY_CATALOG.md)**.
+
+---
+
+## Quick start
 
 ```bash
-cd ai-agronomist
-source venv/bin/activate          # Python 3.11 required
+# 1. Backend services
+docker compose up -d          # Postgres, RabbitMQ, Redis, API, worker
+
+# 2. Frontend
+cd web
+corepack pnpm install
+API_URL=http://localhost:8000 corepack pnpm dev
+```
+
+| Service | URL |
+|---------|-----|
+| **Operator UI (Next.js)** | http://localhost:3000 |
+| API docs (OpenAPI) | http://localhost:8000/docs |
+| RabbitMQ management | http://localhost:15672 |
+| Streamlit dashboard (legacy) | http://localhost:8501 |
+
+### Local development without Docker
+
+```bash
+python3 -m venv venv && source venv/bin/activate   # Python 3.11
 pip install -r requirements.txt
 
 export DATABASE_URL=sqlite+aiosqlite:///./greenhouse.db
-venv/bin/alembic upgrade head
+alembic upgrade head
 
-# Terminal 1 — API
-venv/bin/python -m uvicorn src.api.main:app --reload
-
-# Terminal 2 — Dashboard (optional)
-venv/bin/python -m streamlit run src/dashboard/app.py
+python -m uvicorn src.api.main:app --reload   # terminal 1
+python -m src.workers.main                    # terminal 2 — required for uploads
 ```
 
-- **API docs:** http://127.0.0.1:8000/docs  
-- **Dashboard:** http://localhost:8501  
+> The worker is **not optional** for uploads that persist or train. The API
+> accepts and queues them regardless; without a worker they sit in `preparing`
+> forever.
 
-Train a model if you don't have a checkpoint:
-
-```bash
-venv/bin/python scripts/train_lstm_vae.py
-```
-
-Run tests:
+### Tests
 
 ```bash
-venv/bin/python -m pytest tests/ -q --override-ini="addopts="
+python -m pytest tests/ -q --override-ini="addopts="   # backend
+cd web && corepack pnpm test                            # frontend unit
+cd web && corepack pnpm exec playwright test            # e2e (needs a build)
 ```
 
 ---
 
-## Typical workflows
+## First run
 
-### 1. Detect and diagnose an anomaly
+1. **Configuration** — pick your crop, set the day/night window (**UTC**), set
+   the CO₂ enrichment flag, review setpoint bands. Do this *before* uploading.
+2. **Upload & Operations** — upload a CSV with *Ingest data + train model*.
+3. **Job Monitoring** — wait for `completed`. Cold-start training takes minutes.
+4. **Thresholds** — tune the cutoff against the score distribution.
+5. **Anomaly Detection** — review findings.
+6. **Operator Feedback** — label incidents to drive retraining.
 
-Send one 20×4 sensor sequence to the **comprehensive pipeline** — detection, attribution, pattern analysis, root cause, and operator recommendations in a single response:
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/inference/comprehensive \
-  -H "Content-Type: application/json" \
-  -d @fixtures/comprehensive_request.json
-```
-
-Returns: `is_anomaly`, `anomaly_score`, `confidence`, `pattern_type`, `root_cause`, `immediate_actions`, `incident_id`, `learning_progress`, and more.
-
-Batch mode: `POST /api/inference/batch`
-
-### 2. Operator feedback → active learning
-
-When an operator confirms or rejects a detection, feedback is stored and can trigger retraining when enough high-quality labels accumulate:
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/feedback/mark-anomaly \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customer_id": "demo_tenant",
-    "incident_id": "<from comprehensive response>",
-    "is_true_anomaly": true,
-    "operator_id": "alice"
-  }'
-```
-
-Check progress: `GET /api/feedback/learning-progress/{customer_id}`  
-Statistics: `GET /api/feedback/statistics/{customer_id}`
-
-Learning state **persists across API restarts** (SQLite/Postgres `learning_states` table).
-
-### 3. Incident memory — learn from history
-
-Store incidents with latent embeddings, find similar past cases, and mine fix suggestions from resolved history:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /api/incidents/store` | Save anomaly + embedding |
-| `GET /api/incidents/similar` | k-nearest semantic search |
-| `GET /api/incidents/suggest-fixes` | Root cause + actions from similar resolved cases |
-| `POST /api/incidents/resolve/{id}` | Close incident (409 if already resolved) |
-| `GET /api/incidents/statistics` | Tenant analytics |
-| `GET /api/incidents/recurring-issues` | Repeated root causes |
-
-### 4. Online learning (continuous adaptation)
-
-Feed normal sequences to update the tenant model incrementally:
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/learning/observe \
-  -H "Content-Type: application/json" \
-  -d '{"tenant_id": "demo_tenant", "greenhouse_id": "gh_1", "sequences": [[...]]}'
-```
-
-Also: `POST /api/learning/predict`, `GET /api/learning/statistics`, `GET /api/learning/drift`
-
-### 5. Monitor detections
-
-```bash
-curl -s "http://127.0.0.1:8000/api/monitoring/metrics?hours=24"
-```
-
-Returns detection counts, false-positive rate, average confidence, true/false positive tallies, pattern and confidence distributions. The Streamlit **Metrics** page reads this endpoint live.
-
-### 6. Production deployment
-
-See [docs/deployment/phase-4.1-deployment-checklist.md](docs/deployment/phase-4.1-deployment-checklist.md) and [docs/deployment/ops-runbook.md](docs/deployment/ops-runbook.md).
-
-```bash
-# PostgreSQL + pgvector
-docker compose up -d postgres
-export DATABASE_URL=postgresql+asyncpg://postgres:postgres_dev_password@localhost:5432/greenhouse_monitoring
-venv/bin/alembic upgrade head
-
-# Enable API key auth
-export AUTH_ENABLED=true
-export TENANT_API_KEYS=demo_tenant:your_secret_key
-# All requests need: -H "X-API-Key: your_secret_key"
-```
-
-See [docs/DOCKER_SETUP.md](docs/DOCKER_SETUP.md) for ivfflat index maintenance after loading incident data.
-
-#### Database migrations
-
-Run `alembic upgrade head` **before or simultaneously with** the application code deploy — the running app will error on a missing column, table, or constraint if migrations lag. The migration chain is linear with a single head (`019`); verify with `venv/bin/alembic heads`.
-
-Migrations that must be in place before the current code version:
-- `017` — adds `sensor_readings.source` column with backfill (live-path persistence and wipe filters depend on it)
-- `018` — creates the `operational_config` table (CO₂ enrichment flag and band-breach config API depend on it)
-- `019` — adds band-breach `fault_type` CHECK constraint values (band-breach detector writes these values)
-
-**Authoritative migrations tree:** `alembic/versions/`. `src/db/migrations/` is a dead legacy tree (single initial-schema stub) — do not run it; use only the `alembic/` tree.
+Full walkthrough: **[User Guide § First-run checklist](docs/USER_GUIDE.md#19-first-run-checklist)**.
 
 ---
 
-## Architecture overview
+## Architecture
 
 ```
-Sensor CSV / API          LSTM-VAE              Diagnosis stack           Memory & learning
-     │                       │                        │                         │
-     ▼                       ▼                        ▼                         ▼
- POST /upload          POST /inference      POST /inference/comprehensive   /api/incidents/*
-                       (scores + embed)     (full pipeline)                 /api/feedback/*
-                                            attribution · patterns ·         /api/learning/*
-                                            root cause · recommendations     /api/monitoring/*
+                    ┌──────────────────┐
+  Browser ─────────►│  Next.js (web/)  │  URL-driven state, BFF proxy
+                    │  localhost:3000  │  injects X-API-Key server-side
+                    └────────┬─────────┘
+                             │ /api/bff/*
+                    ┌────────▼─────────┐
+                    │  FastAPI (src/)  │  async SQLAlchemy, multi-tenant
+                    │  localhost:8000  │
+                    └───┬──────────┬───┘
+                        │          │
+              ┌─────────▼──┐  ┌────▼──────────┐
+              │ PostgreSQL │  │   RabbitMQ    │
+              │ + pgvector │  │  upload.*     │
+              └────────────┘  │  retrain.*    │
+                              └────┬──────────┘
+                                   │
+                            ┌──────▼───────┐
+                            │    Worker    │  portioned CSV processing,
+                            │ (src/workers)│  cold-start training, retrain
+                            └──────────────┘
 ```
 
-**ML (`src/models/`)** — LSTM-VAE detector, pattern detector (7 types), anomaly attributor, confidence scorer, root-cause analyzer, recommendation engine, active learner with auto-retrain orchestrator.
+### Code layout
 
-**API (`src/api/`)** — FastAPI, async SQLAlchemy, multi-tenant by `tenant_id` / `customer_id`.
+| Path | Contents |
+|------|----------|
+| `src/models/` | Detectors, LSTM-VAE, pattern/root-cause/recommendation stack, active learning |
+| `src/models/network/` | OT network detectors (RTT, IAT, TCP, DHCP, service, Isolation Forest) |
+| `src/api/routes/` | FastAPI route groups |
+| `src/api/services/` | Comprehensive pipeline, upload orchestration, cold-start training |
+| `src/live/` | Live SSE streaming, sources (mock, Priva, Hoogendoorn, fertigation) |
+| `src/workers/` | RabbitMQ consumers: upload prepare, upload, training, retrain |
+| `src/db/` | Models, migrations, incident memory, vector search |
+| `src/config.py` | **Every** tunable constant — no magic numbers elsewhere |
+| `web/app/` | Next.js App Router pages + BFF proxy |
+| `web/features/` | One folder per page domain |
+| `alembic/versions/` | **Authoritative** migrations |
 
-**Database (`src/db/`)** — SQLite (dev) or PostgreSQL + pgvector (prod). Migrations `001`–`006`: sensor readings, incidents, learning logs, model registry, learning state, customer model config.
+> `src/db/migrations/` is a dead legacy tree (a single initial-schema stub).
+> Do not run it — use only `alembic/`.
 
-**Dashboard (`src/dashboard/`)** — Streamlit UI: sensor charts, highlighted anomaly table, operator feedback queue, pipeline metrics from `/api/monitoring/metrics`.
+### Detection pipeline
+
+```
+CSV / live tick
+      │
+      ├─► Short-circuit gates ──► polling_dropout · out_of_bounds
+      │                            (no data / impossible value → stop)
+      │
+      ├─► Rule detectors (vote) ─► spike_mad · noise · bias_dual · correlation
+      │                            diurnal · multivariate · change_point
+      │                            SCADA heating/humidity · band breaches
+      │
+      ├─► LSTM-VAE ─────────────► reconstruction error + 8-dim latent embedding
+      │
+      ├─► Ensemble vote ────────► lstm_vae · isolation_forest · statistical
+      │                            · correlation  →  agreement count
+      │
+      └─► Diagnosis ────────────► pattern type · root cause · confidence
+                                  · recommendations · incident memory
+```
+
+Rule detectors **vote** rather than short-circuit: the LSTM/ensemble path always
+runs, and the first-fired rule takes fault-type precedence. Details:
+[Anomaly Catalog § Precedence](docs/ANOMALY_CATALOG.md#precedence).
 
 ---
 
-## API reference (all route groups)
+## Operator UI pages
 
-| Prefix | Description |
-|--------|-------------|
+| Page | Purpose |
+|------|---------|
+| **Monitoring** | All channels, sensor tiles, live SSE streaming, anomaly bands |
+| **Climate Data** | Temperature / humidity only |
+| **Gas Monitoring** | Gas channels (exact match — never climate CO₂) |
+| **Anomaly Detection** | Score timeline, top/all anomalies, server- or client-side grouping |
+| **Thresholds** | Preview flagged-count impact before committing a cutoff |
+| **System Metrics** | Detection counters, FP rate, pattern distribution |
+| **Configuration** | Crop profile, day/night window, CO₂ flag, setpoint bands, season map |
+| **Upload & Operations** | CSV upload, model registry, synthetic anomalies, data wipes |
+| **Job Monitoring** | Background job progress (SSE with polling fallback) |
+| **Operator Feedback** | Review queue, verdict labelling, retrain progress |
+
+Detailed walkthroughs: **[User Guide § Page by page](docs/USER_GUIDE.md#6-home)**.
+
+### Frontend conventions
+
+- **URL is the state** — tenant, greenhouse, window, threshold, channel and live
+  mode all live in the query string. Reload reproduces the exact view.
+- **Two-step confirm** on every destructive or committing action.
+- **Zod validation** at every BFF response boundary.
+- **Job status is never cached** (`staleTime: 0`) — SSE first, polling fallback.
+- Loading, error and explicit empty states on every data component.
+
+---
+
+## API reference
+
+| Prefix | Purpose |
+|--------|---------|
 | `/health`, `/health/db` | Liveness and database check |
-| `/api/upload` | CSV sensor ingestion |
-| `/api/inference` | Batch inference + embeddings |
-| `/api/inference/comprehensive`, `/batch` | Full diagnosis pipeline |
-| `/api/incidents/*` | Incident memory |
-| `/api/learning/*` | Online learning + drift |
-| `/api/feedback/*` | Operator feedback + active learning |
-| `/api/models/*` | Per-customer model registry |
+| `/api/upload` | CSV ingestion, synthetic anomaly injection, data wipes |
+| `/api/inference/upload` | Synchronous analyze-only upload |
+| `/api/inference/upload-async` | Queued persist/train upload (202) |
+| `/api/inference/comprehensive` | Full diagnosis pipeline for one sequence |
+| `/api/readings/*` | Windowed readings, bounds, greenhouses, raw rows |
+| `/api/anomalies/enriched`, `/groups` | Enriched rows and server-side grouping |
+| `/api/jobs/*` | Job status, SSE events, cancel |
+| `/api/live/*` | Live source status, resume, SSE event stream |
+| `/api/models/*` | Per-tenant model registry, train, activate, rollback |
+| `/api/config/*` | Operational config (crop, setpoints, seasons, CO₂ flag) |
+| `/api/feedback/*` | Operator verdicts, learning progress, statistics |
+| `/api/incidents/*` | Incident memory, similarity search, fix suggestions |
+| `/api/learning/*` | Online learning, drift |
+| `/api/gas/*` | Gas summary and readings |
+| `/api/network/*` | OT network detectors |
+| `/api/baselines/*` | Seasonal baselines |
 | `/api/monitoring/metrics` | Pipeline observability |
 
-Interactive docs: http://127.0.0.1:8000/docs
+Interactive docs: http://localhost:8000/docs
+
+---
+
+## Configuration
+
+Every tunable lives in **`src/config.py`**, most overridable by environment
+variable. Key groups:
+
+| Group | Examples |
+|-------|----------|
+| Model | `INPUT_DIM` 4, `SEQ_LEN` 20, `LATENT_DIM` 8, `HIDDEN_DIMS` [64,32], `BETA` 0.1 |
+| Detection | `ANOMALY_THRESHOLD`, `SPIKE_MAD_*`, `CUSUM_*`, `STUCK_*`, `NOISE_*`, `BIAS_*`, `CORR_BREAKDOWN_*`, `DIURNAL_*` |
+| Ensemble | `ENSEMBLE_DETECTOR_WEIGHTS`, `ENSEMBLE_ANOMALY_THRESHOLD` 0.5, `ENSEMBLE_MIN_AGREEMENT` 2 |
+| Active learning | `ACTIVE_LEARNING_MIN_QUALITY_LABELS` 20, `EWC_LAMBDA` 0.4, `SI_LAMBDA` 0.4 |
+| Bootstrap | `BOOTSTRAP_MIN_CLEAN_ROWS` 100, `BOOTSTRAP_IF_CONTAMINATION` 0.04, `BOOTSTRAP_THRESHOLD_PERCENTILE` 99.0 |
+| Queue | `UPLOAD_PORTION_ROWS` 5000, `MQ_PREFETCH_COUNT`, `MQ_PREPARE_HANDLER_TIMEOUT_SECONDS` 1800 |
+| Network | `RTT_BASELINE_MS`, `IAT_CV_THRESHOLD`, `TCP_BASELINE_MS`, `THREAT_SCORE_THRESHOLD` 65.0 |
+
+### Environment variables
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/db
+RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+REDIS_URL=redis://localhost:6379/0
+
+AUTH_ENABLED=true
+TENANT_API_KEYS=tenant_1:secret_a,tenant_2:secret_b
+
+# Frontend (server-side only — never NEXT_PUBLIC_*)
+API_URL=http://localhost:8000
+API_KEY=secret_a
+```
+
+See `.env.example`.
+
+---
+
+## Deployment
+
+- **Docker:** [docker-compose.yml](docker-compose.yml)
+- **Railway:** [RAILWAY_HOSTING.md](RAILWAY_HOSTING.md) — service topology, first
+  deploy, cutover, rollback
+- **Render:** [render.yaml](render.yaml)
+
+### Migrations
+
+Run `alembic upgrade head` **before or simultaneously with** the code deploy —
+the app errors on a missing column if migrations lag. Verify a single head with
+`alembic heads`.
 
 ---
 
@@ -203,24 +269,12 @@ Interactive docs: http://127.0.0.1:8000/docs
 
 | Doc | Contents |
 |-----|----------|
-| [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | Release history (Operator Feedback, Phase 4.1) |
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Setup, migrations, curl examples, dashboard walkthrough |
-| [docs/USER_GUIDE_VISUAL.md](docs/USER_GUIDE_VISUAL.md) | Illustrated dashboard guide with screenshots |
-| [docs/deployment/phase-4.1-deployment-checklist.md](docs/deployment/phase-4.1-deployment-checklist.md) | Staging/production gates |
-| [docs/deployment/ops-runbook.md](docs/deployment/ops-runbook.md) | On-call procedures |
-| [docs/deployment/monitoring-dashboard-config.yaml](docs/deployment/monitoring-dashboard-config.yaml) | Metrics + alert thresholds |
-| [docs/DOCKER_SETUP.md](docs/DOCKER_SETUP.md) | Docker stack, pgvector, REINDEX |
-| [docs/incident_memory_schema.md](docs/incident_memory_schema.md) | Incident DB schema |
-| [docs/bugs/README.md](docs/bugs/README.md) | Resolved issues (all closed) |
-| [docs/plans/fix-deferred-items-plan.md](docs/plans/fix-deferred-items-plan.md) | Fix-plan completion record |
-
----
-
-## What's next (roadmap)
-
-Phase 1.9.1 and Phase 4.1 are **complete**. Future work (not started):
-
-- Prometheus/Grafana export for pipeline metrics
-- JWT auth, rate limiting, Redis cache for multi-worker deployments
-- `_pipeline_cache` LRU eviction (NOTE-INT-001)
-- Automated load test suite
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Complete operator guide — every page, upload and training workflows, troubleshooting |
+| [docs/ANOMALY_CATALOG.md](docs/ANOMALY_CATALOG.md) | Every anomaly type: meaning, detection method, parameters, operator action |
+| [docs/anomaly_framework_spec.md](docs/anomaly_framework_spec.md) | Reference formulas and verification datasets |
+| [ARCHITECTURE_ASSESSMENT.md](ARCHITECTURE_ASSESSMENT.md) | Architecture review |
+| [MIGRATION_PLAN.md](MIGRATION_PLAN.md) | Streamlit → Next.js migration plan |
+| [DESIGN_upload_prepare_on_worker.md](DESIGN_upload_prepare_on_worker.md) | Durable upload prepare design |
+| [RAILWAY_HOSTING.md](RAILWAY_HOSTING.md) | Railway deployment runbook |
+| [HANDOVER.md](HANDOVER.md) | Upload/processing fix handover |
+| [web/AGENTS.md](web/AGENTS.md) | Frontend conventions and quality gates |
