@@ -19,8 +19,14 @@ results/
 *.db
 *.db.bak
 greenhouse.db
+# Model binaries — production exchanges checkpoints via the artifact store,
+# not the container filesystem.  Excluding these saves ~48 MB per image build.
+models/*.pt
+models/*.pth
+models/checkpoints/
 models/detect_cust_*/
 models/patterns_cust_*/
+models/test_customer/
 .vercel/
 .cursor/
 data/inference_result_cache/

@@ -3,6 +3,76 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Commit trained checkpoint as test fixture (demo-fixture) — COMPLETE (2026-07-29)**
+Agent: ml-engineer. Task: promote one trained checkpoint to a tracked test fixture so
+7 tests in `test_demo_compound_score.py` stop skipping forever after the .pt cleanup.
+
+**What was done:**
+- Copied `models/checkpoints/epoch_0072.pt` (252 KB, epoch 72, loss=0.0054 — lowest loss
+  of all 82 checkpoints) to `tests/fixtures/epoch_0072_trained_baseline.pt`
+- Path is NOT ignored by `.gitignore` — verified with `git check-ignore -v` (exit 1)
+- Updated `tests/live/test_demo_compound_score.py`:
+  - Removed `glob` import and the `_checkpoints` / `_HAS_CHECKPOINT` glob logic
+  - Removed `pytest.mark.skipif` — fixture is committed, missing = broken checkout
+  - Added `TRAINED_FIXTURE_PATH` constant resolving via `Path(__file__)` to the fixture
+  - Updated `_get_detector()` to pass explicit fixture path to `get_cached_detector()`
+  - Kept `pytest.mark.slow` — these are genuinely slow empirical tests
+- No assertions weakened, no thresholds adjusted — all 7 passed on first try
+
+**Proof:**
+- 2667 passed, 2 failed (pre-existing), 12 skipped ✅
+- Skip list: 8 PostgreSQL URL, 3 asyncpg, 1 CUDA — zero compound-score skips
+- All 7 compound score tests RUN and PASS (previously skipped)
+- Size delta: ~21 MB removed (85 .pt files), 252 KB added back — net ~20.7 MB reduction
+
+Done signal: tasks/done/demo-fixture.json.
+
+---
+
+## Previous Phase
+**Remove 48 MB model binaries from git tracking (models-delete) — COMPLETE (2026-07-29)**
+Agent: ml-engineer. Task: remove tracked .pt checkpoint files, add .gitignore/.dockerignore
+patterns, fix hidden test dependencies, prove deletion is safe.
+
+**What was removed:**
+- 82 × `models/checkpoints/epoch_0001..0082.pt` (~47 MB) — training epoch byproducts from
+  accidental bulk commit 3fd3c85
+- 3 × `models/{customer_e2e,pipeline_cust,tenant_1}_model.pt` (~750 KB) — TransferLearner
+  output files rewritten by test runs
+
+**tenant_1_model.pt verdict: BYPRODUCT (safe to remove)**
+- Produced by `TransferLearner.fine_tune(customer_id="tenant_1")` writing to
+  `CUSTOMER_MODEL_DIR/{customer_id}_model.pt` — "tenant_1" is just a test string
+- Zero references to the literal path `models/tenant_1_model.pt` anywhere in the codebase
+- Production uses `artifact_store.put_checkpoint()` (DB blobs) not filesystem .pt files
+- No seeding, bootstrap, or cold-start code loads it
+
+**Files changed:**
+1. `git rm --cached` 85 .pt files (files kept on disk for local dev)
+2. `.gitignore`: replaced stale "keep canonical checkpoints" comment; added `models/*.pt`
+   and `models/checkpoints/` patterns
+3. `.dockerignore`: added `models/*.pt`, `models/checkpoints/`, `models/test_customer/`
+   — saves ~48 MB per container image build
+4. `tests/api/conftest.py`: added autouse `patch_model_load` fixture — patches
+   `AnomalyDetector._load_model` to return fresh LSTMVAE so API tests never depend on
+   checkpoint files existing on disk
+5. `tests/models/test_transfer_learner.py`: replaced `glob+pytest.skip` trapdoor with
+   `baseline_checkpoint` fixture from `tests/conftest.py`
+6. `tests/integration/test_end_to_end.py`: added `_load_model` patch to `patch_detector`
+7. `tests/live/test_demo_compound_score.py`: clarified skip message (these are `@slow`
+   tests that legitimately need trained weights)
+
+**Proof (files absent from working tree):**
+- 2660 passed, 2 failed (pre-existing), 19 skipped ✅
+- Skip list: 8 PostgreSQL URL, 3 asyncpg, 7 demo-compound-score (slow/needs trained
+  weights), 1 CUDA — zero training/checkpoint test skips
+- Transfer learner tests: 3/3 PASSED (previously skipped)
+
+Done signal: tasks/done/models-delete.json.
+
+---
+
+## Previous Phase
 **P0 LiveRuntime shutdown hang fix (live-cancel-fix) — COMPLETE (2026-07-28)**
 Agent: backend-engineer. Task: fix CancelledError swallowed by failing cleanup flush
 causing LiveRuntime.stop() to hang indefinitely.
