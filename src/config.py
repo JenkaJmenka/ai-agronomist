@@ -260,6 +260,13 @@ PCA_VARIANCE_TARGET: float = 0.95
 # Output dimensionality for visualization projections (t-SNE / UMAP).
 PROJECTION_COMPONENTS_2D: int = 2
 
+# Size of the HNSW candidate list kept during a similarity search, applied per
+# query by src/db/vector_search.py. Trades query latency for recall; must be >= k.
+# Measured recall@10 on 30k incidents (see alembic/versions/023_*.py):
+# pgvector's default of 40 gives 98.3%, 100 gives 100%. PostgreSQL only —
+# the SQLite fallback computes distances exactly in Python and ignores this.
+HNSW_EF_SEARCH: int = 100
+
 # =============================================================================
 # Online Learning (Gap 3 — Online Learning Pipeline)
 # =============================================================================

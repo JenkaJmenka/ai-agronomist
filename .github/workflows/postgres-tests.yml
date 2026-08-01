@@ -49,8 +49,27 @@ jobs:
         run: |
           alembic upgrade head
 
+      # Must run before pytest: the pg_db fixture drops and recreates the schema
+      # via Base.metadata, which destroys the index the migration just built.
+      - name: Assert migration 023 produced the HNSW vector index
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          indexes=$(psql -h localhost -U postgres -d test_db -At \
+            -c "SELECT indexname FROM pg_indexes WHERE tablename = 'incidents';")
+          echo "$indexes"
+          echo "$indexes" | grep -qx 'ix_incidents_embedding_hnsw' \
+            || { echo "::error::HNSW index missing after alembic upgrade head"; exit 1; }
+          if echo "$indexes" | grep -qx 'ix_incidents_embedding_ivfflat'; then
+            echo "::error::migration 023 must drop the ivfflat index it replaces"
+            exit 1
+          fi
+
+      # POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py pins DATABASE_URL
+      # to SQLite before any app import, which silently skipped every test here.
       - name: Run pgvector integration tests
         env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
           pytest -m postgres tests/db/test_incident_memory_postgres.py -v

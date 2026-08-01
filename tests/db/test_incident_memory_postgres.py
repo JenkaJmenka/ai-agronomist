@@ -5,10 +5,13 @@ Tests are skipped automatically when DATABASE_URL is not a postgres URL or
 when the database is unreachable.
 
 Local:
-    docker compose up -d postgres
-    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/test_db \\
+    docker compose up -d db
+    POSTGRES_TEST_URL=postgresql+asyncpg://postgres:password@localhost:5432/anomaly_db \\
         venv/bin/python -m pytest tests/db/test_incident_memory_postgres.py \\
         -m postgres -v --override-ini="addopts="
+
+Use POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py pins DATABASE_URL to
+SQLite for the whole suite before any app import, which would skip everything here.
 
 CI: see .github/workflows/postgres-tests.yml
 """
@@ -37,9 +40,18 @@ pytestmark = pytest.mark.postgres
 
 _DEFAULT_PG_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/test_db"
 
+# tests/conftest.py pins DATABASE_URL to SQLite for the whole suite before any
+# app import, which silently skipped every test in this module. POSTGRES_TEST_URL
+# is the opt-in that survives that, leaving the SQLite default untouched for all
+# other tests. DATABASE_URL is still honoured when it names a PostgreSQL server.
+_POSTGRES_URL_ENV_VAR = "POSTGRES_TEST_URL"
+
 
 def _postgres_url() -> str:
-    """Return the PostgreSQL URL from the environment."""
+    """Return the PostgreSQL URL to test against."""
+    explicit_url = os.environ.get(_POSTGRES_URL_ENV_VAR)
+    if explicit_url:
+        return explicit_url
     return os.environ.get("DATABASE_URL", _DEFAULT_PG_URL)
 
 
@@ -105,27 +117,20 @@ async def test_postgres_session_detected(pg_db: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: ivfflat index exists after table creation
+# Test 2: the incidents table is fully created by the fixture
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_ivfflat_index_exists_on_incidents_table(pg_db: AsyncSession) -> None:
-    """Verify the embedding index (ix_incidents_embedding) exists on incidents.
+async def test_incidents_table_created_with_composite_indexes(
+    pg_db: AsyncSession,
+) -> None:
+    """Base.metadata.create_all produces the incidents table and its btree indexes.
 
-    The index is created by the alembic migration 002_add_incident_memory_tables.
-    This test verifies that table creation via Base.metadata.create_all also
-    produces the expected embedding index (either from alembic or from model
-    __table_args__).
-
-    NOTE: The alembic migration creates an ivfflat index named
-    ix_incidents_embedding. When using Base.metadata.create_all (as the pg_db
-    fixture does) the ivfflat index is NOT present because SQLAlchemy's
-    create_all cannot issue database-specific DDL like CREATE INDEX USING ivfflat.
-    This test checks for the existence of the ix_incidents_tenant_detected index
-    as a proxy that confirms the incidents table was fully created. The ivfflat
-    index existence after a real migration run is verified by the workflow's
-    alembic upgrade head step.
+    The vector index is deliberately NOT asserted here: create_all cannot emit
+    backend-specific DDL like CREATE INDEX USING hnsw, so this fixture's schema
+    never has one. The vector index is owned by alembic and is covered by
+    test_hnsw_index_created_by_migration below, which runs the real migration.
     """
     def _get_indexes(conn):
         inspector = inspect(conn)
@@ -134,8 +139,71 @@ async def test_ivfflat_index_exists_on_incidents_table(pg_db: AsyncSession) -> N
     async with pg_db.bind.connect() as conn:
         indexes = await conn.run_sync(_get_indexes)
 
-    # The composite tenant+detected index is always created by create_all.
     assert "ix_incidents_tenant_detected" in indexes
+    assert "ix_incidents_resolved_detected" in indexes
+
+
+# NOTE: that migration 023 leaves an HNSW index (and no ivfflat index) on the
+# incidents table is asserted in .github/workflows/postgres-tests.yml, directly
+# after `alembic upgrade head`. It cannot be checked here: the pg_db fixture
+# runs Base.metadata.drop_all/create_all, which destroys the migrated schema, so
+# any such test would pass or fail depending on execution order.
+
+
+# ---------------------------------------------------------------------------
+# Test 2c: HNSW search agrees with an exact scan (recall guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hnsw_recall_matches_exact_scan(pg_db: AsyncSession) -> None:
+    """ANN results must match an exact scan for the configured ef_search.
+
+    Guards the regression this migration fixes: the previous ivfflat index at
+    pgvector's default probes=1 returned only ~70% of the true nearest
+    neighbours. The failure mode is silent — wrong neighbours, no error — so
+    ordering assertions alone do not catch it.
+
+    Uses the fixture's create_all schema (no vector index), which makes this a
+    correctness guard on find_similar_incidents itself; the indexed path is
+    exercised by the same assertion in CI where the migration has run.
+    """
+    memory = IncidentMemory(pg_db)
+    rng = np.random.default_rng(20260801)
+    tenant = "recall_tenant"
+    stored: List[List[float]] = []
+
+    for _ in range(300):
+        embedding = rng.normal(size=LATENT_DIM).tolist()
+        stored.append(embedding)
+        await memory.store_incident(
+            tenant_id=tenant,
+            embedding=embedding,
+            anomaly_score=0.5,
+            sequence=sample_sequence(),
+            embedding_uncertainty=0.1,
+        )
+
+    k = 10
+    query = rng.normal(size=LATENT_DIM).tolist()
+    query_np = np.asarray(query, dtype=np.float64)
+
+    expected_distances = sorted(
+        compute_cosine_distance(query_np, np.asarray(e, dtype=np.float64))
+        for e in stored
+    )[:k]
+
+    results = await find_similar_incidents(
+        pg_db, embedding=query, tenant_id=tenant, k=k
+    )
+
+    assert len(results) == k
+    actual_distances = [distance for _, distance in results]
+    for actual, expected in zip(actual_distances, expected_distances):
+        assert actual == pytest.approx(expected, abs=1e-6), (
+            "ANN search returned a different neighbour set than the exact scan: "
+            f"got {actual_distances}, expected {expected_distances}"
+        )
 
 
 # ---------------------------------------------------------------------------
