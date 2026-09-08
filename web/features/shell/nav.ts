@@ -29,9 +29,15 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     ],
   },
   {
+    title: "Configuration",
+    entries: [
+      { href: "/greenhouse-profile", label: "Greenhouse Profile" },
+      { href: "/app-configuration", label: "App Configuration" },
+    ],
+  },
+  {
     title: "Operations",
     entries: [
-      { href: "/configuration", label: "Configuration" },
       { href: "/operations", label: "Upload & Operations" },
       { href: "/jobs", label: "Job Monitoring" },
     ],

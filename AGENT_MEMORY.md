@@ -3,6 +3,203 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Home Phase A + Config IA — COMPLETE (2026-09-08)**
+
+Phase A — fixed critical Home (`web/features/home/HomeView.tsx`):
+- Status bar (LiveBadge + anomaly count + severity chips), SensorTiles, climate mini-chart,
+  LiveAnomalyStrip, recent anomalies list; slim controls (Live + DateRange only).
+- Reuses monitoring primitives; no ReadingsTable / SetpointsPanel / ChannelToggles.
+- App prefs (`useHomeLayoutPrefs`) already gate widgets; defaults match Phase A layout.
+
+Phase B — Configuration IA:
+- Nav section **Configuration**: Greenhouse Profile (`/greenhouse-profile`), App Configuration
+  (`/app-configuration`); Operations no longer owns config.
+- Legacy `/configuration` redirects to `/greenhouse-profile` (query preserved).
+- App Configuration persists Home layout prefs in localStorage (`aa-app-config:home-layout`).
+
+Gates: `pnpm lint` + `typecheck` + `test` green (244 unit tests). Smoke e2e Home + NAV_TARGETS updated.
+
+---
+
+**Anomaly fault-type mapping — four gaps closed (backend-engineer) — COMPLETE (2026-08-01)**
+
+Closed all four gaps in `_ANOMALY_TYPE_TO_FAULT_TYPE` + `_zscore_flags`:
+
+**GAP 1 — real-detector types (highest value):**
+- Added 6 SCADA detector types: `UNDER_HEATING → "under_heating"`, `OVER_HEATING → "over_heating"`,
+  `DEHUMIDIFICATION_FAILURE → "dehumidification_failure"`, `HUMIDITY_SATURATION_RISK → "humidity_saturation_risk"`,
+  `THERMAL_DIVERGENCE → "thermal_divergence"`, `SENSOR_FLATLINE → "stuck_fault"` (justified: zero-variance
+  frozen sensor = stuck sensor per db/models.py taxonomy; matches comprehensive_pipeline "sensor_flatline" profile).
+- Added 8 band-breach types via `**BAND_TYPE_TO_VOTE` unpack (see GAP 2).
+- All fault keys taken verbatim from `comprehensive_pipeline._RULE_VOTE_PROFILES`.
+
+**GAP 2 — no duplication of BAND_TYPE_TO_VOTE:**
+- `band_breach_detector.py:29` already has `BAND_TYPE_TO_VOTE` (anomaly_type → vote_key = fault_key for all 8 band types).
+- Imported it into `anomaly_group_service.py` and used `**BAND_TYPE_TO_VOTE` in the dict literal.
+- Dependency direction: `src/api/services → src/models` is already established by `comprehensive_pipeline.py`
+  (imports `BAND_TYPE_TO_VOTE` at line 52, SCADA constants at lines 83–92). Same pattern, not a new decision.
+
+**GAP 3 — removed two invented entries:**
+- `'random': "spike_fault"` → `'random': None` (perturbs all 4 sensors simultaneously, not a spike)
+- `'multi_sensor': "accuracy_decline"` → `'multi_sensor': None` (explicitly multivariate, not accuracy decline)
+- Both now fall through to value-based inference honestly.
+
+**GAP 4 — removed dead expression in diagnosis_enricher.py:**
+- Removed `flags[col] = z > 1.2` from `_zscore_flags` (line 203 in modified file).
+- The comment added in the previous phase (explaining why it's always False) was kept and improved.
+- Behaviour preserved: most-deviant fallback still fires for in-range readings.
+- `flags` dict now only has entries for out-of-range sensors (True) — clean structure.
+
+**Label parity:**
+- `src/dashboard/constants.py FAULT_LABELS` updated with all new keys:
+  `under_heating`, `over_heating`, `dehumidification_failure`, `humidity_saturation_risk`,
+  `thermal_divergence`, `temp_band_{high,low}`, `vpd_band_{high,low}`,
+  `humidity_band_{high,low}`, `co2_band_{high,low}`, `correlation_breakdown`,
+  `diurnal_deviation`, `humidity_fault`.
+- `web/lib/severity.ts FAULT_LABELS` is MISSING all these new keys — DO NOT edit web/ per task constraint.
+  Report to FE team: add the same 14 keys to web/lib/severity.ts FAULT_LABELS.
+
+**Proof:**
+- 19/19 parity tests PASSED (tests/api/test_anomaly_groups_parity.py)
+- 30/30 new mapping tests PASSED (tests/api/test_anomaly_type_fault_mapping.py)
+- 480 passed, 1 pre-existing failure (alembic not installed — unrelated), 1 xfailed, 359 warnings
+Done signal: tasks/done/backend-engineer.json
+
+---
+
+## Previous Phase
+**ADR-005 anomaly_score scale semantics (architect) — DESIGN COMPLETE (2026-08-01)**
+Design decision only; no implementation code written.
+Output: [docs/architecture/anomaly_score_scale_decision.md](docs/architecture/anomaly_score_scale_decision.md)
+
+**Problem:** `anomaly_score` is written by 4 producers on 3 incompatible scales but read
+through one `threshold` param. Live = raw recon error (noise 0.017, peak 0.36, cutoff
+`LIVE_ANOMALY_THRESHOLD` 0.05); batch = fused probability (cutoff `ANOMALY_THRESHOLD` 0.8);
+synthetic generator = fabricated (anomalies 0.60–0.99, filler `random.uniform(0.02, 0.28)`);
+upload = **sparse** (only flagged rows scored, normals stay NULL — a density convention the
+generator breaks). FE `DEFAULT_SCORE_THRESHOLD = 0.15` is on the LIVE scale, so it lands
+inside the generator's NORMAL band → 484 of 500 exported "anomalies" were normal rows.
+
+**Decisions:**
+- **One canonical scale, normalised at WRITE time.** `anomaly_score` = calibrated exceedance
+  ratio in [0,1] where **0.5 = the producing detector's own decision point**, 1.0 = saturation.
+  Per-producer `(p, hi)` calibration: `0.5*raw/p` below cutoff; above, `0.5+0.5*(raw-p)/(hi-p)`
+  when bounded, `0.5+0.5*(raw-p)/raw` when unbounded. Continuous at p, monotone, asymptotic to
+  1.0 so existing `Query(le=1.0)` stays valid. Live 0.017→0.17, 0.05→0.50, 0.36→0.93;
+  batch 0.28→0.175, 0.8→0.50, 0.99→0.97.
+- **Ground-truth producers get NO transform** — the generator and `seeds.py` run no detector.
+  Emit canonical directly: anomalies 0.75–0.99, filler 0.05–0.20 (deliberately below live's
+  canonical noise floor of 0.17 — fabricated normals must never outrank measured ones).
+- **Keep raw**: new nullable `anomaly_score_raw` + `score_scale`. Audit / re-derivation only,
+  explicitly NOT a query-time threshold selector. Lets a retrain recalibrate by recompute
+  instead of re-inferring over all history; also makes the migration reversible.
+- **Route**: `threshold` becomes OPTIONAL, defaults to `CANONICAL_ANOMALY_THRESHOLD = 0.5`,
+  effective value echoed in the response. Rejected server-side auto-detection — it breaks
+  `@cache`, which keys on query params, so an inferred threshold serves stale wrong results.
+- **FE**: `DEFAULT_SCORE_THRESHOLD` → **0.5**, stays a single constant (that is the point).
+  Its doc comment ("scores top out ~0.2") describes the live raw scale and becomes actively
+  misleading — must change. 4 call sites move for free via the shared import.
+- **Cause D (attribution)**: z-score vs the **tenant diurnal profile** (hour-of-day mean/std);
+  `diurnal_profile_service.py` already builds and persists these, so it is wiring not new
+  machinery. Key insight: the bug is BOTH the wrong centre (light mid 500 vs generator mean
+  200) AND the wrong scale (dividing by half-range, not σ). Fixing only the centre leaves
+  light comparing ~300/500 vs temperature ~0.6/5 — still wins the tiebreak. Fetch the profile
+  once per request in the route and thread it down (same pattern as `incidents=`).
+- **Cause B (Incidents)**: **NO** — the generator must not forge `Incident` rows. Incident is
+  pipeline OUTPUT and the substrate of the feedback/active-learning loop; forged detections
+  would be graded by operators, move reliability EMAs, and drive retraining on detections the
+  model never made. `SensorReading.anomaly_type` is the correct boundary. If the real
+  classifier should participate, run injected rows *through* the pipeline (separate work,
+  behind an explicit flag).
+
+**Rejected:** per-row `score_scale` + query-time resolution (turns the predicate into a
+disjunction → kills the `ix_sensor_readings_score_desc` index walk, the documented 38× /
+~9.8 s prod regression behind migration 022, and makes one FE slider unrenderable for mixed
+windows); canonicalising onto batch 0.8 or live 0.05 (producer-specific; live is unbounded and
+every retrain silently redefines all stored history); percentile scores (a healthy tenant
+flags 1% of normals by construction); NULL-ing synthetic filler (structurally safer and
+matches the sparse-upload convention, but breaks the FE score timeline for demo tenants).
+
+**Migration risks flagged:**
+- Existing rows partition cleanly with no guessing: `source='live'` / `anomaly_type IS NOT
+  NULL` / both NULL.
+- Legacy upload rows: per-file `p` is unrecoverable → one-time rank-preserving map
+  `0.5+0.5*raw/(1+raw)` (all land above 0.5, intra-file order preserved), tagged
+  `score_scale='legacy'` so they stay distinguishable. Synthetic rows: recommend DELETE
+  rather than transform — transforming fabricated scores lends them false credibility.
+- Non-finite guard is mandatory. Postgres `float8` **accepts** NaN/Inf (it is `jsonb` that
+  rejects them), so a bad value writes fine and only 500s when serialised into a JSON response
+  body. Must be Postgres-tested — SQLite cannot catch it (same gap class as `utc_date`).
+- `ix_sensor_readings_score_desc` is a partial index; rewriting every score bloats it and
+  staleness hits the exact path that caused the ~9.8 s regression. `CREATE INDEX CONCURRENTLY`
+  + swap + `ANALYZE`. Never plain `REINDEX` on a live table. Largest operational risk.
+- **Coordinated release REQUIRED and the ordering is asymmetric.** Backend FIRST: an old FE
+  sending 0.15 merely under-filters (noisy, no worse than today). FE first would send 0.5
+  against raw live scores that top out at 0.36 → **zero rows, silently empty dashboard**.
+  Making the param optional in step 1 removes the hazard from step 2 entirely.
+- Bookmarked URLs carrying `?threshold=0.15` / `?saved=` under-filter after the change; there
+  is no server-stored threshold to migrate (`ThresholdsView` reads `saved` from the URL).
+- `web/features/monitoring/api/live.ts:46` validates a `threshold` in the SSE payload — it must
+  emit canonical too, or SSE and REST disagree about "flagged" mid-session.
+
+**Note — causes C and E landed mid-design (backend-engineer, same day):** the Q5 mapping table
+already exists as `_ANOMALY_TYPE_TO_FAULT_TYPE` with `synthetic_context → None`, so that work
+is done and drops out of the FE release train. Cause C removed the dead branch but NOT the
+defective half-span denominator, which survives in `_infer_sensors_from_values` (`:346`) — the
+function that actually picks the attributed sensor. **Cause D remains fully open**, and no
+longer collides with cause C.
+
+Done signal: tasks/done/architect.json.
+
+---
+
+## Previous Phase
+**Anomaly fault-type classification fallback fix (backend-engineer) — COMPLETE (2026-08-01)**
+Agent: backend-engineer. Task: fix two root causes that made all 484 normal background
+synthetic readings appear as "Unknown / unclassified" and made "accuracy_decline" unreachable.
+
+**Root causes fixed:**
+
+**Cause E — anomaly_type label never read (Task 1):**
+- Added `SensorReading.anomaly_type` to the column-projection query in
+  `_fetch_minimal_flagged_rows` (and to the `_groups_by_date` inner subquery).
+- Extended `_row_dict_from_minimal` to carry `anomaly_type: str | None = None`.
+- Added module-level constant `_ANOMALY_TYPE_TO_FAULT_TYPE` mapping the 9 synthetic
+  anomaly types (temperature_spike, temperature_drop, humidity_spike, humidity_drop,
+  co2_surge, light_failure, multi_sensor, gradual_drift, random) + sentinel
+  "synthetic_context" → Incident.fault_type taxonomy. "synthetic_context" → None
+  (normal background reading, must not produce a fault classification).
+- Added `_fault_type_from_anomaly_type()` helper.
+- In `_enrich_sample_fast` else-branch (no incident): prefer `anomaly_type` → mapped
+  fault_type over `_infer_fault_type_from_values` fallback.
+- In `_groups_by_type_or_sensor` bucketing loop (no incident): same preference.
+- Carried `anomaly_type` through `BucketItem` 6-tuple → 7-tuple and `sample_raw`.
+- Updated `_sort_samples_newest_first` type hints to match 7-tuple.
+
+**Cause C — dead `accuracy_decline` branch (Task 2):**
+- Removed `has_flags = any(z > 1.2 ...)` + `if has_flags: return "accuracy_decline"`
+  from `_infer_fault_type_from_values` in `anomaly_group_service.py`. The z-score is
+  bounded at 1.0 for in-range values so this branch could never fire.
+- Added explanatory comment to `diagnosis_enricher._zscore_flags` at the matching
+  `flags[col] = z > 1.2` line (same bound; fallback ensures something is always flagged).
+- The two files are now consistent in their handling of in-range z-scores.
+
+**Label parity check:**
+- All fault_type keys produced by `_ANOMALY_TYPE_TO_FAULT_TYPE`
+  (spike_fault, accuracy_decline, calibration_drift) are already present in
+  `src/dashboard/constants.py:FAULT_LABELS` and `web/lib/severity.ts:FAULT_LABELS`.
+  No new keys were introduced; no web/ changes needed.
+
+**Proof:**
+- 19/19 parity tests PASSED (tests/api/test_anomaly_groups_parity.py)
+- 450 passed, 1 pre-existing failure (alembic not installed — unrelated), 1 xfailed,
+  359 warnings in tests/api/
+
+Done signal: tasks/done/backend-engineer.json.
+
+---
+
+## Previous Phase
 **Commit trained checkpoint as test fixture (demo-fixture) — COMPLETE (2026-07-29)**
 Agent: ml-engineer. Task: promote one trained checkpoint to a tracked test fixture so
 7 tests in `test_demo_compound_score.py` stop skipping forever after the .pt cleanup.

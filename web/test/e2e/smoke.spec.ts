@@ -18,14 +18,52 @@ const NAV_TARGETS = [
   { label: "Anomaly Detection", path: "/anomalies" },
   { label: "Thresholds", path: "/thresholds" },
   { label: "System Metrics", path: "/metrics" },
+  { label: "Greenhouse Profile", path: "/greenhouse-profile" },
+  { label: "App Configuration", path: "/app-configuration" },
   { label: "Upload & Operations", path: "/operations" },
   { label: "Job Monitoring", path: "/jobs" },
   { label: "Operator Feedback", path: "/feedback" },
 ];
 
 test("app boots and renders the Home page", async ({ page }) => {
+  await page.route("**/api/bff/readings/**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [
+          {
+            timestamp: "2026-07-18T12:00:00.000Z",
+            temperature: 22,
+            humidity: 60,
+            co2: 400,
+            light: 500,
+            anomaly_score: 0.01,
+          },
+        ],
+        count: 1,
+        min_timestamp: "2026-07-18T12:00:00.000Z",
+        max_timestamp: "2026-07-18T12:00:00.000Z",
+      },
+    }),
+  );
+  await page.route("**/api/bff/live/**", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/api/bff/config/**", (route) =>
+    route.fulfill({
+      json: {
+        config: {
+          crop: "tomato",
+          day_window: { start_hour: 6, end_hour: 18 },
+          co2_enrichment: false,
+          setpoints: {},
+          season_map: {},
+        },
+        sources: {},
+      },
+    }),
+  );
+
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
+  await expect(page.getByTestId("home-page")).toBeVisible();
   await expect(page.getByTestId("uplot-chart")).toBeVisible();
 });
 
