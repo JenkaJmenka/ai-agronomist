@@ -47,6 +47,15 @@ from src.config import (
     TEMP_RANGE,
 )
 from src.db.models import SensorReading
+from src.models.band_breach_detector import BAND_TYPE_TO_VOTE
+from src.models.setpoint_scada_detector import (
+    DEHUMIDIFICATION_FAILURE,
+    HUMIDITY_SATURATION_RISK,
+    OVER_HEATING,
+    SENSOR_FLATLINE,
+    THERMAL_DIVERGENCE,
+    UNDER_HEATING,
+)
 
 # Mirror the ±window used by diagnosis_enricher._nearest_incident.
 _INCIDENT_WINDOW_MINUTES: int = 15
@@ -70,6 +79,59 @@ _SENSOR_BOUNDS: dict[str, tuple[float, float]] = {
     "light": LIGHT_RANGE,
 }
 
+# Maps SensorReading.anomaly_type to the Incident.fault_type taxonomy.
+#
+# Three sources write anomaly_type values to SensorReading rows:
+#   1. synthetic_anomalies.py  — lowercase keys from _TYPE_PROFILES
+#   2. setpoint_scada_detector — UPPER_CASE constants (e.g. UNDER_HEATING)
+#   3. band_breach_detector    — UPPER_CASE constants (e.g. TEMP_BAND_HIGH)
+#
+# Fault keys are taken verbatim from comprehensive_pipeline._RULE_VOTE_PROFILES
+# so the mapping is always consistent with what the pipeline writes to Incident.
+#
+# Dependency direction: src/api/services → src/models is already established
+# by comprehensive_pipeline.py (lines 52, 83–92).  Importing BAND_TYPE_TO_VOTE
+# and the SCADA constants here follows that same pattern.
+#
+# BAND_TYPE_TO_VOTE (band_breach_detector.py:29) already maps every band
+# anomaly_type to the correct lowercase fault_key; we reuse it via **-unpack
+# rather than restating 8 pairs (two maps that must stay in sync violates the
+# no-duplication guardrail).
+_ANOMALY_TYPE_TO_FAULT_TYPE: dict[str, str | None] = {
+    # ── synthetic-injection labels (synthetic_anomalies.py _TYPE_PROFILES) ──
+    "temperature_spike": "spike_fault",
+    "temperature_drop":  "spike_fault",
+    "humidity_spike":    "spike_fault",
+    "humidity_drop":     "spike_fault",
+    "co2_surge":         "spike_fault",
+    "light_failure":     "spike_fault",
+    "gradual_drift":     "calibration_drift",
+    # 'random' perturbs all four sensors simultaneously — it is not a spike on
+    # any single channel.  'multi_sensor' is explicitly multivariate — it is
+    # not an accuracy decline.  Neither maps honestly to a single fault key;
+    # return None and let value-based inference decide.
+    "random":            None,
+    "multi_sensor":      None,
+    # Sentinel: marks normal background readings injected around synthetic
+    # faults.  Not a fault — must not produce any fault classification.
+    "synthetic_context": None,
+    # ── setpoint-SCADA detector (setpoint_scada_detector.py:38–43) ──────────
+    UNDER_HEATING:            "under_heating",
+    OVER_HEATING:             "over_heating",
+    DEHUMIDIFICATION_FAILURE: "dehumidification_failure",
+    HUMIDITY_SATURATION_RISK: "humidity_saturation_risk",
+    THERMAL_DIVERGENCE:       "thermal_divergence",
+    # SENSOR_FLATLINE: a sensor frozen at constant value (zero variance) is
+    # the canonical "stuck" failure in db/models.py taxonomy (stuck_fault).
+    # comprehensive_pipeline._RULE_VOTE_PROFILES["sensor_flatline"] uses the
+    # same assignment (fault_type="stuck_fault"), so this is consistent.
+    SENSOR_FLATLINE:          "stuck_fault",
+    # ── band-breach detector (band_breach_detector.py:29 BAND_TYPE_TO_VOTE) ──
+    # Reuse the existing map — its values are the lowercase fault_keys used by
+    # comprehensive_pipeline (temp_band_high, vpd_band_low, etc.).
+    **BAND_TYPE_TO_VOTE,
+}
+
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -81,6 +143,28 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _canonical_sensor_value(
+    channel: str,
+    temperature: float | None,
+    humidity: float | None,
+    co2: float | None,
+    light: float | None,
+) -> float | None:
+    """Return the stored SensorReading value for a canonical channel name.
+
+    Only the four stored columns are supported.  Non-canonical channel names
+    (e.g. ``measured_pipe_1_temp``) return None — the caller must use a
+    separately persisted ``trigger_value`` for those.
+    """
+    _MAP: dict[str, float | None] = {
+        "temperature": temperature,
+        "humidity": humidity,
+        "co2": co2,
+        "light": light,
+    }
+    return _MAP.get(channel)
 
 
 def _sensor_values_from_dict(
@@ -116,6 +200,7 @@ def _build_sample(row: dict[str, Any]) -> dict[str, Any]:
         "affected_sensors": sensors,
         "reasoning": row.get("reasoning"),
         "values": _sensor_values_from_dict(row, sensors),
+        "detected_severity": row.get("detected_severity"),
     }
 
 
@@ -133,6 +218,12 @@ def _row_dict_from_minimal(
     humidity: float | None,
     co2: float | None,
     light: float | None,
+    anomaly_type: str | None = None,
+    *,
+    trigger_channel: str | None = None,
+    trigger_detector: str | None = None,
+    detected_severity: str | None = None,
+    trigger_value: float | None = None,
 ) -> dict[str, Any]:
     """Build a row dict suitable for enrich_anomaly_rows from column values."""
     return {
@@ -142,6 +233,11 @@ def _row_dict_from_minimal(
         "humidity": humidity,
         "co2": co2,
         "light": light,
+        "anomaly_type": anomaly_type,
+        "trigger_channel": trigger_channel,
+        "trigger_detector": trigger_detector,
+        "detected_severity": detected_severity,
+        "trigger_value": trigger_value,
     }
 
 
@@ -205,6 +301,19 @@ def _fault_type_from_incident(incident: dict[str, Any] | None) -> str | None:
     return incident.get("fault_type") or None
 
 
+def _fault_type_from_anomaly_type(anomaly_type: str | None) -> str | None:
+    """Map SensorReading.anomaly_type to the Incident.fault_type taxonomy.
+
+    Returns None when anomaly_type is None, not recognised, or is the sentinel
+    "synthetic_context" (which marks normal background readings that are not
+    faults).  Callers should fall back to _infer_fault_type_from_values when
+    this returns None.
+    """
+    if anomaly_type is None:
+        return None
+    return _ANOMALY_TYPE_TO_FAULT_TYPE.get(anomaly_type)
+
+
 def _infer_fault_type_from_values(
     temperature: float | None,
     humidity: float | None,
@@ -255,12 +364,12 @@ def _infer_fault_type_from_values(
     if below:
         # Mirrors: pattern_type = "drop" → spike_fault.
         return "spike_fault"
-    # In-range z-score deviation — mirrors multivariate branch.
-    has_flags = any(z > 1.2 for z in zscores.values())
-    if has_flags:
-        return "accuracy_decline"
-    # Fallback for multivariate/sequence anomalies with no clear deviation.
-    # enrich_row returns None here (no pattern_type, no incident).
+    # In-range case: z = |f - mid| / (span/2) ≤ 1.0 for all f ∈ [lo, hi],
+    # so any(z > 1.2 ...) can never be True — the old "accuracy_decline" branch
+    # was unreachable dead code.  diagnosis_enricher._zscore_flags has the same
+    # bound; see its inline comment.  Without an incident or a range violation,
+    # the honest answer is "unknown" — Task 1 (anomaly_type label) covers the
+    # synthetic-injection case before this fallback is ever reached.
     return _UNKNOWN_KEY
 
 
@@ -328,47 +437,41 @@ _SIMPLE_REASONING_UNITS: dict[str, str] = {
 }
 
 
-def _simple_reasoning_from_values(
-    temperature: float | None,
-    humidity: float | None,
-    co2: float | None,
-    light: float | None,
-    sensors: list[str],
-) -> str:
-    """Generate a compact reasoning string from sensor readings.
+def _simple_reasoning_from_values(channel: str, value: float | None) -> str:
+    """Generate a compact reasoning string for the single channel that fired.
 
-    Used by _enrich_sample_fast when no persisted reasoning is available.
-    Not intended to be identical to enrich_row._build_reasoning — it is a
-    lighter-weight fallback for sample objects in group responses.
+    Describes only the triggering channel — never emits clauses about channels
+    that did not fire.  When the channel is a raw detector column name (e.g.
+    ``measured_pipe_1_temp``) and has no entry in ``_SENSOR_BOUNDS``, the
+    reasoning quotes the value without a spike/drop qualifier.
+
+    Parameters
+    ----------
+    channel:
+        The raw column name that triggered the alert (e.g. ``humidity``,
+        ``measured_pipe_1_temp``).
+    value:
+        The sensor value at the time of the alert; None if unavailable.
     """
-    vals: dict[str, float | None] = {
-        "temperature": temperature,
-        "humidity": humidity,
-        "co2": co2,
-        "light": light,
-    }
-    parts: list[str] = []
-    for sensor in sensors:
-        v = vals.get(sensor)
-        if v is None:
-            continue
-        bounds = _SENSOR_BOUNDS.get(sensor)
-        unit = _SIMPLE_REASONING_UNITS.get(sensor, "")
-        if bounds is not None:
-            lo, hi = bounds
-            if v > hi:
-                parts.append(
-                    f"Unexpected {sensor} spike: {v:.1f}{unit} ({hi:.0f}{unit} upper bound)"
-                )
-            elif v < lo:
-                parts.append(
-                    f"Unexpected {sensor} drop: {v:.1f}{unit} ({lo:.0f}{unit} lower bound)"
-                )
-            else:
-                parts.append(f"Unusual {sensor} reading: {v:.1f}{unit}")
-    if not parts:
-        return "Anomaly score exceeded threshold — no detailed diagnosis available yet"
-    return "; ".join(parts)
+    if value is None:
+        return (
+            f"Anomaly detected on {channel!r} — value not recorded"
+        )
+    unit = _SIMPLE_REASONING_UNITS.get(channel, "")
+    bounds = _SENSOR_BOUNDS.get(channel)
+    if bounds is not None:
+        lo, hi = bounds
+        if value > hi:
+            return (
+                f"Unexpected {channel} spike: {value:.1f}{unit}"
+                f" ({hi:.0f}{unit} upper bound)"
+            )
+        if value < lo:
+            return (
+                f"Unexpected {channel} drop: {value:.1f}{unit}"
+                f" ({lo:.0f}{unit} lower bound)"
+            )
+    return f"Unusual {channel} reading: {value:.1f}{unit}"
 
 
 def _enrich_sample_fast(
@@ -392,11 +495,20 @@ def _enrich_sample_fast(
     co2 = row_dict.get("co2")
     light = row_dict.get("light")
 
+    # Trigger columns from migration 024 (None for pre-migration rows).
+    trigger_channel: str | None = row_dict.get("trigger_channel")
+    trigger_value: float | None = row_dict.get("trigger_value")
+
     if incident is not None:
         details = incident.get("root_cause_details") or {}
         sensors = list(details.get("affected_sensors") or [])
         if not sensors:
-            sensors = _infer_sensors_from_values(temp, hum, co2, light)
+            # Prefer persisted trigger_channel over value-based inference.
+            sensors = (
+                [trigger_channel]
+                if trigger_channel
+                else _infer_sensors_from_values(temp, hum, co2, light)
+            )
 
         # Persisted reasoning (from pipeline) takes priority — mirrors enrich_row.
         reasoning: str = details.get("reasoning") or ""
@@ -404,15 +516,37 @@ def _enrich_sample_fast(
             root_cause = incident.get("root_cause")
             reasoning = str(root_cause) if root_cause else ""
         if not reasoning:
-            reasoning = _simple_reasoning_from_values(temp, hum, co2, light, sensors)
+            primary = sensors[0] if sensors else (trigger_channel or "unknown")
+            primary_val = trigger_value if trigger_channel == primary else _canonical_sensor_value(
+                primary, temp, hum, co2, light
+            )
+            reasoning = _simple_reasoning_from_values(primary, primary_val)
 
         fault_type: str = incident.get("fault_type") or _UNKNOWN_KEY
         incident_id: str | None = incident.get("id")
         root_cause_val: str | None = incident.get("root_cause")
     else:
-        sensors = _infer_sensors_from_values(temp, hum, co2, light)
-        fault_type = _infer_fault_type_from_values(temp, hum, co2, light)
-        reasoning = _simple_reasoning_from_values(temp, hum, co2, light, sensors)
+        # Prefer persisted trigger_channel over value-based inference (D1).
+        if trigger_channel:
+            sensors = [trigger_channel]
+            reasoning = _simple_reasoning_from_values(trigger_channel, trigger_value)
+        else:
+            inferred = _infer_sensors_from_values(temp, hum, co2, light)
+            sensors = inferred
+            primary = inferred[0] if inferred else "unknown"
+            primary_val = _canonical_sensor_value(primary, temp, hum, co2, light)
+            reasoning = _simple_reasoning_from_values(primary, primary_val)
+        # Prefer the stored anomaly_type label over value-based inference.
+        # anomaly_type is written by the inject endpoint for synthetic rows.
+        # "synthetic_context" sentinel maps to None → fall through to value
+        # inference (marks a normal background reading, not a fault).
+        row_anomaly_type: str | None = row_dict.get("anomaly_type")
+        mapped_fault = _fault_type_from_anomaly_type(row_anomaly_type)
+        fault_type = (
+            mapped_fault
+            if mapped_fault is not None
+            else _infer_fault_type_from_values(temp, hum, co2, light)
+        )
         incident_id = None
         root_cause_val = None
 
@@ -533,6 +667,11 @@ async def _fetch_minimal_flagged_rows(
             SensorReading.humidity,
             SensorReading.co2,
             SensorReading.light,
+            SensorReading.anomaly_type,
+            SensorReading.trigger_channel,
+            SensorReading.trigger_detector,
+            SensorReading.detected_severity,
+            SensorReading.trigger_value,
         )
         .where(*_base_conditions(tenant_id, greenhouse_id, start, end, threshold))
         .order_by(SensorReading.timestamp)
@@ -608,6 +747,11 @@ async def _groups_by_date(
             SensorReading.humidity,
             SensorReading.co2,
             SensorReading.light,
+            SensorReading.anomaly_type,
+            SensorReading.trigger_channel,
+            SensorReading.trigger_detector,
+            SensorReading.detected_severity,
+            SensorReading.trigger_value,
             utc_date(SensorReading.timestamp).label("day"),
             rn_expr,
         )
@@ -625,7 +769,12 @@ async def _groups_by_date(
     sorted_times, sorted_incidents = _build_sorted_incidents(incidents)
     sample_dicts: list[dict[str, Any]] = [
         _row_dict_from_minimal(
-            r.timestamp, r.anomaly_score, r.temperature, r.humidity, r.co2, r.light
+            r.timestamp, r.anomaly_score, r.temperature, r.humidity, r.co2, r.light,
+            r.anomaly_type,
+            trigger_channel=getattr(r, "trigger_channel", None),
+            trigger_detector=getattr(r, "trigger_detector", None),
+            detected_severity=getattr(r, "detected_severity", None),
+            trigger_value=getattr(r, "trigger_value", None),
         )
         for r in sample_rows
     ]
@@ -663,9 +812,9 @@ async def _groups_by_date(
 
 
 def _sort_samples_newest_first(
-    bucket_items: list[tuple[str, float, float, float, float, float]],
+    bucket_items: list[tuple[str, float, float | None, float | None, float | None, float | None, str | None]],
     sample_limit: int,
-) -> list[tuple[str, float, float, float, float, float]]:
+) -> list[tuple[str, float, float | None, float | None, float | None, float | None, str | None]]:
     """Pick the top-N items by score, then sort them newest-first by timestamp.
 
     Mirrors group_anomaly_rows: ranked[:sample_limit] then sort by timestamp DESC.
@@ -715,9 +864,14 @@ async def _groups_by_type_or_sensor(
     if not minimal_rows:
         return []
 
-    # Items stored per bucket: (timestamp_iso, score, temp, hum, co2, light)
-    BucketItem = tuple[str, float, float | None, float | None, float | None, float | None]
+    # Items stored per bucket:
+    # (timestamp_iso, score, temp, hum, co2, light, anomaly_type)
+    BucketItem = tuple[str, float, float | None, float | None, float | None, float | None, str | None]
     buckets: dict[str, list[BucketItem]] = defaultdict(list)
+
+    # Per-timestamp trigger data read from the new migration-024 columns.
+    # Stored separately from BucketItem so the compact tuple shape is unchanged.
+    trigger_by_ts: dict[str, dict[str, Any]] = {}
 
     for r in minimal_rows:
         ts_iso = _iso(r.timestamp) or ""
@@ -726,17 +880,33 @@ async def _groups_by_type_or_sensor(
         hum = r.humidity
         co2 = r.co2
         light = r.light
-        item: BucketItem = (ts_iso, score, temp, hum, co2, light)
+        item: BucketItem = (ts_iso, score, temp, hum, co2, light, r.anomaly_type)
+
+        # Capture trigger columns (NULL for rows pre-dating migration 024).
+        trigger_by_ts[ts_iso] = {
+            "trigger_channel": getattr(r, "trigger_channel", None),
+            "trigger_detector": getattr(r, "trigger_detector", None),
+            "detected_severity": getattr(r, "detected_severity", None),
+            "trigger_value": getattr(r, "trigger_value", None),
+        }
 
         incident = _nearest_incident_fast(r.timestamp, sorted_times, sorted_incidents)
         incident_fault_type = _fault_type_from_incident(incident)
         affected_sensors = _affected_sensors_from_incident(incident)
 
         if incident is None:
-            # No incident match — infer both fault_type and sensors from values.
-            # Mirrors the enrich_row fallback path (_zscore_flags + _infer_fault_type).
-            fault_type = _infer_fault_type_from_values(temp, hum, co2, light)
-            affected_sensors = _infer_sensors_from_values(temp, hum, co2, light)
+            # No incident match — prefer the stored anomaly_type label over
+            # value-based inference.  The sentinel "synthetic_context" maps to
+            # None and falls through to value inference (normal background row).
+            mapped_fault = _fault_type_from_anomaly_type(r.anomaly_type)
+            fault_type = (
+                mapped_fault
+                if mapped_fault is not None
+                else _infer_fault_type_from_values(temp, hum, co2, light)
+            )
+            # Prefer persisted trigger_channel over value-based inference.
+            tc = trigger_by_ts[ts_iso].get("trigger_channel")
+            affected_sensors = [tc] if tc else _infer_sensors_from_values(temp, hum, co2, light)
         else:
             fault_type = incident_fault_type or _UNKNOWN_KEY
             if not affected_sensors:
@@ -764,13 +934,17 @@ async def _groups_by_type_or_sensor(
                 sample_ts_set.add(ts)
                 sample_ts_list.append(ts)
 
-    # Build raw dicts for the sample rows.
+    # Build raw dicts for the sample rows — include trigger columns so the
+    # enrichment fast path can use them instead of value-based inference.
     sample_raw: dict[str, dict[str, Any]] = {}
     for key, top_items in group_top_items.items():
         for item in top_items:
-            ts, score, temp, hum, co2, light = item
+            ts, score, temp, hum, co2, light, anom_type = item
             if ts not in sample_raw:
-                sample_raw[ts] = _row_dict_from_minimal(ts, score, temp, hum, co2, light)
+                sample_raw[ts] = _row_dict_from_minimal(
+                    ts, score, temp, hum, co2, light, anom_type,
+                    **trigger_by_ts.get(ts, {}),
+                )
 
     # Enrich only the sample rows (small N ≤ N_groups × sample_limit).
     # Use the fast path (binary-search incident lookup, no pandas) since

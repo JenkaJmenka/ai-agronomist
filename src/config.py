@@ -817,6 +817,20 @@ BOOTSTRAP_IF_CONTAMINATION: float = 0.04
 # Resampling cadence applied to raw SCADA data before bootstrap processing.
 BOOTSTRAP_RESAMPLE_INTERVAL: str = "5min"
 
+# Chunk size (rows) for streaming CSV reads in the bootstrap loader.
+# Keeps memory bounded without discarding data — every chunk is processed.
+# Override via BOOTSTRAP_LOADER_CHUNK_SIZE env var.
+BOOTSTRAP_LOADER_CHUNK_SIZE: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_CHUNK_SIZE", "5000")
+)
+
+# Random seed used by the bootstrap loader for reproducible sampling when a
+# row cap is active.  Mirrors RANDOM_SEED but is independent so upstream
+# changes to the global seed do not silently alter bootstrap outputs.
+BOOTSTRAP_LOADER_RANDOM_SEED: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_RANDOM_SEED", str(RANDOM_SEED))
+)
+
 # Output paths for the bootstrap pipeline.
 BOOTSTRAP_CLEAN_PATH: str = "data/bootstrapped_clean.csv"
 BOOTSTRAP_ANOMALY_PATH: str = "data/pass1_suspected_anomalies.csv"
@@ -1109,6 +1123,36 @@ LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SEC
 LIVE_ANOMALY_THRESHOLD: float = float(
     os.environ.get("LIVE_ANOMALY_THRESHOLD", "0.05")
 )
+
+# ---------------------------------------------------------------------------
+# ADR-005 — Canonical anomaly score scale (§2, §7)
+#
+# SCORE_SCALE_CALIBRATION is the ONE place (p, hi) calibration pairs live.
+# Do NOT write a second copy anywhere else — import this dict instead.
+#
+#   p  = the producer's own decision threshold (raw, pre-canonical)
+#   hi = saturation value (None for unbounded scales)
+#
+# The upload path computes p per-file at runtime; it is NOT a constant and
+# therefore has no entry here.  Pass p at the call site using the value
+# returned by calibrate_threshold().
+# ---------------------------------------------------------------------------
+SCORE_SCALE_CALIBRATION: dict[str, tuple[float, float | None]] = {
+    "live":  (LIVE_ANOMALY_THRESHOLD, None),   # raw LSTM-VAE recon error, unbounded
+    "batch": (ANOMALY_THRESHOLD,      1.0),    # fused detector probability in [0, 1]
+}
+
+# Threshold on the canonical scale — simultaneously correct for every producer.
+# 0.5 == the producing detector's own decision point by construction.
+CANONICAL_ANOMALY_THRESHOLD: float = 0.5
+
+# Score bands for ground-truth (synthetic) rows.  These are emitted DIRECTLY
+# without running the transform — the generator has no detector and no raw score.
+# Injected faults land in [0.75, 0.99]; background filler in [0.05, 0.20].
+# Filler deliberately sits below the live noise floor (canonical ~0.17) so a
+# fabricated normal row never outranks a real measured one.
+SYNTHETIC_ANOMALY_SCORE_RANGE: tuple[float, float] = (0.75, 0.99)
+SYNTHETIC_CONTEXT_SCORE_RANGE: tuple[float, float] = (0.05, 0.20)
 
 # Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly
 # episode persists (debounce to avoid flooding the SSE stream).

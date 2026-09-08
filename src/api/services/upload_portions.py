@@ -21,7 +21,13 @@ from src.api.schemas.sensor_data import (
     UploadHighAnomalyDetail,
     UploadInferenceResponse,
 )
-from src.config import ANOMALY_SCALING_FACTOR, COLD_RUN_STAT_ROLLING_WINDOW, LATENT_DIM
+from src.api.services.score_transform import canonical as _canonical_transform
+from src.config import (
+    ANOMALY_SCALING_FACTOR,
+    COLD_RUN_STAT_ROLLING_WINDOW,
+    COLD_RUN_STAT_Z_MIN,
+    LATENT_DIM,
+)
 from src.models.cold_run_detector import (
     ColdRunStatisticalDetector,
     _effective_rolling_window,
@@ -29,6 +35,21 @@ from src.models.cold_run_detector import (
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
+
+
+def _stat_z_to_canonical(z_score: float) -> float:
+    """Map a statistical z-score to the ADR-005 canonical [0, 1] scale.
+
+    Decision point p = COLD_RUN_STAT_Z_MIN (config default 5.5):
+      z == p  → canonical 0.5  (detector's own threshold)
+      z > p   → asymptotes toward 1.0 as z grows
+      z < p   → [0, 0.5) (below threshold, not normally reached here)
+
+    Uses the unbounded branch (hi=None) of score_transform.canonical so
+    the score never saturates at 1.0 — z must be infinite to reach it.
+    """
+    can = _canonical_transform(z_score, COLD_RUN_STAT_Z_MIN, None)
+    return can if can is not None else 0.5
 
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
 
@@ -221,7 +242,7 @@ def finalize_scores(
     )
     stat_high = [
         UploadHighAnomalyDetail(
-            score=min(1.0, detail.z_score / 5.0),
+            score=_stat_z_to_canonical(detail.z_score),
             timestamp=detail.timestamp,
             detector="statistical",
             column=detail.column,

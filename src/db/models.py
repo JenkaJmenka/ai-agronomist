@@ -79,7 +79,44 @@ class SensorReading(Base):
     anomaly_score: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
-        doc="Model inference output score indicating confidence in anomaly classification"
+        doc="Model inference output score — canonical [0,1] scale (ADR-005). "
+            "0.5 == the producing detector's own decision point.",
+    )
+    anomaly_score_raw: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        doc="Producer's native score before the ADR-005 canonical transform. "
+            "Preserved for recalibration without re-inference. NULL until migration 023.",
+    )
+    score_scale: Mapped[Optional[str]] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="Provenance label for the scale used: live | upload | batch | "
+            "synthetic | legacy | unknown. NULL until migration 023.",
+    )
+    trigger_channel: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        doc="Raw column name with the highest-|z| hit at this timestamp. "
+            "Populated by the CSV upload path (statistical detector). NULL until migration 024.",
+    )
+    trigger_detector: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="Detector name (statistical, lstm, lstm+statistical) for the trigger_channel hit. "
+            "NULL until migration 024.",
+    )
+    detected_severity: Mapped[Optional[str]] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="Severity label (critical, warning) from the triggering detector. "
+            "NULL until migration 024.",
+    )
+    trigger_value: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        doc="Raw sensor value at trigger_channel that caused the alert. "
+            "NULL for LSTM-only rows. NULL until migration 024.",
     )
     anomaly_type: Mapped[Optional[str]] = mapped_column(
         String(64),

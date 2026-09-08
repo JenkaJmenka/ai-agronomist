@@ -3,6 +3,76 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Alert label integrity (D1–D4) — COMPLETE (2026-09-08)**
+
+Fixed four defects on the CSV upload path that caused every alert to be mis-labelled:
+
+**D1 — Trigger channel now persisted and read:**
+- Added 4 new columns to `SensorReading`: `trigger_channel` (VARCHAR 255), `trigger_detector`
+  (VARCHAR 64), `detected_severity` (VARCHAR 16), `trigger_value` (FLOAT). All nullable.
+- New Alembic migration `024_trigger_label_integrity.py` (revises 023).
+- New `build_trigger_data_by_timestamp()` in `cold_run_upload.py` picks the highest-|z| column
+  per timestamp as primary trigger.
+- `apply_anomaly_scores()` in `csv_persist.py` extended to write trigger columns to `SensorReading`.
+- `_fetch_minimal_flagged_rows()` in `anomaly_group_service.py` now SELECTs trigger columns.
+- `_groups_by_type_or_sensor()` stores trigger data separately from BucketItem for enrichment.
+
+**D2 — Reasoning from triggering channel only:**
+- `_simple_reasoning_from_values()` rewritten: new signature `(channel, value)` instead of
+  the old `(temperature, humidity, co2, light, sensors)` loop.
+- `_enrich_sample_fast()` uses `trigger_channel` + `trigger_value` from row dict when present;
+  falls back to value-based inference for pre-migration rows.
+- A pipe-temperature alert now says "Unusual measured_pipe_1_temp reading: 51.0°C" rather
+  than fabricating greenhouse-air-temperature and humidity clauses.
+
+**D3 — Statistical score de-saturated:**
+- `upload_portions.py` stat_high score: `min(1.0, detail.z_score / 5.0)` → `_stat_z_to_canonical(z)`.
+- `_stat_z_to_canonical()` uses `score_transform.canonical(z, COLD_RUN_STAT_Z_MIN, None)`.
+- z=5.5 → 0.50, z=10 → 0.725, z=19.5 → 0.859. Never saturates at 1.0 for finite z.
+
+**D4 — Detected severity surfaces end-to-end:**
+- `detected_severity` in `SensorReading` populated by `apply_anomaly_scores`.
+- `_build_sample()` in `anomaly_group_service.py` passes `detected_severity` through in response.
+- Frontend-side rendering is owned by another agent.
+
+**Test results:**
+- 27/27 new acceptance tests in `tests/api/test_label_integrity.py` PASS.
+- 537 pre-existing tests in `tests/api/` PASS.
+- Pre-existing failures (NOT caused by this PR):
+  - `test_023_migration.py::test_live_round_trip_restores_original_score` — timeout
+    on SQLite iteration; pre-existing slow test.
+  - `test_inference.py::test_inference_saves_to_database` — expects raw 0.72 but
+    pre-existing ADR-005 modifications to inference.py store the canonical score (0.45).
+
+---
+
+**Bootstrap loader sampling fix — COMPLETE (2026-09-08)**
+
+Fixed `_load_and_resample` in `src/models/bootstrap.py` which silently discarded ~90%
+of uploaded CSV data via reservoir sampling and fabricated derived values via
+`.resample("5min").mean()` and `.interpolate(limit=3)`.
+
+**Changes:**
+- `src/models/bootstrap.py`: Removed reservoir sampling (MAX_CHUNKS=10, unseeded
+  `random.randint`). All chunks are now processed — streaming reads keep memory bounded.
+  Removed `.resample().mean()` and `.interpolate()` that silently replaced real
+  measurements. Added proper `logger.warning()` with chunk index/row range/exception
+  for failed chunks (was `except Exception: continue`). Added summary log line.
+- `src/config.py`: Added `BOOTSTRAP_LOADER_CHUNK_SIZE` (5000, env-overridable) and
+  `BOOTSTRAP_LOADER_RANDOM_SEED` (42, env-overridable) for future use if a row cap
+  is ever needed.
+- `tests/models/test_bootstrap_sampling.py`: 6 new tests — full time-span retention
+  on 55k rows, reproducibility, no silent value replacement, null preservation,
+  malformed chunk logging (direct + mock-injected failure).
+
+**Measured results on synthetic 105,120-row uniform input:**
+- Before: 9,057 rows retained (8.6%), windows spanning 8 days median
+- After: 105,120 rows retained (100.0%), max gap = 5 min (source cadence)
+
+No row cap applied. No files outside ownership touched. 35/35 tests green.
+
+---
+
 **Home Phase A + Config IA — COMPLETE (2026-09-08)**
 
 Phase A — fixed critical Home (`web/features/home/HomeView.tsx`):
@@ -2933,3 +3003,14 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
 - **Verified**: upload.py split (785→292 lines; services/tenant_data_wipe.py 242, services/synthetic_anomalies.py 298 — all ≤300) removes duplication genuinely (suppress/clear-stream helpers, 4 type dicts → one `_TYPE_PROFILES` table with all 9 profiles value-identical); migration 017 (anomaly_type→source) is linear 016→017, SQLite batch-mode, reversible backfill; supervision/runtime de-underscore renames complete with zero stale refs; cache_keys `_safe_args_repr` correct + tested; web extractions (useChannelVisibility, useChartRangeSelect) verbatim incl. profiling probe; chartBaseline scope keys threaded through all 6 call sites; drag-pan `data-row-selectable` contract has exactly one producer/consumer.
 - **Notes for follow-up**: (1) dead `_anomaly_value()` carried into synthetic_anomalies.py — delete; (2) `${pageId}:${tenant}:${gh}` key built by hand in 4 files — extract `buildChartScopeKey`; (3) deploy ordering: migration 017 must run before new code serves the DELETE /upload routes (un-migrated DB + new code would let remove_synthetic_anomalies match legacy anomaly_type='live' rows); (4) `live_runtime: Any` → small Protocol; (5) long lines synthetic_anomalies.py:210-213; (6) pre-existing `adapter._csv_props` private access.
 - **No files under src/, tests/, or web/ modified** (read-only mandate).
+
+## Native-cadence test fixtures (QA, 2026-09-08)
+- **Task**: Extract two native-cadence fixtures from the raw greenhouse SCADA export (`2026_utk_test.csv`), write a provenance record, and create cadence-guard tests.
+- **Source**: `/Users/eugenesidorov/Downloads/2026_utk_test.csv` — 105,120 rows, 365 days x 288 samples/day, all 105,119 inter-row gaps exactly 300s, SHA-256 `7e3aecc815d0b785f553839792c6dea63fa7813aecf5632e1d1a09d84f929e34`.
+- **Fixture A** (`tests/fixtures/native_dec_stuck_fault.csv`): Dec 14–26 inclusive, 3,457 rows, 70 null humidity readings. Main stuck-fault: 1,897 samples at 100.0 from 2026-12-18T13:00 to 2026-12-25T08:50 (163.83h wall-clock), releases at 08:55 (91.24). Prior freezes: 34.83h (truncated), 22.08h, 47.92h, 1.00h. SHA-256 `67476d349321770a5f253a44f9fead0a5c2729dd6f7e29eabc727042907d3deb`.
+- **Fixture B** (`tests/fixtures/native_july_clearsky.csv`): Jul 1–7, 2,016 rows, 0 null humidity. Max light 1019.98 W/m² at 2026-07-02 12:25. SHA-256 `cb7b3a168e7eaac4768d53a796ff4447e324379578c4d41fe61ade87edb8def4`.
+- **Provenance**: `tests/fixtures/NATIVE_FIXTURES.md` — records source SHA, cadence verification, all measured ground-truth values, discrepancy notes vs task prompt (prior freeze durations don't match prompt's "22h, 29.5h, 48.7h" — measured 22.08h, 34.83h, 47.92h, 1.00h).
+- **Tests**: `tests/fixtures/test_native_fixtures.py` — 14 tests, all green. Covers: adapter parsing, cadence (300s), row counts, 1897-sample fault count, 163.83h duration, onset timestamp, pre-onset values, null preservation (70 for A, 0 for B), max light > 900, max light value 1019.98.
+- **Key finding**: `data/*_csvtest_20260712.csv` files are bootstrap derivatives (unseeded random sampling + `.resample("5min").mean()` + `.interpolate()`), NOT native exports. Evidence at `src/models/bootstrap.py` lines 255-308. Must not be used as fixtures.
+- **No bugs found** in `src/vendors/csv_adapter.py` — adapter correctly detects semicolon delimiter, comma decimals, day-first timestamps, and maps Connext column names. NaN humidity rows are correctly dropped during normalization (expected behavior).
+- **Files created**: `tests/fixtures/native_dec_stuck_fault.csv`, `tests/fixtures/native_july_clearsky.csv`, `tests/fixtures/NATIVE_FIXTURES.md`, `tests/fixtures/test_native_fixtures.py`. No `src/` files modified.

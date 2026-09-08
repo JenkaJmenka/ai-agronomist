@@ -14,6 +14,7 @@ from src.api.schemas.sensor_data import (
     UploadHighAnomalyDetail,
     UploadInferenceResponse,
 )
+from src.api.services.score_transform import canonical as _canonical_score
 from src.config import ADAPTIVE_RANGE_SAMPLE_ROWS
 from src.models.data_utils import SENSOR_RANGES, AdaptiveRangeAccumulator
 from src.models.inference import AnomalyDetector
@@ -43,6 +44,10 @@ def build_anomaly_scores_by_timestamp(
 
     Only anomalies above the file-calibrated threshold are stored. Normal
     sequence scores stay unset so dashboard filtering stays sparse and accurate.
+
+    .. deprecated::
+        Prefer ``build_upload_score_dicts`` which also computes canonical scores
+        and raw scores for ADR-005 provenance columns.
     """
     scores: dict[str, float] = {}
     for hit in high_anomalies:
@@ -51,6 +56,43 @@ def build_anomaly_scores_by_timestamp(
             continue
         scores[key] = max(scores.get(key, 0.0), float(hit.score))
     return scores
+
+
+def build_upload_score_dicts(
+    high_anomalies: list[UploadHighAnomalyDetail],
+    threshold_used: float,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Build (canonical_by_ts, raw_by_ts) dicts for the upload write path.
+
+    The upload path is the only producer whose calibration threshold ``p`` is
+    not a constant — it is computed per file by ``calibrate_threshold``.  The
+    highest raw score per timestamp wins (same rule as the legacy function).
+    Non-finite scores are silently skipped (the row will have NULL anomaly_score).
+
+    Returns
+    -------
+    canonical_by_ts:
+        ADR-005 canonical scores for ``SensorReading.anomaly_score``.
+    raw_by_ts:
+        Pre-canonical scores for ``SensorReading.anomaly_score_raw``.
+    """
+    raw_by_ts: dict[str, float] = {}
+    for hit in high_anomalies:
+        key = normalize_timestamp_key(hit.timestamp)
+        if key is None:
+            continue
+        raw_score = float(hit.score)
+        raw_by_ts[key] = max(raw_by_ts.get(key, 0.0), raw_score)
+
+    canonical_by_ts: dict[str, float] = {}
+    valid_raw: dict[str, float] = {}
+    for key, raw_score in raw_by_ts.items():
+        can = _canonical_score(raw_score, threshold_used, None, timestamp=key)
+        if can is not None:
+            canonical_by_ts[key] = can
+            valid_raw[key] = raw_score
+
+    return canonical_by_ts, valid_raw
 
 
 def build_anomaly_metadata_by_timestamp(
@@ -69,6 +111,43 @@ def build_anomaly_metadata_by_timestamp(
         if hit.column and hit.column not in entry["columns"]:
             entry["columns"].append(hit.column)
     return metadata
+
+
+def build_trigger_data_by_timestamp(
+    high_anomalies: list[UploadHighAnomalyDetail],
+) -> dict[str, dict[str, object]]:
+    """Per-timestamp primary trigger: channel with highest |z|, its detector/severity/value.
+
+    For rows where multiple columns fire at the same timestamp the highest-|z|
+    column wins.  LSTM-only hits (column=None, z_score=None) are included so
+    trigger_detector is always populated; trigger_channel stays None for them.
+    """
+    # {ts_key: {"channel", "detector", "severity", "value", "_z"}}
+    best: dict[str, dict[str, object]] = {}
+    for hit in high_anomalies:
+        key = normalize_timestamp_key(hit.timestamp)
+        if key is None:
+            continue
+        z = abs(hit.z_score) if hit.z_score is not None else 0.0
+        existing = best.get(key)
+        if existing is None or z > abs(existing.get("_z") or 0.0):
+            best[key] = {
+                "channel": hit.column,
+                "detector": hit.detector or "lstm",
+                "severity": hit.severity,
+                "value": hit.value,
+                "_z": hit.z_score,
+            }
+    # Strip the internal sort key before returning.
+    return {
+        k: {
+            "channel": v["channel"],
+            "detector": v["detector"],
+            "severity": v["severity"],
+            "value": v["value"],
+        }
+        for k, v in best.items()
+    }
 
 
 def _read_chunks(tmp_path: str, chunk_size: int, csv_props: dict[str, Any]):
@@ -236,14 +315,24 @@ async def run_cold_run_upload(
                 detail="No data could be extracted from the uploaded CSV. "
                 "Check column names and data format.",
             )
+        # ADR-005: compute canonical and raw score dicts keyed by timestamp.
+        # threshold_used is the per-file P99.9 calibration value — the ONLY
+        # upload-path p; never a constant, so it is NOT in SCORE_SCALE_CALIBRATION.
+        _canonical_by_ts, _raw_by_ts = build_upload_score_dicts(
+            response.high_anomalies,
+            response.threshold_used,
+        )
         await apply_anomaly_scores(
             db=persist_db,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
-            anomaly_scores_by_timestamp=build_anomaly_scores_by_timestamp(
+            anomaly_scores_by_timestamp=_canonical_by_ts,
+            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
                 response.high_anomalies
             ),
-            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
+            anomaly_score_raw_by_timestamp=_raw_by_ts,
+            score_scale="upload",
+            trigger_data_by_timestamp=build_trigger_data_by_timestamp(
                 response.high_anomalies
             ),
         )
