@@ -144,18 +144,6 @@ Or just say:
 
 The orchestrator reads the memory file and resumes from the last task log.
 
-## Switching back to Python orchestrator
-
-If you need programmatic/automated triggering (CI, webhooks, cron):
-
-```bash
-# Python script still works for non-interactive use
-python3 scripts/orchestrator_v3.py --file tasks/my_task.txt
-```
-
-Both approaches share the same `.claude/agents/` definitions and
-`.claude/guardrails/` files — they stay in sync automatically.
-
 ## Cost breakdown
 
 | Action | Model | Cost |
