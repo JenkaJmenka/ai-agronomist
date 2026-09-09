@@ -349,8 +349,11 @@ def finalize_scores(
 
     # Task 5: group contiguous per-channel alerts into episodes.
     recovery_chs = stuck_carry.recovery_channels if stuck_carry else {}
+    done_faults = stuck_carry.completed_faults if stuck_carry else []
     raw_episodes = group_alerts_into_episodes(
-        high_anomalies, recovery_channels=recovery_chs,
+        high_anomalies,
+        recovery_channels=recovery_chs,
+        completed_faults=done_faults,
     )
     episodes = [
         AnomalyEpisodeSchema(**ep.to_dict()) for ep in raw_episodes

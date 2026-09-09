@@ -203,6 +203,7 @@ class StuckCarry:
     emitted_onsets: set[tuple[str, str]] = field(default_factory=set)
     skip_channels: frozenset[str] = field(default_factory=frozenset)
     recovery_channels: dict[str, FaultWindow] = field(default_factory=dict)
+    completed_faults: list[FaultWindow] = field(default_factory=list)
 
 
 class WallclockStuckDetector:
@@ -323,13 +324,15 @@ class WallclockStuckDetector:
                     # freeze (key is in emitted_onsets).
                     key = (channel, state.onset_ts)
                     if key in carry.emitted_onsets:
-                        carry.recovery_channels[channel] = FaultWindow(
+                        fw = FaultWindow(
                             channel=channel,
                             onset_ts=state.onset_ts,
                             onset_dt=state.onset_dt,
                             end_ts=ts_iso,
                             end_dt=row_dt,
                         )
+                        carry.recovery_channels[channel] = fw
+                        carry.completed_faults.append(fw)
                     carry.channels[channel] = ChannelFreezeState(
                         frozen_value=value_f,
                         onset_ts=ts_iso,

@@ -357,6 +357,11 @@ class AnomalyEpisodeSchema(BaseModel):
     sample_count: int = Field(ge=1)
     severity: str
     is_recovery: bool = False
+    is_ongoing: bool = Field(
+        default=False,
+        description="True when the freeze had not yet ended at detection time. "
+        "duration_seconds is then a lower bound (gate-crossing duration).",
+    )
     onset_ts: Optional[str] = None
     detected_ts: Optional[str] = None
     frozen_value: Optional[float] = None

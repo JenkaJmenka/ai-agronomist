@@ -3,6 +3,97 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Tasks 2b + 3 + 5: Early stuck detection, recovery scoring, episode grouping — COMPLETE (2026-09-09)**
+
+### Task 2b — Mid-freeze detection
+The stuck detector now evaluates the gate on every row while the freeze is
+still open (`detect_chunk` value-match branch, stuck_fault_detector.py:283-290`).
+Alert fires as soon as `STUCK_WALLCLOCK_MIN_HOURS` is crossed, not when
+the freeze ends. Measured latency: 6.00 h (gate=6.0 h, previously 163.92 h).
+Each alert carries both `onset_ts` (timestamp field) and `detected_ts` for
+true latency computation. `emitted_onsets` prevents duplicate emission.
+
+### Task 3 — Recovery not the loudest event
+1. **Baseline cleanup:** When a fault ends, `recovery_channels` records the
+   fault window. `_purge_fault_from_stat_carry()` NaN-outs fault-period values
+   in `stat_carry.rows` so the rolling z-score baseline excludes frozen readings.
+2. **Score cap:** Recovery episodes (`is_recovery=True`) are capped at
+   `RECOVERY_SCORE_CAP=0.4`. Stuck fault (score=1.0) always outranks recovery.
+3. Recovery is still reported — just not scored as the largest anomaly.
+
+### Task 5 — Episode grouping (detection layer)
+Architecture decision documented in `docs/architecture/episode_grouping.md`.
+Grouping at detection (not storage/presentation) because: per-sample scores
+survive in `anomaly_scores`; computed once; no migration; bounded memory.
+`group_alerts_into_episodes()` in `src/models/episode_grouper.py` groups
+contiguous per-channel alerts (gap < `EPISODE_GAP_SECONDS=600s`) into
+`AnomalyEpisode` objects with start, end, duration, peak_score, sample_count.
+
+### Files changed
+- `src/models/stuck_fault_detector.py` — mid-freeze gate eval, FaultWindow, recovery_channels
+- `src/models/episode_grouper.py` — NEW: episode grouping logic
+- `src/api/services/upload_portions.py` — reorder stuck→stat, baseline purge, episodes in response
+- `src/api/schemas/sensor_data.py` — AnomalyEpisodeSchema, detected_ts, episodes field
+- `src/config.py` — EPISODE_GAP_SECONDS, RECOVERY_SCORE_CAP
+- `docs/architecture/episode_grouping.md` — architecture decision
+- `tests/api/test_episode_grouping.py` — 14 acceptance tests
+- `tests/api/test_stuck_fault_upload.py` — updated for mid-freeze detection
+
+## Previous Phase
+**Stuck-fault / flatline detection on CSV upload path — COMPLETE (2026-09-09)**
+
+Added wall-clock-gated stuck-fault detection to the CSV upload scoring path,
+addressing the critical gap where a perfect freeze silenced the rolling z-score
+detector (rolling_std < 1e-9 guard dropped 83% of the fault).
+
+**Architecture:**
+- `WallclockStuckDetector` class in `src/models/stuck_fault_detector.py` — gates on
+  elapsed time (`STUCK_WALLCLOCK_MIN_HOURS=6.0`) + minimum sample count
+  (`STUCK_WALLCLOCK_MIN_SAMPLES=12`), with per-channel epsilon from
+  `STUCK_WALLCLOCK_EPSILON` (config.py:750-755).
+- `StuckCarry` dataclass threads per-channel freeze state across 5,000-row chunks
+  (bounded memory — one `ChannelFreezeState` per channel, not buffered rows).
+- `score_portion()` calls `WallclockStuckDetector.detect_chunk()` per chunk.
+- `finalize_scores()` calls `.flush()` to emit alerts for still-open freezes and
+  finalise the cadence check.
+- Imputed channels (e.g. CO2 on Connext exports that lack a CO2 column) are
+  excluded via `StuckCarry.skip_channels` to prevent false stuck alerts.
+
+**Cadence check:**
+- Tracks median inter-sample interval across chunks.
+- Flags input whose cadence deviates from `CADENCE_EXPECTED_SECONDS=300` by more
+  than `CADENCE_TOLERANCE_FACTOR=1.5` (e.g. 15-min cadence triggers the flag).
+- Surfaced as `StuckCarry.is_cadence_flagged` + logged warning.
+
+**Measured results on native fixtures:**
+- Fixture A (native_dec_stuck_fault.csv): 4 stuck_fault/urgent alerts detected:
+  - humidity 34.83h (truncated prior freeze)
+  - humidity 22.08h (prior freeze)
+  - humidity 47.92h (prior freeze)
+  - humidity 163.83h (main fault, matches ground truth exactly)
+  - 1.00h short freeze correctly suppressed by 6h gate
+- Fixture B (native_july_clearsky.csv): 0 false positives
+- Measured detection latency: 0.00h (onset timestamp is the alert timestamp;
+  in a real-time scenario the gate would fire after 6.0h)
+
+**Files changed:**
+- `src/models/stuck_fault_detector.py` — added `WallclockStuckDetector`, `StuckCarry`,
+  `ChannelFreezeState`, `_parse_timestamp`
+- `src/api/services/upload_portions.py` — added `stuck_carry` parameter to
+  `score_portion` and `finalize_scores`; `_stuck_dict_to_high_detail` converter
+- `src/api/services/cold_run_upload.py` — creates `StuckCarry(skip_channels=...)`,
+  threads through scoring + finalize
+- `tests/api/test_stuck_fault_upload.py` — 14 acceptance tests (all pass)
+- `src/config.py` — no changes (wall-clock constants already present from prior work)
+
+**Config constants used (all pre-existing at config.py:734-769):**
+- `STUCK_WALLCLOCK_MIN_HOURS=6.0`, `STUCK_WALLCLOCK_MIN_SAMPLES=12`
+- `STUCK_WALLCLOCK_EPSILON={temperature:0.01, humidity:0.01, co2:1.0, light:1.0}`
+- `STUCK_WALLCLOCK_CHANNELS=("temperature", "humidity", "co2")`
+- `CADENCE_EXPECTED_SECONDS=300`, `CADENCE_TOLERANCE_FACTOR=1.5`
+
+---
+
 **Alert label integrity (D1–D4) — COMPLETE (2026-09-08)**
 
 Fixed four defects on the CSV upload path that caused every alert to be mis-labelled:
