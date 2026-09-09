@@ -316,6 +316,11 @@ class UploadHighAnomalyDetail(BaseModel):
 
     score: float = Field(..., ge=0.0, le=1.0)
     timestamp: str
+    detected_ts: Optional[str] = Field(
+        default=None,
+        description="Timestamp when detection actually fired (stuck_fault only). "
+        "Distinct from timestamp (= onset). Latency = detected_ts - timestamp.",
+    )
     detector: str = Field(default="lstm", description="lstm, statistical, or lstm+statistical")
     sequence_index: Optional[int] = Field(default=None, ge=0)
     column: Optional[str] = None
@@ -340,6 +345,23 @@ class StatisticalAnomalyDetail(BaseModel):
     method: str
 
 
+class AnomalyEpisodeSchema(BaseModel):
+    """One continuous anomaly event on a single channel (Task 5)."""
+
+    channel: str
+    detector: str
+    start_ts: str
+    end_ts: str
+    duration_seconds: float = Field(ge=0.0)
+    peak_score: float = Field(ge=0.0, le=1.0)
+    sample_count: int = Field(ge=1)
+    severity: str
+    is_recovery: bool = False
+    onset_ts: Optional[str] = None
+    detected_ts: Optional[str] = None
+    frozen_value: Optional[float] = None
+
+
 class StatisticalColdRunSummary(BaseModel):
     """Aggregate statistical cold-run results."""
 
@@ -357,6 +379,11 @@ class UploadInferenceResponse(BaseModel):
     anomalies_detected: int = Field(..., ge=0)
     anomaly_scores: List[float]
     high_anomalies: List[UploadHighAnomalyDetail] = Field(default_factory=list)
+    episodes: List[AnomalyEpisodeSchema] = Field(
+        default_factory=list,
+        description="Contiguous per-channel anomaly episodes (Task 5). "
+        "One continuous event is one episode with start/end/duration.",
+    )
     threshold_used: float = Field(..., ge=0.0, le=1.0)
     threshold_method: str
     imputed_channels: List[str] = Field(default_factory=list)

@@ -207,39 +207,54 @@ class TestFixtureAStuckFault:
             f"{[a.column for a in self.stuck_alerts]}"
         )
 
-    def test_alert_reports_frozen_duration_near_163h(self):
-        """At least one alert must report duration within ±5 h of 163.83 h.
+    def test_alert_reports_duration_at_gate_crossing(self):
+        """Alerts fire at gate crossing (~6 h), not at freeze end.
 
-        z_score carries the measured wall-clock duration in hours.
+        Task 2b: z_score carries the elapsed-so-far duration (≈ gate
+        threshold) at detection time, not the full fault duration.
         """
         humidity_alerts = [
             a for a in self.stuck_alerts if a.column == "humidity"
         ]
         durations = [a.z_score for a in humidity_alerts if a.z_score is not None]
-        assert any(
-            abs(d - FAULT_DURATION_HOURS) < 5.0 for d in durations
+        assert all(
+            abs(d - STUCK_WALLCLOCK_MIN_HOURS) < 1.0 for d in durations
         ), (
-            f"No humidity alert has duration near {FAULT_DURATION_HOURS} h; "
+            f"Expected duration ≈ {STUCK_WALLCLOCK_MIN_HOURS} h at gate; "
             f"got durations: {durations}"
         )
 
-    def test_main_fault_alert_timestamp_at_or_after_onset(self):
-        """The main stuck_fault alert (duration ≈ 163 h) must have its
-        timestamp at or after the real onset 2026-12-18T13:00:00Z."""
+    def test_main_fault_alert_onset_at_expected_timestamp(self):
+        """The main stuck_fault alert must report onset 2026-12-18T13:00:00Z
+        as its timestamp field and detected_ts strictly before freeze end."""
+        # Identify the main fault by onset timestamp (≈ FAULT_ONSET).
         main_fault_alerts = [
             a for a in self.stuck_alerts
             if a.column == "humidity"
-            and a.z_score is not None
-            and abs(a.z_score - FAULT_DURATION_HOURS) < 5.0
+            and a.timestamp is not None
         ]
-        assert len(main_fault_alerts) >= 1, "No main fault alert found"
-        for alert in main_fault_alerts:
-            ts = datetime.fromisoformat(
-                alert.timestamp.replace("Z", "+00:00")
-            )
-            assert ts >= FAULT_ONSET, (
-                f"Main fault alert timestamp {ts} is before onset {FAULT_ONSET}"
-            )
+        # Find the alert whose onset is closest to the known fault onset.
+        onset_match = [
+            a for a in main_fault_alerts
+            if abs(
+                (datetime.fromisoformat(a.timestamp.replace("Z", "+00:00"))
+                 - FAULT_ONSET).total_seconds()
+            ) < 3600  # within 1 hour
+        ]
+        assert len(onset_match) >= 1, (
+            f"No main fault alert near onset {FAULT_ONSET}; "
+            f"got timestamps: {[a.timestamp for a in main_fault_alerts]}"
+        )
+        alert = onset_match[0]
+        # Task 2b: detected_ts must be STRICTLY EARLIER than freeze end.
+        freeze_end = datetime(2026, 12, 25, 8, 55, 0, tzinfo=timezone.utc)
+        assert alert.detected_ts is not None, "detected_ts must be set"
+        detected_dt = datetime.fromisoformat(
+            alert.detected_ts.replace("Z", "+00:00")
+        )
+        assert detected_dt < freeze_end, (
+            f"detected_ts {detected_dt} should be before freeze end {freeze_end}"
+        )
 
     def test_cadence_not_flagged_for_5min_fixture(self):
         """Fixture A has uniform 300 s cadence — no flag expected."""
@@ -460,11 +475,12 @@ class TestStuckGateLogic:
 # ---------------------------------------------------------------------------
 
 def test_report_measured_latency():
-    """Report the measured detection latency for the main fault in fixture A.
+    """Measure and assert detection latency for the main fault in fixture A.
 
-    Not a pass/fail test — captures the latency for the done-signal.
-    The latency is the difference between the first stuck_fault alert
-    timestamp for humidity and the real onset 2026-12-18T13:00:00Z.
+    Task 2b: latency = detected_ts - onset, NOT onset - onset (which is
+    tautologically zero).  The latency must be bounded by the configured
+    gate + one sampling interval, and must be strictly less than the full
+    fault duration (regression guard).
     """
     assert FIXTURE_A.is_file()
     response, _ = _run_fixture_through_upload(FIXTURE_A)
@@ -474,23 +490,48 @@ def test_report_measured_latency():
     ]
     assert len(stuck_alerts) >= 1
 
-    # Find the alert closest to (or matching) the real onset
-    onset_alerts = []
+    # Find the main fault alert by onset near FAULT_ONSET.
+    main_alert = None
     for alert in stuck_alerts:
         ts = datetime.fromisoformat(alert.timestamp.replace("Z", "+00:00"))
-        if ts >= FAULT_ONSET:
-            onset_alerts.append((ts, alert))
+        if abs((ts - FAULT_ONSET).total_seconds()) < 3600:
+            main_alert = alert
+            break
+    assert main_alert is not None, "No alert near main fault onset"
+    assert main_alert.detected_ts is not None, "detected_ts must be set"
 
-    onset_alerts.sort(key=lambda x: x[0])
-    first_ts, first_alert = onset_alerts[0]
+    onset_dt = datetime.fromisoformat(
+        main_alert.timestamp.replace("Z", "+00:00")
+    )
+    detected_dt = datetime.fromisoformat(
+        main_alert.detected_ts.replace("Z", "+00:00")
+    )
+    latency_hours = (detected_dt - onset_dt).total_seconds() / 3600.0
 
-    latency_hours = (first_ts - FAULT_ONSET).total_seconds() / 3600.0
+    # Gate = STUCK_WALLCLOCK_MIN_HOURS; one sampling interval = 300 s = 0.083 h
+    max_latency = STUCK_WALLCLOCK_MIN_HOURS + 0.1  # gate + margin
+    assert latency_hours <= max_latency, (
+        f"Latency {latency_hours:.2f} h exceeds gate {STUCK_WALLCLOCK_MIN_HOURS} h "
+        f"+ margin; detected_ts={detected_dt}, onset={onset_dt}"
+    )
 
-    # Print for capture in CI / done-signal
+    # Regression: latency must be strictly less than the full fault duration.
+    assert latency_hours < FAULT_DURATION_HOURS, (
+        f"Latency {latency_hours:.2f} h equals or exceeds full fault duration "
+        f"{FAULT_DURATION_HOURS} h — detection is not early"
+    )
+
+    # Latency must NOT be zero (the tautological bug this test guards against).
+    assert latency_hours > 0.0, (
+        "Latency is exactly 0.00 h — this is the tautological bug "
+        "(detected_ts == onset); investigate before reporting"
+    )
+
     print(f"\n=== MEASURED DETECTION LATENCY ===")
-    print(f"Real onset:      {FAULT_ONSET.isoformat()}")
-    print(f"First alert ts:  {first_ts.isoformat()}")
-    print(f"Latency:         {latency_hours:.2f} h")
-    print(f"Reported duration: {first_alert.z_score} h")
-    print(f"Frozen value:    {first_alert.value}")
-    print(f"================================\n")
+    print(f"Real onset:       {onset_dt.isoformat()}")
+    print(f"Detected at:      {detected_dt.isoformat()}")
+    print(f"Latency:          {latency_hours:.2f} h")
+    print(f"Gate threshold:   {STUCK_WALLCLOCK_MIN_HOURS} h")
+    print(f"Reported elapsed: {main_alert.z_score} h")
+    print(f"Frozen value:     {main_alert.value}")
+    print(f"=================================\n")

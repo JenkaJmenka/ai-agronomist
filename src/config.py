@@ -1337,3 +1337,15 @@ DEFAULT_DAY_WINDOW: dict = _parse_json_env(
     "DEFAULT_DAY_WINDOW",
     {"start_hour": 6, "end_hour": 22},
 )
+
+# =============================================================================
+# Episode Grouping & Recovery Scoring (Tasks 3 + 5)
+# =============================================================================
+# Maximum gap (seconds) between consecutive alerts on the same channel before
+# they are split into separate episodes. Default: 2× expected cadence (10 min).
+EPISODE_GAP_SECONDS: int = int(os.environ.get("EPISODE_GAP_SECONDS", "600"))
+
+# Score cap for recovery episodes: post-fault transitions are informational,
+# not the loudest event.  Capped at 0.4 (below CANONICAL_ANOMALY_THRESHOLD)
+# so recovery never outranks a genuine excursion or the fault itself.
+RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
