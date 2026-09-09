@@ -1,19 +1,39 @@
 """
 Stuck-fault detector for greenhouse sensors.
 
-Flags sensors whose minimum rolling-window variance falls below a
-configurable threshold, indicating a frozen / stuck reading. Using the
-minimum over rolling windows means a sensor that was stuck for the first
-K steps is still caught even if it recovers later.
+Two detection modes:
+
+1. **Sample-indexed** (``StuckFaultDetector``) — rolling-variance analysis
+   over fixed-length windows.  Used by ``ComprehensiveInferencePipeline``.
+
+2. **Wall-clock** (``WallclockStuckDetector``) — elapsed-time gate with a
+   per-channel epsilon.  Used by the CSV upload path
+   (``score_portion`` / ``finalize_scores``).  Correctly handles irregular
+   cadence and NaN gaps inside a fault window.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Set
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional, Set
 
 import numpy as np
+import pandas as pd
 
-from src.config import SENSOR_NAMES, STUCK_FLAT_RANGE_THRESHOLD
+from src.config import (
+    CADENCE_EXPECTED_SECONDS,
+    CADENCE_TOLERANCE_FACTOR,
+    SENSOR_NAMES,
+    STUCK_FLAT_RANGE_THRESHOLD,
+    STUCK_WALLCLOCK_CHANNELS,
+    STUCK_WALLCLOCK_EPSILON,
+    STUCK_WALLCLOCK_MIN_HOURS,
+    STUCK_WALLCLOCK_MIN_SAMPLES,
+)
+
+logger = logging.getLogger(__name__)
 
 try:
     from src.config import STUCK_EPSILON, STUCK_WINDOW_K, STUCK_VARIANCE_THRESHOLD
@@ -112,3 +132,233 @@ class StuckFaultDetector:
             flags[t] = var < epsilon
 
         return flags
+
+
+# =========================================================================
+# Wall-clock stuck-fault detection (upload path)
+# =========================================================================
+
+def _parse_timestamp(ts_val: object) -> datetime | None:
+    """Parse a timestamp value into a timezone-aware UTC datetime."""
+    if isinstance(ts_val, pd.Timestamp):
+        dt = ts_val.to_pydatetime()
+    elif isinstance(ts_val, datetime):
+        dt = ts_val
+    elif isinstance(ts_val, str):
+        try:
+            dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+@dataclass
+class ChannelFreezeState:
+    """Per-channel frozen-value tracking for wall-clock stuck detection."""
+
+    frozen_value: float
+    onset_ts: str
+    onset_dt: datetime
+    last_ts: str
+    last_dt: datetime
+    sample_count: int
+
+
+@dataclass
+class StuckCarry:
+    """Rolling state for wall-clock stuck-fault detection across portions.
+
+    Bounded memory: stores one ``ChannelFreezeState`` per monitored channel
+    (constant-size) plus a short list of per-chunk cadence medians.
+
+    ``skip_channels`` excludes imputed channels (constant fill values that
+    would otherwise trigger a false stuck alert for the entire file).
+    """
+
+    channels: dict[str, ChannelFreezeState] = field(default_factory=dict)
+    chunk_medians: list[float] = field(default_factory=list)
+    last_timestamp_dt: datetime | None = None
+    is_cadence_flagged: bool = False
+    cadence_median_seconds: float | None = None
+    emitted_onsets: set[tuple[str, str]] = field(default_factory=set)
+    skip_channels: frozenset[str] = field(default_factory=frozenset)
+
+
+class WallclockStuckDetector:
+    """Wall-clock-gated stuck-fault detection for the CSV upload path.
+
+    Unlike ``StuckFaultDetector`` (sample-indexed), this gates on elapsed
+    time so it works correctly regardless of the input's sampling cadence.
+    A freeze must persist for at least ``min_hours`` AND have at least
+    ``min_samples`` identical readings.
+
+    Usage (streaming, chunk-by-chunk)::
+
+        carry = StuckCarry()
+        det = WallclockStuckDetector()
+        for chunk_df in chunks:
+            alerts = det.detect_chunk(chunk_df, carry)
+        final_alerts = det.flush(carry)
+    """
+
+    def __init__(
+        self,
+        min_hours: float = STUCK_WALLCLOCK_MIN_HOURS,
+        min_samples: int = STUCK_WALLCLOCK_MIN_SAMPLES,
+        channel_epsilon: dict[str, float] | None = None,
+        channels: tuple[str, ...] = STUCK_WALLCLOCK_CHANNELS,
+    ) -> None:
+        self._min_hours = min_hours
+        self._min_samples = min_samples
+        self._epsilon = channel_epsilon or dict(STUCK_WALLCLOCK_EPSILON)
+        self._channels = channels
+
+    # -- public interface --------------------------------------------------
+
+    def detect_chunk(
+        self,
+        normalized_df: pd.DataFrame,
+        carry: StuckCarry,
+    ) -> list[dict[str, Any]]:
+        """Process one chunk, returning alerts for freezes that ended.
+
+        Each alert is a dict with keys: ``timestamp``, ``channel``,
+        ``severity``, ``detector``, ``value``, ``duration_hours``,
+        ``method``.
+        """
+        alerts: list[dict[str, Any]] = []
+
+        if normalized_df.empty or "timestamp" not in normalized_df.columns:
+            return alerts
+
+        timestamps = normalized_df["timestamp"]
+        intervals: list[float] = []
+
+        for row_idx in range(len(normalized_df)):
+            ts_raw = timestamps.iloc[row_idx]
+            if pd.isnull(ts_raw):
+                continue
+
+            row_dt = _parse_timestamp(ts_raw)
+            if row_dt is None:
+                continue
+
+            # --- cadence tracking ---
+            if carry.last_timestamp_dt is not None:
+                delta = (row_dt - carry.last_timestamp_dt).total_seconds()
+                if delta > 0:
+                    intervals.append(delta)
+            carry.last_timestamp_dt = row_dt
+
+            ts_iso = row_dt.isoformat()
+
+            # --- per-channel freeze tracking ---
+            for channel in self._channels:
+                if channel not in normalized_df.columns:
+                    continue
+                if channel in carry.skip_channels:
+                    continue
+
+                value = normalized_df[channel].iloc[row_idx]
+                if pd.isnull(value) or not np.isfinite(float(value)):
+                    continue  # NaN → skip, don't break or extend
+
+                value_f = float(value)
+                epsilon = self._epsilon.get(channel, 0.01)
+                state = carry.channels.get(channel)
+
+                if state is None:
+                    carry.channels[channel] = ChannelFreezeState(
+                        frozen_value=value_f,
+                        onset_ts=ts_iso,
+                        onset_dt=row_dt,
+                        last_ts=ts_iso,
+                        last_dt=row_dt,
+                        sample_count=1,
+                    )
+                elif abs(value_f - state.frozen_value) <= epsilon:
+                    state.last_ts = ts_iso
+                    state.last_dt = row_dt
+                    state.sample_count += 1
+                else:
+                    alert = self._check_gate(channel, state, carry)
+                    if alert is not None:
+                        alerts.append(alert)
+                    carry.channels[channel] = ChannelFreezeState(
+                        frozen_value=value_f,
+                        onset_ts=ts_iso,
+                        onset_dt=row_dt,
+                        last_ts=ts_iso,
+                        last_dt=row_dt,
+                        sample_count=1,
+                    )
+
+        if intervals:
+            carry.chunk_medians.append(float(np.median(intervals)))
+
+        return alerts
+
+    def flush(self, carry: StuckCarry) -> list[dict[str, Any]]:
+        """Flush still-open freezes and finalise cadence check."""
+        alerts: list[dict[str, Any]] = []
+        for channel, state in carry.channels.items():
+            alert = self._check_gate(channel, state, carry)
+            if alert is not None:
+                alerts.append(alert)
+
+        # --- cadence check ---
+        if carry.chunk_medians:
+            overall_median = float(np.median(carry.chunk_medians))
+            carry.cadence_median_seconds = overall_median
+            ratio = overall_median / CADENCE_EXPECTED_SECONDS
+            if (
+                ratio > CADENCE_TOLERANCE_FACTOR
+                or ratio < (1.0 / CADENCE_TOLERANCE_FACTOR)
+            ):
+                carry.is_cadence_flagged = True
+                logger.warning(
+                    "Cadence deviation: median interval %.1fs vs expected %ds "
+                    "(ratio %.2f, tolerance %.1f)",
+                    overall_median,
+                    CADENCE_EXPECTED_SECONDS,
+                    ratio,
+                    CADENCE_TOLERANCE_FACTOR,
+                )
+
+        return alerts
+
+    # -- internal ----------------------------------------------------------
+
+    def _check_gate(
+        self,
+        channel: str,
+        state: ChannelFreezeState,
+        carry: StuckCarry,
+    ) -> dict[str, Any] | None:
+        """Emit an alert dict if the freeze meets the gate."""
+        duration_hours = (
+            (state.last_dt - state.onset_dt).total_seconds() / 3600.0
+        )
+        if duration_hours < self._min_hours:
+            return None
+        if state.sample_count < self._min_samples:
+            return None
+
+        key = (channel, state.onset_ts)
+        if key in carry.emitted_onsets:
+            return None
+        carry.emitted_onsets.add(key)
+
+        return {
+            "timestamp": state.onset_ts,
+            "channel": channel,
+            "severity": "urgent",
+            "detector": "stuck_fault",
+            "value": state.frozen_value,
+            "duration_hours": round(duration_hours, 2),
+            "method": "wallclock_stuck",
+        }

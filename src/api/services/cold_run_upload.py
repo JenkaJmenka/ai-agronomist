@@ -28,6 +28,7 @@ from src.api.services.upload_portions import (
     SENSOR_COLS,
     PortionScores,
     StatCarry,
+    StuckCarry,
     finalize_scores,
     score_portion,
 )
@@ -257,6 +258,7 @@ async def run_cold_run_upload(
 
     portions: list[PortionScores] = []
     stat_carry = StatCarry()
+    stuck_carry = StuckCarry(skip_channels=frozenset(imputed_channels))
     prev_overlap_df = pd.DataFrame()
     sensor_rows_persisted = 0
     raw_rows_persisted = 0
@@ -284,6 +286,7 @@ async def run_cold_run_upload(
             detector=detector,
             seq_len=seq_len,
             include_embeddings=include_embeddings,
+            stuck_carry=stuck_carry,
         )
         portions.append(portion)
 
@@ -306,6 +309,7 @@ async def run_cold_run_upload(
         imputed_channels=imputed_channels,
         stat_carry=stat_carry,
         include_embeddings=include_embeddings,
+        stuck_carry=stuck_carry,
     )
 
     if persist_db is not None:
