@@ -74,7 +74,7 @@ class SensorReading(Base):
     light: Mapped[float] = mapped_column(
         Float,
         nullable=False,
-        doc="Light intensity in lux"
+        doc="Light intensity in W/m² (solar irradiance — canonical unit, see LIGHT_CANONICAL_UNIT)"
     )
     anomaly_score: Mapped[Optional[float]] = mapped_column(
         Float,

@@ -269,3 +269,45 @@ async def test_failed_portion_marks_job_partially_failed(session):
     job = await get_job(session, job_id)
     assert job.status == "partially_failed"
     assert job.failed_portions == 1
+
+
+async def test_async_finalize_persists_trigger_channel(session):
+    """B4: the async finalize path must populate trigger_channel on anomalous rows.
+
+    The sync path passes trigger_data_by_timestamp to apply_anomaly_scores; the
+    async path had a bug where it did not — rows came back with NULL
+    trigger_channel / trigger_detector / detected_severity even when a
+    statistical anomaly was the triggering event.  This test ensures parity.
+    """
+    # Use a fault-at-70 CSV so the statistical detector fires on temperature.
+    csv_content = _csv_content(fault_at=70)
+    job_id, messages = await _produce_messages(session, csv_content, portion_rows=50)
+
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    assert len(finalize_msgs) == 1
+
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed", f"Expected completed, got {job.status}"
+
+    # At least one row must have a non-NULL trigger_channel — the statistical
+    # anomaly on temperature must survive the async path without being dropped.
+    result = await session.execute(
+        select(SensorReading).where(
+            SensorReading.tenant_id == TENANT,
+            SensorReading.trigger_channel.isnot(None),
+        )
+    )
+    rows_with_trigger = result.scalars().all()
+    assert len(rows_with_trigger) > 0, (
+        "No rows have trigger_channel set after async finalize — "
+        "the B4 divergence (trigger_data not passed to apply_anomaly_scores) "
+        "is still present."
+    )
+    # Every row with a trigger must also have trigger_detector set.
+    for row in rows_with_trigger:
+        assert row.trigger_detector is not None, (
+            f"Row at {row.timestamp} has trigger_channel={row.trigger_channel!r} "
+            "but trigger_detector is NULL"
+        )

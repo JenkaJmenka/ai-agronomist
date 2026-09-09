@@ -48,7 +48,7 @@ class SensorReadingCreate(BaseModel):
         ...,
         ge=0.0,
         le=2000.0,
-        description="Light intensity/level in lux (Allowed range: 0.0 to 2000.0)"
+        description="Light intensity in W/m² — solar irradiance, canonical unit (Allowed range: 0.0 to 2000.0)"
     )
 
 
@@ -89,7 +89,7 @@ class SensorReadingResponse(BaseModel):
     )
     light: float = Field(
         ...,
-        description="Light intensity in lux"
+        description="Light intensity in W/m² (solar irradiance — canonical unit)"
     )
     anomaly_score: Optional[float] = Field(
         None,

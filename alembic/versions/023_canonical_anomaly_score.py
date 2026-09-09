@@ -410,7 +410,10 @@ def downgrade() -> None:
         connection.execute(
             text(
                 "UPDATE sensor_readings "
-                "SET anomaly_score = :raw "
+                # Also clear anomaly_score_raw so the next batch's
+                # WHERE anomaly_score_raw IS NOT NULL does not re-select
+                # the same rows — without this the loop never terminates.
+                "SET anomaly_score = :raw, anomaly_score_raw = NULL "
                 "WHERE id = :id"
             ),
             params,

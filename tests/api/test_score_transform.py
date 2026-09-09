@@ -209,6 +209,31 @@ class TestNonFiniteGuard:
         assert result is not None
         assert abs(result - 0.5) < 1e-9
 
+    def test_hi_equals_p_returns_none(self):
+        """hi == p is a degenerate calibration (zero denominator in branch 3); must return None."""
+        # raw > p so branch 3 would fire — but hi==p is invalid calibration.
+        result = canonical(0.9, 0.8, 0.8)
+        assert result is None, f"Expected None for hi==p, got {result!r}"
+
+    def test_hi_less_than_p_returns_none(self):
+        """hi < p is an inverted calibration (negative denominator in branch 3); must return None."""
+        result = canonical(0.9, 0.8, 0.5)
+        assert result is None, f"Expected None for hi<p, got {result!r}"
+
+    def test_hi_equals_p_logs_at_warning(self, caplog):
+        """hi == p guard logs at WARNING with context fields (same pattern as other guards)."""
+        with caplog.at_level(logging.WARNING, logger="src.api.services.score_transform"):
+            result = canonical(
+                0.9, 0.8, 0.8,
+                tenant_id="t2",
+                greenhouse_id="gh2",
+                timestamp="2026-01-02T00:00:00Z",
+            )
+        assert result is None
+        assert any("t2" in r.message or "t2" in str(r.args) for r in caplog.records), (
+            "Expected tenant_id 't2' in log output for hi==p guard"
+        )
+
     def test_nonfinite_logs_at_warning(self, caplog):
         """Non-finite inputs log at WARNING with context fields."""
         with caplog.at_level(logging.WARNING, logger="src.api.services.score_transform"):

@@ -241,7 +241,14 @@ def _run_downgrade(conn):
             break
         params = [{"id": r[0], "raw": r[1]} for r in rows]
         conn.execute(
-            text("UPDATE sensor_readings SET anomaly_score = :raw WHERE id = :id"),
+            # Also clear anomaly_score_raw so the next iteration's
+            # WHERE anomaly_score_raw IS NOT NULL does not re-select
+            # the same rows — without this the loop never terminates.
+            text(
+                "UPDATE sensor_readings "
+                "SET anomaly_score = :raw, anomaly_score_raw = NULL "
+                "WHERE id = :id"
+            ),
             params,
         )
         conn.commit()

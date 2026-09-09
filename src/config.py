@@ -751,7 +751,7 @@ STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
     "temperature": 0.01,   # °C  — native resolution ~0.01
     "humidity": 0.01,       # %   — native resolution ~0.01
     "co2": 1.0,             # ppm — native resolution ~1
-    "light": 1.0,           # W/m² or lux — native resolution ~1
+    "light": 1.0,           # W/m² — native resolution ~1
 }
 
 # Channels checked by the wall-clock stuck detector.  Light is excluded
@@ -851,7 +851,7 @@ SENSOR_NOISE_TARGETS: Dict[str, float] = {
     "temperature": 0.05,   # °C RMS
     "humidity": 0.1,       # % RMS
     "co2": 5.0,            # ppm RMS
-    "light": 2.0,          # lux RMS
+    "light": 2.0,          # W/m² RMS
 }
 
 # =============================================================================
@@ -960,7 +960,7 @@ SPIKE_DELTA_MAX: Dict[str, float] = {
     "temperature": 5.0,   # °C
     "humidity": 10.0,     # %
     "co2": 50.0,          # ppm
-    "light": 200.0,       # lux
+    "light": 200.0,       # W/m² per 5-min step
 }
 
 # =============================================================================
@@ -1008,7 +1008,7 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
     "humidity": 0.04,      # (%)²
     "co2": 25.0,           # (ppm)²
-    "light": 100.0,        # (lux)²
+    "light": 100.0,        # (W/m²)²
 }
 # spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
@@ -1024,13 +1024,13 @@ BIAS_EMA_SPAN: int = int(os.environ.get("BIAS_EMA_SPAN", "288"))
 BIAS_EMA_THRESHOLD: float = float(os.environ.get("BIAS_EMA_THRESHOLD", "2.0"))
 # Per-sensor absolute deviation limits for the EMA bias check. A single
 # absolute threshold cannot serve sensors whose scales differ by orders of
-# magnitude: 2 lux of light jitter is measurement noise, while a 2°C
+# magnitude: 2 W/m² of light jitter is measurement noise, while a 2°C
 # temperature offset is a real calibration fault.
 BIAS_EMA_THRESHOLD_BY_SENSOR: Dict[str, float] = {
     "temperature": 2.0,   # °C
     "humidity": 5.0,      # %
     "co2": 50.0,          # ppm
-    "light": 100.0,       # lux
+    "light": 100.0,       # W/m²
 }
 
 # Spatial Correlation Breakdown — rolling Pearson pair detector.

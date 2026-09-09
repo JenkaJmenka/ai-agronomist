@@ -97,6 +97,16 @@ def canonical(
         )
         return None
 
+    # Guard: hi must be strictly above p — a saturation point at or below the
+    # decision point produces a degenerate (zero denominator) or inverted scale.
+    if hi is not None and hi <= p:
+        logger.warning(
+            "canonical(): invalid calibration hi=%r <= p=%r; returning NULL "
+            "[tenant=%s greenhouse=%s ts=%s]",
+            hi, p, tenant_id, greenhouse_id, timestamp,
+        )
+        return None
+
     # Branch 1 — clamp negative raw
     if raw < 0.0:
         return 0.0

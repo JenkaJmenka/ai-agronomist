@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from src.config import (
+    LIGHT_CANONICAL_UNIT,
+    LIGHT_LUX_TO_W_PER_M2 as LUX_TO_W_PER_M2,
+    LIGHT_PPFD_TO_W_PER_M2 as PPFD_UMOL_TO_W_PER_M2,
+)
 from src.vendors.base import (
     DataSourceAdapter,
     DataSourceConnectionError,
@@ -39,20 +44,11 @@ CANONICAL_COLS: Tuple[str, ...] = (TIMESTAMP_COL,) + SENSOR_COLS
 # ---------------------------------------------------------------------------
 # Light-channel unit tracking and conversion
 # ---------------------------------------------------------------------------
-# Canonical internal unit for the `light` channel: W/m² (solar irradiance).
-# Every CSV path converts to this unit on ingest so that thresholds, LSTM
-# normalization, and alert labels all see the same physical quantity.
-# The "lux" label that appeared in config.py before 2026-09-08 was incorrect —
-# the numeric band (0-1000) already matched W/m² solar irradiance, not lux.
-LIGHT_CANONICAL_UNIT: str = "W/m²"
-
-# Conversion factors — source unit → canonical W/m².
-# Source (lux→W/m²): CIE S 010/E luminous efficacy for standard daylight D65,
-#   ~120 lm/W → 1 lux ≈ 1/120 W/m².
-# Source (PPFD→W/m²): Thimijan & Heins (1983), PAR 400-700 nm;
-#   1 W/m² ≈ 4.57 µmol·m⁻²·s⁻¹ → 1 µmol·m⁻²·s⁻¹ ≈ 1/4.57 W/m².
-LUX_TO_W_PER_M2: float = 1.0 / 120.0
-PPFD_UMOL_TO_W_PER_M2: float = 1.0 / 4.57
+# LIGHT_CANONICAL_UNIT, LUX_TO_W_PER_M2, and PPFD_UMOL_TO_W_PER_M2 are
+# imported from src.config — that is the single source of truth.
+# LUX_TO_W_PER_M2 / PPFD_UMOL_TO_W_PER_M2 are local aliases for the
+# config.py names LIGHT_LUX_TO_W_PER_M2 / LIGHT_PPFD_TO_W_PER_M2.
+# See config.py for source references and rationale.
 
 
 class LightInputUnit(Enum):

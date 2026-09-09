@@ -19,6 +19,7 @@ from src.api.schemas.sensor_data import StatisticalAnomalyDetail
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
+    build_trigger_data_by_timestamp,
     build_upload_score_dicts,
 )
 from src.api.services.csv_persist import apply_anomaly_scores, persist_readings_chunk
@@ -295,6 +296,9 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
             ),
             anomaly_score_raw_by_timestamp=_raw_by_ts,
             score_scale="upload",
+            trigger_data_by_timestamp=build_trigger_data_by_timestamp(
+                response.high_anomalies
+            ),
         )
         response = response.model_copy(
             update={
