@@ -35,6 +35,10 @@ from src.models.cold_run_detector import (
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
+from src.models.stuck_fault_detector import (
+    StuckCarry,
+    WallclockStuckDetector,
+)
 
 
 def _stat_z_to_canonical(z_score: float) -> float:
@@ -73,6 +77,7 @@ class PortionScores:
     embeddings: list[list[float]] = field(default_factory=list)
     uncertainties: list[float] = field(default_factory=list)
     stat_hits: list[StatisticalAnomalyDetail] = field(default_factory=list)
+    stuck_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
     rows_processed: int = 0
 
 
@@ -87,6 +92,26 @@ def _sequence_timestamps_for(combined_df: pd.DataFrame, n_scores: int, seq_len: 
         else:
             out.append("unknown")
     return out
+
+
+def _stuck_dict_to_high_detail(
+    alert: dict[str, Any],
+) -> UploadHighAnomalyDetail:
+    """Convert a ``WallclockStuckDetector`` alert dict to the upload schema."""
+    return UploadHighAnomalyDetail(
+        score=1.0,
+        timestamp=alert["timestamp"],
+        detector=alert["detector"],
+        column=alert["channel"],
+        severity=alert["severity"],
+        method=alert["method"],
+        z_score=alert["duration_hours"],
+        value=alert["value"],
+    )
+
+
+# Singleton: reused across score_portion calls (stateless — state is in StuckCarry).
+_WALLCLOCK_DETECTOR = WallclockStuckDetector()
 
 
 def _detect_stats_incremental(
@@ -139,14 +164,23 @@ def score_portion(
     detector: AnomalyDetector,
     seq_len: int = 20,
     include_embeddings: bool = False,
+    stuck_carry: StuckCarry | None = None,
 ) -> tuple[PortionScores, pd.DataFrame]:
-    """Score one portion (LSTM + statistical). Returns (result, next_overlap_df).
+    """Score one portion (LSTM + statistical + stuck). Returns (result, next_overlap_df).
 
     `prev_overlap_df` must hold the last seq_len-1 normalized rows of the
     previous portion so sequences spanning the boundary are not lost.
+
+    When ``stuck_carry`` is provided, wall-clock stuck-fault detection runs in
+    parallel with the other detectors.  The carry threads per-channel freeze
+    state across portions so a fault spanning multiple chunks is not lost.
     """
     result = PortionScores(rows_processed=len(raw_rows))
     result.stat_hits = _detect_stats_incremental(raw_rows, stat_carry)
+
+    if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
+        raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
+        result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
 
     if normalized_df is None or normalized_df.empty:
         return result, prev_overlap_df
@@ -192,12 +226,17 @@ def finalize_scores(
     imputed_channels: list[str],
     stat_carry: StatCarry,
     include_embeddings: bool = False,
+    stuck_carry: StuckCarry | None = None,
 ) -> tuple[UploadInferenceResponse, list[str]]:
     """Calibrate the file-level threshold over all portions and build the response.
 
     calibrate_threshold needs the whole score distribution, so this is the one
     step that must see every portion — the inputs are compact (floats, ISO
     strings, sparse hits), not raw rows.
+
+    When ``stuck_carry`` is provided, still-open freezes are flushed and the
+    cadence check is finalised.  All stuck_fault alerts (from portions + flush)
+    are merged into ``high_anomalies``.
     """
     # Local import: cold_run_upload also imports this module.
     from src.api.services.cold_run_upload import _merge_by_timestamp
@@ -207,13 +246,20 @@ def finalize_scores(
     embeddings: list[list[float]] = []
     uncertainties: list[float] = []
     stat_details: list[StatisticalAnomalyDetail] = []
+    stuck_details: list[UploadHighAnomalyDetail] = []
     for portion in portions_in_order:
         anomaly_scores.extend(portion.scores)
         sequence_timestamps.extend(portion.sequence_timestamps)
         stat_details.extend(portion.stat_hits)
+        stuck_details.extend(portion.stuck_hits)
         if include_embeddings:
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
+
+    # Flush open freezes and finalise cadence check.
+    if stuck_carry is not None:
+        flush_alerts = _WALLCLOCK_DETECTOR.flush(stuck_carry)
+        stuck_details.extend(_stuck_dict_to_high_detail(a) for a in flush_alerts)
 
     scores_arr = np.asarray(anomaly_scores, dtype=np.float64)
     threshold_used, threshold_method = calibrate_threshold(scores_arr)
@@ -256,6 +302,11 @@ def finalize_scores(
     ]
 
     high_anomalies = _merge_by_timestamp(lstm_high, stat_high)
+
+    # Append stuck-fault alerts (distinct detector — no timestamp merge needed).
+    if stuck_details:
+        high_anomalies.extend(stuck_details)
+        high_anomalies.sort(key=lambda h: h.timestamp)
 
     response = UploadInferenceResponse(
         tenant_id=tenant_id,
