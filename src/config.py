@@ -1349,3 +1349,11 @@ EPISODE_GAP_SECONDS: int = int(os.environ.get("EPISODE_GAP_SECONDS", "600"))
 # not the loudest event.  Capped at 0.4 (below CANONICAL_ANOMALY_THRESHOLD)
 # so recovery never outranks a genuine excursion or the fault itself.
 RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
+
+# Window (hours) after a stuck-fault recovery during which excursions on
+# downstream control channels (heating setpoint, pipe temps) are attributed
+# to the recovery — physically real controller responses, not independent
+# faults.  Prevents recovery knock-on from dominating the run (D4).
+RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
+    os.environ.get("RECOVERY_KNOCKON_WINDOW_HOURS", "4.0")
+)
