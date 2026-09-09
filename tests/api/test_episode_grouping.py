@@ -50,6 +50,14 @@ FAULT_ONSET = datetime(2026, 12, 18, 13, 0, 0, tzinfo=timezone.utc)
 FREEZE_END = datetime(2026, 12, 25, 8, 55, 0, tzinfo=timezone.utc)
 
 
+def _parse_onset(ts: str) -> datetime:
+    """Parse an ISO timestamp to a UTC-aware datetime for onset comparison."""
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -207,6 +215,96 @@ class TestFixtureAEpisodes:
         for ep in self.recovery_episodes:
             assert ep.peak_score <= RECOVERY_SCORE_CAP, (
                 f"Recovery peak {ep.peak_score} exceeds cap {RECOVERY_SCORE_CAP}"
+            )
+
+    # --- Regression assertions (Correction 2) ----------------------------
+
+    def test_main_fault_episode_exists_by_onset(self):
+        """A stuck_fault episode on humidity with onset 2026-12-18T13:00:00Z
+        must exist — the 163 h main fault specifically, not 'at least one'."""
+        humidity_stuck = [
+            e for e in self.stuck_episodes if e.channel == "humidity"
+        ]
+        main_faults = [
+            e for e in humidity_stuck
+            if e.onset_ts is not None
+            and _parse_onset(e.onset_ts) == FAULT_ONSET
+        ]
+        assert len(main_faults) == 1, (
+            f"Expected exactly 1 main-fault episode (onset {FAULT_ONSET}), "
+            f"got {len(main_faults)}; onsets: "
+            f"{[e.onset_ts for e in humidity_stuck]}"
+        )
+
+    def test_main_fault_duration_is_163_83h(self):
+        """The main fault's frozen duration must be 163.83 h (ground truth
+        from NATIVE_FIXTURES.md: onset 2026-12-18T13:00 → last frozen
+        sample 2026-12-25T08:50, wall-clock 163.83 h)."""
+        humidity_stuck = [
+            e for e in self.stuck_episodes if e.channel == "humidity"
+        ]
+        main_faults = [
+            e for e in humidity_stuck
+            if e.onset_ts is not None
+            and _parse_onset(e.onset_ts) == FAULT_ONSET
+        ]
+        assert len(main_faults) == 1, "Main fault episode missing"
+        ep = main_faults[0]
+        duration_hours = ep.duration_seconds / 3600.0
+        assert round(duration_hours, 2) == 163.83, (
+            f"Main fault duration {duration_hours:.4f} h "
+            f"(rounded: {round(duration_hours, 2)}) != 163.83 h"
+        )
+
+    def test_no_statistical_episode_with_urgent_severity(self):
+        """No episode may combine detector='statistical' with
+        severity='urgent' — that combination is an artefact of
+        cross-detector merge and must not exist."""
+        bad_episodes = [
+            e for e in self.episodes
+            if e.detector == "statistical" and e.severity == "urgent"
+        ]
+        assert len(bad_episodes) == 0, (
+            f"Found {len(bad_episodes)} statistical+urgent episodes; "
+            f"channels: {[e.channel for e in bad_episodes]}"
+        )
+
+    def test_every_stuck_fault_has_positive_duration(self):
+        """Every stuck_fault episode must have duration_seconds > 0."""
+        for ep in self.stuck_episodes:
+            assert ep.duration_seconds > 0, (
+                f"stuck_fault episode on {ep.channel} "
+                f"(onset={ep.onset_ts}) has duration_seconds=0"
+            )
+
+    def test_prior_freeze_durations_match_ground_truth(self):
+        """The three prior freezes (before the main fault) must report
+        their ground-truth durations from NATIVE_FIXTURES.md:
+        34.83 h, 22.08 h, 47.92 h."""
+        humidity_stuck = [
+            e for e in self.stuck_episodes if e.channel == "humidity"
+        ]
+        # Expected: (onset_iso_prefix, duration_hours)
+        expected_prior = [
+            ("2026-12-14T00:00:00", 34.83),
+            ("2026-12-15T11:05:00", 22.08),
+            ("2026-12-16T11:20:00", 47.92),
+        ]
+        for onset_prefix, expected_h in expected_prior:
+            matching = [
+                e for e in humidity_stuck
+                if e.onset_ts is not None
+                and e.onset_ts.startswith(onset_prefix)
+            ]
+            assert len(matching) == 1, (
+                f"Expected 1 episode with onset {onset_prefix}, "
+                f"got {len(matching)}; onsets: "
+                f"{[e.onset_ts for e in humidity_stuck]}"
+            )
+            actual_h = round(matching[0].duration_seconds / 3600.0, 2)
+            assert actual_h == expected_h, (
+                f"Episode onset={onset_prefix}: "
+                f"duration {actual_h} h != expected {expected_h} h"
             )
 
 
