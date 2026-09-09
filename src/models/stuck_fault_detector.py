@@ -170,13 +170,24 @@ class ChannelFreezeState:
 
 @dataclass
 class FaultWindow:
-    """Recorded fault period for post-fault baseline cleanup."""
+    """Recorded fault period for post-fault baseline cleanup.
+
+    ``end_ts`` / ``end_dt`` point to the first **non-frozen** sample
+    (the release point) — used for recovery-window and baseline-purge
+    calculations.
+
+    ``last_frozen_ts`` / ``last_frozen_dt`` point to the last sample
+    that was still at the frozen value — used for accurate frozen-span
+    duration (onset → last frozen sample).
+    """
 
     channel: str
     onset_ts: str
     onset_dt: datetime
     end_ts: str
     end_dt: datetime
+    last_frozen_ts: str | None = None
+    last_frozen_dt: datetime | None = None
 
 
 @dataclass
@@ -330,6 +341,8 @@ class WallclockStuckDetector:
                             onset_dt=state.onset_dt,
                             end_ts=ts_iso,
                             end_dt=row_dt,
+                            last_frozen_ts=state.last_ts,
+                            last_frozen_dt=state.last_dt,
                         )
                         carry.recovery_channels[channel] = fw
                         carry.completed_faults.append(fw)

@@ -3,6 +3,35 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Task 5b corrections: Duration off-by-one + regression assertions — COMPLETE (2026-09-09)**
+
+### Correction 1 — Frozen duration off-by-one sample
+Completed fault durations were measured as onset → first non-frozen sample
+(`FaultWindow.end_dt`), over-reporting by exactly one sampling interval.
+Fix: added `last_frozen_dt`/`last_frozen_ts` fields to `FaultWindow` (the
+last sample still at the frozen value) and updated `_stuck_fault_duration()`
+in `episode_grouper.py` to use that boundary instead of `end_dt`.
+`end_dt`/`end_ts` are preserved for recovery-window and baseline-purge
+calculations (which correctly need the release point).
+
+Verified durations: 34.83 / 22.08 / 47.92 / 163.83 h (all match
+`NATIVE_FIXTURES.md` ground truth).
+
+### Correction 2 — Regression assertions (5 new tests)
+1. `test_main_fault_episode_exists_by_onset` — pins the 163 h fault by onset timestamp
+2. `test_main_fault_duration_is_163_83h` — asserts 163.83 h to 2 decimal places
+3. `test_no_statistical_episode_with_urgent_severity` — blocks cross-detector merge artefact
+4. `test_every_stuck_fault_has_positive_duration` — no more 0.0 pass-throughs
+5. `test_prior_freeze_durations_match_ground_truth` — pins 34.83/22.08/47.92 h
+
+Total tests: 91 (86 original + 5 new), all pass.
+
+### Files changed
+- `src/models/stuck_fault_detector.py` — `last_frozen_dt`/`last_frozen_ts` on `FaultWindow`
+- `src/models/episode_grouper.py` — use `last_frozen_dt` for completed fault duration
+- `tests/api/test_episode_grouping.py` — 5 new regression assertions + `_parse_onset` helper
+
+## Previous Phase
 **Tasks 2b + 3 + 5: Early stuck detection, recovery scoring, episode grouping — COMPLETE (2026-09-09)**
 
 ### Task 2b — Mid-freeze detection

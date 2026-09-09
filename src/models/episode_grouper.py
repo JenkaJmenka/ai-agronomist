@@ -205,7 +205,11 @@ def _stuck_fault_duration(
     fw = fault_index.get(fw_key)
 
     if fw is not None:
-        full_duration = (fw.end_dt - fw.onset_dt).total_seconds()
+        # Use the last frozen sample, not the first non-frozen sample
+        # (release point).  end_dt is one sampling interval past the
+        # actual frozen span; last_frozen_dt is the correct boundary.
+        boundary_dt = fw.last_frozen_dt if fw.last_frozen_dt is not None else fw.end_dt
+        full_duration = (boundary_dt - fw.onset_dt).total_seconds()
         return full_duration, False
 
     # Fallback: duration_hours stored in z_score field.
