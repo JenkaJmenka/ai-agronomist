@@ -28,7 +28,7 @@ import {
   formatSensorValues,
 } from "@/features/anomalies/lib/formatAnomalyDetails";
 import { resolveGroupingMode } from "@/features/anomalies/lib/groupingDecision";
-import { FAULT_LABELS } from "@/lib/severity";
+import { FAULT_LABELS, SEVERITY_ORDER, type Severity } from "@/lib/severity";
 
 const SERVER_GROUP_LABELS: Readonly<Record<ServerGroupBy, string>> = {
   date: "Date",
@@ -70,7 +70,13 @@ function groupClientSide(anomalies: AnomalyRow[], groupBy: ClientGroupBy): Clien
     // Date groups newest calendar day first.
     return groups.sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
   }
-  return groups.sort((a, b) => b.peak - a.peak);
+  // Severity groups: most severe first (urgent → critical → lstm → warning),
+  // then highest peak score as a tiebreaker within the same severity level.
+  return groups.sort((a, b) => {
+    const severityDiff =
+      (SEVERITY_ORDER[b.key as Severity] ?? -1) - (SEVERITY_ORDER[a.key as Severity] ?? -1);
+    return severityDiff !== 0 ? severityDiff : b.peak - a.peak;
+  });
 }
 
 function GroupModeButton(props: {

@@ -9,7 +9,7 @@ import {
 } from "@/features/anomalies/api/enriched";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import { STALE_TIME_MS } from "@/lib/query";
-import { getSeverity } from "@/lib/severity";
+import { resolveRowSeverity } from "@/lib/severity";
 import { useScope } from "@/lib/useScope";
 
 /** Default cap when callers omit `limit` — Top Anomalies table size. */
@@ -98,7 +98,11 @@ export function useEnrichedAnomalies(params: {
         timestamp: row.timestamp,
         anomaly_score: score,
         score,
-        severity: getSeverity({ score, threshold }),
+        severity: resolveRowSeverity({
+          score,
+          threshold,
+          detectedSeverity: row.detected_severity,
+        }),
       });
     }
     return flagged.sort((a, b) => b.score - a.score);

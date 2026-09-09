@@ -24,6 +24,7 @@ const SEVERITY_LABEL = {
   warning: "Warning",
   lstm: "LSTM / drift",
   critical: "Critical",
+  urgent: "Urgent",
 } as const;
 
 type AnomalyTableMode = "top" | "all";

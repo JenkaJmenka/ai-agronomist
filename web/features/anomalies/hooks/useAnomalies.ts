@@ -7,7 +7,7 @@ import type { SensorRow } from "@/features/monitoring/api/readings";
 import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { rowsForActiveWindow } from "@/lib/periodPresets";
-import { DEFAULT_SCORE_THRESHOLD, getSeverity, type Severity } from "@/lib/severity";
+import { DEFAULT_SCORE_THRESHOLD, resolveRowSeverity, type Severity } from "@/lib/severity";
 
 export interface AnomalyRow extends SensorRow {
   readonly score: number;
@@ -74,7 +74,9 @@ export function useAnomalies(): AnomaliesState {
     for (const row of rows) {
       const score = row.anomaly_score;
       if (typeof score !== "number" || score < threshold) continue;
-      flagged.push({ ...row, score, severity: getSeverity({ score, threshold }) });
+      // Chart rows come from the monitoring readings endpoint which does not
+      // return detected_severity — always uses the score/threshold fallback.
+      flagged.push({ ...row, score, severity: resolveRowSeverity({ score, threshold }) });
     }
     // Most severe first — mirrors the Streamlit Top Anomalies ordering.
     return flagged.sort((a, b) => b.score - a.score);

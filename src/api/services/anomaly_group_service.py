@@ -433,7 +433,7 @@ _SIMPLE_REASONING_UNITS: dict[str, str] = {
     "temperature": "°C",
     "humidity": "%",
     "co2": " ppm",
-    "light": " lux",
+    "light": " W/m²",  # canonical unit — see LIGHT_CANONICAL_UNIT in src/config.py
 }
 
 

@@ -177,6 +177,46 @@ Never send `max_points` below `DOWNSAMPLE_MAX_POINTS_FLOOR` to `/readings/anomal
 
 ---
 
+## Severity: urgent + server-preferred path (2026-09-08)
+
+### What was done
+Task 1 frontend half — ADR-006 / migration 024 follow-up.
+
+**Problem:** `Severity` union had no `"urgent"` value; the backend assigns `detected_severity: "urgent"` in 14 places but the UI had no way to render it. Additionally, the `getSeverity` function had dead `detector`/`agreement` branches that no call site ever populated, meaning all 232 rows in a 5-month export showed `"warning"`.
+
+**Changes:**
+
+- **`lib/severity.ts`**: Added `"urgent"` to `Severity` union. Added `SEVERITY_ORDER` constant (`urgent=4 > critical=3 > lstm=2 > warning=1 > normal=0`). Removed dead `detector`/`agreement` branches from `getSeverity` (simplified to score/threshold fallback only, returns `"normal" | "warning"`). Added `resolveRowSeverity({ score, threshold, detectedSeverity })` — prefers server-assigned `detected_severity`, falls back to `getSeverity` for pre-migration rows.
+
+- **`app/globals.css`**: Added `--sev-urgent: #9333ea` (purple) and its `@theme inline` mapping `--color-sev-urgent`.
+
+- **`components/ui/Chip.tsx`**: Added `urgent` entry to `SEVERITY_CLASSES`.
+
+- **`features/anomalies/components/AnomalyTable.tsx`**: Added `urgent: "Urgent"` to `SEVERITY_LABEL`.
+
+- **`features/anomalies/api/enriched.ts`**: Added `detected_severity` to `enrichedRowSchema` and `anomalyGroupSampleSchema`.
+
+- **`features/anomalies/api/flaggedWindow.ts`**: Added `detected_severity` to `flaggedRowSchema` (future-proofing for when `_canonical_records_to_rows` includes it).
+
+- **`features/anomalies/hooks/useEnrichedAnomalies.ts`**, **`useFlaggedWindow.ts`**, **`useAnomalies.ts`**: All three call sites switched from `getSeverity` to `resolveRowSeverity`. `useEnrichedAnomalies` and `useFlaggedWindow` pass `detected_severity` from the API row; `useAnomalies` uses score/threshold fallback (chart rows from monitoring endpoint have no `detected_severity`).
+
+- **`features/anomalies/components/GroupedAnomalies.tsx`**: Severity group sort now uses `SEVERITY_ORDER` as primary key (urgent first), peak score as tiebreaker.
+
+- **`lib/severity.test.ts`**: Rewrote; removed dead-branch tests; added `resolveRowSeverity`, `SEVERITY_ORDER`, urgent label coverage, and multi-group regression test.
+
+### Dead-branch decision
+Removed. The `detector` and `agreement` branches in `getSeverity` were never reachable: the `/readings/anomalies-in-window` and `/readings/window` endpoints do not return those fields, and neither do the chart rows. Rather than making them live (would require backend changes to `_canonical_records_to_rows` to expose `trigger_detector`), they were deleted. The server-preferred `resolveRowSeverity` replaces the multi-branch logic entirely.
+
+### Backend assumption noted in done signal
+`/api/anomalies/enriched` routes through `readings_service.fetch_top_flagged_rows_by_score` → `_canonical_records_to_rows` which does NOT currently include `detected_severity`. The groups endpoint DOES include it via a different SQL path. FE codes against the documented shape; fallback path works for pre-migration rows.
+
+### Gates status (2026-09-08)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing biome.json deprecation info only)
+- `pnpm test`: 259/259 (32 test files)
+
+---
+
 ## UI freeze mitigations (2026-07-23)
 
 Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:

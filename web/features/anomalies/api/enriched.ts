@@ -12,6 +12,8 @@ const enrichedRowSchema = z
     pattern_type: z.string().nullable().optional(),
     affected_sensors: z.array(z.string()).default([]),
     incident_id: z.string().nullable().optional(),
+    /** Persisted by migration 024; null for rows predating the migration. */
+    detected_severity: z.string().nullable().optional(),
   })
   .loose();
 
@@ -74,6 +76,8 @@ const anomalyGroupSampleSchema = z.object({
   affected_sensors: z.array(z.string()).default([]),
   reasoning: z.string().nullable().optional(),
   values: z.record(z.string(), z.number()).default({}),
+  /** Persisted by migration 024; null for rows predating the migration. */
+  detected_severity: z.string().nullable().optional(),
 });
 
 const anomalyGroupSchema = z.object({

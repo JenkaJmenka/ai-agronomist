@@ -139,7 +139,25 @@ NORM_MAX: float = 1.0
 TEMP_RANGE: Tuple[float, float] = (20.0, 30.0)      # Celsius
 HUMIDITY_RANGE: Tuple[float, float] = (50.0, 80.0)  # Percentage
 CO2_RANGE: Tuple[float, float] = (300.0, 500.0)     # ppm
-LIGHT_RANGE: Tuple[float, float] = (0.0, 1000.0)    # lux
+# Canonical light unit: W/m² (solar irradiance).
+# The comment "lux" on this constant was incorrect — the numeric band matches
+# solar irradiance in W/m², not lux (0-1000 lux is near-darkness; clear-sky
+# greenhouse solar irradiance reaches 1000-1200 W/m²).  The upper bound is
+# raised from 1000.0 to 1200.0 to accommodate measured clear-sky peaks
+# (fixture max: 1019.98 W/m² on 2026-07-02).  All callers must supply and
+# interpret light values in W/m².  See LIGHT_CANONICAL_UNIT below.
+LIGHT_RANGE: Tuple[float, float] = (0.0, 1200.0)    # W/m² irradiance
+
+# Single source of truth for the canonical physical unit of the light channel.
+LIGHT_CANONICAL_UNIT: str = "W/m²"
+
+# Conversion factors from non-canonical units to W/m².
+# Source (lux): CIE S 010/E luminous efficacy for standard daylight (D65),
+#   ~120 lm/W → 1 lux ≈ 1/120 W/m².
+# Source (PPFD): Thimijan & Heins (1983), PAR 400-700 nm band;
+#   1 W/m² ≈ 4.57 µmol·m⁻²·s⁻¹ → 1 µmol·m⁻²·s⁻¹ ≈ 1/4.57 W/m².
+LIGHT_LUX_TO_W_PER_M2: float = 1.0 / 120.0
+LIGHT_PPFD_TO_W_PER_M2: float = 1.0 / 4.57
 
 # Metadata for sensor identification
 SENSOR_NAMES: List[str] = ["temperature", "humidity", "co2", "light"]
@@ -148,7 +166,7 @@ SENSOR_UNITS: Dict[str, str] = {
     "temperature": "°C",
     "humidity": "%",
     "co2": " ppm",
-    "light": " lux",
+    "light": " W/m²",  # canonical unit; see LIGHT_CANONICAL_UNIT
 }
 
 # =============================================================================
@@ -713,6 +731,43 @@ STUCK_VARIANCE_THRESHOLD: float = 1e-4
 # Normalized-space range below which a window is treated as truly flat (stuck).
 STUCK_FLAT_RANGE_THRESHOLD: float = 1e-4
 
+# Wall-clock stuck-fault gate for the CSV upload path.
+# Unlike the sample-indexed detectors above (STUCK_WINDOW_K, STUCK_EPSILON),
+# this gate uses elapsed wall-clock time so it works correctly regardless of
+# the input's sampling cadence.  A freeze must persist for at least
+# STUCK_WALLCLOCK_MIN_HOURS AND have at least STUCK_WALLCLOCK_MIN_SAMPLES
+# identical readings (so a sparse two-sample gap cannot satisfy the gate).
+STUCK_WALLCLOCK_MIN_HOURS: float = float(
+    os.environ.get("STUCK_WALLCLOCK_MIN_HOURS", "6.0")
+)
+STUCK_WALLCLOCK_MIN_SAMPLES: int = int(
+    os.environ.get("STUCK_WALLCLOCK_MIN_SAMPLES", "12")
+)
+
+# Per-channel epsilon for the wall-clock stuck detector (raw sensor units).
+# Two readings whose absolute difference is <= epsilon are treated as identical.
+# Calibrated against native Connext export resolution per sensor type.
+STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
+    "temperature": 0.01,   # °C  — native resolution ~0.01
+    "humidity": 0.01,       # %   — native resolution ~0.01
+    "co2": 1.0,             # ppm — native resolution ~1
+    "light": 1.0,           # W/m² or lux — native resolution ~1
+}
+
+# Channels checked by the wall-clock stuck detector.  Light is excluded
+# because diurnal zero (nighttime darkness) is normal, not a stuck sensor.
+STUCK_WALLCLOCK_CHANNELS: Tuple[str, ...] = ("temperature", "humidity", "co2")
+
+# Expected inter-sample cadence (seconds) and tolerance factor.
+# The cadence check flags input whose median interval deviates beyond
+# CADENCE_EXPECTED_SECONDS × CADENCE_TOLERANCE_FACTOR.
+CADENCE_EXPECTED_SECONDS: int = int(
+    os.environ.get("CADENCE_EXPECTED_SECONDS", "300")
+)
+CADENCE_TOLERANCE_FACTOR: float = float(
+    os.environ.get("CADENCE_TOLERANCE_FACTOR", "1.5")
+)
+
 # =============================================================================
 # Setpoint-aware SCADA rules (dynamic climate-computer detection)
 # =============================================================================
@@ -925,7 +980,7 @@ SPIKE_MAD_FLOOR: Dict[str, float] = {
     "temperature": 0.1,   # °C
     "humidity": 0.2,      # %
     "co2": 10.0,          # ppm
-    "light": 4.0,         # lux
+    "light": 4.0,         # W/m² (was labelled lux; canonical unit is W/m²; numeric floor unchanged)
 }
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
@@ -933,7 +988,11 @@ OOB_LIMITS: Dict[str, Tuple[float, float]] = {
     "temperature": (-40.0, 80.0),
     "humidity": (0.0, 100.0),
     "co2": (0.0, 5000.0),
-    "light": (0.0, 200000.0),
+    # W/m² hard limit.  The previous value of 200000.0 was lux-scaled — only
+    # valid if the canonical unit were lux.  2000.0 W/m² is far above the
+    # clear-sky solar maximum at Earth's surface (~1400 W/m²) and only flags
+    # hardware faults (stuck-high, direct sensor illumination, cable short).
+    "light": (0.0, 2000.0),
 }
 
 # Stuck-at — 1-D series epsilon for the document-aligned detector.
