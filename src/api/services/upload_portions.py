@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.api.schemas.sensor_data import (
+    AnomalyEpisodeSchema,
     StatisticalAnomalyDetail,
     StatisticalColdRunSummary,
     UploadHighAnomalyDetail,
@@ -35,6 +36,7 @@ from src.models.cold_run_detector import (
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
+from src.models.episode_grouper import group_alerts_into_episodes
 from src.models.stuck_fault_detector import (
     StuckCarry,
     WallclockStuckDetector,
@@ -97,10 +99,16 @@ def _sequence_timestamps_for(combined_df: pd.DataFrame, n_scores: int, seq_len: 
 def _stuck_dict_to_high_detail(
     alert: dict[str, Any],
 ) -> UploadHighAnomalyDetail:
-    """Convert a ``WallclockStuckDetector`` alert dict to the upload schema."""
+    """Convert a ``WallclockStuckDetector`` alert dict to the upload schema.
+
+    ``detected_ts`` carries the timestamp at which detection actually fired
+    (when the gate was first satisfied), distinct from ``timestamp`` which
+    is the freeze onset.  Latency = ``detected_ts`` - ``timestamp``.
+    """
     return UploadHighAnomalyDetail(
         score=1.0,
         timestamp=alert["timestamp"],
+        detected_ts=alert.get("detected_ts"),
         detector=alert["detector"],
         column=alert["channel"],
         severity=alert["severity"],
@@ -154,6 +162,26 @@ def _detect_stats_incremental(
     return fresh
 
 
+def _purge_fault_from_stat_carry(
+    stat_carry: StatCarry,
+    channel: str,
+    onset_ts: str,
+    end_ts: str,
+) -> None:
+    """NaN-out a channel's values in stat_carry.rows for the fault period.
+
+    This prevents the rolling baseline from being contaminated by the
+    frozen values.  After purge, the rolling detector builds its
+    baseline from pre-fault data and the z-scores after recovery are
+    computed against a clean baseline (Task 3 — address the baseline,
+    not only the emission).
+    """
+    for row in stat_carry.rows:
+        row_ts = row.get("timestamp", "")
+        if onset_ts <= row_ts <= end_ts and channel in row:
+            row[channel] = float("nan")
+
+
 def score_portion(
     *,
     normalized_df: pd.DataFrame | None,
@@ -171,16 +199,27 @@ def score_portion(
     `prev_overlap_df` must hold the last seq_len-1 normalized rows of the
     previous portion so sequences spanning the boundary are not lost.
 
-    When ``stuck_carry`` is provided, wall-clock stuck-fault detection runs in
-    parallel with the other detectors.  The carry threads per-channel freeze
-    state across portions so a fault spanning multiple chunks is not lost.
+    When ``stuck_carry`` is provided, wall-clock stuck-fault detection runs
+    FIRST so recovery channels can be identified before statistical detection.
+    The carry threads per-channel freeze state across portions.
     """
     result = PortionScores(rows_processed=len(raw_rows))
-    result.stat_hits = _detect_stats_incremental(raw_rows, stat_carry)
 
+    # Run stuck detection FIRST so we know which channels just
+    # exited a fault before the statistical detector runs.
     if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
         raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
         result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
+
+        # Task 3 baseline cleanup: purge fault-period values from
+        # stat_carry so the rolling z-score baseline is not contaminated
+        # by frozen readings.
+        for ch, fw in stuck_carry.recovery_channels.items():
+            _purge_fault_from_stat_carry(
+                stat_carry, ch, fw.onset_ts, fw.end_ts,
+            )
+
+    result.stat_hits = _detect_stats_incremental(raw_rows, stat_carry)
 
     if normalized_df is None or normalized_df.empty:
         return result, prev_overlap_df
@@ -308,6 +347,15 @@ def finalize_scores(
         high_anomalies.extend(stuck_details)
         high_anomalies.sort(key=lambda h: h.timestamp)
 
+    # Task 5: group contiguous per-channel alerts into episodes.
+    recovery_chs = stuck_carry.recovery_channels if stuck_carry else {}
+    raw_episodes = group_alerts_into_episodes(
+        high_anomalies, recovery_channels=recovery_chs,
+    )
+    episodes = [
+        AnomalyEpisodeSchema(**ep.to_dict()) for ep in raw_episodes
+    ]
+
     response = UploadInferenceResponse(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -315,6 +363,7 @@ def finalize_scores(
         anomalies_detected=len(high_anomalies),
         anomaly_scores=anomaly_scores,
         high_anomalies=high_anomalies,
+        episodes=episodes,
         threshold_used=float(threshold_used),
         threshold_method=threshold_method,
         imputed_channels=imputed_channels,

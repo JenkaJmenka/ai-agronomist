@@ -169,6 +169,17 @@ class ChannelFreezeState:
 
 
 @dataclass
+class FaultWindow:
+    """Recorded fault period for post-fault baseline cleanup."""
+
+    channel: str
+    onset_ts: str
+    onset_dt: datetime
+    end_ts: str
+    end_dt: datetime
+
+
+@dataclass
 class StuckCarry:
     """Rolling state for wall-clock stuck-fault detection across portions.
 
@@ -177,6 +188,11 @@ class StuckCarry:
 
     ``skip_channels`` excludes imputed channels (constant fill values that
     would otherwise trigger a false stuck alert for the entire file).
+
+    ``recovery_channels`` maps channel → FaultWindow for channels that just
+    exited a detected fault.  Used by the statistical detector to purge
+    contaminated baseline values and by episode grouping to tag recovery
+    alerts.
     """
 
     channels: dict[str, ChannelFreezeState] = field(default_factory=dict)
@@ -186,6 +202,7 @@ class StuckCarry:
     cadence_median_seconds: float | None = None
     emitted_onsets: set[tuple[str, str]] = field(default_factory=set)
     skip_channels: frozenset[str] = field(default_factory=frozenset)
+    recovery_channels: dict[str, FaultWindow] = field(default_factory=dict)
 
 
 class WallclockStuckDetector:
@@ -284,10 +301,35 @@ class WallclockStuckDetector:
                     state.last_ts = ts_iso
                     state.last_dt = row_dt
                     state.sample_count += 1
-                else:
-                    alert = self._check_gate(channel, state, carry)
+                    # Task 2b: evaluate gate DURING the freeze so
+                    # the alert fires as soon as the gate is met,
+                    # not only when the freeze ends.  emitted_onsets
+                    # prevents duplicate emission on later rows.
+                    alert = self._check_gate(
+                        channel, state, carry, detected_ts=ts_iso,
+                    )
                     if alert is not None:
                         alerts.append(alert)
+                else:
+                    # Value changed → freeze ended.  Try to emit if
+                    # not already emitted mid-freeze.
+                    alert = self._check_gate(
+                        channel, state, carry, detected_ts=ts_iso,
+                    )
+                    if alert is not None:
+                        alerts.append(alert)
+                    # Record recovery for baseline cleanup (Task 3).
+                    # Only if a fault was actually detected for this
+                    # freeze (key is in emitted_onsets).
+                    key = (channel, state.onset_ts)
+                    if key in carry.emitted_onsets:
+                        carry.recovery_channels[channel] = FaultWindow(
+                            channel=channel,
+                            onset_ts=state.onset_ts,
+                            onset_dt=state.onset_dt,
+                            end_ts=ts_iso,
+                            end_dt=row_dt,
+                        )
                     carry.channels[channel] = ChannelFreezeState(
                         frozen_value=value_f,
                         onset_ts=ts_iso,
@@ -306,7 +348,9 @@ class WallclockStuckDetector:
         """Flush still-open freezes and finalise cadence check."""
         alerts: list[dict[str, Any]] = []
         for channel, state in carry.channels.items():
-            alert = self._check_gate(channel, state, carry)
+            alert = self._check_gate(
+                channel, state, carry, detected_ts=state.last_ts,
+            )
             if alert is not None:
                 alerts.append(alert)
 
@@ -338,8 +382,20 @@ class WallclockStuckDetector:
         channel: str,
         state: ChannelFreezeState,
         carry: StuckCarry,
+        *,
+        detected_ts: str | None = None,
     ) -> dict[str, Any] | None:
-        """Emit an alert dict if the freeze meets the gate."""
+        """Emit an alert dict if the freeze meets the gate.
+
+        ``detected_ts`` is the row timestamp at which the gate was first
+        satisfied — distinct from ``state.onset_ts`` (when the freeze
+        began).  The alert carries both so downstream code can compute
+        true detection latency as ``detected_ts - onset_ts``.
+
+        ``duration_hours`` is elapsed-so-far at detection time (the freeze
+        may still be open).  Episode grouping updates the final duration
+        when the freeze ends.
+        """
         duration_hours = (
             (state.last_dt - state.onset_dt).total_seconds() / 3600.0
         )
@@ -355,6 +411,7 @@ class WallclockStuckDetector:
 
         return {
             "timestamp": state.onset_ts,
+            "detected_ts": detected_ts or state.last_ts,
             "channel": channel,
             "severity": "urgent",
             "detector": "stuck_fault",
