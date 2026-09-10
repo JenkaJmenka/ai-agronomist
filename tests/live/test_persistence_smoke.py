@@ -21,9 +21,14 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import SCORE_SCALE_CALIBRATION
 from src.db.models import Base, SensorReading
 from src.live.events import LiveReadingEvent
 from src.live.persistence import PersistenceBatcher, _BUFFER_CAP
+
+# ADR-005: live scores are transformed at write time.
+_LIVE_P, _LIVE_HI = SCORE_SCALE_CALIBRATION["live"]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -175,7 +180,12 @@ async def test_anomaly_score_persisted(batcher: PersistenceBatcher, session_fact
         reading: SensorReading | None = row.scalars().first()
 
     assert reading is not None
-    assert abs(reading.anomaly_score - 0.92) < 1e-6
+    # ADR-005: anomaly_score now stores the canonical score; raw is in anomaly_score_raw.
+    expected_canonical = _canonical_score(0.92, _LIVE_P, _LIVE_HI)
+    assert expected_canonical is not None
+    assert abs(reading.anomaly_score - expected_canonical) < 1e-6
+    assert abs(reading.anomaly_score_raw - 0.92) < 1e-6
+    assert reading.score_scale == "live"
 
 
 @pytest.mark.asyncio

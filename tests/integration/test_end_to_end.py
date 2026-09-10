@@ -19,11 +19,21 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.main import app
-from src.config import INPUT_DIM, SEQ_LEN
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import ANOMALY_SCALING_FACTOR, INPUT_DIM, SCORE_SCALE_CALIBRATION, SEQ_LEN
 from src.db.models import Base, SensorReading
 from src.db.session import get_db
 from src.vendors.csv_adapter import CSVAdapter
 from tests.integration.conftest_pipeline import baseline_sequences, sample_sequence
+
+# ADR-005: patch_detector returns raw=1.5 → batch_score=clip(1.5/ANOMALY_SCALING_FACTOR, 0, 1)=0.75
+# → canonical(0.75, p=0.8, hi=1.0) = 0.5 * 0.75 / 0.8 ≈ 0.469
+_MOCK_RAW_SCORE: float = 1.5
+_MOCK_BATCH_SCORE: float = min(_MOCK_RAW_SCORE / ANOMALY_SCALING_FACTOR, 1.0)
+_BATCH_P, _BATCH_HI = SCORE_SCALE_CALIBRATION["batch"]
+_EXPECTED_ANOMALY_SCORE: float = _canonical_score(  # type: ignore[assignment]
+    _MOCK_BATCH_SCORE, _BATCH_P, _BATCH_HI
+)
 
 
 def _post_comprehensive(
@@ -91,8 +101,9 @@ def patch_detector():
     from src.models.lstm_vae import LSTMVAE
 
     def enriched_side_effect(seqs):
-        # returns 1.5 raw score so that clipped score is 0.75
-        scores = np.array([1.5] * len(seqs), dtype=np.float32)
+        # returns 1.5 raw score → clip(1.5/2.0, 0, 1) = 0.75 batch score →
+        # ADR-005 canonical(0.75, p=0.8, hi=1.0) ≈ 0.469 stored in anomaly_score
+        scores = np.array([_MOCK_RAW_SCORE] * len(seqs), dtype=np.float32)
         embeddings = np.zeros((len(scores), LATENT_DIM), dtype=np.float32)
         uncertainties = np.full(len(scores), 0.1, dtype=np.float32)
         return scores, embeddings, uncertainties
@@ -169,7 +180,8 @@ async def test_csv_upload_to_inference_to_dashboard(
     db_scores_res = await test_database.execute(stmt_scores)
     scored_records = db_scores_res.scalars().all()
     assert len(scored_records) == 10
-    assert all(r.anomaly_score == pytest.approx(0.75) for r in scored_records)
+    # ADR-005: anomaly_score now stores the canonical score, not the raw batch score.
+    assert all(r.anomaly_score == pytest.approx(_EXPECTED_ANOMALY_SCORE) for r in scored_records)
 
     # -------------------------------------------------------------------------
     # Step 5: Query database directly (mimicking Dashboard queries)
@@ -186,7 +198,8 @@ async def test_csv_upload_to_inference_to_dashboard(
     # At least some elements should contain the calculated anomaly score
     recorded_anomaly_scores = [r.anomaly_score for r in dash_records if r.anomaly_score is not None]
     assert len(recorded_anomaly_scores) == 10
-    assert recorded_anomaly_scores[0] == pytest.approx(0.75)
+    # ADR-005: anomaly_score now stores the canonical score, not the raw batch score.
+    assert recorded_anomaly_scores[0] == pytest.approx(_EXPECTED_ANOMALY_SCORE)
 
     # -------------------------------------------------------------------------
     # Step 6: Verify strict multi-tenant isolation

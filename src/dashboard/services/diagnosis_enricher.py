@@ -193,7 +193,14 @@ def _zscore_flags(row: pd.Series) -> Dict[str, bool]:
         span = max(hi - lo, 1e-6)
         z = abs(val - mid) / (span / 2.0)
         zscores[col] = z
-        flags[col] = z > 1.2
+        # z = |val - mid| / (span/2) ≤ 1.0 for any val ∈ [lo, hi], so
+        # z > 1.2 is always False — no in-range value can exceed this bound.
+        # The dead expression `flags[col] = z > 1.2` was removed; the fallback
+        # below (if not any(flags.values())) ensures the most-deviant in-range
+        # sensor is still flagged for multivariate anomalies.
+        # anomaly_group_service._infer_fault_type_from_values has the same
+        # bound; the old "accuracy_decline" branch there was dead for the
+        # same reason and has been removed (see that module's inline comment).
 
     if zscores and not any(flags.values()):
         most_deviant = max(zscores, key=lambda c: zscores[c])

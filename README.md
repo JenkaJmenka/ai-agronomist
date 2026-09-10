@@ -131,9 +131,6 @@ Full walkthrough: **[User Guide § First-run checklist](docs/USER_GUIDE.md#19-fi
 | `web/features/` | One folder per page domain |
 | `alembic/versions/` | **Authoritative** migrations |
 
-> `src/db/migrations/` is a dead legacy tree (a single initial-schema stub).
-> Do not run it — use only `alembic/`.
-
 ### Detection pipeline
 
 ```
@@ -272,9 +269,6 @@ the app errors on a missing column if migrations lag. Verify a single head with
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Complete operator guide — every page, upload and training workflows, troubleshooting |
 | [docs/ANOMALY_CATALOG.md](docs/ANOMALY_CATALOG.md) | Every anomaly type: meaning, detection method, parameters, operator action |
 | [docs/anomaly_framework_spec.md](docs/anomaly_framework_spec.md) | Reference formulas and verification datasets |
-| [ARCHITECTURE_ASSESSMENT.md](ARCHITECTURE_ASSESSMENT.md) | Architecture review |
 | [MIGRATION_PLAN.md](MIGRATION_PLAN.md) | Streamlit → Next.js migration plan |
-| [DESIGN_upload_prepare_on_worker.md](DESIGN_upload_prepare_on_worker.md) | Durable upload prepare design |
 | [RAILWAY_HOSTING.md](RAILWAY_HOSTING.md) | Railway deployment runbook |
-| [HANDOVER.md](HANDOVER.md) | Upload/processing fix handover |
 | [web/AGENTS.md](web/AGENTS.md) | Frontend conventions and quality gates |

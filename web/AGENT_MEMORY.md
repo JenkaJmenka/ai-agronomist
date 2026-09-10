@@ -177,6 +177,114 @@ Never send `max_points` below `DOWNSAMPLE_MAX_POINTS_FLOOR` to `/readings/anomal
 
 ---
 
+## Severity: urgent + server-preferred path (2026-09-08)
+
+### What was done
+Task 1 frontend half — ADR-006 / migration 024 follow-up.
+
+**Problem:** `Severity` union had no `"urgent"` value; the backend assigns `detected_severity: "urgent"` in 14 places but the UI had no way to render it. Additionally, the `getSeverity` function had dead `detector`/`agreement` branches that no call site ever populated, meaning all 232 rows in a 5-month export showed `"warning"`.
+
+**Changes:**
+
+- **`lib/severity.ts`**: Added `"urgent"` to `Severity` union. Added `SEVERITY_ORDER` constant (`urgent=4 > critical=3 > lstm=2 > warning=1 > normal=0`). Removed dead `detector`/`agreement` branches from `getSeverity` (simplified to score/threshold fallback only, returns `"normal" | "warning"`). Added `resolveRowSeverity({ score, threshold, detectedSeverity })` — prefers server-assigned `detected_severity`, falls back to `getSeverity` for pre-migration rows.
+
+- **`app/globals.css`**: Added `--sev-urgent: #9333ea` (purple) and its `@theme inline` mapping `--color-sev-urgent`.
+
+- **`components/ui/Chip.tsx`**: Added `urgent` entry to `SEVERITY_CLASSES`.
+
+- **`features/anomalies/components/AnomalyTable.tsx`**: Added `urgent: "Urgent"` to `SEVERITY_LABEL`.
+
+- **`features/anomalies/api/enriched.ts`**: Added `detected_severity` to `enrichedRowSchema` and `anomalyGroupSampleSchema`.
+
+- **`features/anomalies/api/flaggedWindow.ts`**: Added `detected_severity` to `flaggedRowSchema` (future-proofing for when `_canonical_records_to_rows` includes it).
+
+- **`features/anomalies/hooks/useEnrichedAnomalies.ts`**, **`useFlaggedWindow.ts`**, **`useAnomalies.ts`**: All three call sites switched from `getSeverity` to `resolveRowSeverity`. `useEnrichedAnomalies` and `useFlaggedWindow` pass `detected_severity` from the API row; `useAnomalies` uses score/threshold fallback (chart rows from monitoring endpoint have no `detected_severity`).
+
+- **`features/anomalies/components/GroupedAnomalies.tsx`**: Severity group sort now uses `SEVERITY_ORDER` as primary key (urgent first), peak score as tiebreaker.
+
+- **`lib/severity.test.ts`**: Rewrote; removed dead-branch tests; added `resolveRowSeverity`, `SEVERITY_ORDER`, urgent label coverage, and multi-group regression test.
+
+### Dead-branch decision
+Removed. The `detector` and `agreement` branches in `getSeverity` were never reachable: the `/readings/anomalies-in-window` and `/readings/window` endpoints do not return those fields, and neither do the chart rows. Rather than making them live (would require backend changes to `_canonical_records_to_rows` to expose `trigger_detector`), they were deleted. The server-preferred `resolveRowSeverity` replaces the multi-branch logic entirely.
+
+### Backend assumption noted in done signal
+`/api/anomalies/enriched` routes through `readings_service.fetch_top_flagged_rows_by_score` → `_canonical_records_to_rows` which does NOT currently include `detected_severity`. The groups endpoint DOES include it via a different SQL path. FE codes against the documented shape; fallback path works for pre-migration rows.
+
+### Gates status (2026-09-08)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing biome.json deprecation info only)
+- `pnpm test`: 259/259 (32 test files)
+
+---
+
+## Fix: `every sidebar entry navigates` e2e failure + silent-pass hole (2026-09-10)
+
+### Root cause (commit a4cd41a)
+`App Configuration` nav entry was added together with a new `/greenhouse-profile` page
+(`ConfigurationView`). `ConfigurationBody` throws when `isError` is true (deliberate product
+choice). The page has no `error.tsx`, so Next.js renders its default error page ("This page
+couldn't load", h1) — sidebar disappears. The loop then times out 30 s waiting to click the
+now-missing `App Configuration` sidebar link.
+
+**Silent-pass hole:** The old assertion was `getByRole("heading", { level: 1 })` with no name.
+The error page's own h1 satisfied it, so the test passed on the crashed page and only blew up
+one step later.
+
+### Fix (`web/test/e2e/smoke.spec.ts`)
+
+1. **`setupBffMocks(page)` helper** — extracted from the `app boots` inline mocks so both tests
+   share one payload definition:
+   - `**/api/bff/readings/**` — prevents readings-dependent views from reaching their
+     `isError → throw` path (Anomaly Detection, Thresholds).
+   - `**/api/bff/config/**` — prevents `ConfigurationBody` from throwing (the critical fix).
+   - `**/api/bff/live/**` — suppresses SSE probe noise on the Home page.
+
+2. **`NAV_TARGETS` gains `heading` field** — exact h1 text per destination (differs from nav
+   label in two cases: "Thresholds" → "Threshold Management").
+
+3. **Two new assertions per iteration:**
+   - `expect(page.getByRole("heading", { name: "This page couldn't load" })).not.toBeVisible()`
+     — fails loudly on the crashed target instead of on the next one.
+   - `expect(page.getByRole("heading", { name: target.heading, level: 1 })).toBeVisible()`
+     — asserts the *expected* page loaded, not merely that some h1 is present.
+
+### Assertion fix verified
+Temporarily replaced the config mock with `route.fulfill({ status: 500 })`. Test failed on
+target 7 (Greenhouse Profile) with "element(s) not found" for the heading, not on target 8's
+click. Restored mock; all 54 e2e tests passed.
+
+### Gates status (2026-09-10)
+- `pnpm lint`: 0 errors
+- `pnpm typecheck`: clean
+- `pnpm test`: 259/259
+- `pnpm exec playwright test`: 54/54
+
+---
+
+## Fix: `custom range form` TZ-independent assertion (2026-09-10)
+
+### Root cause
+`expect(new Date(params.get("from") ?? "").getTime()).toBe(new Date("2026-06-01T12:00").getTime())`:
+- RHS `new Date("2026-06-01T12:00")` is Node.js local time — depends on the TZ env-var of the test process.
+- LHS is a UTC ISO string from nuqs's `.toISOString()` — always an absolute instant, TZ-independent to parse.
+- Both sides agree only when the Node.js TZ and the browser TZ are identical. Playwright normally propagates TZ env-var to the browser, but the browser's source (OS vs env-var) can diverge on macOS, and the assertion is semantically wrong regardless.
+
+### Contract found
+`DateTimeField.toDate()` uses `new Date(year, month-1, day, hour, minute)` — **browser local time**.  
+nuqs `parseAsIsoDateTime.serialize()` calls `.toISOString()` → **UTC ISO string** in URL.
+
+### Fix
+Replaced `new Date("YYYY-MM-DDTHH:mm").getTime()` on the RHS with `page.evaluate(() => new Date(year, month-1, day, hour, minute).getTime())`. Both sides now use the browser's timezone: the URL param is parsed as an absolute UTC instant (TZ-independent), and the expected value is computed in the same browser context that produced it.
+
+### Gates status (2026-09-10)
+- `pnpm lint`: 0 errors
+- `pnpm typecheck`: clean
+- `pnpm test`: 259/259
+- `pnpm exec playwright test`: 54/54
+- TZ=UTC, TZ=Asia/Tokyo, TZ=America/Los_Angeles: all 1 passed
+
+---
+
 ## UI freeze mitigations (2026-07-23)
 
 Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7–5.9 s and live-mode main-thread cascades as the freeze driver:

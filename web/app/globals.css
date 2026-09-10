@@ -16,6 +16,7 @@
   --sev-warning: #f59e0b;
   --sev-lstm: #ff8c00;
   --sev-critical: #ef4444;
+  --sev-urgent: #9333ea;
 
   --radius-control: 6px;
   --radius-card: 8px;
@@ -57,6 +58,7 @@
   --color-sev-warning: var(--sev-warning);
   --color-sev-lstm: var(--sev-lstm);
   --color-sev-critical: var(--sev-critical);
+  --color-sev-urgent: var(--sev-urgent);
   --radius-control: var(--radius-control);
   --radius-card: var(--radius-card);
 }

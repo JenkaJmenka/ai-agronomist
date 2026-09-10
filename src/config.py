@@ -139,7 +139,25 @@ NORM_MAX: float = 1.0
 TEMP_RANGE: Tuple[float, float] = (20.0, 30.0)      # Celsius
 HUMIDITY_RANGE: Tuple[float, float] = (50.0, 80.0)  # Percentage
 CO2_RANGE: Tuple[float, float] = (300.0, 500.0)     # ppm
-LIGHT_RANGE: Tuple[float, float] = (0.0, 1000.0)    # lux
+# Canonical light unit: W/m² (solar irradiance).
+# The comment "lux" on this constant was incorrect — the numeric band matches
+# solar irradiance in W/m², not lux (0-1000 lux is near-darkness; clear-sky
+# greenhouse solar irradiance reaches 1000-1200 W/m²).  The upper bound is
+# raised from 1000.0 to 1200.0 to accommodate measured clear-sky peaks
+# (fixture max: 1019.98 W/m² on 2026-07-02).  All callers must supply and
+# interpret light values in W/m².  See LIGHT_CANONICAL_UNIT below.
+LIGHT_RANGE: Tuple[float, float] = (0.0, 1200.0)    # W/m² irradiance
+
+# Single source of truth for the canonical physical unit of the light channel.
+LIGHT_CANONICAL_UNIT: str = "W/m²"
+
+# Conversion factors from non-canonical units to W/m².
+# Source (lux): CIE S 010/E luminous efficacy for standard daylight (D65),
+#   ~120 lm/W → 1 lux ≈ 1/120 W/m².
+# Source (PPFD): Thimijan & Heins (1983), PAR 400-700 nm band;
+#   1 W/m² ≈ 4.57 µmol·m⁻²·s⁻¹ → 1 µmol·m⁻²·s⁻¹ ≈ 1/4.57 W/m².
+LIGHT_LUX_TO_W_PER_M2: float = 1.0 / 120.0
+LIGHT_PPFD_TO_W_PER_M2: float = 1.0 / 4.57
 
 # Metadata for sensor identification
 SENSOR_NAMES: List[str] = ["temperature", "humidity", "co2", "light"]
@@ -148,7 +166,7 @@ SENSOR_UNITS: Dict[str, str] = {
     "temperature": "°C",
     "humidity": "%",
     "co2": " ppm",
-    "light": " lux",
+    "light": " W/m²",  # canonical unit; see LIGHT_CANONICAL_UNIT
 }
 
 # =============================================================================
@@ -713,6 +731,43 @@ STUCK_VARIANCE_THRESHOLD: float = 1e-4
 # Normalized-space range below which a window is treated as truly flat (stuck).
 STUCK_FLAT_RANGE_THRESHOLD: float = 1e-4
 
+# Wall-clock stuck-fault gate for the CSV upload path.
+# Unlike the sample-indexed detectors above (STUCK_WINDOW_K, STUCK_EPSILON),
+# this gate uses elapsed wall-clock time so it works correctly regardless of
+# the input's sampling cadence.  A freeze must persist for at least
+# STUCK_WALLCLOCK_MIN_HOURS AND have at least STUCK_WALLCLOCK_MIN_SAMPLES
+# identical readings (so a sparse two-sample gap cannot satisfy the gate).
+STUCK_WALLCLOCK_MIN_HOURS: float = float(
+    os.environ.get("STUCK_WALLCLOCK_MIN_HOURS", "6.0")
+)
+STUCK_WALLCLOCK_MIN_SAMPLES: int = int(
+    os.environ.get("STUCK_WALLCLOCK_MIN_SAMPLES", "12")
+)
+
+# Per-channel epsilon for the wall-clock stuck detector (raw sensor units).
+# Two readings whose absolute difference is <= epsilon are treated as identical.
+# Calibrated against native Connext export resolution per sensor type.
+STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
+    "temperature": 0.01,   # °C  — native resolution ~0.01
+    "humidity": 0.01,       # %   — native resolution ~0.01
+    "co2": 1.0,             # ppm — native resolution ~1
+    "light": 1.0,           # W/m² — native resolution ~1
+}
+
+# Channels checked by the wall-clock stuck detector.  Light is excluded
+# because diurnal zero (nighttime darkness) is normal, not a stuck sensor.
+STUCK_WALLCLOCK_CHANNELS: Tuple[str, ...] = ("temperature", "humidity", "co2")
+
+# Expected inter-sample cadence (seconds) and tolerance factor.
+# The cadence check flags input whose median interval deviates beyond
+# CADENCE_EXPECTED_SECONDS × CADENCE_TOLERANCE_FACTOR.
+CADENCE_EXPECTED_SECONDS: int = int(
+    os.environ.get("CADENCE_EXPECTED_SECONDS", "300")
+)
+CADENCE_TOLERANCE_FACTOR: float = float(
+    os.environ.get("CADENCE_TOLERANCE_FACTOR", "1.5")
+)
+
 # =============================================================================
 # Setpoint-aware SCADA rules (dynamic climate-computer detection)
 # =============================================================================
@@ -796,7 +851,7 @@ SENSOR_NOISE_TARGETS: Dict[str, float] = {
     "temperature": 0.05,   # °C RMS
     "humidity": 0.1,       # % RMS
     "co2": 5.0,            # ppm RMS
-    "light": 2.0,          # lux RMS
+    "light": 2.0,          # W/m² RMS
 }
 
 # =============================================================================
@@ -816,6 +871,20 @@ BOOTSTRAP_IF_CONTAMINATION: float = 0.04
 
 # Resampling cadence applied to raw SCADA data before bootstrap processing.
 BOOTSTRAP_RESAMPLE_INTERVAL: str = "5min"
+
+# Chunk size (rows) for streaming CSV reads in the bootstrap loader.
+# Keeps memory bounded without discarding data — every chunk is processed.
+# Override via BOOTSTRAP_LOADER_CHUNK_SIZE env var.
+BOOTSTRAP_LOADER_CHUNK_SIZE: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_CHUNK_SIZE", "5000")
+)
+
+# Random seed used by the bootstrap loader for reproducible sampling when a
+# row cap is active.  Mirrors RANDOM_SEED but is independent so upstream
+# changes to the global seed do not silently alter bootstrap outputs.
+BOOTSTRAP_LOADER_RANDOM_SEED: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_RANDOM_SEED", str(RANDOM_SEED))
+)
 
 # Output paths for the bootstrap pipeline.
 BOOTSTRAP_CLEAN_PATH: str = "data/bootstrapped_clean.csv"
@@ -891,7 +960,7 @@ SPIKE_DELTA_MAX: Dict[str, float] = {
     "temperature": 5.0,   # °C
     "humidity": 10.0,     # %
     "co2": 50.0,          # ppm
-    "light": 200.0,       # lux
+    "light": 200.0,       # W/m² per 5-min step
 }
 
 # =============================================================================
@@ -911,7 +980,7 @@ SPIKE_MAD_FLOOR: Dict[str, float] = {
     "temperature": 0.1,   # °C
     "humidity": 0.2,      # %
     "co2": 10.0,          # ppm
-    "light": 4.0,         # lux
+    "light": 4.0,         # W/m² (was labelled lux; canonical unit is W/m²; numeric floor unchanged)
 }
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
@@ -919,7 +988,11 @@ OOB_LIMITS: Dict[str, Tuple[float, float]] = {
     "temperature": (-40.0, 80.0),
     "humidity": (0.0, 100.0),
     "co2": (0.0, 5000.0),
-    "light": (0.0, 200000.0),
+    # W/m² hard limit.  The previous value of 200000.0 was lux-scaled — only
+    # valid if the canonical unit were lux.  2000.0 W/m² is far above the
+    # clear-sky solar maximum at Earth's surface (~1400 W/m²) and only flags
+    # hardware faults (stuck-high, direct sensor illumination, cable short).
+    "light": (0.0, 2000.0),
 }
 
 # Stuck-at — 1-D series epsilon for the document-aligned detector.
@@ -935,7 +1008,7 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
     "humidity": 0.04,      # (%)²
     "co2": 25.0,           # (ppm)²
-    "light": 100.0,        # (lux)²
+    "light": 100.0,        # (W/m²)²
 }
 # spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
@@ -951,13 +1024,13 @@ BIAS_EMA_SPAN: int = int(os.environ.get("BIAS_EMA_SPAN", "288"))
 BIAS_EMA_THRESHOLD: float = float(os.environ.get("BIAS_EMA_THRESHOLD", "2.0"))
 # Per-sensor absolute deviation limits for the EMA bias check. A single
 # absolute threshold cannot serve sensors whose scales differ by orders of
-# magnitude: 2 lux of light jitter is measurement noise, while a 2°C
+# magnitude: 2 W/m² of light jitter is measurement noise, while a 2°C
 # temperature offset is a real calibration fault.
 BIAS_EMA_THRESHOLD_BY_SENSOR: Dict[str, float] = {
     "temperature": 2.0,   # °C
     "humidity": 5.0,      # %
     "co2": 50.0,          # ppm
-    "light": 100.0,       # lux
+    "light": 100.0,       # W/m²
 }
 
 # Spatial Correlation Breakdown — rolling Pearson pair detector.
@@ -1110,6 +1183,36 @@ LIVE_ANOMALY_THRESHOLD: float = float(
     os.environ.get("LIVE_ANOMALY_THRESHOLD", "0.05")
 )
 
+# ---------------------------------------------------------------------------
+# ADR-005 — Canonical anomaly score scale (§2, §7)
+#
+# SCORE_SCALE_CALIBRATION is the ONE place (p, hi) calibration pairs live.
+# Do NOT write a second copy anywhere else — import this dict instead.
+#
+#   p  = the producer's own decision threshold (raw, pre-canonical)
+#   hi = saturation value (None for unbounded scales)
+#
+# The upload path computes p per-file at runtime; it is NOT a constant and
+# therefore has no entry here.  Pass p at the call site using the value
+# returned by calibrate_threshold().
+# ---------------------------------------------------------------------------
+SCORE_SCALE_CALIBRATION: dict[str, tuple[float, float | None]] = {
+    "live":  (LIVE_ANOMALY_THRESHOLD, None),   # raw LSTM-VAE recon error, unbounded
+    "batch": (ANOMALY_THRESHOLD,      1.0),    # fused detector probability in [0, 1]
+}
+
+# Threshold on the canonical scale — simultaneously correct for every producer.
+# 0.5 == the producing detector's own decision point by construction.
+CANONICAL_ANOMALY_THRESHOLD: float = 0.5
+
+# Score bands for ground-truth (synthetic) rows.  These are emitted DIRECTLY
+# without running the transform — the generator has no detector and no raw score.
+# Injected faults land in [0.75, 0.99]; background filler in [0.05, 0.20].
+# Filler deliberately sits below the live noise floor (canonical ~0.17) so a
+# fabricated normal row never outranks a real measured one.
+SYNTHETIC_ANOMALY_SCORE_RANGE: tuple[float, float] = (0.75, 0.99)
+SYNTHETIC_CONTEXT_SCORE_RANGE: tuple[float, float] = (0.05, 0.20)
+
 # Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly
 # episode persists (debounce to avoid flooding the SSE stream).
 LIVE_ANOMALY_REEMIT_SECONDS: float = float(
@@ -1233,4 +1336,24 @@ DEFAULT_SEASON_MAP: dict = _parse_json_env(
 DEFAULT_DAY_WINDOW: dict = _parse_json_env(
     "DEFAULT_DAY_WINDOW",
     {"start_hour": 6, "end_hour": 22},
+)
+
+# =============================================================================
+# Episode Grouping & Recovery Scoring (Tasks 3 + 5)
+# =============================================================================
+# Maximum gap (seconds) between consecutive alerts on the same channel before
+# they are split into separate episodes. Default: 2× expected cadence (10 min).
+EPISODE_GAP_SECONDS: int = int(os.environ.get("EPISODE_GAP_SECONDS", "600"))
+
+# Score cap for recovery episodes: post-fault transitions are informational,
+# not the loudest event.  Capped at 0.4 (below CANONICAL_ANOMALY_THRESHOLD)
+# so recovery never outranks a genuine excursion or the fault itself.
+RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
+
+# Window (hours) after a stuck-fault recovery during which excursions on
+# downstream control channels (heating setpoint, pipe temps) are attributed
+# to the recovery — physically real controller responses, not independent
+# faults.  Prevents recovery knock-on from dominating the run (D4).
+RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
+    os.environ.get("RECOVERY_KNOCKON_WINDOW_HOURS", "4.0")
 )

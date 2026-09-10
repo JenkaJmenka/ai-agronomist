@@ -266,7 +266,7 @@ SENSOR_LABELS = {
     "temperature": "Temperature (°C)",
     "humidity": "Relative Humidity (%)",
     "co2": "CO2 Concentration (ppm)",
-    "light": "Light Intensity (lux)",
+    "light": "Light Intensity (W/m²)",
     "outdoor_temp": "Outdoor Temp (°C)",
     "measured_humidity_deficit": "Humidity Deficit (g/m³)",
     "measured_relative_humidity": "Relative Humidity (%)",

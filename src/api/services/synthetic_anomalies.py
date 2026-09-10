@@ -19,13 +19,41 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.cache_invalidation import invalidate_response_cache
+from src.config import SYNTHETIC_ANOMALY_SCORE_RANGE, SYNTHETIC_CONTEXT_SCORE_RANGE
 from src.db.models import RawReading, SensorReading
 
 # Per-type injection profile, as a tuple of:
 #   - canonical sensor fields to make anomalous (others stay normal)
 #   - direction of deviation for targeted sensors
-#   - anomaly score range
+#   - intra-band score spread expressed as fraction of SYNTHETIC_ANOMALY_SCORE_RANGE
+#     (not an absolute range — see ADR-005 §2.2)
 #   - raw column keyword substrings to spike (empty list = all raw columns)
+#
+# ADR-005 §2.2: the synthetic generator emits canonical scores DIRECTLY from
+# the config bands (no transform).  The score range below now represents
+# intra-band variation within SYNTHETIC_ANOMALY_SCORE_RANGE = (0.75, 0.99).
+#
+# Previous bug: gradual_drift used (0.60, 0.90) on a scale whose threshold was
+# 0.8, meaning it emitted "anomalies" that the scale called normal ~50% of the
+# time.  The new explicit canonical bands fix this permanently.
+_SCORE_LO, _SCORE_HI = SYNTHETIC_ANOMALY_SCORE_RANGE  # (0.75, 0.99)
+_SCORE_SPAN = _SCORE_HI - _SCORE_LO                    # 0.24
+
+# Intra-band spread: (offset_from_lo, width) as fractions of _SCORE_SPAN.
+# All types land inside [_SCORE_LO, _SCORE_HI] = [0.75, 0.99].
+_TYPE_SCORE_SPREAD: dict[str, tuple[float, float]] = {
+    #                             lo_offset  width (both as fraction of _SCORE_SPAN)
+    "random":            (0.29, 1.00),  # 0.82 – 0.99
+    "temperature_spike": (0.42, 0.58),  # 0.85 – 0.99
+    "temperature_drop":  (0.29, 0.71),  # 0.82 – 0.99 (capped at hi)
+    "humidity_spike":    (0.21, 0.79),  # 0.80 – 0.99
+    "humidity_drop":     (0.13, 0.71),  # 0.78 – 0.95
+    "co2_surge":         (0.54, 0.46),  # 0.88 – 0.99
+    "light_failure":     (0.42, 0.54),  # 0.85 – 0.98
+    "multi_sensor":      (0.63, 0.38),  # 0.90 – 0.99
+    "gradual_drift":     (0.00, 1.00),  # 0.75 – 0.99  ← was 0.60–0.90 (bug fixed)
+}
+
 _TYPE_PROFILES: dict[str, tuple[set[str], str, tuple[float, float], list[str]]] = {
     "random": ({"temperature", "humidity", "co2", "light"}, "mixed", (0.82, 0.99), []),
     "temperature_spike": ({"temperature"}, "high", (0.85, 0.99), ["temp"]),
@@ -35,7 +63,7 @@ _TYPE_PROFILES: dict[str, tuple[set[str], str, tuple[float, float], list[str]]] 
     "co2_surge": ({"co2"}, "high", (0.88, 0.99), ["co2"]),
     "light_failure": ({"light"}, "low", (0.85, 0.98), ["light", "lux", "par"]),
     "multi_sensor": ({"temperature", "humidity", "co2", "light"}, "mixed", (0.90, 0.99), []),
-    "gradual_drift": ({"temperature", "humidity"}, "drift", (0.60, 0.90), ["temp", "humid"]),
+    "gradual_drift": ({"temperature", "humidity"}, "drift", (0.75, 0.99), ["temp", "humid"]),
 }
 
 ANOMALY_TYPES: list[str] = list(_TYPE_PROFILES)
@@ -169,8 +197,15 @@ async def inject_synthetic_anomalies(
     if not col_stats:
         col_stats = dict(_CANONICAL_STATS)
 
-    # Type-specific configuration
-    canonical_targets, direction, (score_lo, score_hi), raw_keywords = _TYPE_PROFILES[anomaly_type]
+    # Type-specific configuration.
+    # ADR-005 §2.2: anomaly score bands are expressed within the canonical
+    # SYNTHETIC_ANOMALY_SCORE_RANGE = (0.75, 0.99).  _TYPE_SCORE_SPREAD holds
+    # (lo_offset, width) as fractions of that band's span (0.24).
+    canonical_targets, direction, _legacy_range, raw_keywords = _TYPE_PROFILES[anomaly_type]
+    _spread_lo_frac, _spread_width_frac = _TYPE_SCORE_SPREAD[anomaly_type]
+    score_lo = round(_SCORE_LO + _spread_lo_frac * _SCORE_SPAN, 4)
+    score_hi = round(min(_SCORE_HI, _SCORE_LO + (_spread_lo_frac + _spread_width_frac) * _SCORE_SPAN), 4)
+    _ctx_lo, _ctx_hi = SYNTHETIC_CONTEXT_SCORE_RANGE  # (0.05, 0.20)
     raw_spike_cols: set[str] = (
         {col for col in col_stats if any(kw in col.lower() for kw in raw_keywords)}
         if raw_keywords
@@ -211,8 +246,13 @@ async def inject_synthetic_anomalies(
         hum = _pick_col(col_values, ["relative_humidity", "humidity"], _canonical_val("humidity", is_anomaly, drift_factor))
         co2 = _pick_col(col_values, ["co2"], _canonical_val("co2", is_anomaly, drift_factor))
         light = _pick_col(col_values, ["light"], _canonical_val("light", is_anomaly, drift_factor))
+        # ADR-005 §2.2: ground-truth producers emit canonical values directly
+        # from the config bands.  No transform is applied.
+        # Filler deliberately sits below live's canonical noise floor (~0.17)
+        # so fabricated normals never outrank real measured readings.
         score = round(
-            random.uniform(score_lo, score_hi) if is_anomaly else random.uniform(0.02, 0.28), 4
+            random.uniform(score_lo, score_hi) if is_anomaly else random.uniform(_ctx_lo, _ctx_hi),
+            4,
         )
 
         sensor_records.append(SensorReading(
@@ -220,6 +260,8 @@ async def inject_synthetic_anomalies(
             temperature=round(float(temp), 2), humidity=round(float(hum), 2),
             co2=round(float(co2), 1), light=round(float(light), 1),
             anomaly_score=score,
+            anomaly_score_raw=None,   # ground-truth: no raw detector score
+            score_scale="synthetic",
             anomaly_type=anomaly_type if is_anomaly else "synthetic_context",
         ))
 

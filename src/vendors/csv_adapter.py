@@ -1,9 +1,16 @@
+import logging
 import os
 import re as _re
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from src.config import (
+    LIGHT_CANONICAL_UNIT,
+    LIGHT_LUX_TO_W_PER_M2 as LUX_TO_W_PER_M2,
+    LIGHT_PPFD_TO_W_PER_M2 as PPFD_UMOL_TO_W_PER_M2,
+)
 from src.vendors.base import (
     DataSourceAdapter,
     DataSourceConnectionError,
@@ -11,6 +18,8 @@ from src.vendors.base import (
     NormalizationError,
     DataValidationError,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical schema definition — single source of truth for column names
@@ -31,6 +40,90 @@ OPTIONAL_SENSOR_COLS: Tuple[str, ...] = tuple(SENSOR_DEFAULTS)
 
 SENSOR_COLS: Tuple[str, ...] = REQUIRED_SENSOR_COLS + OPTIONAL_SENSOR_COLS
 CANONICAL_COLS: Tuple[str, ...] = (TIMESTAMP_COL,) + SENSOR_COLS
+
+# ---------------------------------------------------------------------------
+# Light-channel unit tracking and conversion
+# ---------------------------------------------------------------------------
+# LIGHT_CANONICAL_UNIT, LUX_TO_W_PER_M2, and PPFD_UMOL_TO_W_PER_M2 are
+# imported from src.config — that is the single source of truth.
+# LUX_TO_W_PER_M2 / PPFD_UMOL_TO_W_PER_M2 are local aliases for the
+# config.py names LIGHT_LUX_TO_W_PER_M2 / LIGHT_PPFD_TO_W_PER_M2.
+# See config.py for source references and rationale.
+
+
+class LightInputUnit(Enum):
+    """Physical unit detected from an original CSV light-column header."""
+
+    W_PER_M2 = "W/m²"                          # solar irradiance — native Connext unit
+    LUX = "lux"                                  # illuminance
+    PPFD_UMOL = "µmol·m⁻²·s⁻¹"                 # photosynthetic photon flux density
+    DEFAULTED_W_PER_M2 = "W/m² (defaulted)"    # no unit marker in header; default applied
+
+
+def infer_light_unit(column_header: str) -> LightInputUnit:
+    """Infer the physical unit of a light column from its original CSV header.
+
+    Checks the header text for known unit markers before any cleaning/stripping.
+    Returns ``LightInputUnit.DEFAULTED_W_PER_M2`` when the header carries no
+    recognisable unit — the default is documented and logged, never silent.
+
+    Parameters
+    ----------
+    column_header:
+        Original (unmodified) CSV column header string.
+    """
+    h = column_header.lower()
+    # Irradiance markers — match before checking generic "light" to avoid
+    # accidentally classifying "w/m" fragments in other contexts.
+    if any(kw in h for kw in ("w/m²", "w/m2", "w/m", "w·m", "wm⁻²", "irradiance")):
+        return LightInputUnit.W_PER_M2
+    # Illuminance markers
+    if any(kw in h for kw in ("lux", "illuminance", " lx")):
+        return LightInputUnit.LUX
+    # Photosynthetic photon flux density markers
+    if any(kw in h for kw in ("ppfd", "par", "µmol", "umol", "μmol")):
+        return LightInputUnit.PPFD_UMOL
+    # No unit marker found — default to W/m² and record the defaulting.
+    return LightInputUnit.DEFAULTED_W_PER_M2
+
+
+def _convert_light_to_canonical(
+    series: pd.Series,
+    source_unit: LightInputUnit,
+) -> pd.Series:
+    """Convert a light series from its detected unit to the canonical W/m² unit.
+
+    W/m² and DEFAULTED_W/m² inputs are returned unchanged (no copy made).
+    """
+    if source_unit in (LightInputUnit.W_PER_M2, LightInputUnit.DEFAULTED_W_PER_M2):
+        return series
+    if source_unit == LightInputUnit.LUX:
+        return series * LUX_TO_W_PER_M2
+    if source_unit == LightInputUnit.PPFD_UMOL:
+        return series * PPFD_UMOL_TO_W_PER_M2
+    return series  # unknown variant — pass through unchanged
+
+
+def _detect_light_unit_from_df(data: pd.DataFrame) -> LightInputUnit:
+    """Find which column will map to 'light' and return its inferred source unit.
+
+    Examines original column headers (before renaming) so that unit markers
+    stripped by _clean_col_name (e.g. "(W/m²)") are still visible.
+    Returns DEFAULTED_W_PER_M2 when no light column is found.
+    """
+    col_map = _smart_column_map(list(data.columns))
+    for orig_col, canonical in col_map.items():
+        if canonical == "light":
+            unit = infer_light_unit(orig_col)
+            if unit == LightInputUnit.DEFAULTED_W_PER_M2:
+                logger.warning(
+                    "light column %r carries no unit marker — defaulting to W/m²",
+                    orig_col,
+                )
+            return unit
+    # No light column matched — will be filled with the fill default (500.0 W/m²).
+    return LightInputUnit.DEFAULTED_W_PER_M2
+
 
 # ---------------------------------------------------------------------------
 # Column detection: keyword-score matching
@@ -316,6 +409,11 @@ def parse_raw_rows(
     Drops rows with no parseable timestamp. Gas / climate-extra aliases are
     remapped onto canonical names (``measured_c2h4`` → ``c2h4``, etc.) so the
     Gas Monitoring exact filter and live mock share the same keys.
+
+    Light-unit handling: the original column header is inspected (before
+    ``_clean_col_name`` strips unit tokens) to detect the physical unit.  The
+    ``light`` column in the result is always in the canonical W/m² unit.  The
+    detected source unit is stored in ``result_df.attrs["light_source_unit"]``.
     """
     # --- Detect timestamp columns ---
     ts_candidates = [
@@ -365,6 +463,8 @@ def parse_raw_rows(
         "source": list(work["_source"]),
     }
     col_names: List[str] = []
+    # Track which light source unit was detected (recorded in df.attrs).
+    light_source_unit: Optional[LightInputUnit] = None
 
     for col in chunk.columns:
         col_l = col.lower()
@@ -379,11 +479,32 @@ def parse_raw_rows(
         # Prefer the first occurrence when aliases collide (e.g. no vs measured_no).
         if clean in result_data:
             continue
+
+        # Light-unit conversion — detect from the ORIGINAL header (before cleaning
+        # strips unit tokens like "(W/m²)") and convert to canonical W/m².
+        if clean == "light" and light_source_unit is None:
+            light_source_unit = infer_light_unit(col)
+            if light_source_unit == LightInputUnit.DEFAULTED_W_PER_M2:
+                logger.warning(
+                    "parse_raw_rows: light column %r carries no unit marker — defaulting to W/m²",
+                    col,
+                )
+            floats = [
+                v * LUX_TO_W_PER_M2 if (v is not None and light_source_unit == LightInputUnit.LUX)
+                else v * PPFD_UMOL_TO_W_PER_M2 if (v is not None and light_source_unit == LightInputUnit.PPFD_UMOL)
+                else v
+                for v in floats
+            ]
+
         result_data[clean] = floats
         if clean not in col_names:
             col_names.append(clean)
 
-    return pd.DataFrame(result_data), col_names
+    result_df = pd.DataFrame(result_data)
+    result_df.attrs["light_source_unit"] = (
+        light_source_unit if light_source_unit is not None else LightInputUnit.DEFAULTED_W_PER_M2
+    )
+    return result_df, col_names
 
 
 class CSVAdapter(DataSourceAdapter):
@@ -427,14 +548,22 @@ class CSVAdapter(DataSourceAdapter):
     def normalize(self, data: pd.DataFrame) -> pd.DataFrame:
         """Normalize any CSV to the canonical schema defined by CANONICAL_COLS.
 
-        1. Remap columns: explicit config mapping, then keyword-score auto-detection.
-        2. Add any absent optional sensor columns filled with their defaults.
-        3. Validate that all required columns are now present.
-        4. Parse timestamp → UTC datetime64; coerce sensors → float64.
-        5. Fill NaN in optional columns with defaults; drop rows with NaN in required columns.
+        1. Detect the physical unit of the light column from original headers.
+        2. Remap columns: explicit config mapping, then keyword-score auto-detection.
+        3. Add any absent optional sensor columns filled with their defaults.
+        4. Validate that all required columns are now present.
+        5. Parse timestamp → UTC datetime64; coerce sensors → float64.
+        6. Convert the light column to canonical W/m² (see LIGHT_CANONICAL_UNIT).
+        7. Fill NaN in optional columns with defaults; drop rows with NaN in required columns.
+
+        The detected source unit is stored in ``result.attrs["light_source_unit"]``
+        so callers can log or display the provenance of the light values.
         """
         if data is None:
             raise NormalizationError("Cannot normalize a None DataFrame.")
+
+        # Step 1 — detect light unit from original headers BEFORE renaming strips units.
+        light_unit = _detect_light_unit_from_df(data)
 
         data = _remap_columns(data, self.config.get("column_mapping") or {})
         data = _fill_missing_columns(data)
@@ -455,7 +584,14 @@ class CSVAdapter(DataSourceAdapter):
             raise NormalizationError(f"Failed to normalize '{TIMESTAMP_COL}' column: {exc}") from exc
 
         normalized = _coerce_sensors(data, normalized)
-        return _handle_nan(normalized)
+
+        # Step 6 — convert light to canonical W/m².
+        if "light" in normalized.columns:
+            normalized["light"] = _convert_light_to_canonical(normalized["light"], light_unit)
+
+        result = _handle_nan(normalized)
+        result.attrs["light_source_unit"] = light_unit
+        return result
 
     def validate(self, data: pd.DataFrame) -> bool:
         try:

@@ -128,7 +128,12 @@ class TestEnrichedEndpoint:
             params={**WINDOW, "tenant_id": "ghost"},
         )
         payload = response.json()
-        assert payload == {"rows": [], "count": 0, "anomaly_count": 0}
+        # ADR-005: response now includes threshold and score_scale_version.
+        assert payload["rows"] == []
+        assert payload["count"] == 0
+        assert payload["anomaly_count"] == 0
+        assert "threshold" in payload       # echoed back (ADR-005 §2)
+        assert payload["score_scale_version"] == 2
 
 
 class TestGroupsEndpoint:

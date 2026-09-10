@@ -48,7 +48,7 @@ class SensorReadingCreate(BaseModel):
         ...,
         ge=0.0,
         le=2000.0,
-        description="Light intensity/level in lux (Allowed range: 0.0 to 2000.0)"
+        description="Light intensity in W/m² — solar irradiance, canonical unit (Allowed range: 0.0 to 2000.0)"
     )
 
 
@@ -89,7 +89,7 @@ class SensorReadingResponse(BaseModel):
     )
     light: float = Field(
         ...,
-        description="Light intensity in lux"
+        description="Light intensity in W/m² (solar irradiance — canonical unit)"
     )
     anomaly_score: Optional[float] = Field(
         None,
@@ -316,6 +316,11 @@ class UploadHighAnomalyDetail(BaseModel):
 
     score: float = Field(..., ge=0.0, le=1.0)
     timestamp: str
+    detected_ts: Optional[str] = Field(
+        default=None,
+        description="Timestamp when detection actually fired (stuck_fault only). "
+        "Distinct from timestamp (= onset). Latency = detected_ts - timestamp.",
+    )
     detector: str = Field(default="lstm", description="lstm, statistical, or lstm+statistical")
     sequence_index: Optional[int] = Field(default=None, ge=0)
     column: Optional[str] = None
@@ -340,6 +345,28 @@ class StatisticalAnomalyDetail(BaseModel):
     method: str
 
 
+class AnomalyEpisodeSchema(BaseModel):
+    """One continuous anomaly event on a single channel (Task 5)."""
+
+    channel: str
+    detector: str
+    start_ts: str
+    end_ts: str
+    duration_seconds: float = Field(ge=0.0)
+    peak_score: float = Field(ge=0.0, le=1.0)
+    sample_count: int = Field(ge=1)
+    severity: str
+    is_recovery: bool = False
+    is_ongoing: bool = Field(
+        default=False,
+        description="True when the freeze had not yet ended at detection time. "
+        "duration_seconds is then a lower bound (gate-crossing duration).",
+    )
+    onset_ts: Optional[str] = None
+    detected_ts: Optional[str] = None
+    frozen_value: Optional[float] = None
+
+
 class StatisticalColdRunSummary(BaseModel):
     """Aggregate statistical cold-run results."""
 
@@ -357,6 +384,11 @@ class UploadInferenceResponse(BaseModel):
     anomalies_detected: int = Field(..., ge=0)
     anomaly_scores: List[float]
     high_anomalies: List[UploadHighAnomalyDetail] = Field(default_factory=list)
+    episodes: List[AnomalyEpisodeSchema] = Field(
+        default_factory=list,
+        description="Contiguous per-channel anomaly episodes (Task 5). "
+        "One continuous event is one episode with start/end/duration.",
+    )
     threshold_used: float = Field(..., ge=0.0, le=1.0)
     threshold_method: str
     imputed_channels: List[str] = Field(default_factory=list)

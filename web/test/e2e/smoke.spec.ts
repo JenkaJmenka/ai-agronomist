@@ -11,21 +11,22 @@ async function fillDateTimeField(page: Page, testId: string, value: string): Pro
   }
 }
 
-const NAV_TARGETS = [
-  { label: "Monitoring", path: "/monitoring" },
-  { label: "Climate Data", path: "/climate" },
-  { label: "Gas Monitoring", path: "/gas" },
-  { label: "Anomaly Detection", path: "/anomalies" },
-  { label: "Thresholds", path: "/thresholds" },
-  { label: "System Metrics", path: "/metrics" },
-  { label: "Greenhouse Profile", path: "/greenhouse-profile" },
-  { label: "App Configuration", path: "/app-configuration" },
-  { label: "Upload & Operations", path: "/operations" },
-  { label: "Job Monitoring", path: "/jobs" },
-  { label: "Operator Feedback", path: "/feedback" },
-];
-
-test("app boots and renders the Home page", async ({ page }) => {
+/**
+ * Register BFF stubs that all navigation targets need.
+ *
+ * Extracted from the `app boots` inline mocks so the nav smoke test shares
+ * exactly one payload definition — one edit here covers both tests.
+ *
+ * Only the three routes that gate page rendering are included:
+ * - readings/**  : prevents Monitoring/Climate/Gas/Anomalies/Thresholds from
+ *                  reaching their `isError → throw` error-boundary path.
+ * - config/**    : prevents ConfigurationView (Greenhouse Profile) from
+ *                  throwing to the root Next.js error page ("This page
+ *                  couldn't load") — that page has no segment error.tsx, so
+ *                  the sidebar disappears and subsequent nav clicks time out.
+ * - live/**      : avoids noise from the optional SSE probe on the Home page.
+ */
+async function setupBffMocks(page: Page): Promise<void> {
   await page.route("**/api/bff/readings/**", (route) =>
     route.fulfill({
       json: {
@@ -60,7 +61,32 @@ test("app boots and renders the Home page", async ({ page }) => {
       },
     }),
   );
+}
 
+/**
+ * NAV_TARGETS drives the sidebar navigation smoke test.
+ *
+ * `heading` is the exact h1 text expected on the destination page — it may
+ * differ from the nav label (e.g. "Thresholds" → "Threshold Management").
+ * Keeping it explicit prevents the test from silently passing on an error
+ * page whose own h1 would satisfy a level-only assertion.
+ */
+const NAV_TARGETS = [
+  { label: "Monitoring", path: "/monitoring", heading: "Monitoring" },
+  { label: "Climate Data", path: "/climate", heading: "Climate Data" },
+  { label: "Gas Monitoring", path: "/gas", heading: "Gas Monitoring" },
+  { label: "Anomaly Detection", path: "/anomalies", heading: "Anomaly Detection" },
+  { label: "Thresholds", path: "/thresholds", heading: "Threshold Management" },
+  { label: "System Metrics", path: "/metrics", heading: "System Metrics" },
+  { label: "Greenhouse Profile", path: "/greenhouse-profile", heading: "Greenhouse Profile" },
+  { label: "App Configuration", path: "/app-configuration", heading: "App Configuration" },
+  { label: "Upload & Operations", path: "/operations", heading: "Upload & Operations" },
+  { label: "Job Monitoring", path: "/jobs", heading: "Job Monitoring" },
+  { label: "Operator Feedback", path: "/feedback", heading: "Operator Feedback" },
+];
+
+test("app boots and renders the Home page", async ({ page }) => {
+  await setupBffMocks(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
   await expect(page.getByTestId("home-page")).toBeVisible();
@@ -68,11 +94,22 @@ test("app boots and renders the Home page", async ({ page }) => {
 });
 
 test("every sidebar entry navigates", async ({ page }) => {
+  await setupBffMocks(page);
   await page.goto("/");
   for (const target of NAV_TARGETS) {
     await page.getByRole("link", { name: target.label, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`${target.path}(\\?.*)?$`));
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+    // Guard: if the page crashed (no segment error.tsx → Next.js default error
+    // page), fail on the broken target, not on the next target's sidebar click.
+    // "This page couldn't load" is the h1 Next.js renders in that case; the
+    // sidebar disappears with the layout, causing a 30 s timeout one step later.
+    await expect(page.getByRole("heading", { name: "This page couldn't load" })).not.toBeVisible();
+
+    // Assert the EXPECTED heading text, not merely that any h1 exists.
+    // Without this specificity, the error-page h1 would make the assertion
+    // pass on a crashed page, hiding the failure until the next target.
+    await expect(page.getByRole("heading", { name: target.heading, level: 1 })).toBeVisible();
   }
 });
 
@@ -154,11 +191,31 @@ test("custom range form writes an explicit window to the URL", async ({ page }) 
   await fillDateTimeField(page, "custom-range-from", "2026-06-01T12:00");
   await fillDateTimeField(page, "custom-range-to", "2026-06-15T12:30");
   await page.getByTestId("custom-range-apply").click();
-  await expect(page).toHaveURL(/from=.+to=.+/);
-  // Segment values are local time; compare instants, not strings.
+  // Contract: DateTimeField constructs dates with new Date(year, month-1, day, hour, minute),
+  // which uses the browser's local timezone. nuqs then serialises via .toISOString() (UTC) into
+  // the URL. Evaluate the expected instants inside the browser so the assertion is independent
+  // of the Node.js process TZ — the two can diverge when TZ is overridden in the test runner
+  // but the browser resolves timezone from a different source (e.g. OS vs env-var on macOS).
+  const [expectedFromMs, expectedToMs] = await page.evaluate(() => [
+    new Date(2026, 5, 1, 12, 0).getTime(),
+    new Date(2026, 5, 15, 12, 30).getTime(),
+  ]);
+  // Wait until the URL carries the exact submitted window before asserting.
+  // Cannot use /from=.+to=.+/ here — a `from` param is already present in the
+  // default now-derived window, so that pattern resolves immediately without
+  // waiting for nuqs to serialise the submitted values.  The submitted instants
+  // always land on a whole minute (milliseconds === 0), so they can never be
+  // satisfied by the live `now` timestamp whose ms component is non-zero.
+  const expectedFromIso = new Date(expectedFromMs).toISOString();
+  const expectedToIso = new Date(expectedToMs).toISOString();
+  await page.waitForURL(
+    (url) =>
+      url.searchParams.get("from") === expectedFromIso &&
+      url.searchParams.get("to") === expectedToIso,
+  );
   const params = new URL(page.url()).searchParams;
-  expect(new Date(params.get("from") ?? "").getTime()).toBe(new Date("2026-06-01T12:00").getTime());
-  expect(new Date(params.get("to") ?? "").getTime()).toBe(new Date("2026-06-15T12:30").getTime());
+  expect(new Date(params.get("from") ?? "").getTime()).toBe(expectedFromMs);
+  expect(new Date(params.get("to") ?? "").getTime()).toBe(expectedToMs);
 });
 
 test("custom range apply is disabled when from is not before to", async ({ page }) => {

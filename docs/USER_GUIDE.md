@@ -127,8 +127,7 @@ alembic upgrade head
 alembic heads     # must show a single head
 ```
 
-> **Only the `alembic/` tree is authoritative.** `src/db/migrations/` is a dead
-> legacy tree containing a single initial-schema stub — do not run it.
+> Use only the `alembic/` tree (`alembic upgrade head`).
 
 ---
 

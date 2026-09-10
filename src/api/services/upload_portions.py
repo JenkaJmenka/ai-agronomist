@@ -9,6 +9,8 @@ statistical hits survive a portion; full raw rows and embeddings do not
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,12 +18,20 @@ import numpy as np
 import pandas as pd
 
 from src.api.schemas.sensor_data import (
+    AnomalyEpisodeSchema,
     StatisticalAnomalyDetail,
     StatisticalColdRunSummary,
     UploadHighAnomalyDetail,
     UploadInferenceResponse,
 )
-from src.config import ANOMALY_SCALING_FACTOR, COLD_RUN_STAT_ROLLING_WINDOW, LATENT_DIM
+from src.api.services.score_transform import canonical as _canonical_transform
+from src.config import (
+    ANOMALY_SCALING_FACTOR,
+    COLD_RUN_STAT_ROLLING_WINDOW,
+    COLD_RUN_STAT_Z_MIN,
+    LATENT_DIM,
+)
+from src.models.psychrometric_validator import validate_row as _psychro_validate_row
 from src.models.cold_run_detector import (
     ColdRunStatisticalDetector,
     _effective_rolling_window,
@@ -29,6 +39,26 @@ from src.models.cold_run_detector import (
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
+from src.models.episode_grouper import group_alerts_into_episodes
+from src.models.stuck_fault_detector import (
+    StuckCarry,
+    WallclockStuckDetector,
+)
+
+
+def _stat_z_to_canonical(z_score: float) -> float:
+    """Map a statistical z-score to the ADR-005 canonical [0, 1] scale.
+
+    Decision point p = COLD_RUN_STAT_Z_MIN (config default 5.5):
+      z == p  → canonical 0.5  (detector's own threshold)
+      z > p   → asymptotes toward 1.0 as z grows
+      z < p   → [0, 0.5) (below threshold, not normally reached here)
+
+    Uses the unbounded branch (hi=None) of score_transform.canonical so
+    the score never saturates at 1.0 — z must be infinite to reach it.
+    """
+    can = _canonical_transform(z_score, COLD_RUN_STAT_Z_MIN, None)
+    return can if can is not None else 0.5
 
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
 
@@ -41,6 +71,12 @@ class StatCarry:
     seen: set[tuple[str, str]] = field(default_factory=set)
     total_rows: int = 0
     columns: list[str] | None = None
+    # Psychrometric context: {timestamp: (T_air, RH, measured_hd)} for
+    # timestamps with stat anomalies where all three values are present.
+    # Used by finalize_scores to suppress physically-expected pairings.
+    psychro_context: dict[str, tuple[float, float, float]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -52,6 +88,7 @@ class PortionScores:
     embeddings: list[list[float]] = field(default_factory=list)
     uncertainties: list[float] = field(default_factory=list)
     stat_hits: list[StatisticalAnomalyDetail] = field(default_factory=list)
+    stuck_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
     rows_processed: int = 0
 
 
@@ -66,6 +103,32 @@ def _sequence_timestamps_for(combined_df: pd.DataFrame, n_scores: int, seq_len: 
         else:
             out.append("unknown")
     return out
+
+
+def _stuck_dict_to_high_detail(
+    alert: dict[str, Any],
+) -> UploadHighAnomalyDetail:
+    """Convert a ``WallclockStuckDetector`` alert dict to the upload schema.
+
+    ``detected_ts`` carries the timestamp at which detection actually fired
+    (when the gate was first satisfied), distinct from ``timestamp`` which
+    is the freeze onset.  Latency = ``detected_ts`` - ``timestamp``.
+    """
+    return UploadHighAnomalyDetail(
+        score=1.0,
+        timestamp=alert["timestamp"],
+        detected_ts=alert.get("detected_ts"),
+        detector=alert["detector"],
+        column=alert["channel"],
+        severity=alert["severity"],
+        method=alert["method"],
+        z_score=alert["duration_hours"],
+        value=alert["value"],
+    )
+
+
+# Singleton: reused across score_portion calls (stateless — state is in StuckCarry).
+_WALLCLOCK_DETECTOR = WallclockStuckDetector()
 
 
 def _detect_stats_incremental(
@@ -103,9 +166,149 @@ def _detect_stats_incremental(
             )
         )
 
+    # Extract psychrometric context (T_air, RH, measured_hd) for timestamps
+    # with fresh anomalies, so finalize_scores can suppress physically-expected
+    # paired temperature + humidity alerts.
+    hit_timestamps = {h.timestamp for h in fresh}
+    if hit_timestamps:
+        _extract_psychro_context(rows, hit_timestamps, stat_carry)
+
     stat_carry.rows = rows[-COLD_RUN_STAT_ROLLING_WINDOW:]
     stat_carry.total_rows += len(raw_rows)
     return fresh
+
+
+def _extract_psychro_context(
+    rows: list[dict[str, Any]],
+    timestamps: set[str],
+    stat_carry: StatCarry,
+) -> None:
+    """Store (T_air, RH, measured_hd) for anomaly timestamps when all three present.
+
+    Only records context for timestamps not already stored, so the carry
+    accumulates across portions without duplicating work.
+    """
+    for row in rows:
+        ts = row.get("timestamp", "")
+        if ts not in timestamps or ts in stat_carry.psychro_context:
+            continue
+        t_val = row.get("temperature")
+        rh_val = row.get("humidity")
+        hd_val = row.get("measured_hd")
+        if t_val is None or rh_val is None or hd_val is None:
+            continue
+        try:
+            t_f = float(t_val)
+            rh_f = float(rh_val)
+            hd_f = float(hd_val)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(t_f) and math.isfinite(rh_f) and math.isfinite(hd_f):
+            stat_carry.psychro_context[ts] = (t_f, rh_f, hd_f)
+
+
+def _is_temp_stat_column(col: str) -> bool:
+    """True for temperature-family columns in statistical alerts."""
+    return "temp" in col.lower()
+
+
+def _is_humidity_stat_column(col: str) -> bool:
+    """True for relative-humidity columns (not humidity deficit / measured_hd)."""
+    return "humid" in col.lower()
+
+
+def _suppress_psychrometric_pairs(
+    stat_details: list[StatisticalAnomalyDetail],
+    psychro_context: dict[str, tuple[float, float, float]],
+) -> list[StatisticalAnomalyDetail]:
+    """Suppress paired temp+humidity alerts that are psychrometrically consistent.
+
+    When air temperature drops and relative humidity rises simultaneously, the
+    Tetens equation predicts exactly that coupling.  If the measured humidity
+    deficit (HD) AGREES with the HD derived from T and RH, the pairing is
+    expected physics — suppress both sides.  If HD DISAGREES, the sensors
+    contradict thermodynamics — keep the original alerts and add a
+    ``psychrometric_inconsistency`` marker so the fault is surfaced.
+
+    When measured_hd is absent for a timestamp, the check does not run and
+    behaviour is identical to pre-suppression (no silent default, no
+    fabricated HD).
+    """
+    if not psychro_context:
+        return stat_details
+
+    by_ts: dict[str, list[StatisticalAnomalyDetail]] = defaultdict(list)
+    for detail in stat_details:
+        by_ts[detail.timestamp].append(detail)
+
+    suppressed_ts: set[str] = set()
+    inconsistent_extras: list[StatisticalAnomalyDetail] = []
+
+    for ts, details in by_ts.items():
+        has_temp = any(_is_temp_stat_column(d.column) for d in details)
+        has_humid = any(_is_humidity_stat_column(d.column) for d in details)
+        if not (has_temp and has_humid):
+            continue
+
+        ctx = psychro_context.get(ts)
+        if ctx is None:
+            continue
+
+        t_air, rh, hd_measured = ctx
+        try:
+            status = _psychro_validate_row(t_air, rh, hd_measured)
+        except ValueError:
+            # Unphysical inputs (e.g. RH > 100 from sensor noise) — skip.
+            continue
+
+        if status == "OK":
+            # Psychrometrically consistent: suppress paired alerts.
+            suppressed_ts.add(ts)
+        else:
+            # Sensor disagrees with physics — flag the inconsistency.
+            inconsistent_extras.append(
+                StatisticalAnomalyDetail(
+                    timestamp=ts,
+                    column="psychrometric",
+                    value=hd_measured,
+                    z_score=0.0,
+                    severity="warning",
+                    method="psychrometric_inconsistency",
+                )
+            )
+
+    if not suppressed_ts and not inconsistent_extras:
+        return stat_details
+
+    result = [
+        d for d in stat_details
+        if not (
+            d.timestamp in suppressed_ts
+            and (_is_temp_stat_column(d.column) or _is_humidity_stat_column(d.column))
+        )
+    ]
+    result.extend(inconsistent_extras)
+    return result
+
+
+def _purge_fault_from_stat_carry(
+    stat_carry: StatCarry,
+    channel: str,
+    onset_ts: str,
+    end_ts: str,
+) -> None:
+    """NaN-out a channel's values in stat_carry.rows for the fault period.
+
+    This prevents the rolling baseline from being contaminated by the
+    frozen values.  After purge, the rolling detector builds its
+    baseline from pre-fault data and the z-scores after recovery are
+    computed against a clean baseline (Task 3 — address the baseline,
+    not only the emission).
+    """
+    for row in stat_carry.rows:
+        row_ts = row.get("timestamp", "")
+        if onset_ts <= row_ts <= end_ts and channel in row:
+            row[channel] = float("nan")
 
 
 def score_portion(
@@ -118,13 +321,33 @@ def score_portion(
     detector: AnomalyDetector,
     seq_len: int = 20,
     include_embeddings: bool = False,
+    stuck_carry: StuckCarry | None = None,
 ) -> tuple[PortionScores, pd.DataFrame]:
-    """Score one portion (LSTM + statistical). Returns (result, next_overlap_df).
+    """Score one portion (LSTM + statistical + stuck). Returns (result, next_overlap_df).
 
     `prev_overlap_df` must hold the last seq_len-1 normalized rows of the
     previous portion so sequences spanning the boundary are not lost.
+
+    When ``stuck_carry`` is provided, wall-clock stuck-fault detection runs
+    FIRST so recovery channels can be identified before statistical detection.
+    The carry threads per-channel freeze state across portions.
     """
     result = PortionScores(rows_processed=len(raw_rows))
+
+    # Run stuck detection FIRST so we know which channels just
+    # exited a fault before the statistical detector runs.
+    if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
+        raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
+        result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
+
+        # Task 3 baseline cleanup: purge fault-period values from
+        # stat_carry so the rolling z-score baseline is not contaminated
+        # by frozen readings.
+        for ch, fw in stuck_carry.recovery_channels.items():
+            _purge_fault_from_stat_carry(
+                stat_carry, ch, fw.onset_ts, fw.end_ts,
+            )
+
     result.stat_hits = _detect_stats_incremental(raw_rows, stat_carry)
 
     if normalized_df is None or normalized_df.empty:
@@ -171,12 +394,17 @@ def finalize_scores(
     imputed_channels: list[str],
     stat_carry: StatCarry,
     include_embeddings: bool = False,
+    stuck_carry: StuckCarry | None = None,
 ) -> tuple[UploadInferenceResponse, list[str]]:
     """Calibrate the file-level threshold over all portions and build the response.
 
     calibrate_threshold needs the whole score distribution, so this is the one
     step that must see every portion — the inputs are compact (floats, ISO
     strings, sparse hits), not raw rows.
+
+    When ``stuck_carry`` is provided, still-open freezes are flushed and the
+    cadence check is finalised.  All stuck_fault alerts (from portions + flush)
+    are merged into ``high_anomalies``.
     """
     # Local import: cold_run_upload also imports this module.
     from src.api.services.cold_run_upload import _merge_by_timestamp
@@ -186,13 +414,27 @@ def finalize_scores(
     embeddings: list[list[float]] = []
     uncertainties: list[float] = []
     stat_details: list[StatisticalAnomalyDetail] = []
+    stuck_details: list[UploadHighAnomalyDetail] = []
     for portion in portions_in_order:
         anomaly_scores.extend(portion.scores)
         sequence_timestamps.extend(portion.sequence_timestamps)
         stat_details.extend(portion.stat_hits)
+        stuck_details.extend(portion.stuck_hits)
         if include_embeddings:
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
+
+    # Psychrometric suppression: suppress paired temperature + humidity
+    # statistical alerts when measured HD confirms the pairing is expected
+    # physics (cooling air → rising RH).  Inconsistent HD is flagged.
+    stat_details = _suppress_psychrometric_pairs(
+        stat_details, stat_carry.psychro_context,
+    )
+
+    # Flush open freezes and finalise cadence check.
+    if stuck_carry is not None:
+        flush_alerts = _WALLCLOCK_DETECTOR.flush(stuck_carry)
+        stuck_details.extend(_stuck_dict_to_high_detail(a) for a in flush_alerts)
 
     scores_arr = np.asarray(anomaly_scores, dtype=np.float64)
     threshold_used, threshold_method = calibrate_threshold(scores_arr)
@@ -221,7 +463,7 @@ def finalize_scores(
     )
     stat_high = [
         UploadHighAnomalyDetail(
-            score=min(1.0, detail.z_score / 5.0),
+            score=_stat_z_to_canonical(detail.z_score),
             timestamp=detail.timestamp,
             detector="statistical",
             column=detail.column,
@@ -236,6 +478,23 @@ def finalize_scores(
 
     high_anomalies = _merge_by_timestamp(lstm_high, stat_high)
 
+    # Append stuck-fault alerts (distinct detector — no timestamp merge needed).
+    if stuck_details:
+        high_anomalies.extend(stuck_details)
+        high_anomalies.sort(key=lambda h: h.timestamp)
+
+    # Task 5: group contiguous per-channel alerts into episodes.
+    recovery_chs = stuck_carry.recovery_channels if stuck_carry else {}
+    done_faults = stuck_carry.completed_faults if stuck_carry else []
+    raw_episodes = group_alerts_into_episodes(
+        high_anomalies,
+        recovery_channels=recovery_chs,
+        completed_faults=done_faults,
+    )
+    episodes = [
+        AnomalyEpisodeSchema(**ep.to_dict()) for ep in raw_episodes
+    ]
+
     response = UploadInferenceResponse(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -243,6 +502,7 @@ def finalize_scores(
         anomalies_detected=len(high_anomalies),
         anomaly_scores=anomaly_scores,
         high_anomalies=high_anomalies,
+        episodes=episodes,
         threshold_used=float(threshold_used),
         threshold_method=threshold_method,
         imputed_channels=imputed_channels,

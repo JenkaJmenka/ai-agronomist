@@ -3,6 +3,435 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Four-test Fix — COMPLETE (2026-09-10)**
+
+Fixed four test failures exposed by running the full `pytest tests/ --ignore=tests/load`
+suite. Final counts: **2856 passed, 1 failed** (only the known SQLite NaN limitation).
+
+**F1 + F2 (stale expectations in `tests/live/test_persistence_extra_channels.py`)**
+
+`_event_to_row` applies the ADR-005 canonical transform to the anomaly_score before
+persisting. Two tests hardcoded the pre-transform raw values (0.5 and 0.42) instead
+of the transformed values.
+
+Fix: import `canonical` from `src.api.services.score_transform` and
+`SCORE_SCALE_CALIBRATION` from `src.config`; derive expected values via
+`_canonical_score(raw, *SCORE_SCALE_CALIBRATION["live"])` rather than
+hardcoding literals. Pattern matches commit f711333 (test_inference.py).
+
+**F3 (`tests/unit/test_data_generator.py::test_generate_data_bounds`)**
+
+`LIGHT_RANGE` was corrected from `(0.0, 1000.0)` to `(0.0, 1200.0)` W/m² (canonical
+unit fix). The generator clips to `LIGHT_RANGE[1]`; the test still asserted `≤ 1000.0`.
+
+Fix: import `LIGHT_RANGE` from `src.config`; assert `data.max() <= LIGHT_RANGE[1]`.
+The config constant is authoritative — asserting against it prevents silent drift.
+
+**F4 (`tests/workers/test_upload_consumer.py::test_async_finalize_persists_trigger_channel`)**
+
+Root cause: **test fixture gap, not a production bug.**
+`_FAULT_RAMP = (45.0, 75.0, 130.0, 220.0, 380.0)` produced temperatures > 50°C.
+`CSVAdapter.validate_canonical_schema` (src/vendors/base.py) enforces temperature ≤ 50°C.
+When the fault-ramp chunk fails validation, the producer sets `normalized_rows = []`
+for that portion → those rows are never persisted to `sensor_readings`. Consequently
+`apply_anomaly_scores` finds no rows to update → `trigger_channel` stays NULL forever.
+
+Diagnostic: the statistical detector fires correctly on raw rows regardless of adapter
+validation (raw rows bypass `validate_canonical_schema`). The wiring in
+`upload_consumer.py:299` was never broken — the rows simply did not exist in the DB.
+
+Fix: change `_FAULT_RAMP` to `(30.0, 35.0, 40.0, 45.0, 49.0)` — all within the 50°C
+cap, all >> the z-threshold of 27°C (z ≈ 8.5 to 27.5 against baseline mean 21.5°C,
+std 1.0°C). 5 consecutive hits → 3 emitted (min_consecutive=3). Rows are now persisted
+and `apply_anomaly_scores` sets `trigger_channel = "temperature"` on them.
+
+**Files changed (tests only — no source modifications):**
+- `tests/live/test_persistence_extra_channels.py` — F1, F2: added imports + derived assertions
+- `tests/unit/test_data_generator.py` — F3: import LIGHT_RANGE, assert against constant
+- `tests/workers/test_upload_consumer.py` — F4: new _FAULT_RAMP within adapter validation bounds
+
+---
+
+## Previous Phase
+**ADR-007, ADR-008, and Convergence Doc Cost Correction — COMPLETE (2026-09-10)**
+
+Corrected the cost analysis in `docs/architecture/upload_detector_convergence.md`
+and wrote two new ADRs. All changes are architecture docs only — no source or
+test modifications.
+
+**Convergence doc corrections:**
+- Replaced the ~10 ms/sequence LSTM assumption (~525 s/year) with measured
+  0.043 ms/sequence (4.5 s/year) — 230× cheaper than assumed because
+  `predict_batch_enriched` vectorises the full batch.
+- Reversed the bottleneck conclusion: `ensemble.detect` at 1.05 ms/seq
+  (111 s/year) is now the dominant cost, not the LSTM.
+- Added measured false-positive rates: NoiseDetector 69.6% FP on healthy
+  data (BLOCKED), Mahalanobis inverted signal 38.3% healthy vs 9.5%
+  faulted (BLOCKED), SpikeMAD 0% on both (needs investigation).
+- Stated 60 s performance budget for Phase 1 full-year uploads.
+- Resolved 4 of 5 "could not determine" items with measured values.
+- Added imputed-channel exclusion as a Phase 1 requirement (CO2 400.0
+  fill value triggers false stuck alert without `skip_channels`).
+
+**ADR-007 (Upload Worker Sizing):** Stay on budget Railway tier. Pin
+`torch.set_num_threads(1)`. Size on memory (~1 GB), not CPU. Keep
+`numReplicas: 1`. Adopt 60 s budget. One open verification: profile on
+deployed container.
+
+**ADR-008 (Tenant Baseline Provisioning):** Derive per-tenant ensemble
+baseline from cold-start bootstrap clean output. Persist in existing
+`model_baseline` table. Falls back to synthetic default when absent.
+Key sequencing constraint: baseline must be fixed BEFORE recalibrating
+any ensemble-derived detector.
+
+---
+
+## Previous Phase
+**Anomaly Group Module Split Completion — COMPLETE (2026-09-10)**
+
+Finished the interrupted module split of `anomaly_group_service.py`. Brought
+both over-limit files under the 300-line guardrail:
+
+| File | Before | After |
+|------|--------|-------|
+| `anomaly_group_service.py` | 322 | 294 |
+| `sample_enrichment.py` | 317 | 296 |
+| `fault_classification.py` | 271 | 294 |
+| `anomaly_group_queries.py` | 261 | 261 |
+
+Changes: (1) moved `_canonical_sensor_value` to `fault_classification.py`
+(sensor-metadata responsibility); (2) merged duplicate import/re-export blocks
+in `anomaly_group_service.py`; (3) inlined single-use `_sort_samples_newest_first`.
+
+All 713 tests pass (1 pre-existing NaN guard failure, 8 skipped, 1 xfailed).
+Both parity test suites green. No public API changes. No test modifications.
+
+Refactor notes: `docs/refactor/anomaly-group-module-split-completion.md`
+
+---
+
+**Psychrometric Suppression on Upload Path — COMPLETE (2026-09-10)**
+
+Resolved the measured_hd (humidity deficit) channel being dropped by
+`is_cold_run_stat_column` — "deficit" appeared in both exclude and include
+lists; the exclusion won. Removed "deficit" from the exclude list (HD is a
+derived climate measurement, not an actuator) and added "measured_hd" to
+the include tokens.
+
+Wired `psychrometric_validator.validate_row` into the upload path
+(`upload_portions.py`) so paired temperature + humidity statistical alerts
+are suppressed when the measured HD agrees with the Tetens-derived HD
+(psychrometrically consistent → expected physics). Inconsistent HD still
+alerts with a `psychrometric_inconsistency` marker. When HD is absent, the
+check does not run — no fabricated values, behaviour identical to before.
+
+**Measured on native_dec_stuck_fault.csv:** paired alerts dropped from 6 → 0
+(all 6 were psychrometrically consistent cooling events).
+
+Files changed:
+- `src/models/cold_run_detector.py` — exclude/include list fix
+- `src/api/services/upload_portions.py` — psychro context extraction + suppression
+- `tests/api/test_psychrometric_suppression.py` — 12 new tests (all green)
+
+---
+
+**Upload ↔ Comprehensive Pipeline Detector Convergence Design — COMPLETE (2026-09-09)**
+
+Produced `docs/architecture/upload_detector_convergence.md` — a design document
+(no implementation) for bringing the full detector stack to the CSV upload path.
+
+**Key decisions:**
+1. **Option C (shared detector library, two orchestrators)** — both paths import the
+   same detector classes from `src/models/`; each keeps its own orchestration. Rejected
+   big-bang pipeline adoption (DB/state corruption), subsample approach (incomplete
+   coverage), and common DetectionOrchestrator interface (over-engineering).
+
+2. **8 detectors IN for Phase 1** (stateless, per-sequence): DropoutDetector,
+   NoiseDetector, OutOfBoundsDetector, SpikeMADDetector, BiasEMADetector,
+   MultivariateMahalanobisDetector, BOCPDDetector, EnsembleAnomalyDetector.
+
+3. **6 detectors OUT** (stateful or require unavailable data): CUSUMDriftDetector,
+   EMABaselineEstimator, EWMA/POT, SetpointAwareScadaDetector, BiasDualSensor,
+   CorrelationBreakdown.
+
+4. **Episode-level incidents** (not per-sequence) — one Incident per AnomalyEpisode,
+   using peak-score sequence embedding.
+
+5. **5 independently shippable phases**: (1) stateless detector fan-out, (2) episode
+   incidents, (3) ChunkCarry unification, (4) conditional detectors, (5) divergence guard.
+
+6. **Unmeasured assumptions flagged**: LSTM throughput on 105k sequences, false-positive
+   rate of new detectors on upload data, OOB detector interaction with imputed channels,
+   IF fit cost, episode embedding quality.
+
+## Previous Phase
+**COTHN outreach doc technical corrections — COMPLETE (2026-09-09)**
+
+Task: Correct all wrong technical claims in `docs/outreach/cothn-first-contact.md`
+against `tests/fixtures/NATIVE_FIXTURES.md` and source code. Six categories fixed:
+
+1. **Sampling cadence** — "15-minute interval" was bootstrap-file artifact.
+   Native export is 5-minute / 300 s cadence (105,120 rows = 365 × 288 samples/day).
+   Corrected in Detection latency section; derivation note updated in Flatline evidence.
+
+2. **Detection latency** — caveat block removed. End-to-end measured latency is
+   6.00 h (fault onset 2026-12-18T13:00Z → first alert 2026-12-18T19:00Z).
+   Configured threshold: 24 samples × 5 min = 2 h (`src/config.py:804`).
+   Alert carries `severity:"urgent"`, names channel, reports `duration_hours`
+   (`stuck_fault_detector.py:432/435`). One grouped event per freeze, recovery
+   tracked separately and not scored as anomalous.
+
+3. **Prior freeze durations** — "22, 29, 48 h" corrected to "22, 35, 48 h" in
+   email body (measured: 22.08, 34.83, 47.92 h). "29 h" was bootstrap artifact.
+   Table updated with exact native values + 1.00 h short freeze.
+
+4. **Main fault sample count** — 997 (bootstrap) → 1,897 (native). End time
+   corrected 08:40 → 08:50 UTC. Duration 163.7 h → 163.83 h everywhere.
+
+5. **Flatline evidence provenance** — section rewritten to cite native export
+   (`~/Downloads/2026_utk_test.csv`, SHA-256 in `NATIVE_FIXTURES.md`).
+   Bootstrap files explicitly marked as not valid fixtures.
+
+6. **CO2 row count in §5** — updated 9,057 (bootstrap) → 105,120 (native).
+   Added `src/vendors/csv_adapter.py:35` citation for `SENSOR_DEFAULTS["co2"]`.
+
+Not changed: CO2 caveat (still true), neutral provenance phrasing,
+external COTHN/SFT-EDIH claims, document structure, §7 connector caveat.
+
+## Previous Phase (formerly Current)
+**Reviewer findings applied — F1/F2/F3/F4 — COMPLETE (2026-09-09)**
+
+### F1 — ZeroDivisionError guard (hi == p)
+Guard already present at `src/api/services/score_transform.py:100-108`.
+Tests for `hi == p` and `hi < p` already in `tests/api/test_score_transform.py`
+(`TestNonFiniteGuard.test_hi_equals_p_returns_none`, `test_hi_less_than_p_returns_none`,
+`test_hi_equals_p_logs_at_warning`). No code changes required.
+
+### F2 — Canonical score assertion in test_inference_saves_to_database
+Test already updated (`_expected_canonical` derived from `_canonical_score` + calibration
+constants). No code changes required.
+
+### F2 — migration 023 downgrade infinite loop (timeout fix)
+Root cause: `_run_downgrade` updated `anomaly_score = raw` but never cleared
+`anomaly_score_raw`, so `WHERE anomaly_score_raw IS NOT NULL` re-selected the same rows
+every iteration — an infinite loop.
+
+Fix: added `anomaly_score_raw = NULL` to the UPDATE in both:
+- `tests/api/test_023_migration.py:_run_downgrade`
+- `alembic/versions/023_canonical_anomaly_score.py:downgrade`
+
+Two timeout tests now pass.
+Remaining failure: `test_nan_in_live_row_becomes_null_with_unknown_scale` — pre-existing
+SQLite NaN storage: SQLite converts `float('nan')` to NULL on REAL column insert, so the
+backfill's `WHERE anomaly_score IS NOT NULL` never finds it; cannot be fixed within
+migration code. Left failing per task instructions.
+
+### F3 — Stale "lux" in API schema docstrings
+- `src/api/schemas/sensor_data.py:SensorReadingCreate.light` → "W/m² — solar irradiance, canonical unit"
+- `src/api/schemas/sensor_data.py:SensorReadingResponse.light` → "W/m² (solar irradiance — canonical unit)"
+- `src/db/models.py:77` was already correct (W/m²)
+
+### F4 — Duplicated light constants
+Already fixed: `csv_adapter.py` imports `LIGHT_CANONICAL_UNIT`, `LIGHT_LUX_TO_W_PER_M2`,
+`LIGHT_PPFD_TO_W_PER_M2` from `src/config.py`. No changes required.
+
+### Test results
+- 111 baseline tests: ALL PASS
+- test_inference.py: ALL PASS (13/13)
+- test_score_transform.py: ALL PASS (33/33)
+- test_023_migration.py: 15/16 pass, 1 pre-existing SQLite NaN failure (left failing)
+
+## Previous Phase
+**Task 5b corrections: Duration off-by-one + regression assertions — COMPLETE (2026-09-09)**
+
+### Correction 1 — Frozen duration off-by-one sample
+Completed fault durations were measured as onset → first non-frozen sample
+(`FaultWindow.end_dt`), over-reporting by exactly one sampling interval.
+Fix: added `last_frozen_dt`/`last_frozen_ts` fields to `FaultWindow` (the
+last sample still at the frozen value) and updated `_stuck_fault_duration()`
+in `episode_grouper.py` to use that boundary instead of `end_dt`.
+`end_dt`/`end_ts` are preserved for recovery-window and baseline-purge
+calculations (which correctly need the release point).
+
+Verified durations: 34.83 / 22.08 / 47.92 / 163.83 h (all match
+`NATIVE_FIXTURES.md` ground truth).
+
+### Correction 2 — Regression assertions (5 new tests)
+1. `test_main_fault_episode_exists_by_onset` — pins the 163 h fault by onset timestamp
+2. `test_main_fault_duration_is_163_83h` — asserts 163.83 h to 2 decimal places
+3. `test_no_statistical_episode_with_urgent_severity` — blocks cross-detector merge artefact
+4. `test_every_stuck_fault_has_positive_duration` — no more 0.0 pass-throughs
+5. `test_prior_freeze_durations_match_ground_truth` — pins 34.83/22.08/47.92 h
+
+Total tests: 91 (86 original + 5 new), all pass.
+
+### Files changed
+- `src/models/stuck_fault_detector.py` — `last_frozen_dt`/`last_frozen_ts` on `FaultWindow`
+- `src/models/episode_grouper.py` — use `last_frozen_dt` for completed fault duration
+- `tests/api/test_episode_grouping.py` — 5 new regression assertions + `_parse_onset` helper
+
+## Previous Phase
+**Tasks 2b + 3 + 5: Early stuck detection, recovery scoring, episode grouping — COMPLETE (2026-09-09)**
+
+### Task 2b — Mid-freeze detection
+The stuck detector now evaluates the gate on every row while the freeze is
+still open (`detect_chunk` value-match branch, stuck_fault_detector.py:283-290`).
+Alert fires as soon as `STUCK_WALLCLOCK_MIN_HOURS` is crossed, not when
+the freeze ends. Measured latency: 6.00 h (gate=6.0 h, previously 163.92 h).
+Each alert carries both `onset_ts` (timestamp field) and `detected_ts` for
+true latency computation. `emitted_onsets` prevents duplicate emission.
+
+### Task 3 — Recovery not the loudest event
+1. **Baseline cleanup:** When a fault ends, `recovery_channels` records the
+   fault window. `_purge_fault_from_stat_carry()` NaN-outs fault-period values
+   in `stat_carry.rows` so the rolling z-score baseline excludes frozen readings.
+2. **Score cap:** Recovery episodes (`is_recovery=True`) are capped at
+   `RECOVERY_SCORE_CAP=0.4`. Stuck fault (score=1.0) always outranks recovery.
+3. Recovery is still reported — just not scored as the largest anomaly.
+
+### Task 5 — Episode grouping (detection layer)
+Architecture decision documented in `docs/architecture/episode_grouping.md`.
+Grouping at detection (not storage/presentation) because: per-sample scores
+survive in `anomaly_scores`; computed once; no migration; bounded memory.
+`group_alerts_into_episodes()` in `src/models/episode_grouper.py` groups
+contiguous per-channel alerts (gap < `EPISODE_GAP_SECONDS=600s`) into
+`AnomalyEpisode` objects with start, end, duration, peak_score, sample_count.
+
+### Files changed
+- `src/models/stuck_fault_detector.py` — mid-freeze gate eval, FaultWindow, recovery_channels
+- `src/models/episode_grouper.py` — NEW: episode grouping logic
+- `src/api/services/upload_portions.py` — reorder stuck→stat, baseline purge, episodes in response
+- `src/api/schemas/sensor_data.py` — AnomalyEpisodeSchema, detected_ts, episodes field
+- `src/config.py` — EPISODE_GAP_SECONDS, RECOVERY_SCORE_CAP
+- `docs/architecture/episode_grouping.md` — architecture decision
+- `tests/api/test_episode_grouping.py` — 14 acceptance tests
+- `tests/api/test_stuck_fault_upload.py` — updated for mid-freeze detection
+
+## Previous Phase
+**Stuck-fault / flatline detection on CSV upload path — COMPLETE (2026-09-09)**
+
+Added wall-clock-gated stuck-fault detection to the CSV upload scoring path,
+addressing the critical gap where a perfect freeze silenced the rolling z-score
+detector (rolling_std < 1e-9 guard dropped 83% of the fault).
+
+**Architecture:**
+- `WallclockStuckDetector` class in `src/models/stuck_fault_detector.py` — gates on
+  elapsed time (`STUCK_WALLCLOCK_MIN_HOURS=6.0`) + minimum sample count
+  (`STUCK_WALLCLOCK_MIN_SAMPLES=12`), with per-channel epsilon from
+  `STUCK_WALLCLOCK_EPSILON` (config.py:750-755).
+- `StuckCarry` dataclass threads per-channel freeze state across 5,000-row chunks
+  (bounded memory — one `ChannelFreezeState` per channel, not buffered rows).
+- `score_portion()` calls `WallclockStuckDetector.detect_chunk()` per chunk.
+- `finalize_scores()` calls `.flush()` to emit alerts for still-open freezes and
+  finalise the cadence check.
+- Imputed channels (e.g. CO2 on Connext exports that lack a CO2 column) are
+  excluded via `StuckCarry.skip_channels` to prevent false stuck alerts.
+
+**Cadence check:**
+- Tracks median inter-sample interval across chunks.
+- Flags input whose cadence deviates from `CADENCE_EXPECTED_SECONDS=300` by more
+  than `CADENCE_TOLERANCE_FACTOR=1.5` (e.g. 15-min cadence triggers the flag).
+- Surfaced as `StuckCarry.is_cadence_flagged` + logged warning.
+
+**Measured results on native fixtures:**
+- Fixture A (native_dec_stuck_fault.csv): 4 stuck_fault/urgent alerts detected:
+  - humidity 34.83h (truncated prior freeze)
+  - humidity 22.08h (prior freeze)
+  - humidity 47.92h (prior freeze)
+  - humidity 163.83h (main fault, matches ground truth exactly)
+  - 1.00h short freeze correctly suppressed by 6h gate
+- Fixture B (native_july_clearsky.csv): 0 false positives
+- Measured detection latency: 0.00h (onset timestamp is the alert timestamp;
+  in a real-time scenario the gate would fire after 6.0h)
+
+**Files changed:**
+- `src/models/stuck_fault_detector.py` — added `WallclockStuckDetector`, `StuckCarry`,
+  `ChannelFreezeState`, `_parse_timestamp`
+- `src/api/services/upload_portions.py` — added `stuck_carry` parameter to
+  `score_portion` and `finalize_scores`; `_stuck_dict_to_high_detail` converter
+- `src/api/services/cold_run_upload.py` — creates `StuckCarry(skip_channels=...)`,
+  threads through scoring + finalize
+- `tests/api/test_stuck_fault_upload.py` — 14 acceptance tests (all pass)
+- `src/config.py` — no changes (wall-clock constants already present from prior work)
+
+**Config constants used (all pre-existing at config.py:734-769):**
+- `STUCK_WALLCLOCK_MIN_HOURS=6.0`, `STUCK_WALLCLOCK_MIN_SAMPLES=12`
+- `STUCK_WALLCLOCK_EPSILON={temperature:0.01, humidity:0.01, co2:1.0, light:1.0}`
+- `STUCK_WALLCLOCK_CHANNELS=("temperature", "humidity", "co2")`
+- `CADENCE_EXPECTED_SECONDS=300`, `CADENCE_TOLERANCE_FACTOR=1.5`
+
+---
+
+**Alert label integrity (D1–D4) — COMPLETE (2026-09-08)**
+
+Fixed four defects on the CSV upload path that caused every alert to be mis-labelled:
+
+**D1 — Trigger channel now persisted and read:**
+- Added 4 new columns to `SensorReading`: `trigger_channel` (VARCHAR 255), `trigger_detector`
+  (VARCHAR 64), `detected_severity` (VARCHAR 16), `trigger_value` (FLOAT). All nullable.
+- New Alembic migration `024_trigger_label_integrity.py` (revises 023).
+- New `build_trigger_data_by_timestamp()` in `cold_run_upload.py` picks the highest-|z| column
+  per timestamp as primary trigger.
+- `apply_anomaly_scores()` in `csv_persist.py` extended to write trigger columns to `SensorReading`.
+- `_fetch_minimal_flagged_rows()` in `anomaly_group_service.py` now SELECTs trigger columns.
+- `_groups_by_type_or_sensor()` stores trigger data separately from BucketItem for enrichment.
+
+**D2 — Reasoning from triggering channel only:**
+- `_simple_reasoning_from_values()` rewritten: new signature `(channel, value)` instead of
+  the old `(temperature, humidity, co2, light, sensors)` loop.
+- `_enrich_sample_fast()` uses `trigger_channel` + `trigger_value` from row dict when present;
+  falls back to value-based inference for pre-migration rows.
+- A pipe-temperature alert now says "Unusual measured_pipe_1_temp reading: 51.0°C" rather
+  than fabricating greenhouse-air-temperature and humidity clauses.
+
+**D3 — Statistical score de-saturated:**
+- `upload_portions.py` stat_high score: `min(1.0, detail.z_score / 5.0)` → `_stat_z_to_canonical(z)`.
+- `_stat_z_to_canonical()` uses `score_transform.canonical(z, COLD_RUN_STAT_Z_MIN, None)`.
+- z=5.5 → 0.50, z=10 → 0.725, z=19.5 → 0.859. Never saturates at 1.0 for finite z.
+
+**D4 — Detected severity surfaces end-to-end:**
+- `detected_severity` in `SensorReading` populated by `apply_anomaly_scores`.
+- `_build_sample()` in `anomaly_group_service.py` passes `detected_severity` through in response.
+- Frontend-side rendering is owned by another agent.
+
+**Test results:**
+- 27/27 new acceptance tests in `tests/api/test_label_integrity.py` PASS.
+- 537 pre-existing tests in `tests/api/` PASS.
+- Pre-existing failures (NOT caused by this PR):
+  - `test_023_migration.py::test_live_round_trip_restores_original_score` — timeout
+    on SQLite iteration; pre-existing slow test.
+  - `test_inference.py::test_inference_saves_to_database` — expects raw 0.72 but
+    pre-existing ADR-005 modifications to inference.py store the canonical score (0.45).
+
+---
+
+**Bootstrap loader sampling fix — COMPLETE (2026-09-08)**
+
+Fixed `_load_and_resample` in `src/models/bootstrap.py` which silently discarded ~90%
+of uploaded CSV data via reservoir sampling and fabricated derived values via
+`.resample("5min").mean()` and `.interpolate(limit=3)`.
+
+**Changes:**
+- `src/models/bootstrap.py`: Removed reservoir sampling (MAX_CHUNKS=10, unseeded
+  `random.randint`). All chunks are now processed — streaming reads keep memory bounded.
+  Removed `.resample().mean()` and `.interpolate()` that silently replaced real
+  measurements. Added proper `logger.warning()` with chunk index/row range/exception
+  for failed chunks (was `except Exception: continue`). Added summary log line.
+- `src/config.py`: Added `BOOTSTRAP_LOADER_CHUNK_SIZE` (5000, env-overridable) and
+  `BOOTSTRAP_LOADER_RANDOM_SEED` (42, env-overridable) for future use if a row cap
+  is ever needed.
+- `tests/models/test_bootstrap_sampling.py`: 6 new tests — full time-span retention
+  on 55k rows, reproducibility, no silent value replacement, null preservation,
+  malformed chunk logging (direct + mock-injected failure).
+
+**Measured results on synthetic 105,120-row uniform input:**
+- Before: 9,057 rows retained (8.6%), windows spanning 8 days median
+- After: 105,120 rows retained (100.0%), max gap = 5 min (source cadence)
+
+No row cap applied. No files outside ownership touched. 35/35 tests green.
+
+---
+
 **Home Phase A + Config IA — COMPLETE (2026-09-08)**
 
 Phase A — fixed critical Home (`web/features/home/HomeView.tsx`):
@@ -2933,3 +3362,14 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
 - **Verified**: upload.py split (785→292 lines; services/tenant_data_wipe.py 242, services/synthetic_anomalies.py 298 — all ≤300) removes duplication genuinely (suppress/clear-stream helpers, 4 type dicts → one `_TYPE_PROFILES` table with all 9 profiles value-identical); migration 017 (anomaly_type→source) is linear 016→017, SQLite batch-mode, reversible backfill; supervision/runtime de-underscore renames complete with zero stale refs; cache_keys `_safe_args_repr` correct + tested; web extractions (useChannelVisibility, useChartRangeSelect) verbatim incl. profiling probe; chartBaseline scope keys threaded through all 6 call sites; drag-pan `data-row-selectable` contract has exactly one producer/consumer.
 - **Notes for follow-up**: (1) dead `_anomaly_value()` carried into synthetic_anomalies.py — delete; (2) `${pageId}:${tenant}:${gh}` key built by hand in 4 files — extract `buildChartScopeKey`; (3) deploy ordering: migration 017 must run before new code serves the DELETE /upload routes (un-migrated DB + new code would let remove_synthetic_anomalies match legacy anomaly_type='live' rows); (4) `live_runtime: Any` → small Protocol; (5) long lines synthetic_anomalies.py:210-213; (6) pre-existing `adapter._csv_props` private access.
 - **No files under src/, tests/, or web/ modified** (read-only mandate).
+
+## Native-cadence test fixtures (QA, 2026-09-08)
+- **Task**: Extract two native-cadence fixtures from the raw greenhouse SCADA export (`2026_utk_test.csv`), write a provenance record, and create cadence-guard tests.
+- **Source**: `/Users/eugenesidorov/Downloads/2026_utk_test.csv` — 105,120 rows, 365 days x 288 samples/day, all 105,119 inter-row gaps exactly 300s, SHA-256 `7e3aecc815d0b785f553839792c6dea63fa7813aecf5632e1d1a09d84f929e34`.
+- **Fixture A** (`tests/fixtures/native_dec_stuck_fault.csv`): Dec 14–26 inclusive, 3,457 rows, 70 null humidity readings. Main stuck-fault: 1,897 samples at 100.0 from 2026-12-18T13:00 to 2026-12-25T08:50 (163.83h wall-clock), releases at 08:55 (91.24). Prior freezes: 34.83h (truncated), 22.08h, 47.92h, 1.00h. SHA-256 `67476d349321770a5f253a44f9fead0a5c2729dd6f7e29eabc727042907d3deb`.
+- **Fixture B** (`tests/fixtures/native_july_clearsky.csv`): Jul 1–7, 2,016 rows, 0 null humidity. Max light 1019.98 W/m² at 2026-07-02 12:25. SHA-256 `cb7b3a168e7eaac4768d53a796ff4447e324379578c4d41fe61ade87edb8def4`.
+- **Provenance**: `tests/fixtures/NATIVE_FIXTURES.md` — records source SHA, cadence verification, all measured ground-truth values, discrepancy notes vs task prompt (prior freeze durations don't match prompt's "22h, 29.5h, 48.7h" — measured 22.08h, 34.83h, 47.92h, 1.00h).
+- **Tests**: `tests/fixtures/test_native_fixtures.py` — 14 tests, all green. Covers: adapter parsing, cadence (300s), row counts, 1897-sample fault count, 163.83h duration, onset timestamp, pre-onset values, null preservation (70 for A, 0 for B), max light > 900, max light value 1019.98.
+- **Key finding**: `data/*_csvtest_20260712.csv` files are bootstrap derivatives (unseeded random sampling + `.resample("5min").mean()` + `.interpolate()`), NOT native exports. Evidence at `src/models/bootstrap.py` lines 255-308. Must not be used as fixtures.
+- **No bugs found** in `src/vendors/csv_adapter.py` — adapter correctly detects semicolon delimiter, comma decimals, day-first timestamps, and maps Connext column names. NaN humidity rows are correctly dropped during normalization (expected behavior).
+- **Files created**: `tests/fixtures/native_dec_stuck_fault.csv`, `tests/fixtures/native_july_clearsky.csv`, `tests/fixtures/NATIVE_FIXTURES.md`, `tests/fixtures/test_native_fixtures.py`. No `src/` files modified.

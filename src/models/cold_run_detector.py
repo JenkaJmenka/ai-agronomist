@@ -29,12 +29,16 @@ from src.models.gas_anomaly_detector import (
 _METADATA_KEYS = frozenset({"timestamp", "source"})
 
 # Actuators and diurnal channels produce false positives with rolling z-scores.
+# NOTE: "deficit" was removed — humidity deficit (measured_hd) is a derived
+# climate measurement computed from T_air and RH via the Tetens equation,
+# NOT an actuator output or diurnal signal.  Its variance tracks real
+# thermodynamic state and is valid input for rolling z-score detection.
+# Excluding it prevented psychrometric validation on the upload path.
 _COLD_RUN_STAT_EXCLUDE_SUBSTRINGS = (
     "light",
     "rain",
     "screen",
     "vent",
-    "deficit",
 )
 
 
@@ -47,7 +51,7 @@ def is_cold_run_stat_column(name: str) -> bool:
         return False
     return any(
         token in norm
-        for token in ("temp", "humid", "humidity", "wind", "deficit")
+        for token in ("temp", "humid", "humidity", "wind", "deficit", "measured_hd")
     )
 
 

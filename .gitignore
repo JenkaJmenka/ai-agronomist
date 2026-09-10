@@ -23,10 +23,25 @@ results/
 # asserts its Table 9 worked values; a fresh clone must have the spec its tests conform to.
 # docs/USER_GUIDE.md and docs/ANOMALY_CATALOG.md are shipped operator
 # documentation linked from README.md — they must survive a fresh clone.
+# docs/runbooks/** is onboarding material: step-by-step procedures written for
+# someone with no prior knowledge of this project, plus the agent prompts they
+# reference. Useless if it does not survive a clone.
+# docs/architecture/ADR-*.md are decision records — they explain why the code is
+# the way it is, and are cited from commit messages and source comments.
+# Everything else under docs/ (working notes, review reports, plans) stays local.
 docs/*
 !docs/anomaly_framework_spec.md
 !docs/USER_GUIDE.md
 !docs/ANOMALY_CATALOG.md
+!docs/runbooks/
+!docs/runbooks/**
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/ADR-*.md
+# These two are cited as required reading by docs/runbooks/** — a runbook that
+# points at a file missing from a fresh clone is a broken runbook.
+!docs/architecture/upload_detector_convergence.md
+!docs/architecture/episode_grouping.md
 implementation plan/
 tasks/
 

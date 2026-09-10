@@ -36,7 +36,8 @@ import os
 import logging
 
 from src.vendors.csv_adapter import CSVAdapter
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, SEQ_LEN
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, SCORE_SCALE_CALIBRATION, SEQ_LEN
 from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
@@ -102,8 +103,12 @@ async def run_inference(
                 detail="timestamps required (one per sequence) to persist anomaly scores",
             )
 
-        scores_by_key: dict[str, float] = {}
+        # raw_by_key: pre-canonical scores (raw / ANOMALY_SCALING_FACTOR).
+        # canonical_by_key: ADR-005 scores stored in anomaly_score column.
+        raw_by_key: dict[str, float] = {}
+        canonical_by_key: dict[str, float] = {}
         dt_timestamps: list[datetime] = []
+        _batch_p, _batch_hi = SCORE_SCALE_CALIBRATION["batch"]
         for ts_str, score in zip(request.timestamps, batch_scores):
             try:
                 dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -115,7 +120,11 @@ async def run_inference(
             dt_timestamps.append(dt)
             key = normalize_timestamp_key(dt)
             if key is not None:
-                scores_by_key[key] = float(score)
+                raw_score = float(score)
+                can = _canonical_score(raw_score, _batch_p, _batch_hi, timestamp=ts_str)
+                raw_by_key[key] = raw_score
+                if can is not None:
+                    canonical_by_key[key] = can
 
         stmt = select(SensorReading).where(
             SensorReading.tenant_id == request.tenant_id,
@@ -127,8 +136,11 @@ async def run_inference(
 
         for record in records:
             record_key = normalize_timestamp_key(record.timestamp)
-            if record_key is not None and record_key in scores_by_key:
-                record.anomaly_score = scores_by_key[record_key]
+            if record_key is not None and record_key in canonical_by_key:
+                # ADR-005: store canonical score; preserve raw for recalibration.
+                record.anomaly_score = canonical_by_key[record_key]
+                record.anomaly_score_raw = raw_by_key[record_key]
+                record.score_scale = "batch"
 
         try:
             await db.commit()

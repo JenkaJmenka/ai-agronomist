@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 from src.models.data_generator import SyntheticDataGenerator
-from src.config import DATA_CONFIG
+from src.config import DATA_CONFIG, LIGHT_RANGE
 
 
 class TestSyntheticDataGenerator:
@@ -48,11 +48,14 @@ class TestSyntheticDataGenerator:
     def test_generate_data_bounds(self, generator: SyntheticDataGenerator) -> None:
         """Checks that generated physical readings fall within general physical bounds."""
         data = generator.generate_normal_data()
-        
-        # Temp range [20, 30], Humidity range [50, 80], CO2 range [300, 500], Light range [0, 1000]
-        # Data values should not fall below 0 or exceed 1000 by standard config bounds.
+
+        # The generator clips each channel to its LIGHT_RANGE / TEMP_RANGE / etc. bounds.
+        # The effective overall max is LIGHT_RANGE[1] (currently 1200.0 W/m²) — raised
+        # from 1000.0 when the canonical light unit was corrected from lux to W/m²
+        # (clear-sky solar irradiance peaks at ~1000–1200 W/m²).  Assert against the
+        # config constant so the test cannot silently drift when the range is updated.
         assert data.min() >= 0.0
-        assert data.max() <= 1000.0
+        assert data.max() <= LIGHT_RANGE[1]
 
     def test_generate_data_variance(self, generator: SyntheticDataGenerator) -> None:
         """Verifies that every generated sequence has variance (is not flat)."""

@@ -19,6 +19,7 @@ from src.config import (
     ANOMALY_ENRICHED_DEFAULT_LIMIT,
     ANOMALY_ENRICHED_MAX_LIMIT,
     ANOMALY_GROUP_SAMPLE_IDS,
+    CANONICAL_ANOMALY_THRESHOLD,
     REDIS_CACHE_EXPIRE_SECONDS,
 )
 from src.db.session import get_db
@@ -53,7 +54,7 @@ async def get_anomaly_groups(
     greenhouse_id: str = Query(default="default"),
     start: str = Query(...),
     end: str = Query(...),
-    threshold: float = Query(..., ge=0.0, le=1.0),
+    threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     group_by: Literal["date", "type", "sensor"] = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
@@ -67,7 +68,19 @@ async def get_anomaly_groups(
     search incident join (by=type/sensor) instead of fetching up to 50 000 full
     rows and processing them in Python.  Full-range full-year queries that
     previously took 33 s now complete in < 1 s.
+
+    ADR-005 §2 — threshold is now optional.  When omitted the server defaults to
+    ``CANONICAL_ANOMALY_THRESHOLD = 0.5``, which is correct for every producer on
+    the canonical scale.  The effective value is echoed in the response so clients
+    can display exactly which threshold was applied.
+
+    Cache key note: the cache is keyed on all query parameters.  An absent
+    ``threshold`` and an explicit ``?threshold=0.5`` produce different cache keys
+    and are cached independently; both return the same result and both are correct.
+    A stale ``?threshold=0.15`` entry from before the migration will age out
+    within REDIS_CACHE_EXPIRE_SECONDS.
     """
+    effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
 
@@ -76,20 +89,26 @@ async def get_anomaly_groups(
 
     # Exact flagged row count (DISTINCT timestamps, never capped).
     anomaly_count = await readings_service.count_flagged_rows(
-        db, **scope, **window, threshold=threshold
+        db, **scope, **window, threshold=effective_threshold
     )
 
     groups = await fetch_anomaly_groups(
         db,
         **scope,
         **window,
-        threshold=threshold,
+        threshold=effective_threshold,
         group_by=group_by,
         sample_limit=ANOMALY_GROUP_SAMPLE_IDS,
         incidents=incidents,
     )
 
-    return {"groups": groups, "group_by": group_by, "anomaly_count": anomaly_count}
+    return {
+        "groups": groups,
+        "group_by": group_by,
+        "anomaly_count": anomaly_count,
+        "threshold": effective_threshold,
+        "score_scale_version": 2,
+    }
 
 
 @router.get("/enriched")
@@ -99,7 +118,7 @@ async def get_enriched_anomalies(
     greenhouse_id: str = Query(default="default"),
     start: str = Query(...),
     end: str = Query(...),
-    threshold: float = Query(..., ge=0.0, le=1.0),
+    threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     limit: Optional[int] = Query(
         default=None, ge=1, le=ANOMALY_ENRICHED_MAX_LIMIT
     ),
@@ -138,7 +157,11 @@ async def get_enriched_anomalies(
 
     Response shape is preserved exactly: rows, count, anomaly_count.
     anomaly_count is the full window count — never capped by the display limit.
+
+    ADR-005 §2 — threshold is now optional.  Echoes the effective threshold and
+    score_scale_version so clients can confirm which scale is in use.
     """
+    effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
     effective_limit = limit or ANOMALY_ENRICHED_DEFAULT_LIMIT
@@ -149,13 +172,13 @@ async def get_enriched_anomalies(
         db,
         **scope,
         **window,
-        threshold=threshold,
+        threshold=effective_threshold,
         limit=effective_limit,
     )
 
     # Full window count — must stay uncapped regardless of the display limit.
     anomaly_count = await readings_service.count_flagged_rows(
-        db, **scope, **window, threshold=threshold
+        db, **scope, **window, threshold=effective_threshold
     )
 
     # Load incidents for the window then build a binary-search index so each
@@ -166,4 +189,10 @@ async def get_enriched_anomalies(
     sorted_times, sorted_incidents = _build_sorted_incidents(incidents)
     rows = _enrich_samples_fast(ranked, sorted_times, sorted_incidents)
 
-    return {"rows": rows, "count": len(rows), "anomaly_count": anomaly_count}
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "anomaly_count": anomaly_count,
+        "threshold": effective_threshold,
+        "score_scale_version": 2,
+    }

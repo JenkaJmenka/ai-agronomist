@@ -19,6 +19,8 @@ from src.api.schemas.sensor_data import StatisticalAnomalyDetail
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
+    build_trigger_data_by_timestamp,
+    build_upload_score_dicts,
 )
 from src.api.services.csv_persist import apply_anomaly_scores, persist_readings_chunk
 from src.api.services.upload_portions import (
@@ -279,14 +281,22 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     )
 
     if payload.get("persist_data"):
+        # ADR-005: canonical scores + raw scores keyed by timestamp.
+        _canonical_by_ts, _raw_by_ts = build_upload_score_dicts(
+            response.high_anomalies,
+            response.threshold_used,
+        )
         await apply_anomaly_scores(
             db=db,
             tenant_id=job.tenant_id,
             greenhouse_id=job.greenhouse_id or "default",
-            anomaly_scores_by_timestamp=build_anomaly_scores_by_timestamp(
+            anomaly_scores_by_timestamp=_canonical_by_ts,
+            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
                 response.high_anomalies
             ),
-            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
+            anomaly_score_raw_by_timestamp=_raw_by_ts,
+            score_scale="upload",
+            trigger_data_by_timestamp=build_trigger_data_by_timestamp(
                 response.high_anomalies
             ),
         )
