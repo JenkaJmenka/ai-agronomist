@@ -3,6 +3,63 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**ADR-007, ADR-008, and Convergence Doc Cost Correction — COMPLETE (2026-09-10)**
+
+Corrected the cost analysis in `docs/architecture/upload_detector_convergence.md`
+and wrote two new ADRs. All changes are architecture docs only — no source or
+test modifications.
+
+**Convergence doc corrections:**
+- Replaced the ~10 ms/sequence LSTM assumption (~525 s/year) with measured
+  0.043 ms/sequence (4.5 s/year) — 230× cheaper than assumed because
+  `predict_batch_enriched` vectorises the full batch.
+- Reversed the bottleneck conclusion: `ensemble.detect` at 1.05 ms/seq
+  (111 s/year) is now the dominant cost, not the LSTM.
+- Added measured false-positive rates: NoiseDetector 69.6% FP on healthy
+  data (BLOCKED), Mahalanobis inverted signal 38.3% healthy vs 9.5%
+  faulted (BLOCKED), SpikeMAD 0% on both (needs investigation).
+- Stated 60 s performance budget for Phase 1 full-year uploads.
+- Resolved 4 of 5 "could not determine" items with measured values.
+- Added imputed-channel exclusion as a Phase 1 requirement (CO2 400.0
+  fill value triggers false stuck alert without `skip_channels`).
+
+**ADR-007 (Upload Worker Sizing):** Stay on budget Railway tier. Pin
+`torch.set_num_threads(1)`. Size on memory (~1 GB), not CPU. Keep
+`numReplicas: 1`. Adopt 60 s budget. One open verification: profile on
+deployed container.
+
+**ADR-008 (Tenant Baseline Provisioning):** Derive per-tenant ensemble
+baseline from cold-start bootstrap clean output. Persist in existing
+`model_baseline` table. Falls back to synthetic default when absent.
+Key sequencing constraint: baseline must be fixed BEFORE recalibrating
+any ensemble-derived detector.
+
+---
+
+## Previous Phase
+**Anomaly Group Module Split Completion — COMPLETE (2026-09-10)**
+
+Finished the interrupted module split of `anomaly_group_service.py`. Brought
+both over-limit files under the 300-line guardrail:
+
+| File | Before | After |
+|------|--------|-------|
+| `anomaly_group_service.py` | 322 | 294 |
+| `sample_enrichment.py` | 317 | 296 |
+| `fault_classification.py` | 271 | 294 |
+| `anomaly_group_queries.py` | 261 | 261 |
+
+Changes: (1) moved `_canonical_sensor_value` to `fault_classification.py`
+(sensor-metadata responsibility); (2) merged duplicate import/re-export blocks
+in `anomaly_group_service.py`; (3) inlined single-use `_sort_samples_newest_first`.
+
+All 713 tests pass (1 pre-existing NaN guard failure, 8 skipped, 1 xfailed).
+Both parity test suites green. No public API changes. No test modifications.
+
+Refactor notes: `docs/refactor/anomaly-group-module-split-completion.md`
+
+---
+
 **Psychrometric Suppression on Upload Path — COMPLETE (2026-09-10)**
 
 Resolved the measured_hd (humidity deficit) channel being dropped by
