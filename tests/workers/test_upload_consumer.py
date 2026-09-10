@@ -31,7 +31,15 @@ ROWS = 130
 # Accelerating ramp: the rolling baseline absorbs each anomalous row, so only
 # values that outrun the inflating std keep z >= COLD_RUN_STAT_Z_MIN for the
 # COLD_RUN_STAT_MIN_CONSECUTIVE rows the detector requires.
-_FAULT_RAMP = (45.0, 75.0, 130.0, 220.0, 380.0)
+#
+# IMPORTANT: all values must be <= 50.0 °C — the upper bound enforced by
+# CSVAdapter.validate_canonical_schema (src/vendors/base.py).  Exceeding it
+# causes the adapter to reject the entire portion chunk, leaving those rows
+# absent from sensor_readings so apply_anomaly_scores cannot set trigger_channel.
+# Normal baseline mean ≈ 21.5 °C, std ≈ 1.0 °C; z-threshold = 5.5 → need ≥ 27 °C.
+# These values produce z-scores of ≈ 8.5, 13.5, 18.5, 23.5, 27.5 — all well
+# above the 5.5 threshold — while staying within the adapter's 50 °C cap.
+_FAULT_RAMP = (30.0, 35.0, 40.0, 45.0, 49.0)
 
 
 def _csv_content(rows: int = ROWS, fault_at: int | None = None) -> str:

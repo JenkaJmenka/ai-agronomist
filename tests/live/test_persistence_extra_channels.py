@@ -28,6 +28,8 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import SCORE_SCALE_CALIBRATION
 from src.db.models import Base, RawReading, SensorReading
 from src.live.events import LiveReadingEvent
 from src.live.persistence import PersistenceBatcher, _event_to_raw_row, _event_to_row
@@ -367,7 +369,15 @@ class TestFlushWithExtraChannels:
         assert abs(row.humidity - 65.0) < 1e-6
         assert abs(row.co2 - 400.0) < 1e-6
         assert abs(row.light - 500.0) < 1e-6
-        assert abs(row.anomaly_score - 0.5) < 1e-6
+
+        # ADR-005: _event_to_row applies the canonical transform at write time.
+        # canonical(raw=0.5, p=LIVE_ANOMALY_THRESHOLD=0.05, hi=None):
+        #   raw > p, hi is None → 0.5 + 0.5 * (raw - p) / raw = 0.95
+        # Derive from calibration constants so the assertion survives recalibration.
+        _live_p, _live_hi = SCORE_SCALE_CALIBRATION["live"]
+        _expected_score = _canonical_score(0.5, _live_p, _live_hi)
+        assert _expected_score is not None, "canonical() returned None for live-path score"
+        assert abs(row.anomaly_score - _expected_score) < 1e-6
 
         # SensorReading model should NOT have vpd/soil_moisture/root_zone_temp columns
         assert not hasattr(row, "vpd")
@@ -657,6 +667,13 @@ class TestReadPathIntegration:
         assert "root_zone_temp" in target, "root_zone_temp should surface from raw row"
         assert "vpd" in target, "vpd should surface from raw row"
 
-        # Anomaly score attached from canonical table
+        # Anomaly score attached from canonical table.
+        # ADR-005: _event_to_row applies the canonical transform at write time.
+        # canonical(raw=0.42, p=LIVE_ANOMALY_THRESHOLD=0.05, hi=None):
+        #   raw > p, hi is None → 0.5 + 0.5 * (0.42 - 0.05) / 0.42 ≈ 0.9405
+        # Derive from calibration constants so the assertion survives recalibration.
+        _live_p, _live_hi = SCORE_SCALE_CALIBRATION["live"]
+        _expected_score = _canonical_score(0.42, _live_p, _live_hi)
+        assert _expected_score is not None, "canonical() returned None for live-path score"
         assert target.get("anomaly_score") is not None, "anomaly_score should be merged from SensorReading"
-        assert abs(float(target["anomaly_score"]) - 0.42) < 1e-3
+        assert abs(float(target["anomaly_score"]) - _expected_score) < 1e-3

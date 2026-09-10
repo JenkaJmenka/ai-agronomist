@@ -3,6 +3,56 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Four-test Fix — COMPLETE (2026-09-10)**
+
+Fixed four test failures exposed by running the full `pytest tests/ --ignore=tests/load`
+suite. Final counts: **2856 passed, 1 failed** (only the known SQLite NaN limitation).
+
+**F1 + F2 (stale expectations in `tests/live/test_persistence_extra_channels.py`)**
+
+`_event_to_row` applies the ADR-005 canonical transform to the anomaly_score before
+persisting. Two tests hardcoded the pre-transform raw values (0.5 and 0.42) instead
+of the transformed values.
+
+Fix: import `canonical` from `src.api.services.score_transform` and
+`SCORE_SCALE_CALIBRATION` from `src.config`; derive expected values via
+`_canonical_score(raw, *SCORE_SCALE_CALIBRATION["live"])` rather than
+hardcoding literals. Pattern matches commit f711333 (test_inference.py).
+
+**F3 (`tests/unit/test_data_generator.py::test_generate_data_bounds`)**
+
+`LIGHT_RANGE` was corrected from `(0.0, 1000.0)` to `(0.0, 1200.0)` W/m² (canonical
+unit fix). The generator clips to `LIGHT_RANGE[1]`; the test still asserted `≤ 1000.0`.
+
+Fix: import `LIGHT_RANGE` from `src.config`; assert `data.max() <= LIGHT_RANGE[1]`.
+The config constant is authoritative — asserting against it prevents silent drift.
+
+**F4 (`tests/workers/test_upload_consumer.py::test_async_finalize_persists_trigger_channel`)**
+
+Root cause: **test fixture gap, not a production bug.**
+`_FAULT_RAMP = (45.0, 75.0, 130.0, 220.0, 380.0)` produced temperatures > 50°C.
+`CSVAdapter.validate_canonical_schema` (src/vendors/base.py) enforces temperature ≤ 50°C.
+When the fault-ramp chunk fails validation, the producer sets `normalized_rows = []`
+for that portion → those rows are never persisted to `sensor_readings`. Consequently
+`apply_anomaly_scores` finds no rows to update → `trigger_channel` stays NULL forever.
+
+Diagnostic: the statistical detector fires correctly on raw rows regardless of adapter
+validation (raw rows bypass `validate_canonical_schema`). The wiring in
+`upload_consumer.py:299` was never broken — the rows simply did not exist in the DB.
+
+Fix: change `_FAULT_RAMP` to `(30.0, 35.0, 40.0, 45.0, 49.0)` — all within the 50°C
+cap, all >> the z-threshold of 27°C (z ≈ 8.5 to 27.5 against baseline mean 21.5°C,
+std 1.0°C). 5 consecutive hits → 3 emitted (min_consecutive=3). Rows are now persisted
+and `apply_anomaly_scores` sets `trigger_channel = "temperature"` on them.
+
+**Files changed (tests only — no source modifications):**
+- `tests/live/test_persistence_extra_channels.py` — F1, F2: added imports + derived assertions
+- `tests/unit/test_data_generator.py` — F3: import LIGHT_RANGE, assert against constant
+- `tests/workers/test_upload_consumer.py` — F4: new _FAULT_RAMP within adapter validation bounds
+
+---
+
+## Previous Phase
 **ADR-007, ADR-008, and Convergence Doc Cost Correction — COMPLETE (2026-09-10)**
 
 Corrected the cost analysis in `docs/architecture/upload_detector_convergence.md`
