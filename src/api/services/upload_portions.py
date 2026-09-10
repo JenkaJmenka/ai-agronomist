@@ -9,6 +9,8 @@ statistical hits survive a portion; full raw rows and embeddings do not
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +31,7 @@ from src.config import (
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
 )
+from src.models.psychrometric_validator import validate_row as _psychro_validate_row
 from src.models.cold_run_detector import (
     ColdRunStatisticalDetector,
     _effective_rolling_window,
@@ -68,6 +71,12 @@ class StatCarry:
     seen: set[tuple[str, str]] = field(default_factory=set)
     total_rows: int = 0
     columns: list[str] | None = None
+    # Psychrometric context: {timestamp: (T_air, RH, measured_hd)} for
+    # timestamps with stat anomalies where all three values are present.
+    # Used by finalize_scores to suppress physically-expected pairings.
+    psychro_context: dict[str, tuple[float, float, float]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -157,9 +166,129 @@ def _detect_stats_incremental(
             )
         )
 
+    # Extract psychrometric context (T_air, RH, measured_hd) for timestamps
+    # with fresh anomalies, so finalize_scores can suppress physically-expected
+    # paired temperature + humidity alerts.
+    hit_timestamps = {h.timestamp for h in fresh}
+    if hit_timestamps:
+        _extract_psychro_context(rows, hit_timestamps, stat_carry)
+
     stat_carry.rows = rows[-COLD_RUN_STAT_ROLLING_WINDOW:]
     stat_carry.total_rows += len(raw_rows)
     return fresh
+
+
+def _extract_psychro_context(
+    rows: list[dict[str, Any]],
+    timestamps: set[str],
+    stat_carry: StatCarry,
+) -> None:
+    """Store (T_air, RH, measured_hd) for anomaly timestamps when all three present.
+
+    Only records context for timestamps not already stored, so the carry
+    accumulates across portions without duplicating work.
+    """
+    for row in rows:
+        ts = row.get("timestamp", "")
+        if ts not in timestamps or ts in stat_carry.psychro_context:
+            continue
+        t_val = row.get("temperature")
+        rh_val = row.get("humidity")
+        hd_val = row.get("measured_hd")
+        if t_val is None or rh_val is None or hd_val is None:
+            continue
+        try:
+            t_f = float(t_val)
+            rh_f = float(rh_val)
+            hd_f = float(hd_val)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(t_f) and math.isfinite(rh_f) and math.isfinite(hd_f):
+            stat_carry.psychro_context[ts] = (t_f, rh_f, hd_f)
+
+
+def _is_temp_stat_column(col: str) -> bool:
+    """True for temperature-family columns in statistical alerts."""
+    return "temp" in col.lower()
+
+
+def _is_humidity_stat_column(col: str) -> bool:
+    """True for relative-humidity columns (not humidity deficit / measured_hd)."""
+    return "humid" in col.lower()
+
+
+def _suppress_psychrometric_pairs(
+    stat_details: list[StatisticalAnomalyDetail],
+    psychro_context: dict[str, tuple[float, float, float]],
+) -> list[StatisticalAnomalyDetail]:
+    """Suppress paired temp+humidity alerts that are psychrometrically consistent.
+
+    When air temperature drops and relative humidity rises simultaneously, the
+    Tetens equation predicts exactly that coupling.  If the measured humidity
+    deficit (HD) AGREES with the HD derived from T and RH, the pairing is
+    expected physics — suppress both sides.  If HD DISAGREES, the sensors
+    contradict thermodynamics — keep the original alerts and add a
+    ``psychrometric_inconsistency`` marker so the fault is surfaced.
+
+    When measured_hd is absent for a timestamp, the check does not run and
+    behaviour is identical to pre-suppression (no silent default, no
+    fabricated HD).
+    """
+    if not psychro_context:
+        return stat_details
+
+    by_ts: dict[str, list[StatisticalAnomalyDetail]] = defaultdict(list)
+    for detail in stat_details:
+        by_ts[detail.timestamp].append(detail)
+
+    suppressed_ts: set[str] = set()
+    inconsistent_extras: list[StatisticalAnomalyDetail] = []
+
+    for ts, details in by_ts.items():
+        has_temp = any(_is_temp_stat_column(d.column) for d in details)
+        has_humid = any(_is_humidity_stat_column(d.column) for d in details)
+        if not (has_temp and has_humid):
+            continue
+
+        ctx = psychro_context.get(ts)
+        if ctx is None:
+            continue
+
+        t_air, rh, hd_measured = ctx
+        try:
+            status = _psychro_validate_row(t_air, rh, hd_measured)
+        except ValueError:
+            # Unphysical inputs (e.g. RH > 100 from sensor noise) — skip.
+            continue
+
+        if status == "OK":
+            # Psychrometrically consistent: suppress paired alerts.
+            suppressed_ts.add(ts)
+        else:
+            # Sensor disagrees with physics — flag the inconsistency.
+            inconsistent_extras.append(
+                StatisticalAnomalyDetail(
+                    timestamp=ts,
+                    column="psychrometric",
+                    value=hd_measured,
+                    z_score=0.0,
+                    severity="warning",
+                    method="psychrometric_inconsistency",
+                )
+            )
+
+    if not suppressed_ts and not inconsistent_extras:
+        return stat_details
+
+    result = [
+        d for d in stat_details
+        if not (
+            d.timestamp in suppressed_ts
+            and (_is_temp_stat_column(d.column) or _is_humidity_stat_column(d.column))
+        )
+    ]
+    result.extend(inconsistent_extras)
+    return result
 
 
 def _purge_fault_from_stat_carry(
@@ -294,6 +423,13 @@ def finalize_scores(
         if include_embeddings:
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
+
+    # Psychrometric suppression: suppress paired temperature + humidity
+    # statistical alerts when measured HD confirms the pairing is expected
+    # physics (cooling air → rising RH).  Inconsistent HD is flagged.
+    stat_details = _suppress_psychrometric_pairs(
+        stat_details, stat_carry.psychro_context,
+    )
 
     # Flush open freezes and finalise cadence check.
     if stuck_carry is not None:

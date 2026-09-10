@@ -3,6 +3,138 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Psychrometric Suppression on Upload Path — COMPLETE (2026-09-10)**
+
+Resolved the measured_hd (humidity deficit) channel being dropped by
+`is_cold_run_stat_column` — "deficit" appeared in both exclude and include
+lists; the exclusion won. Removed "deficit" from the exclude list (HD is a
+derived climate measurement, not an actuator) and added "measured_hd" to
+the include tokens.
+
+Wired `psychrometric_validator.validate_row` into the upload path
+(`upload_portions.py`) so paired temperature + humidity statistical alerts
+are suppressed when the measured HD agrees with the Tetens-derived HD
+(psychrometrically consistent → expected physics). Inconsistent HD still
+alerts with a `psychrometric_inconsistency` marker. When HD is absent, the
+check does not run — no fabricated values, behaviour identical to before.
+
+**Measured on native_dec_stuck_fault.csv:** paired alerts dropped from 6 → 0
+(all 6 were psychrometrically consistent cooling events).
+
+Files changed:
+- `src/models/cold_run_detector.py` — exclude/include list fix
+- `src/api/services/upload_portions.py` — psychro context extraction + suppression
+- `tests/api/test_psychrometric_suppression.py` — 12 new tests (all green)
+
+---
+
+**Upload ↔ Comprehensive Pipeline Detector Convergence Design — COMPLETE (2026-09-09)**
+
+Produced `docs/architecture/upload_detector_convergence.md` — a design document
+(no implementation) for bringing the full detector stack to the CSV upload path.
+
+**Key decisions:**
+1. **Option C (shared detector library, two orchestrators)** — both paths import the
+   same detector classes from `src/models/`; each keeps its own orchestration. Rejected
+   big-bang pipeline adoption (DB/state corruption), subsample approach (incomplete
+   coverage), and common DetectionOrchestrator interface (over-engineering).
+
+2. **8 detectors IN for Phase 1** (stateless, per-sequence): DropoutDetector,
+   NoiseDetector, OutOfBoundsDetector, SpikeMADDetector, BiasEMADetector,
+   MultivariateMahalanobisDetector, BOCPDDetector, EnsembleAnomalyDetector.
+
+3. **6 detectors OUT** (stateful or require unavailable data): CUSUMDriftDetector,
+   EMABaselineEstimator, EWMA/POT, SetpointAwareScadaDetector, BiasDualSensor,
+   CorrelationBreakdown.
+
+4. **Episode-level incidents** (not per-sequence) — one Incident per AnomalyEpisode,
+   using peak-score sequence embedding.
+
+5. **5 independently shippable phases**: (1) stateless detector fan-out, (2) episode
+   incidents, (3) ChunkCarry unification, (4) conditional detectors, (5) divergence guard.
+
+6. **Unmeasured assumptions flagged**: LSTM throughput on 105k sequences, false-positive
+   rate of new detectors on upload data, OOB detector interaction with imputed channels,
+   IF fit cost, episode embedding quality.
+
+## Previous Phase
+**COTHN outreach doc technical corrections — COMPLETE (2026-09-09)**
+
+Task: Correct all wrong technical claims in `docs/outreach/cothn-first-contact.md`
+against `tests/fixtures/NATIVE_FIXTURES.md` and source code. Six categories fixed:
+
+1. **Sampling cadence** — "15-minute interval" was bootstrap-file artifact.
+   Native export is 5-minute / 300 s cadence (105,120 rows = 365 × 288 samples/day).
+   Corrected in Detection latency section; derivation note updated in Flatline evidence.
+
+2. **Detection latency** — caveat block removed. End-to-end measured latency is
+   6.00 h (fault onset 2026-12-18T13:00Z → first alert 2026-12-18T19:00Z).
+   Configured threshold: 24 samples × 5 min = 2 h (`src/config.py:804`).
+   Alert carries `severity:"urgent"`, names channel, reports `duration_hours`
+   (`stuck_fault_detector.py:432/435`). One grouped event per freeze, recovery
+   tracked separately and not scored as anomalous.
+
+3. **Prior freeze durations** — "22, 29, 48 h" corrected to "22, 35, 48 h" in
+   email body (measured: 22.08, 34.83, 47.92 h). "29 h" was bootstrap artifact.
+   Table updated with exact native values + 1.00 h short freeze.
+
+4. **Main fault sample count** — 997 (bootstrap) → 1,897 (native). End time
+   corrected 08:40 → 08:50 UTC. Duration 163.7 h → 163.83 h everywhere.
+
+5. **Flatline evidence provenance** — section rewritten to cite native export
+   (`~/Downloads/2026_utk_test.csv`, SHA-256 in `NATIVE_FIXTURES.md`).
+   Bootstrap files explicitly marked as not valid fixtures.
+
+6. **CO2 row count in §5** — updated 9,057 (bootstrap) → 105,120 (native).
+   Added `src/vendors/csv_adapter.py:35` citation for `SENSOR_DEFAULTS["co2"]`.
+
+Not changed: CO2 caveat (still true), neutral provenance phrasing,
+external COTHN/SFT-EDIH claims, document structure, §7 connector caveat.
+
+## Previous Phase (formerly Current)
+**Reviewer findings applied — F1/F2/F3/F4 — COMPLETE (2026-09-09)**
+
+### F1 — ZeroDivisionError guard (hi == p)
+Guard already present at `src/api/services/score_transform.py:100-108`.
+Tests for `hi == p` and `hi < p` already in `tests/api/test_score_transform.py`
+(`TestNonFiniteGuard.test_hi_equals_p_returns_none`, `test_hi_less_than_p_returns_none`,
+`test_hi_equals_p_logs_at_warning`). No code changes required.
+
+### F2 — Canonical score assertion in test_inference_saves_to_database
+Test already updated (`_expected_canonical` derived from `_canonical_score` + calibration
+constants). No code changes required.
+
+### F2 — migration 023 downgrade infinite loop (timeout fix)
+Root cause: `_run_downgrade` updated `anomaly_score = raw` but never cleared
+`anomaly_score_raw`, so `WHERE anomaly_score_raw IS NOT NULL` re-selected the same rows
+every iteration — an infinite loop.
+
+Fix: added `anomaly_score_raw = NULL` to the UPDATE in both:
+- `tests/api/test_023_migration.py:_run_downgrade`
+- `alembic/versions/023_canonical_anomaly_score.py:downgrade`
+
+Two timeout tests now pass.
+Remaining failure: `test_nan_in_live_row_becomes_null_with_unknown_scale` — pre-existing
+SQLite NaN storage: SQLite converts `float('nan')` to NULL on REAL column insert, so the
+backfill's `WHERE anomaly_score IS NOT NULL` never finds it; cannot be fixed within
+migration code. Left failing per task instructions.
+
+### F3 — Stale "lux" in API schema docstrings
+- `src/api/schemas/sensor_data.py:SensorReadingCreate.light` → "W/m² — solar irradiance, canonical unit"
+- `src/api/schemas/sensor_data.py:SensorReadingResponse.light` → "W/m² (solar irradiance — canonical unit)"
+- `src/db/models.py:77` was already correct (W/m²)
+
+### F4 — Duplicated light constants
+Already fixed: `csv_adapter.py` imports `LIGHT_CANONICAL_UNIT`, `LIGHT_LUX_TO_W_PER_M2`,
+`LIGHT_PPFD_TO_W_PER_M2` from `src/config.py`. No changes required.
+
+### Test results
+- 111 baseline tests: ALL PASS
+- test_inference.py: ALL PASS (13/13)
+- test_score_transform.py: ALL PASS (33/33)
+- test_023_migration.py: 15/16 pass, 1 pre-existing SQLite NaN failure (left failing)
+
+## Previous Phase
 **Task 5b corrections: Duration off-by-one + regression assertions — COMPLETE (2026-09-09)**
 
 ### Correction 1 — Frozen duration off-by-one sample
