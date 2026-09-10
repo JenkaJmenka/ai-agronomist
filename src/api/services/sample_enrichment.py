@@ -11,6 +11,7 @@ from src.api.services.fault_classification import (
     _SENSOR_BOUNDS,
     _SENSOR_VALUE_KEYS,
     _UNKNOWN_KEY,
+    _canonical_sensor_value,
     _fault_type_from_anomaly_type,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
@@ -31,28 +32,6 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
-
-
-def _canonical_sensor_value(
-    channel: str,
-    temperature: float | None,
-    humidity: float | None,
-    co2: float | None,
-    light: float | None,
-) -> float | None:
-    """Return the stored SensorReading value for a canonical channel name.
-
-    Only the four stored columns are supported.  Non-canonical channel names
-    (e.g. ``measured_pipe_1_temp``) return None — the caller must use a
-    separately persisted ``trigger_value`` for those.
-    """
-    _MAP: dict[str, float | None] = {
-        "temperature": temperature,
-        "humidity": humidity,
-        "co2": co2,
-        "light": light,
-    }
-    return _MAP.get(channel)
 
 
 def _sensor_values_from_dict(

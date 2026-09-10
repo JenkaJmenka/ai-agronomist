@@ -22,42 +22,29 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.services.anomaly_group_queries import (
+from src.api.services.anomaly_group_queries import (  # noqa: F401
     _fetch_minimal_flagged_rows,
     _groups_by_date,
+    utc_date as utc_date,
 )
-from src.api.services.fault_classification import (
+from src.api.services.fault_classification import (  # noqa: F401
+    _SIMPLE_REASONING_UNITS as _SIMPLE_REASONING_UNITS,
     _UNKNOWN_KEY,
     _affected_sensors_from_incident,
-    _fault_type_from_anomaly_type,
+    _fault_type_from_anomaly_type as _fault_type_from_anomaly_type,
     _fault_type_from_incident,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
-)
-from src.api.services.sample_enrichment import (
-    _build_sample,
-    _build_sorted_incidents,
-    _enrich_samples_fast,
-    _iso,
-    _nearest_incident_fast,
-    _row_dict_from_minimal,
-)
-
-# ─── backward-compatibility re-exports ───────────────────────────────────────
-# Tests and routes import these names from anomaly_group_service; re-export so
-# existing import paths keep working without modifying every consumer.
-from src.api.services.anomaly_group_queries import utc_date as utc_date  # noqa: F401
-from src.api.services.fault_classification import (  # noqa: F401
-    _SIMPLE_REASONING_UNITS as _SIMPLE_REASONING_UNITS,
-    _fault_type_from_anomaly_type as _fault_type_from_anomaly_type,
     _simple_reasoning_from_values as _simple_reasoning_from_values,
 )
 from src.api.services.sample_enrichment import (  # noqa: F401
-    _enrich_sample_fast as _enrich_sample_fast,
-    _enrich_samples_fast as _enrich_samples_fast,
-    _row_dict_from_minimal as _row_dict_from_minimal,
     _build_sample as _build_sample,
     _build_sorted_incidents as _build_sorted_incidents,
+    _enrich_sample_fast as _enrich_sample_fast,
+    _enrich_samples_fast as _enrich_samples_fast,
+    _iso,
+    _nearest_incident_fast,
+    _row_dict_from_minimal as _row_dict_from_minimal,
 )
 
 # Type alias for bucket items in type/sensor grouping.
@@ -67,22 +54,6 @@ BucketItem = tuple[
 
 
 # ─── type / sensor grouping helpers ─────────────────────────────────────────
-
-
-def _sort_samples_newest_first(
-    bucket_items: list[tuple[str, float, float | None, float | None, float | None, float | None, str | None]],
-    sample_limit: int,
-) -> list[tuple[str, float, float | None, float | None, float | None, float | None, str | None]]:
-    """Pick the top-N items by score, then sort them newest-first by timestamp.
-
-    Mirrors group_anomaly_rows: ranked[:sample_limit] then sort by timestamp DESC.
-    Items: (timestamp_iso, anomaly_score, temperature, humidity, co2, light)
-    """
-    # Sort by score descending (stable sort — earliest timestamp wins on ties).
-    ranked = sorted(bucket_items, key=lambda t: t[1], reverse=True)
-    top = ranked[:sample_limit]
-    # Show newest-first by timestamp string (ISO sorts lexicographically).
-    return sorted(top, key=lambda t: t[0], reverse=True)
 
 
 def _bucket_rows_by_group(
@@ -158,7 +129,8 @@ def _collect_and_enrich_group_samples(
     group_top_items: dict[str, list[BucketItem]] = {}
 
     for key, items in buckets.items():
-        top_items = _sort_samples_newest_first(items, sample_limit)
+        ranked = sorted(items, key=lambda t: t[1], reverse=True)
+        top_items = sorted(ranked[:sample_limit], key=lambda t: t[0], reverse=True)
         group_top_items[key] = top_items
         for item in top_items:
             ts = item[0]

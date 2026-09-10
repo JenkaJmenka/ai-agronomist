@@ -45,6 +45,29 @@ _SENSOR_BOUNDS: dict[str, tuple[float, float]] = {
     "light": LIGHT_RANGE,
 }
 
+
+def _canonical_sensor_value(
+    channel: str,
+    temperature: float | None,
+    humidity: float | None,
+    co2: float | None,
+    light: float | None,
+) -> float | None:
+    """Return the stored SensorReading value for a canonical channel name.
+
+    Only the four stored columns are supported.  Non-canonical channel names
+    (e.g. ``measured_pipe_1_temp``) return None — the caller must use a
+    separately persisted ``trigger_value`` for those.
+    """
+    _MAP: dict[str, float | None] = {
+        "temperature": temperature,
+        "humidity": humidity,
+        "co2": co2,
+        "light": light,
+    }
+    return _MAP.get(channel)
+
+
 # Maps SensorReading.anomaly_type to the Incident.fault_type taxonomy.
 #
 # Three sources write anomaly_type values to SensorReading rows:
