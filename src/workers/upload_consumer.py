@@ -229,7 +229,15 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         # Producer may finalize before any portion transitioned the status.
         claimed = await try_transition(db, msg.job_id, "pending", "finalizing")
     if not claimed:
-        logger.info("Finalize for %s already claimed — skipping", msg.job_id)
+        # Still 'finalizing' means the claiming attempt died before writing a
+        # result — set_job_result always moves the status to a terminal one.
+        # Without this re-claim the retry short-circuits here and acks, so the
+        # DLQ hook never fires and the job hangs in 'finalizing' forever with
+        # no error surfaced (observed in production when a missing column made
+        # apply_anomaly_scores raise).
+        claimed = await try_transition(db, msg.job_id, "finalizing", "finalizing")
+    if not claimed:
+        logger.info("Finalize for %s already terminal — skipping", msg.job_id)
         return
 
     job = await get_job(db, msg.job_id)
@@ -238,6 +246,14 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         return
 
     portion_rows = await load_portions_in_order(db, msg.job_id)
+    if job.completed_portions and not any(row.result for row in portion_rows):
+        # prune_portion_results ran, so a prior attempt finalized successfully.
+        # Only a concurrent duplicate delivery reaches this. Recomputing would
+        # overwrite a good result with an empty one.
+        logger.info(
+            "Finalize for %s: portion results already pruned — skipping", msg.job_id
+        )
+        return
     portions: list[PortionScores] = []
     stat_carry = StatCarry()
     sensor_rows_total = 0
