@@ -39,8 +39,17 @@ _DEFAULT_PG_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
 
 
 def _postgres_url() -> str:
-    """Return the PostgreSQL URL from the environment."""
-    return os.environ.get("DATABASE_URL", _DEFAULT_PG_URL)
+    """Return the PostgreSQL URL from the environment.
+
+    POSTGRES_TEST_URL is checked first because ``tests/conftest.py`` overwrites
+    DATABASE_URL with the SQLite test database before any test module is
+    imported.  Reading DATABASE_URL alone meant every test in this file skipped
+    — including in the CI job that exists to run them, which reported green
+    while exercising nothing.
+    """
+    return os.environ.get(
+        "POSTGRES_TEST_URL", os.environ.get("DATABASE_URL", _DEFAULT_PG_URL)
+    )
 
 
 def _is_postgres_url(url: str) -> bool:

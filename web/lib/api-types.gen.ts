@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/api/anomalies/enriched": {
+    "/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -12,13 +12,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Enriched Anomalies
-         * @description Enriched top anomalies (G4) — replaces `load_enriched_top_anomalies`.
+         * Get Health
+         * @description Perform a basic health check on the API service to verify it is responsive.
          *
-         *     Highest-scoring flagged rows with fault_type / root_cause / reasoning
-         *     from the incident join, ready for the FE Top Anomalies table.
+         *     Returns:
+         *         dict: A JSON response containing the status of the service representation.
          */
-        get: operations["get_enriched_anomalies_api_anomalies_enriched_get"];
+        get: operations["get_health_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -27,7 +27,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/anomalies/groups": {
+    "/health/db": {
         parameters: {
             query?: never;
             header?: never;
@@ -35,39 +35,17 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Anomaly Groups
-         * @description Aggregated anomaly groups (G3) — powers the FE Table view grouping.
+         * Get Db Health
+         * @description Check the database connection health by executing a low-overhead query
+         *     against the sensor readings table as specified in the service contracts.
          *
-         *     `sample_ids` are ISO timestamps of each group's top-scoring rows (rows
-         *     have no stable primary key); `type`/`sensor` grouping runs the same
-         *     incident-join enrichment as /enriched so fault labels agree everywhere.
-         */
-        get: operations["get_anomaly_groups_api_anomalies_groups_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/auth/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Validate Api Key
-         * @description Report whether the presented X-API-Key is valid and its tenant scope.
+         *     Args:
+         *         db (AsyncSession): The database session dependency.
          *
-         *     Always answers 200 so the BFF can branch on the body instead of
-         *     exception-handling a 401: `{ok: false}` for unknown/missing keys,
-         *     `{ok: true, tenant_scope: <tenant>}` for valid ones. With auth
-         *     disabled every key is acceptable and there is no tenant scope.
+         *     Returns:
+         *         dict: A JSON response describing the connection status.
          */
-        get: operations["validate_api_key_api_auth_validate_get"];
+        get: operations["get_db_health_health_db_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -76,27 +54,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/feedback/learning-progress/{tenant_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Learning Progress
-         * @description Return detailed progress toward the next retrain trigger.
-         */
-        get: operations["learning_progress_api_feedback_learning_progress__tenant_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/feedback/mark": {
+    "/api/v1/bootstrap/run": {
         parameters: {
             query?: never;
             header?: never;
@@ -106,19 +64,33 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Mark Feedback
-         * @description Operator marks an incident as true anomaly or false positive.
+         * Run Bootstrap
+         * @description Run the two-pass cold-start bootstrap pipeline on a raw SCADA CSV.
          *
-         *     Automatically triggers learning if retraining criteria are met.
+         *     The uploaded CSV is written to a temporary file, processed through
+         *     Pass 1 (physics + IsolationForest cleaning) and Pass 2 (LSTM-VAE
+         *     training + full inference), and the merged per-row result is returned.
+         *
+         *     Args:
+         *         file: Raw SCADA CSV upload.
+         *         tenant_id: Tenant identifier used for multi-tenant output isolation.
+         *
+         *     Returns:
+         *         BootstrapRunResponse with ingestion counts and per-row results.
+         *
+         *     Raises:
+         *         HTTPException 422: CSV could not be read (FileNotFoundError).
+         *         HTTPException 400: Fewer than 100 clean rows after Pass 1.
+         *         HTTPException 500: Unexpected pipeline or training failure.
          */
-        post: operations["mark_feedback_api_feedback_mark_post"];
+        post: operations["run_bootstrap_api_v1_bootstrap_run_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/feedback/mark-anomaly": {
+    "/api/upload": {
         parameters: {
             query?: never;
             header?: never;
@@ -128,110 +100,19 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Mark Anomaly Integrated
-         * @description Operator feedback → active learning → optional auto-retrain.
-         *
-         *     Uses ``RetrainingOrchestrator.observe()`` which delegates to
-         *     ``ActiveLearner.collect_operator_feedback()`` — retraining is triggered
-         *     automatically when criteria are met (no separate ``trigger_retraining()``).
+         * Upload Csv
+         * @description Upload CSV file with sensor readings. Uses a memory-safe chunking
+         *     approach with CSVAdapter to validate and process data before database insertion.
+         *     Also stores raw readings (all columns) for full-fidelity dashboard display.
          */
-        post: operations["mark_anomaly_integrated_api_feedback_mark_anomaly_post"];
+        post: operations["upload_csv_api_upload_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/feedback/record-outcome": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Record Outcome
-         * @description Record whether an operator's past feedback was accurate.
-         *
-         *     Updates the operator's EMA reliability score in the per-customer
-         *     orchestrator.
-         */
-        post: operations["record_outcome_api_feedback_record_outcome_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/feedback/statistics/{tenant_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Feedback Statistics
-         * @description Return feedback statistics and learning progress for a tenant.
-         */
-        get: operations["feedback_statistics_api_feedback_statistics__tenant_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/gas/readings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Gas Readings
-         * @description Return raw gas sensor time-series without anomaly scoring.
-         *
-         *     Useful for charting tools that want unprocessed data.  Synthetic
-         *     readings are excluded.
-         */
-        get: operations["gas_readings_api_gas_readings_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/gas/summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Gas Summary
-         * @description Return per-column gas anomaly baselines and time-series for the window.
-         *
-         *     The baseline is fitted from all readings in the window, then each reading
-         *     is scored against it.  Synthetic readings are excluded.
-         */
-        get: operations["gas_summary_api_gas_summary_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/clear": {
+    "/api/upload/data": {
         parameters: {
             query?: never;
             header?: never;
@@ -242,76 +123,36 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Clear Incidents
-         * @description Delete all incidents and operator feedback for a tenant (and optional greenhouse).
+         * Clear Tenant Data
+         * @description Delete all greenhouse-scoped data (cascade rules in services.tenant_data_wipe).
          */
-        delete: operations["clear_incidents_api_incidents_clear_delete"];
+        delete: operations["clear_tenant_data_api_upload_data_delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/incidents/nearby": {
+    "/api/upload/live-data": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Find Nearby Incidents
-         * @description Incidents detected within ±window_min of the given timestamp.
-         */
-        get: operations["find_nearby_incidents_api_incidents_nearby_get"];
+        get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Remove Live Demo Data
+         * @description Delete Go Live / mock SCADA rows only (filter rules in services.tenant_data_wipe).
+         */
+        delete: operations["remove_live_demo_data_api_upload_live_data_delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/incidents/open": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Open Incidents
-         * @description Unresolved incidents for operator review queue.
-         */
-        get: operations["list_open_incidents_api_incidents_open_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/recurring-issues": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Recurring Issues
-         * @description Root causes that keep re-occurring for a tenant.
-         */
-        get: operations["get_recurring_issues_api_incidents_recurring_issues_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/resolve/{incident_id}": {
+    "/api/upload/inject-test-anomalies": {
         parameters: {
             query?: never;
             header?: never;
@@ -321,111 +162,15 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Resolve Incident
-         * @description Mark an incident as resolved with root cause and actions taken.
+         * Inject Test Anomalies
+         * @description Insert synthetic readings (generation rules in services.synthetic_anomalies).
          */
-        post: operations["resolve_incident_api_incidents_resolve__incident_id__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/similar": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
+        post: operations["inject_test_anomalies_api_upload_inject_test_anomalies_post"];
         /**
-         * Find Similar
-         * @description Find the k most similar past incidents (most similar first).
+         * Remove Synthetic Anomalies
+         * @description Remove synthetically injected test anomalies. Real sensor data is never touched.
          */
-        get: operations["find_similar_api_incidents_similar_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/statistics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Statistics
-         * @description Tenant-scoped incident statistics.
-         */
-        get: operations["get_statistics_api_incidents_statistics_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/store": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Store Incident
-         * @description Store a detected anomaly as an incident.
-         */
-        post: operations["store_incident_api_incidents_store_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/suggest-fixes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Suggest Fixes
-         * @description Suggest root cause and fixes based on similar resolved incidents.
-         */
-        get: operations["suggest_fixes_api_incidents_suggest_fixes_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/incidents/{incident_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Incident
-         * @description Single incident with diagnosis snapshot.
-         */
-        get: operations["get_incident_api_incidents__incident_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
+        delete: operations["remove_synthetic_anomalies_api_upload_inject_test_anomalies_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -442,46 +187,6 @@ export interface paths {
         put?: never;
         /** Run Inference */
         post: operations["run_inference_api_inference_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/inference/batch": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Batch Inference
-         * @description Run comprehensive inference for multiple sequences.
-         */
-        post: operations["batch_inference_api_inference_batch_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/inference/comprehensive": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Comprehensive Inference
-         * @description Run the full anomaly detection pipeline for one sequence.
-         */
-        post: operations["comprehensive_inference_api_inference_comprehensive_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -543,123 +248,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Jobs */
-        get: operations["get_jobs_api_jobs_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/jobs/{job_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Job Status */
-        get: operations["get_job_status_api_jobs__job_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/jobs/{job_id}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Cancel Job */
-        post: operations["cancel_job_api_jobs__job_id__cancel_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/jobs/{job_id}/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stream Job Events
-         * @description SSE job progress stream (G5) — replaces the dashboard's 5 s poll.
-         *
-         *     Emits a `data:` event whenever status/progress changes and closes after
-         *     the terminal event. Unchanged polls send an SSE comment as keep-alive.
-         *     The stream also closes after JOB_EVENTS_MAX_SECONDS as a hard guard
-         *     against zombie jobs holding connections open forever.
-         */
-        get: operations["stream_job_events_api_jobs__job_id__events_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/drift": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Drift
-         * @description Latest persisted drift check plus live detector state for a tenant.
-         */
-        get: operations["get_drift_api_learning_drift_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/history": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get History
-         * @description Learning events for a tenant, newest first, optionally filtered.
-         */
-        get: operations["get_history_api_learning_history_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/jobs/observe": {
+    "/api/inference/comprehensive": {
         parameters: {
             query?: never;
             header?: never;
@@ -669,63 +258,17 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Observe Sequences Async
-         * @description Queue observations for portion-wise online learning on the worker.
-         *
-         *     Once observations flow through the queue, the worker owns learner state
-         *     (single writer); the sync /observe endpoint remains for small interactive
-         *     batches and tests. Poll /api/jobs/{job_id} for progress.
+         * Comprehensive Inference
+         * @description Run the full anomaly detection pipeline for one sequence.
          */
-        post: operations["observe_sequences_async_api_learning_jobs_observe_post"];
+        post: operations["comprehensive_inference_api_inference_comprehensive_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/learning/models": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Clear Models
-         * @description Clears all trained models for a tenant, resetting them to the base model.
-         */
-        delete: operations["clear_models_api_learning_models_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/models/{tenant_id}/active-version": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Active Model Version
-         * @description Return the currently deployed model version for a tenant.
-         *
-         *     Returns 404 when no ModelDeployment with is_current=True exists for the tenant.
-         */
-        get: operations["get_active_model_version_api_learning_models__tenant_id__active_version_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/observe": {
+    "/api/inference/batch": {
         parameters: {
             query?: never;
             header?: never;
@@ -735,50 +278,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Observe Sequences
-         * @description Feed a batch of sequences to the tenant's online learner.
+         * Batch Inference
+         * @description Run comprehensive inference for multiple sequences.
          */
-        post: operations["observe_sequences_api_learning_observe_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/predict": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Predict Sequence
-         * @description Score one sequence with the tenant's adapted model (or the base model).
-         */
-        post: operations["predict_sequence_api_learning_predict_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/learning/statistics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Statistics
-         * @description Live learner statistics merged with the persisted learning summary.
-         */
-        get: operations["get_statistics_api_learning_statistics_get"];
-        put?: never;
-        post?: never;
+        post: operations["batch_inference_api_inference_batch_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -802,38 +305,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/models/{tenant_id}/activate": {
+    "/api/models/{tenant_id}/versions": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List Model Versions */
+        get: operations["list_model_versions_api_models__tenant_id__versions_get"];
         put?: never;
+        post?: never;
         /**
-         * Activate Model
-         * @description Set a previously trained model as the active deployment.
+         * Delete All Model Versions
+         * @description Delete all model versions for a customer.
          */
-        post: operations["activate_model_api_models__tenant_id__activate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/models/{tenant_id}/rollback": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Rollback Model */
-        post: operations["rollback_model_api_models__tenant_id__rollback_post"];
-        delete?: never;
+        delete: operations["delete_all_model_versions_api_models__tenant_id__versions_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -885,22 +372,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/models/{tenant_id}/versions": {
+    "/api/models/{tenant_id}/rollback": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Model Versions */
-        get: operations["list_model_versions_api_models__tenant_id__versions_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Rollback Model */
+        post: operations["rollback_model_api_models__tenant_id__rollback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/models/{tenant_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
-         * Delete All Model Versions
-         * @description Delete all model versions for a customer.
+         * Activate Model
+         * @description Set a previously trained model as the active deployment.
          */
-        delete: operations["delete_all_model_versions_api_models__tenant_id__versions_delete"];
+        post: operations["activate_model_api_models__tenant_id__activate_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -926,6 +429,481 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/incidents/store": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Store Incident
+         * @description Store a detected anomaly as an incident.
+         */
+        post: operations["store_incident_api_incidents_store_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/similar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Find Similar
+         * @description Find the k most similar past incidents (most similar first).
+         */
+        get: operations["find_similar_api_incidents_similar_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/suggest-fixes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Suggest Fixes
+         * @description Suggest root cause and fixes based on similar resolved incidents.
+         */
+        get: operations["suggest_fixes_api_incidents_suggest_fixes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/resolve/{incident_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Incident
+         * @description Mark an incident as resolved with root cause and actions taken.
+         */
+        post: operations["resolve_incident_api_incidents_resolve__incident_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/statistics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Statistics
+         * @description Tenant-scoped incident statistics.
+         */
+        get: operations["get_statistics_api_incidents_statistics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/recurring-issues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Recurring Issues
+         * @description Root causes that keep re-occurring for a tenant.
+         */
+        get: operations["get_recurring_issues_api_incidents_recurring_issues_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Open Incidents
+         * @description Unresolved incidents for operator review queue.
+         */
+        get: operations["list_open_incidents_api_incidents_open_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/nearby": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Find Nearby Incidents
+         * @description Incidents detected within ±window_min of the given timestamp.
+         */
+        get: operations["find_nearby_incidents_api_incidents_nearby_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Clear Incidents
+         * @description Delete all incidents and operator feedback for a tenant (and optional greenhouse).
+         */
+        delete: operations["clear_incidents_api_incidents_clear_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Incident
+         * @description Single incident with diagnosis snapshot.
+         */
+        get: operations["get_incident_api_incidents__incident_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Observe Sequences
+         * @description Feed a batch of sequences to the tenant's online learner.
+         */
+        post: operations["observe_sequences_api_learning_observe_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/jobs/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Observe Sequences Async
+         * @description Queue observations for portion-wise online learning on the worker.
+         *
+         *     Once observations flow through the queue, the worker owns learner state
+         *     (single writer); the sync /observe endpoint remains for small interactive
+         *     batches and tests. Poll /api/jobs/{job_id} for progress.
+         */
+        post: operations["observe_sequences_async_api_learning_jobs_observe_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/predict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Predict Sequence
+         * @description Score one sequence with the tenant's adapted model (or the base model).
+         */
+        post: operations["predict_sequence_api_learning_predict_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/statistics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Statistics
+         * @description Live learner statistics merged with the persisted learning summary.
+         */
+        get: operations["get_statistics_api_learning_statistics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get History
+         * @description Learning events for a tenant, newest first, optionally filtered.
+         */
+        get: operations["get_history_api_learning_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/drift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Drift
+         * @description Latest persisted drift check plus live detector state for a tenant.
+         */
+        get: operations["get_drift_api_learning_drift_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/models/{tenant_id}/active-version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Active Model Version
+         * @description Return the currently deployed model version for a tenant.
+         *
+         *     Returns 404 when no ModelDeployment with is_current=True exists for the tenant.
+         */
+        get: operations["get_active_model_version_api_learning_models__tenant_id__active_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/learning/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Clear Models
+         * @description Clears all trained models for a tenant, resetting them to the base model.
+         */
+        delete: operations["clear_models_api_learning_models_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/mark": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Feedback
+         * @description Operator marks an incident as true anomaly or false positive.
+         *
+         *     Automatically triggers learning if retraining criteria are met.
+         */
+        post: operations["mark_feedback_api_feedback_mark_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/statistics/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Feedback Statistics
+         * @description Return feedback statistics and learning progress for a tenant.
+         */
+        get: operations["feedback_statistics_api_feedback_statistics__tenant_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/learning-progress/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Learning Progress
+         * @description Return detailed progress toward the next retrain trigger.
+         */
+        get: operations["learning_progress_api_feedback_learning_progress__tenant_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/record-outcome": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record Outcome
+         * @description Record whether an operator's past feedback was accurate.
+         *
+         *     Updates the operator's EMA reliability score in the per-customer
+         *     orchestrator.
+         */
+        post: operations["record_outcome_api_feedback_record_outcome_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feedback/mark-anomaly": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Anomaly Integrated
+         * @description Operator feedback → active learning → optional auto-retrain.
+         *
+         *     Uses ``RetrainingOrchestrator.observe()`` which delegates to
+         *     ``ActiveLearner.collect_operator_feedback()`` — retraining is triggered
+         *     automatically when criteria are met (no separate ``trigger_retraining()``).
+         */
+        post: operations["mark_anomaly_integrated_api_feedback_mark_anomaly_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/monitoring/metrics": {
         parameters: {
             query?: never;
@@ -946,7 +924,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/network/dhcp-fingerprint": {
+    "/api/gas/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Gas Summary
+         * @description Return per-column gas anomaly baselines and time-series for the window.
+         *
+         *     The baseline is fitted from all readings in the window, then each reading
+         *     is scored against it.  Synthetic readings are excluded.
+         */
+        get: operations["gas_summary_api_gas_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/gas/readings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Gas Readings
+         * @description Return raw gas sensor time-series without anomaly scoring.
+         *
+         *     Useful for charting tools that want unprocessed data.  Synthetic
+         *     readings are excluded.
+         */
+        get: operations["gas_readings_api_gas_readings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job Status */
+        get: operations["get_job_status_api_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Job Events
+         * @description SSE job progress stream (G5) — replaces the dashboard's 5 s poll.
+         *
+         *     Emits a `data:` event whenever status/progress changes and closes after
+         *     the terminal event. Unchanged polls send an SSE comment as keep-alive.
+         *     The stream also closes after JOB_EVENTS_MAX_SECONDS as a hard guard
+         *     against zombie jobs holding connections open forever.
+         */
+        get: operations["stream_job_events_api_jobs__job_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Job */
+        post: operations["cancel_job_api_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Jobs
+         * @description List jobs — heavy result arrays stripped server-side at the SQL layer.
+         *
+         *     payload is never fetched (not in the list response schema).
+         *     result is returned without _HEAVY_RESULT_KEYS (anomaly_scores,
+         *     sequence_timestamps, high_anomalies, statistical_summary, …).
+         *     Both exclusions happen in the SELECT, so the DB never sends the large
+         *     blobs to Python.  The full result is available via GET /api/jobs/{id}.
+         */
+        get: operations["get_jobs_api_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/live/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live Source Status
+         * @description Return current health status of all live data sources for a scope.
+         *
+         *     Response shape (always HTTP 200):
+         *     ::
+         *
+         *         {
+         *           "greenhouse_status": "not_registered" | "no_source" | "live",
+         *           "sources": [...]
+         *         }
+         *
+         *     The ``greenhouse_status`` discriminator lets callers tell apart three
+         *     empty-source states that previously all returned ``{"sources": []}``
+         *     and were indistinguishable:
+         *
+         *     * ``not_registered`` — no greenhouse record in the registry or any
+         *       readings table; the tenant needs to be provisioned.
+         *     * ``no_source``      — greenhouse exists but the live runtime is not
+         *       watching it; use POST /api/readings/greenhouses to register and
+         *       configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.
+         *     * ``live``           — the runtime has an active scope for this
+         *       greenhouse (sources may still have ``last_seen: null`` while the
+         *       first ticks arrive).
+         *
+         *     The ``sources`` list is always present so existing consumers that only
+         *     read ``sources`` continue to work without changes.
+         */
+        get: operations["live_source_status_api_live_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/live/resume": {
         parameters: {
             query?: never;
             header?: never;
@@ -956,77 +1109,71 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Check Dhcp Fingerprint
-         * @description Validate DHCP configuration fingerprint against baseline.
+         * Resume Live Scope Endpoint
+         * @description Explicitly re-enable live publish/persistence after Clear all data.
+         *
+         *     Called when the operator turns Go Live on — not on every SSE reconnect,
+         *     which would immediately re-seed the wiped database.
          */
-        post: operations["check_dhcp_fingerprint_api_network_dhcp_fingerprint_post"];
+        post: operations["resume_live_scope_endpoint_api_live_resume_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/network/rtt-jitter": {
+    "/api/live/events": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Stream Live Events
+         * @description SSE live-monitoring stream (Phase 2B).
+         *
+         *     Replays missed events when Last-Event-ID / last_event_id is supplied,
+         *     then tails the Redis stream live.  Hard-closes after
+         *     ``LIVE_MAX_STREAM_SECONDS`` so the browser reconnects and the server
+         *     sheds stale connections automatically.
+         *
+         *     Does **not** resume a scope muted by Clear all data — use POST /resume
+         *     (wired to Go Live) for that.
+         */
+        get: operations["stream_live_events_api_live_events_get"];
         put?: never;
-        /**
-         * Check Rtt Jitter
-         * @description Check a single RTT measurement for latency and jitter anomalies.
-         */
-        post: operations["check_rtt_jitter_api_network_rtt_jitter_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/network/service-response": {
+    "/api/readings/window": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get Readings Window
+         * @description Merged raw+canonical rows for an inclusive window (hard row cap applies).
+         *
+         *     G1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);
+         *     `include_scores=false` trims anomaly_score from the payload.
+         */
+        get: operations["get_readings_window_api_readings_window_get"];
         put?: never;
-        /**
-         * Check Service Response
-         * @description Check a service response duration against threshold.
-         */
-        post: operations["check_service_response_api_network_service_response_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/network/tcp-handshake": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check Tcp Handshake
-         * @description Check a TCP handshake latency.
-         */
-        post: operations["check_tcp_handshake_api_network_tcp_handshake_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/readings/anomalies": {
+    "/api/readings/recent": {
         parameters: {
             query?: never;
             header?: never;
@@ -1034,10 +1181,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Anomaly Readings
-         * @description Canonical (scored) rows within the trailing wall-clock window.
+         * Get Readings Recent
+         * @description Bounded landing-page load: the most recent `hours` of merged readings.
+         *
+         *     Anchored to the newest stored timestamp (not wall-clock) so historical
+         *     datasets still render on first load.
          */
-        get: operations["get_anomaly_readings_api_readings_anomalies_get"];
+        get: operations["get_readings_recent_api_readings_recent_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1057,11 +1207,9 @@ export interface paths {
          * Get Anomalies In Window
          * @description Threshold-filtered anomaly rows for a window (migration plan G2).
          *
-         *     Moves the dashboard's `load_anomalies_for_window` merge+filter
-         *     server-side: merged raw+canonical rows are score-filtered, and
-         *     `max_points` LTTB-downsamples the flagged rows. `total_count` is the
-         *     full window's row count, `anomaly_count` the flagged count before
-         *     downsampling.
+         *     Score filtering and counting run in SQL over the FULL window (never the
+         *     row-capped merged rows, which silently dropped flagged rows on wide
+         *     windows); `max_points` LTTB-downsamples the flagged rows.
          */
         get: operations["get_anomalies_in_window_api_readings_anomalies_in_window_get"];
         put?: never;
@@ -1089,32 +1237,18 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/readings/greenhouses": {
+    "/api/readings/anomalies": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Greenhouses */
-        get: operations["get_greenhouses_api_readings_greenhouses_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/readings/incidents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Incidents */
-        get: operations["get_incidents_api_readings_incidents_get"];
+        /**
+         * Get Anomaly Readings
+         * @description Canonical (scored) rows within the trailing wall-clock window.
+         */
+        get: operations["get_anomaly_readings_api_readings_anomalies_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1160,7 +1294,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/readings/recent": {
+    "/api/readings/greenhouses": {
         parameters: {
             query?: never;
             header?: never;
@@ -1168,13 +1302,35 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Readings Recent
-         * @description Bounded landing-page load: the most recent `hours` of merged readings.
-         *
-         *     Anchored to the newest stored timestamp (not wall-clock) so historical
-         *     datasets still render on first load.
+         * Get Greenhouses
+         * @description List registered greenhouses plus any with readings, merged and sorted.
          */
-        get: operations["get_readings_recent_api_readings_recent_get"];
+        get: operations["get_greenhouses_api_readings_greenhouses_get"];
+        put?: never;
+        /**
+         * Register Greenhouse
+         * @description Register a greenhouse so it appears in the selector with zero readings.
+         *
+         *     Idempotent: calling this multiple times for the same
+         *     (tenant_id, greenhouse_id) pair is safe and returns ``created: false``
+         *     on subsequent calls.
+         */
+        post: operations["register_greenhouse_api_readings_greenhouses_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/readings/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Incidents */
+        get: operations["get_incidents_api_readings_incidents_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1183,30 +1339,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/readings/window": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Readings Window
-         * @description Merged raw+canonical rows for an inclusive window (hard row cap applies).
-         *
-         *     G1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);
-         *     `include_scores=false` trims anomaly_score from the payload.
-         */
-        get: operations["get_readings_window_api_readings_window_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/upload": {
+    "/api/network/rtt-jitter": {
         parameters: {
             query?: never;
             header?: never;
@@ -1216,19 +1349,20 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Upload Csv
-         * @description Upload CSV file with sensor readings. Uses a memory-safe chunking
-         *     approach with CSVAdapter to validate and process data before database insertion.
-         *     Also stores raw readings (all columns) for full-fidelity dashboard display.
+         * Check Rtt Jitter
+         * @description Check a single RTT measurement for latency and jitter anomalies.
+         *
+         *     The per-tenant detector remembers the previous RTT, so jitter works
+         *     across consecutive requests; ``previous_rtt_ms`` overrides it.
          */
-        post: operations["upload_csv_api_upload_post"];
+        post: operations["check_rtt_jitter_api_network_rtt_jitter_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/upload/data": {
+    "/api/network/iat": {
         parameters: {
             query?: never;
             header?: never;
@@ -1236,83 +1370,163 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        put?: never;
+        /**
+         * Check Iat
+         * @description Check an inter-packet interval series for CV / spacing anomalies.
+         */
+        post: operations["check_iat_api_network_iat_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/network/tcp-handshake": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Tcp Handshake
+         * @description Check a TCP handshake latency.
+         */
+        post: operations["check_tcp_handshake_api_network_tcp_handshake_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/network/dhcp-fingerprint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Dhcp Fingerprint
+         * @description Validate DHCP configuration fingerprint against baseline.
+         */
+        post: operations["check_dhcp_fingerprint_api_network_dhcp_fingerprint_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/network/service-response": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Service Response
+         * @description Check a service response duration against the dynamic P99 threshold.
+         *
+         *     Every observed duration feeds the per-tenant rolling window (after
+         *     detection, so a sample never softens its own check); the threshold is
+         *     P99 of that window with the static baseline as a floor.
+         */
+        post: operations["check_service_response_api_network_service_response_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/network/threat/fit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fit Threat Detector
+         * @description Fit the per-tenant Isolation Forest on normal-traffic vectors.
+         */
+        post: operations["fit_threat_detector_api_network_threat_fit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/network/threat/score": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Score Threat
+         * @description Score a feature vector against the tenant's fitted Isolation Forest.
+         */
+        post: operations["score_threat_api_network_threat_score_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/anomalies/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Anomaly Groups
+         * @description Aggregated anomaly groups (G3) — powers the FE Table view grouping.
+         *
+         *     ``sample_ids`` are ISO timestamps of each group's top-scoring rows (rows
+         *     have no stable primary key); ``type``/``sensor`` grouping runs the same
+         *     incident-join enrichment as /enriched so fault labels agree everywhere.
+         *
+         *     Performance: uses SQL aggregation (by=date) or column-projection + binary-
+         *     search incident join (by=type/sensor) instead of fetching up to 50 000 full
+         *     rows and processing them in Python.  Full-range full-year queries that
+         *     previously took 33 s now complete in < 1 s.
+         *
+         *     ADR-005 §2 — threshold is now optional.  When omitted the server defaults to
+         *     ``CANONICAL_ANOMALY_THRESHOLD = 0.5``, which is correct for every producer on
+         *     the canonical scale.  The effective value is echoed in the response so clients
+         *     can display exactly which threshold was applied.
+         *
+         *     Cache key note: the cache is keyed on all query parameters.  An absent
+         *     ``threshold`` and an explicit ``?threshold=0.5`` produce different cache keys
+         *     and are cached independently; both return the same result and both are correct.
+         *     A stale ``?threshold=0.15`` entry from before the migration will age out
+         *     within REDIS_CACHE_EXPIRE_SECONDS.
+         */
+        get: operations["get_anomaly_groups_api_anomalies_groups_get"];
         put?: never;
         post?: never;
-        /**
-         * Clear Tenant Data
-         * @description Delete all raw and sensor readings for a tenant/greenhouse.
-         */
-        delete: operations["clear_tenant_data_api_upload_data_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/upload/inject-test-anomalies": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Inject Test Anomalies
-         * @description Insert synthetic readings into the database.
-         *
-         *     Reads column names and value ranges from existing RawReadings so injected
-         *     spikes match the user's real sensors. Writes SensorReading (anomaly_score +
-         *     anomaly_type set) and RawReading (source = synthetic:<type>).
-         */
-        post: operations["inject_test_anomalies_api_upload_inject_test_anomalies_post"];
-        /**
-         * Remove Synthetic Anomalies
-         * @description Remove synthetically injected test anomalies. Real sensor data is never touched.
-         */
-        delete: operations["remove_synthetic_anomalies_api_upload_inject_test_anomalies_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/bootstrap/run": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Run Bootstrap
-         * @description Run the two-pass cold-start bootstrap pipeline on a raw SCADA CSV.
-         *
-         *     The uploaded CSV is written to a temporary file, processed through
-         *     Pass 1 (physics + IsolationForest cleaning) and Pass 2 (LSTM-VAE
-         *     training + full inference), and the merged per-row result is returned.
-         *
-         *     Args:
-         *         file: Raw SCADA CSV upload.
-         *         tenant_id: Tenant identifier used for multi-tenant output isolation.
-         *
-         *     Returns:
-         *         BootstrapRunResponse with ingestion counts and per-row results.
-         *
-         *     Raises:
-         *         HTTPException 422: CSV could not be read (FileNotFoundError).
-         *         HTTPException 400: Fewer than 100 clean rows after Pass 1.
-         *         HTTPException 500: Unexpected pipeline or training failure.
-         */
-        post: operations["run_bootstrap_api_v1_bootstrap_run_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/health": {
+    "/api/anomalies/enriched": {
         parameters: {
             query?: never;
             header?: never;
@@ -1320,13 +1534,45 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Health
-         * @description Perform a basic health check on the API service to verify it is responsive.
+         * Get Enriched Anomalies
+         * @description Enriched top anomalies (G4) — replaces ``load_enriched_top_anomalies``.
          *
-         *     Returns:
-         *         dict: A JSON response containing the status of the service representation.
+         *     Highest-scoring flagged rows with fault_type / root_cause / reasoning
+         *     from the incident join, ready for the FE Top Anomalies table.
+         *
+         *     Performance (two-part fix shipped 2026-07-28):
+         *
+         *     1. Migration 022 adds ``ix_sensor_readings_score_desc`` on
+         *        ``(tenant_id, greenhouse_id, anomaly_score DESC) WHERE anomaly_score IS NOT NULL``.
+         *        This lets Postgres walk the index from the highest score downward and stop
+         *        after LIMIT rows, avoiding the full-table seq scan + top-N heapsort that
+         *        dominated at FULL RANGE.
+         *
+         *        EXPLAIN ANALYZE before (35k rows, Postgres 16):
+         *          Seq Scan + top-N heapsort over 4 381 filtered rows — 10.570 ms local,
+         *          ~9.8 s in production.
+         *
+         *        EXPLAIN ANALYZE after:
+         *          Index Scan on ix_sensor_readings_score_desc — 0.277 ms local (38x).
+         *
+         *     2. The incident-join enrichment switches from ``enrich_anomaly_rows``
+         *        (pandas DataFrame + O(N_incidents) linear scan per row) to
+         *        ``_enrich_samples_fast`` (binary-search incident lookup, no pandas),
+         *        reusing the same fast path already in use by /groups.
+         *
+         *     Note: the three sequential awaits (fetch_top_flagged_rows_by_score,
+         *     count_flagged_rows, _load_incidents) are independent but CANNOT be
+         *     parallelised with asyncio.gather: AsyncSession is backed by a single
+         *     connection and does not support concurrent queries on the same session.
+         *     Running them in parallel would raise sqlalchemy.exc.InvalidRequestError.
+         *
+         *     Response shape is preserved exactly: rows, count, anomaly_count.
+         *     anomaly_count is the full window count — never capped by the display limit.
+         *
+         *     ADR-005 §2 — threshold is now optional.  Echoes the effective threshold and
+         *     score_scale_version so clients can confirm which scale is in use.
          */
-        get: operations["get_health_health_get"];
+        get: operations["get_enriched_anomalies_api_anomalies_enriched_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1335,7 +1581,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/health/db": {
+    "/api/auth/validate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1343,17 +1589,79 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Db Health
-         * @description Check the database connection health by executing a low-overhead query
-         *     against the sensor readings table as specified in the service contracts.
+         * Validate Api Key
+         * @description Report whether the presented X-API-Key is valid and its tenant scope.
          *
-         *     Args:
-         *         db (AsyncSession): The database session dependency.
-         *
-         *     Returns:
-         *         dict: A JSON response describing the connection status.
+         *     Always answers 200 so the BFF can branch on the body instead of
+         *     exception-handling a 401: `{ok: false}` for unknown/missing keys,
+         *     `{ok: true, tenant_scope: <tenant>}` for valid ones. With auth
+         *     disabled every key is acceptable and there is no tenant scope.
          */
-        get: operations["get_db_health_health_db_get"];
+        get: operations["validate_api_key_api_auth_validate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/config/operational": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Operational Config
+         * @description Return the merged operational config plus per-key source annotation.
+         */
+        get: operations["get_operational_config_api_config_operational_get"];
+        /**
+         * Put Operational Config
+         * @description Validate and upsert the operational config for (tenant, greenhouse).
+         */
+        put: operations["put_operational_config_api_config_operational_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/config/crop-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Crop Profiles
+         * @description Return the static crop setpoint profile templates (no auth required).
+         */
+        get: operations["get_crop_profiles_api_config_crop_profiles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/baselines/seasonal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Seasonal Baselines
+         * @description Return seasonal baselines plus detector scale factors.
+         */
+        get: operations["get_seasonal_baselines_api_baselines_seasonal_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1377,15 +1685,15 @@ export interface components {
              */
             action: string;
             /**
-             * Count
-             * @description Times the action was applied
-             */
-            count: number;
-            /**
              * Effectiveness
              * @description Observed effectiveness rate (0-1)
              */
             effectiveness: number;
+            /**
+             * Count
+             * @description Times the action was applied
+             */
+            count: number;
         };
         /** ActivateRequest */
         ActivateRequest: {
@@ -1398,22 +1706,61 @@ export interface components {
          */
         ActiveModelVersionResponse: {
             /**
-             * Checkpoint Path
-             * @description Path to the model checkpoint file
-             */
-            checkpoint_path: string;
-            /**
              * Model Id
              * @description Identifier of the active model version
              */
             model_id: string;
+            /**
+             * Checkpoint Path
+             * @description Path to the model checkpoint file
+             */
+            checkpoint_path: string;
+        };
+        /**
+         * AnomalyEpisodeSchema
+         * @description One continuous anomaly event on a single channel (Task 5).
+         */
+        AnomalyEpisodeSchema: {
+            /** Channel */
+            channel: string;
+            /** Detector */
+            detector: string;
+            /** Start Ts */
+            start_ts: string;
+            /** End Ts */
+            end_ts: string;
+            /** Duration Seconds */
+            duration_seconds: number;
+            /** Peak Score */
+            peak_score: number;
+            /** Sample Count */
+            sample_count: number;
+            /** Severity */
+            severity: string;
+            /**
+             * Is Recovery
+             * @default false
+             */
+            is_recovery: boolean;
+            /**
+             * Is Ongoing
+             * @description True when the freeze had not yet ended at detection time. duration_seconds is then a lower bound (gate-crossing duration).
+             * @default false
+             */
+            is_ongoing: boolean;
+            /** Onset Ts */
+            onset_ts?: string | null;
+            /** Detected Ts */
+            detected_ts?: string | null;
+            /** Frozen Value */
+            frozen_value?: number | null;
         };
         /** AnomalyFlagResponse */
         AnomalyFlagResponse: {
-            /** Detail */
-            detail?: string | null;
             /** Is Anomaly */
             is_anomaly: boolean;
+            /** Detail */
+            detail?: string | null;
         };
         /**
          * BatchInferenceRequest
@@ -1438,43 +1785,43 @@ export interface components {
          * @description Aggregated batch inference result.
          */
         BatchInferenceResponse: {
+            /** Batch Size */
+            batch_size: number;
             /** Anomalies Detected */
             anomalies_detected: number;
             /** Avg Confidence */
             avg_confidence: number;
-            /** Batch Size */
-            batch_size: number;
             /** Results */
             results: components["schemas"]["ComprehensiveInferenceResponse"][];
         };
         /** Body_inject_test_anomalies_api_upload_inject_test_anomalies_post */
         Body_inject_test_anomalies_api_upload_inject_test_anomalies_post: {
-            /**
-             * Anomaly Type
-             * @default random
-             */
-            anomaly_type: string;
+            /** Tenant Id */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @default default
              */
             greenhouse_id: string;
             /**
+             * N Normal
+             * @default 96
+             */
+            n_normal: number;
+            /**
              * N Anomalies
              * @default 8
              */
             n_anomalies: number;
             /**
-             * N Normal
-             * @default 96
+             * Anomaly Type
+             * @default random
              */
-            n_normal: number;
-            /** Tenant Id */
-            tenant_id: string;
-            /** Window End */
-            window_end?: string | null;
+            anomaly_type: string;
             /** Window Start */
             window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
         };
         /** Body_run_bootstrap_api_v1_bootstrap_run_post */
         Body_run_bootstrap_api_v1_bootstrap_run_post: {
@@ -1485,25 +1832,25 @@ export interface components {
         };
         /** Body_run_inference_from_csv_api_inference_upload_post */
         Body_run_inference_from_csv_api_inference_upload_post: {
-            /** File */
-            file: string;
+            /** Tenant Id */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @default default
              */
             greenhouse_id: string;
-            /**
-             * Include Embeddings
-             * @default false
-             */
-            include_embeddings: boolean;
+            /** File */
+            file: string;
             /**
              * Persist Data
              * @default false
              */
             persist_data: boolean;
-            /** Tenant Id */
-            tenant_id: string;
+            /**
+             * Include Embeddings
+             * @default false
+             */
+            include_embeddings: boolean;
             /**
              * Train Model
              * @default false
@@ -1512,20 +1859,20 @@ export interface components {
         };
         /** Body_run_inference_from_csv_async_api_inference_upload_async_post */
         Body_run_inference_from_csv_async_api_inference_upload_async_post: {
-            /** File */
-            file: string;
+            /** Tenant Id */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @default default
              */
             greenhouse_id: string;
+            /** File */
+            file: string;
             /**
              * Persist Data
              * @default false
              */
             persist_data: boolean;
-            /** Tenant Id */
-            tenant_id: string;
             /**
              * Train Model
              * @default false
@@ -1536,58 +1883,53 @@ export interface components {
         Body_upload_csv_api_upload_post: {
             /** File */
             file: string;
+            /** Tenant Id */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @default default
              */
             greenhouse_id: string;
-            /** Tenant Id */
-            tenant_id: string;
         };
         /**
          * BootstrapRowResult
          * @description Per-row classification result from the two-pass bootstrap pipeline.
          */
         BootstrapRowResult: {
-            /** Contributing Sensors */
-            contributing_sensors: string[];
-            /** Is Anomaly */
-            is_anomaly: boolean;
-            /** Pass1 Filtered */
-            pass1_filtered: boolean;
-            /** Physics Validation Status */
-            physics_validation_status: string;
-            /** Reconstruction Loss */
-            reconstruction_loss: number;
-            /** Root Cause Tags */
-            root_cause_tags: string[];
             /** Timestamp */
             timestamp: string;
+            /** Is Anomaly */
+            is_anomaly: boolean;
+            /** Reconstruction Loss */
+            reconstruction_loss: number;
+            /** Pass1 Filtered */
+            pass1_filtered: boolean;
+            /** Root Cause Tags */
+            root_cause_tags: string[];
+            /** Contributing Sensors */
+            contributing_sensors: string[];
+            /** Physics Validation Status */
+            physics_validation_status: string;
         };
         /**
          * BootstrapRunResponse
          * @description Top-level response from POST /api/v1/bootstrap/run.
          */
         BootstrapRunResponse: {
-            /** Pass1 Anomaly Rows */
-            pass1_anomaly_rows: number;
-            /** Pass1 Clean Rows */
-            pass1_clean_rows: number;
-            /** Results */
-            results: components["schemas"]["BootstrapRowResult"][];
             /** Rows Ingested */
             rows_ingested: number;
+            /** Pass1 Clean Rows */
+            pass1_clean_rows: number;
+            /** Pass1 Anomaly Rows */
+            pass1_anomaly_rows: number;
+            /** Results */
+            results: components["schemas"]["BootstrapRowResult"][];
         };
         /**
          * ComprehensiveInferenceRequest
          * @description Request body for POST /api/inference/comprehensive.
          */
         ComprehensiveInferenceRequest: {
-            /**
-             * Baseline Sequences
-             * @description Optional normal baseline sequences for pattern/attribution
-             */
-            baseline_sequences?: number[][][] | null;
             /**
              * Customer Id
              * @description Tenant / customer ID
@@ -1600,99 +1942,128 @@ export interface components {
              */
             greenhouse_id: string;
             /**
-             * Sensor Pairs
-             * @description Optional redundant sensor pairs for cross-validation
-             */
-            sensor_pairs?: components["schemas"]["SensorPairSequence"][] | null;
-            /**
              * Sequence
              * @description Sensor sequence [seq_len, input_dim]
              */
             sequence: number[][];
             /**
+             * Baseline Sequences
+             * @description Optional normal baseline sequences for pattern/attribution
+             */
+            baseline_sequences?: number[][][] | null;
+            /**
+             * Sensor Pairs
+             * @description Optional redundant sensor pairs for cross-validation
+             */
+            sensor_pairs?: components["schemas"]["SensorPairSequence"][] | null;
+            /**
              * Sequence Timestamp
              * @description ISO-8601 timestamp of the sequence for diurnal profile checks
              */
             sequence_timestamp?: string | null;
+            /**
+             * Climate Context
+             * @description Optional climate-computer / microclimate scalars for setpoint-aware SCADA rules (t_setpoint, t_plant, t_outdoor, i_solar, …)
+             */
+            climate_context?: {
+                [key: string]: number;
+            } | null;
         };
         /**
          * ComprehensiveInferenceResponse
          * @description Full pipeline result returned to API consumers.
          */
         ComprehensiveInferenceResponse: {
-            /** Affected Sensors */
-            affected_sensors: string[];
-            /** All Recommendations */
-            all_recommendations: string[];
-            /** Alternative Causes */
-            alternative_causes: string[];
+            /** Is Anomaly */
+            is_anomaly: boolean;
             /** Anomaly Score */
             anomaly_score: number;
-            /** Attribution */
-            attribution: {
-                [key: string]: number;
-            };
             /** Confidence */
             confidence: number;
             /** Confidence Level */
             confidence_level: string;
-            /** Detector Scores */
-            detector_scores?: {
+            /** Pattern Type */
+            pattern_type: string;
+            /** Attribution */
+            attribution: {
                 [key: string]: number;
-            } | null;
-            /** Ensemble Agreement */
-            ensemble_agreement?: number | null;
-            /** Ensemble Score */
-            ensemble_score?: number | null;
-            /** Estimated Resolution Minutes */
-            estimated_resolution_minutes: number;
-            /** Follow Up Actions */
-            follow_up_actions: string[];
-            /** Immediate Actions */
-            immediate_actions: string[];
-            /** Incident Id */
-            incident_id?: string | null;
-            /** Is Anomaly */
-            is_anomaly: boolean;
-            learning_progress?: components["schemas"]["LearningProgressSummary"] | null;
+            };
+            /** Affected Sensors */
+            affected_sensors: string[];
             /** Pattern Scores */
             pattern_scores: {
                 [key: string]: number;
             };
-            /** Pattern Type */
-            pattern_type: string;
+            /** Root Cause */
+            root_cause: string;
+            /** Root Cause Confidence */
+            root_cause_confidence: number;
+            /** Reasoning */
+            reasoning: string;
+            /** Alternative Causes */
+            alternative_causes: string[];
+            /** Severity */
+            severity: string;
+            /** Urgency */
+            urgency: string;
+            /** Immediate Actions */
+            immediate_actions: string[];
+            /** Follow Up Actions */
+            follow_up_actions: string[];
+            /** All Recommendations */
+            all_recommendations: string[];
+            /** Requires Technician */
+            requires_technician: boolean;
+            /** Estimated Resolution Minutes */
+            estimated_resolution_minutes: number;
+            /** Incident Id */
+            incident_id?: string | null;
+            /** Detector Scores */
+            detector_scores?: {
+                [key: string]: number;
+            } | null;
+            /** Ensemble Score */
+            ensemble_score?: number | null;
+            /** Ensemble Agreement */
+            ensemble_agreement?: number | null;
+            learning_progress?: components["schemas"]["LearningProgressSummary"] | null;
+            /** Timestamp */
+            timestamp: string;
             /**
              * Pipeline Version
              * @default 1.0
              */
             pipeline_version: string;
-            /** Reasoning */
-            reasoning: string;
-            /** Requires Technician */
-            requires_technician: boolean;
-            /** Root Cause */
-            root_cause: string;
-            /** Root Cause Confidence */
-            root_cause_confidence: number;
-            /** Severity */
-            severity: string;
-            /** Timestamp */
-            timestamp: string;
-            /** Urgency */
-            urgency: string;
+            /** Scada Anomalies */
+            scada_anomalies?: {
+                [key: string]: unknown;
+            }[] | null;
         };
         /** DHCPCheckRequest */
         DHCPCheckRequest: {
-            /**
-             * Baseline Hash
-             * @description Enrolled baseline SHA-256
-             */
-            baseline_hash: string;
             /**
              * Params
              * @description Ordered config strings (MAC, GW, DNS, ...)
              */
             params: string[];
+            /**
+             * Baseline Hash
+             * @description Enrolled baseline SHA-256
+             */
+            baseline_hash: string;
+        };
+        /** DayWindow */
+        DayWindow: {
+            /**
+             * Start Hour
+             * @default 6
+             */
+            start_hour: number;
+            /**
+             * End Hour
+             * @default 22
+             */
+            end_hour: number;
         };
         /**
          * DriftStateResponse
@@ -1700,30 +2071,25 @@ export interface components {
          */
         DriftStateResponse: {
             /**
+             * Tenant Id
+             * @description Owning tenant identifier
+             */
+            tenant_id: string;
+            /** @description Most recent persisted drift_check event */
+            latest_check?: components["schemas"]["LearningHistoryEntry"] | null;
+            /**
              * Detector
              * @description Live DriftDetector state, when a learner exists
              */
             detector?: {
                 [key: string]: unknown;
             } | null;
-            /** @description Most recent persisted drift_check event */
-            latest_check?: components["schemas"]["LearningHistoryEntry"] | null;
-            /**
-             * Tenant Id
-             * @description Owning tenant identifier
-             */
-            tenant_id: string;
         };
         /**
          * DriftStatus
          * @description Drift evaluation produced by the DriftDetector for one loss stream.
          */
         DriftStatus: {
-            /**
-             * Action
-             * @description 'retrain_model' or 'continue_learning'
-             */
-            action?: string | null;
             /**
              * Drift Detected
              * @description Whether the recent loss window indicates drift
@@ -1735,15 +2101,20 @@ export interface components {
              */
             drift_score: number;
             /**
+             * Recent Avg
+             * @description Mean loss over the recent window
+             */
+            recent_avg?: number | null;
+            /**
              * Historical Avg
              * @description Mean loss over the historical baseline
              */
             historical_avg?: number | null;
             /**
-             * Recent Avg
-             * @description Mean loss over the recent window
+             * Action
+             * @description 'retrain_model' or 'continue_learning'
              */
-            recent_avg?: number | null;
+            action?: string | null;
             /**
              * Warning
              * @description Set while the detector lacks enough history
@@ -1756,16 +2127,6 @@ export interface components {
          */
         FeedbackMarkRequest: {
             /**
-             * Actual Root Cause
-             * @description Root cause the operator believes is correct
-             */
-            actual_root_cause?: string | null;
-            /**
-             * Customer Id
-             * @description Identifier of the customer / tenant
-             */
-            customer_id: string;
-            /**
              * Incident Id
              * @description Identifier of the incident being annotated
              */
@@ -1776,10 +2137,25 @@ export interface components {
              */
             is_true_anomaly: boolean;
             /**
-             * Notes
-             * @description Free-text notes
+             * Operator Id
+             * @description Identifier of the annotating operator
              */
-            notes?: string | null;
+            operator_id: string;
+            /**
+             * Customer Id
+             * @description Identifier of the customer / tenant
+             */
+            customer_id: string;
+            /**
+             * Pattern Type Observed
+             * @description Pattern type the operator identified
+             */
+            pattern_type_observed?: string | null;
+            /**
+             * Actual Root Cause
+             * @description Root cause the operator believes is correct
+             */
+            actual_root_cause?: string | null;
             /**
              * Operator Confidence
              * @description Operator self-assessed confidence [0, 1]
@@ -1787,20 +2163,15 @@ export interface components {
              */
             operator_confidence: number;
             /**
-             * Operator Id
-             * @description Identifier of the annotating operator
-             */
-            operator_id: string;
-            /**
-             * Pattern Type Observed
-             * @description Pattern type the operator identified
-             */
-            pattern_type_observed?: string | null;
-            /**
              * Severity
              * @description Severity on a 1-10 scale (optional)
              */
             severity?: number | null;
+            /**
+             * Notes
+             * @description Free-text notes
+             */
+            notes?: string | null;
         };
         /**
          * FeedbackMarkResponse
@@ -1808,15 +2179,10 @@ export interface components {
          */
         FeedbackMarkResponse: {
             /**
-             * Feedback Count
-             * @description Total feedback collected
+             * Status
+             * @description Processing status
              */
-            feedback_count: number;
-            /**
-             * High Quality Count
-             * @description High-quality feedback count
-             */
-            high_quality_count: number;
+            status: string;
             /**
              * Incident Id
              * @description Annotated incident ID
@@ -1828,56 +2194,61 @@ export interface components {
              */
             learning_triggered: boolean;
             /**
+             * Feedback Count
+             * @description Total feedback collected
+             */
+            feedback_count: number;
+            /**
+             * High Quality Count
+             * @description High-quality feedback count
+             */
+            high_quality_count: number;
+            /**
              * Retraining
              * @description Retraining result, if triggered
              */
             retraining?: {
                 [key: string]: unknown;
             } | null;
-            /**
-             * Status
-             * @description Processing status
-             */
-            status: string;
         };
         /** GasColumnSummary */
         GasColumnSummary: {
-            /** Anomaly Count */
-            anomaly_count: number;
             /** Column */
             column: string;
-            /** Current Value */
-            current_value?: number | null;
             /** Mean */
             mean: number;
-            /** Readings */
-            readings: components["schemas"]["GasReadingEntry"][];
             /** Std */
             std: number;
+            /** Anomaly Count */
+            anomaly_count: number;
+            /** Current Value */
+            current_value?: number | null;
+            /** Readings */
+            readings: components["schemas"]["GasReadingEntry"][];
         };
         /** GasRawEntry */
         GasRawEntry: {
+            /** Timestamp */
+            timestamp: string;
             /** Data */
             data: {
                 [key: string]: number | null;
             };
-            /** Timestamp */
-            timestamp: string;
         };
         /** GasReadingEntry */
         GasReadingEntry: {
-            /** Is Anomaly */
-            is_anomaly: boolean;
-            /** Method */
-            method: string;
-            /** Severity */
-            severity: string;
             /** Timestamp */
             timestamp: string;
             /** Value */
             value?: number | null;
+            /** Is Anomaly */
+            is_anomaly: boolean;
             /** Z Score */
             z_score: number;
+            /** Severity */
+            severity: string;
+            /** Method */
+            method: string;
         };
         /** GasReadingsResponse */
         GasReadingsResponse: {
@@ -1905,15 +2276,15 @@ export interface components {
          */
         HighAnomalyDetail: {
             /**
-             * Score
-             * @description High anomaly representation reconstruction error score [0, 1]
-             */
-            score: number;
-            /**
              * Sequence Index
              * @description Index placement of the sequence in the sent batch list
              */
             sequence_index: number;
+            /**
+             * Score
+             * @description High anomaly representation reconstruction error score [0, 1]
+             */
+            score: number;
             /**
              * Timestamp
              * Format: date-time
@@ -1921,31 +2292,31 @@ export interface components {
              */
             timestamp: string;
         };
+        /** IATCheckRequest */
+        IATCheckRequest: {
+            /**
+             * Iat Series
+             * @description Inter-packet arrival intervals in seconds
+             */
+            iat_series: number[];
+        };
+        /** IATCheckResponse */
+        IATCheckResponse: {
+            /** Is Anomaly */
+            is_anomaly: boolean;
+            /** Flags */
+            flags: boolean[];
+        };
         /**
          * IncidentCreateRequest
          * @description Request to store a detected anomaly as an incident.
          */
         IncidentCreateRequest: {
             /**
-             * Anomaly Score
-             * @description Reconstruction error score from the LSTM-VAE
+             * Tenant Id
+             * @description Identifier of the multi-tenant customer entity
              */
-            anomaly_score: number;
-            /**
-             * Embedding
-             * @description Latent-space embedding (encoder mu), length = LATENT_DIM
-             */
-            embedding: number[];
-            /**
-             * Embedding Uncertainty
-             * @description Std dev in latent space (mean of exp(0.5*logvar))
-             */
-            embedding_uncertainty: number;
-            /**
-             * Fault Type
-             * @description Research fault taxonomy: calibration_drift, bias_offset, stuck_fault, accuracy_decline, spike_fault
-             */
-            fault_type?: string | null;
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @description Identifier of the greenhouse or sensor zone
@@ -1953,30 +2324,45 @@ export interface components {
              */
             greenhouse_id: string;
             /**
-             * Notes
-             * @description Operator notes/observations
+             * Embedding
+             * @description Latent-space embedding (encoder mu), length = LATENT_DIM
              */
-            notes?: string | null;
+            embedding: number[];
             /**
-             * Root Cause
-             * @description Optional root cause label if already known
+             * Anomaly Score
+             * @description Reconstruction error score from the LSTM-VAE
              */
-            root_cause?: string | null;
+            anomaly_score: number;
             /**
              * Sequence
              * @description Sensor readings that triggered the anomaly [seq_len, input_dim]
              */
             sequence: number[][];
             /**
+             * Embedding Uncertainty
+             * @description Std dev in latent space (mean of exp(0.5*logvar))
+             */
+            embedding_uncertainty: number;
+            /**
+             * Root Cause
+             * @description Optional root cause label if already known
+             */
+            root_cause?: string | null;
+            /**
+             * Fault Type
+             * @description Research fault taxonomy: calibration_drift, bias_offset, stuck_fault, accuracy_decline, spike_fault
+             */
+            fault_type?: string | null;
+            /**
              * Tags
              * @description User-assigned tags for filtering
              */
             tags?: string[];
             /**
-             * Tenant Id
-             * @description Identifier of the multi-tenant customer entity
+             * Notes
+             * @description Operator notes/observations
              */
-            tenant_id: string;
+            notes?: string | null;
         };
         /**
          * IncidentResolveRequest
@@ -1984,30 +2370,30 @@ export interface components {
          */
         IncidentResolveRequest: {
             /**
-             * Actions Effective
-             * @description Whether the actions fixed the problem
+             * Tenant Id
+             * @description Owning tenant identifier
              */
-            actions_effective: boolean;
-            /**
-             * Actions Taken
-             * @description Actions performed to resolve the incident
-             */
-            actions_taken: string[];
-            /**
-             * Notes
-             * @description Operator notes
-             */
-            notes?: string | null;
+            tenant_id: string;
             /**
              * Root Cause
              * @description Determined root cause label
              */
             root_cause: string;
             /**
-             * Tenant Id
-             * @description Owning tenant identifier
+             * Actions Taken
+             * @description Actions performed to resolve the incident
              */
-            tenant_id: string;
+            actions_taken: string[];
+            /**
+             * Actions Effective
+             * @description Whether the actions fixed the problem
+             */
+            actions_effective: boolean;
+            /**
+             * Notes
+             * @description Operator notes
+             */
+            notes?: string | null;
         };
         /**
          * IncidentResponse
@@ -2015,20 +2401,20 @@ export interface components {
          */
         IncidentResponse: {
             /**
-             * Actions Effective
-             * @description Whether the actions fixed the problem
+             * Id
+             * @description Unique incident UUID
              */
-            actions_effective?: boolean | null;
+            id: string;
             /**
-             * Actions Taken
-             * @description Actions performed to fix the incident
+             * Tenant Id
+             * @description Owning tenant identifier
              */
-            actions_taken?: string[] | null;
+            tenant_id: string;
             /**
-             * Anomaly Score
-             * @description Reconstruction error score
+             * Greenhouse Id
+             * @description Greenhouse/zone identifier
              */
-            anomaly_score: number;
+            greenhouse_id: string;
             /**
              * Detected At
              * Format: date-time
@@ -2036,35 +2422,30 @@ export interface components {
              */
             detected_at: string;
             /**
-             * Distance
-             * @description Cosine distance to the query embedding (lower = more similar)
+             * Anomaly Score
+             * @description Reconstruction error score
              */
-            distance?: number | null;
+            anomaly_score: number;
             /**
              * Embedding Uncertainty
              * @description Std dev in latent space at detection time
              */
             embedding_uncertainty: number;
             /**
+             * Root Cause
+             * @description Root cause label, if known
+             */
+            root_cause?: string | null;
+            /**
              * Fault Type
              * @description Research fault taxonomy label, if classified
              */
             fault_type?: string | null;
             /**
-             * Greenhouse Id
-             * @description Greenhouse/zone identifier
+             * Root Cause Confidence
+             * @description Confidence in the root cause diagnosis (0-1)
              */
-            greenhouse_id: string;
-            /**
-             * Id
-             * @description Unique incident UUID
-             */
-            id: string;
-            /**
-             * Notes
-             * @description Operator notes
-             */
-            notes?: string | null;
+            root_cause_confidence?: number | null;
             /**
              * Resolved
              * @description Whether the incident is resolved
@@ -2076,15 +2457,30 @@ export interface components {
              */
             resolved_at?: string | null;
             /**
-             * Root Cause
-             * @description Root cause label, if known
+             * Actions Taken
+             * @description Actions performed to fix the incident
              */
-            root_cause?: string | null;
+            actions_taken?: string[] | null;
             /**
-             * Root Cause Confidence
-             * @description Confidence in the root cause diagnosis (0-1)
+             * Actions Effective
+             * @description Whether the actions fixed the problem
              */
-            root_cause_confidence?: number | null;
+            actions_effective?: boolean | null;
+            /**
+             * Time To Resolve
+             * @description Minutes from detection to resolution
+             */
+            time_to_resolve?: number | null;
+            /**
+             * Tags
+             * @description User-assigned tags
+             */
+            tags?: string[] | null;
+            /**
+             * Notes
+             * @description Operator notes
+             */
+            notes?: string | null;
             /**
              * Root Cause Details
              * @description Diagnosis snapshot (attribution, detector_scores, etc.)
@@ -2098,20 +2494,10 @@ export interface components {
              */
             sequence?: number[][] | null;
             /**
-             * Tags
-             * @description User-assigned tags
+             * Distance
+             * @description Cosine distance to the query embedding (lower = more similar)
              */
-            tags?: string[] | null;
-            /**
-             * Tenant Id
-             * @description Owning tenant identifier
-             */
-            tenant_id: string;
-            /**
-             * Time To Resolve
-             * @description Minutes from detection to resolution
-             */
-            time_to_resolve?: number | null;
+            distance?: number | null;
         };
         /**
          * IncidentStoreResponse
@@ -2136,32 +2522,32 @@ export interface components {
          */
         InferenceRequest: {
             /**
+             * Tenant Id
+             * @description Identifier of the tenant requesting model predictions
+             */
+            tenant_id: string;
+            /**
              * Greenhouse Id
              * @description Identifier of the greenhouse
              * @default default
              */
             greenhouse_id: string;
             /**
-             * Persist Scores
-             * @description When True, anomaly scores are written back to the matching SensorReading rows in the database.  Requires timestamps to be provided with one entry per sequence; the route returns HTTP 400 if timestamps are absent or the count does not match len(sequences).
-             * @default false
-             */
-            persist_scores: boolean;
-            /**
              * Sequences
              * @description Batch of temporal sequences of shape (batch, seq_len=20, input_dim=4). Features must be ordered exactly as: [temperature, humidity, CO2, light]
              */
             sequences: number[][][];
             /**
-             * Tenant Id
-             * @description Identifier of the tenant requesting model predictions
-             */
-            tenant_id: string;
-            /**
              * Timestamps
              * @description One ISO-8601 timestamp per sequence (optional for pure inference). Required when persist_scores=True — must align 1:1 with sequences. The field stays Optional for wire compatibility; the route enforces presence when persistence is requested.
              */
             timestamps?: string[] | null;
+            /**
+             * Persist Scores
+             * @description When True, anomaly scores are written back to the matching SensorReading rows in the database.  Requires timestamps to be provided with one entry per sequence; the route returns HTTP 400 if timestamps are absent or the count does not match len(sequences).
+             * @default false
+             */
+            persist_scores: boolean;
         };
         /**
          * InferenceResponse
@@ -2169,6 +2555,21 @@ export interface components {
          *     Contains overall performance counters, a continuous array of scores, and high anomalies indicators.
          */
         InferenceResponse: {
+            /**
+             * Tenant Id
+             * @description Tenant/Owner identification tag linked to inference session
+             */
+            tenant_id: string;
+            /**
+             * Greenhouse Id
+             * @description Greenhouse identification tag linked to inference session
+             */
+            greenhouse_id: string;
+            /**
+             * Sequences Processed
+             * @description Number of sequences successfully analyzed by the LSTM-VAE
+             */
+            sequences_processed: number;
             /**
              * Anomalies Detected
              * @description Total counts of critical sequences classified as anomalous
@@ -2180,40 +2581,25 @@ export interface components {
              */
             anomaly_scores: number[];
             /**
-             * Embedding Dim
-             * @description Dimensionality of each embedding vector (LATENT_DIM from model config)
+             * High Anomalies
+             * @description Metadata on anomalous segments exceeding warning criteria threshold limits
              */
-            embedding_dim?: number | null;
+            high_anomalies?: components["schemas"]["HighAnomalyDetail"][];
             /**
              * Embeddings
              * @description Latent-space embeddings (encoder mu) for each sequence in the batch, shape (batch, LATENT_DIM). Enables semantic anomaly similarity search.
              */
             embeddings?: number[][] | null;
             /**
-             * Greenhouse Id
-             * @description Greenhouse identification tag linked to inference session
-             */
-            greenhouse_id: string;
-            /**
-             * High Anomalies
-             * @description Metadata on anomalous segments exceeding warning criteria threshold limits
-             */
-            high_anomalies?: components["schemas"]["HighAnomalyDetail"][];
-            /**
-             * Sequences Processed
-             * @description Number of sequences successfully analyzed by the LSTM-VAE
-             */
-            sequences_processed: number;
-            /**
-             * Tenant Id
-             * @description Tenant/Owner identification tag linked to inference session
-             */
-            tenant_id: string;
-            /**
              * Uncertainties
              * @description Per-sequence model uncertainty: mean of exp(0.5*logvar) (std) across latent dimensions. Higher values indicate the model is less confident about the anomaly type.
              */
             uncertainties?: number[] | null;
+            /**
+             * Embedding Dim
+             * @description Dimensionality of each embedding vector (LATENT_DIM from model config)
+             */
+            embedding_dim?: number | null;
         };
         /** JobListResponse */
         JobListResponse: {
@@ -2222,28 +2608,28 @@ export interface components {
         };
         /** JobStatusResponse */
         JobStatusResponse: {
+            /** Id */
+            id: string;
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id?: string | null;
+            /** Job Type */
+            job_type: string;
+            /** Status */
+            status: string;
+            /** Total Portions */
+            total_portions?: number | null;
             /**
              * Completed Portions
              * @default 0
              */
             completed_portions: number;
-            /** Created At */
-            created_at?: string | null;
-            /** Error */
-            error?: string | null;
             /**
              * Failed Portions
              * @default 0
              */
             failed_portions: number;
-            /** Finished At */
-            finished_at?: string | null;
-            /** Greenhouse Id */
-            greenhouse_id?: string | null;
-            /** Id */
-            id: string;
-            /** Job Type */
-            job_type: string;
             /**
              * Progress Pct
              * @description completed+failed over total, when total is known
@@ -2253,20 +2639,25 @@ export interface components {
             result?: {
                 [key: string]: unknown;
             } | null;
-            /** Status */
-            status: string;
-            /** Tenant Id */
-            tenant_id: string;
-            /** Total Portions */
-            total_portions?: number | null;
+            /** Error */
+            error?: string | null;
+            /** Created At */
+            created_at?: string | null;
             /** Updated At */
             updated_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
         };
         /**
          * LearnerStatisticsResponse
          * @description Live learner statistics merged with the persisted learning summary.
          */
         LearnerStatisticsResponse: {
+            /**
+             * Tenant Id
+             * @description Owning tenant identifier
+             */
+            tenant_id: string;
             /**
              * Learner
              * @description In-memory learner statistics, or {'status': 'no_learner'}
@@ -2276,11 +2667,6 @@ export interface components {
             };
             /** @description Aggregated summary from the learning-log store */
             summary: components["schemas"]["LearningSummaryResponse"];
-            /**
-             * Tenant Id
-             * @description Owning tenant identifier
-             */
-            tenant_id: string;
         };
         /**
          * LearningHistoryEntry
@@ -2288,11 +2674,61 @@ export interface components {
          */
         LearningHistoryEntry: {
             /**
+             * Id
+             * @description Unique learning-event UUID
+             */
+            id: string;
+            /**
+             * Tenant Id
+             * @description Owning tenant identifier
+             */
+            tenant_id: string;
+            /**
+             * Greenhouse Id
+             * @description Greenhouse/zone identifier
+             */
+            greenhouse_id: string;
+            /**
+             * Event Type
+             * @description Learning event kind
+             */
+            event_type: string;
+            /**
              * Created At
              * Format: date-time
              * @description When the event occurred
              */
             created_at: string;
+            /**
+             * Sequences Observed
+             * @description Sequences observed in this event
+             */
+            sequences_observed: number;
+            /**
+             * Updates Performed
+             * @description Update steps performed in this event
+             */
+            updates_performed: number;
+            /**
+             * Loss Before
+             * @description Loss before the update step
+             */
+            loss_before?: number | null;
+            /**
+             * Loss After
+             * @description Loss after the update step
+             */
+            loss_after?: number | null;
+            /**
+             * Drift Score
+             * @description Computed drift score, for drift_check events
+             */
+            drift_score?: number | null;
+            /**
+             * Drift Detected
+             * @description Whether the drift check flagged drift
+             */
+            drift_detected?: boolean | null;
             /**
              * Details
              * @description Free-form structured event payload
@@ -2301,60 +2737,10 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /**
-             * Drift Detected
-             * @description Whether the drift check flagged drift
-             */
-            drift_detected?: boolean | null;
-            /**
-             * Drift Score
-             * @description Computed drift score, for drift_check events
-             */
-            drift_score?: number | null;
-            /**
-             * Event Type
-             * @description Learning event kind
-             */
-            event_type: string;
-            /**
-             * Greenhouse Id
-             * @description Greenhouse/zone identifier
-             */
-            greenhouse_id: string;
-            /**
-             * Id
-             * @description Unique learning-event UUID
-             */
-            id: string;
-            /**
-             * Loss After
-             * @description Loss after the update step
-             */
-            loss_after?: number | null;
-            /**
-             * Loss Before
-             * @description Loss before the update step
-             */
-            loss_before?: number | null;
-            /**
              * Model Checkpoint Path
              * @description Checkpoint path, for checkpoint_saved events
              */
             model_checkpoint_path?: string | null;
-            /**
-             * Sequences Observed
-             * @description Sequences observed in this event
-             */
-            sequences_observed: number;
-            /**
-             * Tenant Id
-             * @description Owning tenant identifier
-             */
-            tenant_id: string;
-            /**
-             * Updates Performed
-             * @description Update steps performed in this event
-             */
-            updates_performed: number;
         };
         /**
          * LearningProgressResponse
@@ -2367,21 +2753,6 @@ export interface components {
              */
             customer_id: string;
             /**
-             * High Quality Count
-             * @description Current high-quality count
-             */
-            high_quality_count: number;
-            /**
-             * Last Retrain
-             * @description ISO timestamp of last retrain; null until the first retraining cycle completes
-             */
-            last_retrain?: string | null;
-            /**
-             * Next Retrain Eligible
-             * @description Null until the first retraining cycle completes
-             */
-            next_retrain_eligible?: string | null;
-            /**
              * Progress Percent
              * @description Percent progress toward next retrain
              */
@@ -2392,10 +2763,25 @@ export interface components {
              */
             samples_needed: number;
             /**
+             * High Quality Count
+             * @description Current high-quality count
+             */
+            high_quality_count: number;
+            /**
              * Total Feedback
              * @description Total feedback collected
              */
             total_feedback: number;
+            /**
+             * Last Retrain
+             * @description ISO timestamp of last retrain; null until the first retraining cycle completes
+             */
+            last_retrain?: string | null;
+            /**
+             * Next Retrain Eligible
+             * @description Null until the first retraining cycle completes
+             */
+            next_retrain_eligible?: string | null;
         };
         /**
          * LearningProgressSummary
@@ -2422,11 +2808,6 @@ export interface components {
                 [key: string]: number;
             };
             /**
-             * Last Event At
-             * @description Timestamp of the most recent event
-             */
-            last_event_at?: string | null;
-            /**
              * Total Events
              * @description Total logged events
              */
@@ -2436,81 +2817,91 @@ export interface components {
              * @description Sum of update steps across all events
              */
             total_updates_performed: number;
+            /**
+             * Last Event At
+             * @description Timestamp of the most recent event
+             */
+            last_event_at?: string | null;
         };
         /**
          * MarkAnomalyIntegratedRequest
          * @description Request body for POST /api/feedback/mark-anomaly.
          */
         MarkAnomalyIntegratedRequest: {
-            /** Actual Root Cause */
-            actual_root_cause?: string | null;
-            /** Customer Id */
-            customer_id: string;
             /** Incident Id */
             incident_id: string;
             /** Is True Anomaly */
             is_true_anomaly: boolean;
+            /** Operator Id */
+            operator_id: string;
+            /** Customer Id */
+            customer_id: string;
+            /** Pattern Type Observed */
+            pattern_type_observed?: string | null;
+            /** Actual Root Cause */
+            actual_root_cause?: string | null;
             /**
              * Operator Confidence
              * @default 0.8
              */
             operator_confidence: number;
-            /** Operator Id */
-            operator_id: string;
-            /** Pattern Type Observed */
-            pattern_type_observed?: string | null;
         };
         /**
          * MarkAnomalyIntegratedResponse
          * @description Response after integrated feedback is recorded.
          */
         MarkAnomalyIntegratedResponse: {
-            /** High Quality Feedback Count */
-            high_quality_feedback_count: number;
+            /** Status */
+            status: string;
             /** Incident Id */
             incident_id: string;
             /** Learning Triggered */
             learning_triggered: boolean;
+            /** High Quality Feedback Count */
+            high_quality_feedback_count: number;
             /** Progress To Retrain */
             progress_to_retrain: string;
             /** Retraining */
             retraining?: {
                 [key: string]: unknown;
             } | null;
-            /** Status */
-            status: string;
         };
         /**
          * MetricsResponse
          * @description Response for GET /api/monitoring/metrics.
          */
         MetricsResponse: {
-            /** Avg Confidence */
-            avg_confidence: number;
-            /** Confidence Distribution */
-            confidence_distribution: {
-                [key: string]: number;
-            };
-            /** False Positive Rate */
-            false_positive_rate: number;
-            /** False Positives */
-            false_positives: number;
-            /** Pattern Distribution */
-            pattern_distribution: {
-                [key: string]: number;
-            };
             /** Period Hours */
             period_hours: number;
             /** Total Detections */
             total_detections: number;
+            /** False Positives */
+            false_positives: number;
             /** True Positives */
             true_positives: number;
+            /** False Positive Rate */
+            false_positive_rate: number;
+            /** Avg Confidence */
+            avg_confidence: number;
+            /** Pattern Distribution */
+            pattern_distribution: {
+                [key: string]: number;
+            };
+            /** Confidence Distribution */
+            confidence_distribution: {
+                [key: string]: number;
+            };
         };
         /**
          * ObserveRequest
          * @description Request to feed a batch of sensor sequences to a tenant's learner.
          */
         ObserveRequest: {
+            /**
+             * Tenant Id
+             * @description Identifier of the multi-tenant customer entity
+             */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @description Identifier of the greenhouse or sensor zone
@@ -2522,19 +2913,12 @@ export interface components {
              * @description Batch of sensor sequences, each [SEQ_LEN, INPUT_DIM]
              */
             sequences: number[][][];
-            /**
-             * Tenant Id
-             * @description Identifier of the multi-tenant customer entity
-             */
-            tenant_id: string;
         };
         /**
          * ObserveResponse
          * @description Outcome of observing a batch of sequences.
          */
         ObserveResponse: {
-            /** @description Latest drift evaluation after this batch */
-            drift?: components["schemas"]["DriftStatus"] | null;
             /**
              * Losses
              * @description Per-sequence VAE loss (anomaly signal)
@@ -2550,6 +2934,49 @@ export interface components {
              * @description Online SGD updates triggered by this batch
              */
             updates_performed: number;
+            /** @description Latest drift evaluation after this batch */
+            drift?: components["schemas"]["DriftStatus"] | null;
+        };
+        /**
+         * OperationalConfigRequest
+         * @description Full operational config document (PUT body).
+         */
+        OperationalConfigRequest: {
+            /** Crop */
+            crop: string;
+            /** Setpoints */
+            setpoints?: {
+                [key: string]: components["schemas"]["SetpointBand"];
+            };
+            day_window?: components["schemas"]["DayWindow"];
+            /** Season Map */
+            season_map?: {
+                [key: string]: "summer" | "winter";
+            };
+            /** Seasonal Overrides */
+            seasonal_overrides?: {
+                [key: string]: components["schemas"]["SeasonalOverride"];
+            };
+            /**
+             * Co2 Enrichment
+             * @description True when the greenhouse has CO2 enrichment equipment. Enables CO2_BAND_LOW alarms; defaults to false to prevent alarm fatigue in unenriched greenhouses (~420 ppm ambient).
+             * @default false
+             */
+            co2_enrichment: boolean;
+        };
+        /**
+         * OperationalConfigResponse
+         * @description GET response: merged config + per-key provenance annotation.
+         */
+        OperationalConfigResponse: {
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Sources */
+            sources: {
+                [key: string]: "default" | "override";
+            };
         };
         /**
          * PredictRequest
@@ -2557,15 +2984,15 @@ export interface components {
          */
         PredictRequest: {
             /**
-             * Sequence
-             * @description One sensor sequence of shape [SEQ_LEN, INPUT_DIM]
-             */
-            sequence: number[][];
-            /**
              * Tenant Id
              * @description Identifier of the multi-tenant customer entity
              */
             tenant_id: string;
+            /**
+             * Sequence
+             * @description One sensor sequence of shape [SEQ_LEN, INPUT_DIM]
+             */
+            sequence: number[][];
         };
         /**
          * PredictResponse
@@ -2583,52 +3010,58 @@ export interface components {
              */
             embedding: number[];
             /**
-             * Learner Active
-             * @description False when the frozen base model produced the prediction
+             * Uncertainty
+             * @description Mean latent std (exp(0.5*logvar))
              */
-            learner_active: boolean;
+            uncertainty: number;
             /**
              * Trend
              * @description 'increasing'/'stable' once enough losses are seen
              */
             trend?: string | null;
             /**
-             * Uncertainty
-             * @description Mean latent std (exp(0.5*logvar))
-             */
-            uncertainty: number;
-            /**
              * Updates Performed
              * @description Total online updates applied to this tenant's model
              * @default 0
              */
             updates_performed: number;
+            /**
+             * Learner Active
+             * @description False when the frozen base model produced the prediction
+             */
+            learner_active: boolean;
         };
         /** RTTCheckRequest */
         RTTCheckRequest: {
+            /**
+             * Rtt Ms
+             * @description Current round-trip time in ms
+             */
+            rtt_ms: number;
             /**
              * Previous Rtt Ms
              * @description Previous RTT for jitter
              */
             previous_rtt_ms?: number | null;
             /**
-             * Rtt Ms
-             * @description Current round-trip time in ms
+             * Tenant Id
+             * @description Tenant whose RTT stream this is
+             * @default default
              */
-            rtt_ms: number;
+            tenant_id: string;
         };
         /** RTTCheckResponse */
         RTTCheckResponse: {
             /** Is Anomaly */
             is_anomaly: boolean;
-            /** Jitter Ms */
-            jitter_ms: number | null;
+            /** Rtt Violation */
+            rtt_violation: boolean;
             /** Jitter Violation */
             jitter_violation: boolean;
             /** Rtt Ms */
             rtt_ms: number;
-            /** Rtt Violation */
-            rtt_violation: boolean;
+            /** Jitter Ms */
+            jitter_ms: number | null;
         };
         /**
          * RecordOutcomeRequest
@@ -2636,20 +3069,20 @@ export interface components {
          */
         RecordOutcomeRequest: {
             /**
-             * Customer Id
-             * @description Customer context for the operator
+             * Operator Id
+             * @description Operator whose past feedback is being evaluated
              */
-            customer_id: string;
+            operator_id: string;
             /**
              * Feedback Was Correct
              * @description Whether the operator's feedback matched ground truth
              */
             feedback_was_correct: boolean;
             /**
-             * Operator Id
-             * @description Operator whose past feedback is being evaluated
+             * Customer Id
+             * @description Customer context for the operator
              */
-            operator_id: string;
+            customer_id: string;
         };
         /**
          * RecordOutcomeResponse
@@ -2657,20 +3090,20 @@ export interface components {
          */
         RecordOutcomeResponse: {
             /**
-             * New Reliability
-             * @description Updated reliability score
+             * Status
+             * @description Processing status
              */
-            new_reliability: number;
+            status: string;
             /**
              * Operator Id
              * @description Updated operator ID
              */
             operator_id: string;
             /**
-             * Status
-             * @description Processing status
+             * New Reliability
+             * @description Updated reliability score
              */
-            status: string;
+            new_reliability: number;
         };
         /**
          * RecurringIssue
@@ -2678,10 +3111,15 @@ export interface components {
          */
         RecurringIssue: {
             /**
-             * Avg Time To Resolve Minutes
-             * @description Mean minutes to resolve this cause
+             * Root Cause
+             * @description Root cause label
              */
-            avg_time_to_resolve_minutes?: number | null;
+            root_cause: string;
+            /**
+             * Occurrences
+             * @description Number of occurrences
+             */
+            occurrences: number;
             /**
              * Last Occurrence
              * Format: date-time
@@ -2689,15 +3127,10 @@ export interface components {
              */
             last_occurrence: string;
             /**
-             * Occurrences
-             * @description Number of occurrences
+             * Avg Time To Resolve Minutes
+             * @description Mean minutes to resolve this cause
              */
-            occurrences: number;
-            /**
-             * Root Cause
-             * @description Root cause label
-             */
-            root_cause: string;
+            avg_time_to_resolve_minutes?: number | null;
         };
         /** RollbackRequest */
         RollbackRequest: {
@@ -2710,21 +3143,26 @@ export interface components {
          */
         RootCauseCount: {
             /**
-             * Count
-             * @description Number of incidents with this cause
-             */
-            count: number;
-            /**
              * Root Cause
              * @description Root cause label
              */
             root_cause: string;
+            /**
+             * Count
+             * @description Number of incidents with this cause
+             */
+            count: number;
         };
         /**
          * RootCauseSuggestion
          * @description A candidate root cause mined from similar resolved incidents.
          */
         RootCauseSuggestion: {
+            /**
+             * Root Cause
+             * @description Root cause label
+             */
+            root_cause: string;
             /**
              * Confidence
              * @description Frequency among similar incidents (0-1)
@@ -2735,17 +3173,22 @@ export interface components {
              * @description Times seen among similar incidents
              */
             count: number;
-            /**
-             * Root Cause
-             * @description Root cause label
-             */
-            root_cause: string;
+        };
+        /** SeasonalOverride */
+        SeasonalOverride: {
+            /** Detector Scale */
+            detector_scale?: number | null;
         };
         /**
          * SensorPairSequence
          * @description A pair of redundant co-located sensor time series.
          */
         SensorPairSequence: {
+            /**
+             * Variable
+             * @description Physical variable (e.g. 'temperature')
+             */
+            variable: string;
             /**
              * Sensor A
              * @description Primary sensor readings
@@ -2756,11 +3199,6 @@ export interface components {
              * @description Redundant sensor readings
              */
             sensor_b: number[];
-            /**
-             * Variable
-             * @description Physical variable (e.g. 'temperature')
-             */
-            variable: string;
         };
         /**
          * SensorRange
@@ -2769,46 +3207,70 @@ export interface components {
          */
         SensorRange: {
             /**
-             * Max
-             * @description Maximum value seen in the dataset slice
-             */
-            max: number;
-            /**
              * Min
              * @description Minimum value seen in the dataset slice
              */
             min: number;
+            /**
+             * Max
+             * @description Maximum value seen in the dataset slice
+             */
+            max: number;
         };
         /** ServiceCheckRequest */
         ServiceCheckRequest: {
+            /**
+             * Duration Ms
+             * @description Response time in ms
+             */
+            duration_ms: number;
             /**
              * Baseline Threshold Ms
              * @description Override threshold
              */
             baseline_threshold_ms?: number | null;
             /**
-             * Duration Ms
-             * @description Response time in ms
+             * Tenant Id
+             * @description Tenant whose latency stream this is
+             * @default default
              */
-            duration_ms: number;
+            tenant_id: string;
+        };
+        /**
+         * SetpointBand
+         * @description Day/night setpoint band for a single sensor channel.
+         *
+         *     ``night`` may be ``null`` to signal "use the day band as fallback".
+         */
+        SetpointBand: {
+            /**
+             * Day
+             * @description [lo, hi] day band
+             */
+            day?: number[] | null;
+            /**
+             * Night
+             * @description [lo, hi] night band, or null
+             */
+            night?: number[] | null;
         };
         /**
          * StatisticalAnomalyDetail
          * @description Single per-column statistical anomaly from cold-run detection.
          */
         StatisticalAnomalyDetail: {
-            /** Column */
-            column: string;
-            /** Method */
-            method: string;
-            /** Severity */
-            severity: string;
             /** Timestamp */
             timestamp: string;
+            /** Column */
+            column: string;
             /** Value */
             value: number;
             /** Z Score */
             z_score: number;
+            /** Severity */
+            severity: string;
+            /** Method */
+            method: string;
         };
         /**
          * StatisticalColdRunSummary
@@ -2830,18 +3292,13 @@ export interface components {
          * @description Suggested root cause and fixes derived from incident history.
          */
         SuggestionsResponse: {
+            /** @description Highest-ranked root cause, if any history exists */
+            most_likely_cause?: components["schemas"]["RootCauseSuggestion"] | null;
             /**
              * All Causes
              * @description All candidate causes ranked by frequency
              */
             all_causes?: components["schemas"]["RootCauseSuggestion"][];
-            /**
-             * Confidence
-             * @description Number of similar resolved cases the suggestion is based on
-             */
-            confidence: number;
-            /** @description Highest-ranked root cause, if any history exists */
-            most_likely_cause?: components["schemas"]["RootCauseSuggestion"] | null;
             /**
              * Recommended Actions
              * @description Actions ranked by effectiveness rate
@@ -2852,6 +3309,11 @@ export interface components {
              * @description The similar incidents the suggestions are based on
              */
             similar_incidents?: components["schemas"]["IncidentResponse"][];
+            /**
+             * Confidence
+             * @description Number of similar resolved cases the suggestion is based on
+             */
+            confidence: number;
             /**
              * Warning
              * @description Set when no usable history was found
@@ -2866,76 +3328,136 @@ export interface components {
              */
             handshake_ms: number;
         };
+        /** ThreatFitRequest */
+        ThreatFitRequest: {
+            /**
+             * Tenant Id
+             * @default default
+             */
+            tenant_id: string;
+            /**
+             * Vectors
+             * @description Normal-traffic feature vectors (n x 19)
+             */
+            vectors: number[][];
+        };
+        /** ThreatFitResponse */
+        ThreatFitResponse: {
+            /** Fitted Samples */
+            fitted_samples: number;
+        };
+        /** ThreatScoreRequest */
+        ThreatScoreRequest: {
+            /**
+             * Tenant Id
+             * @default default
+             */
+            tenant_id: string;
+            /**
+             * Vector
+             * @description Current feature vector (19 features)
+             */
+            vector: number[];
+        };
+        /** ThreatScoreResponse */
+        ThreatScoreResponse: {
+            /** Threat Score */
+            threat_score: number;
+            /** Is Anomaly */
+            is_anomaly: boolean;
+        };
         /**
          * UploadHighAnomalyDetail
          * @description Anomaly event from cold-run CSV upload (LSTM or statistical).
          */
         UploadHighAnomalyDetail: {
             /**
-             * Agreement
-             * @description True when both LSTM and statistical detectors flagged this timestamp
-             * @default false
+             * Score
+             * @description ADR-005 canonical score — 0.5 is the producing detector's own decision point. Every producer canonicalises before it lands here, so max()/sort() across detectors is meaningful.
              */
-            agreement: boolean;
-            /** Column */
-            column?: string | null;
+            score: number;
+            /**
+             * Score Raw
+             * @description Producer's native score before canonicalisation, for the anomaly_score_raw provenance column: clipped reconstruction error for lstm, z-score for statistical. None when there is no native scalar.
+             */
+            score_raw?: number | null;
+            /** Timestamp */
+            timestamp: string;
+            /**
+             * Detected Ts
+             * @description Timestamp when detection actually fired (stuck_fault only). Distinct from timestamp (= onset). Latency = detected_ts - timestamp.
+             */
+            detected_ts?: string | null;
             /**
              * Detector
              * @description lstm, statistical, or lstm+statistical
              * @default lstm
              */
             detector: string;
-            /** Method */
-            method?: string | null;
-            /** Score */
-            score: number;
             /** Sequence Index */
             sequence_index?: number | null;
-            /** Severity */
-            severity?: string | null;
-            /** Timestamp */
-            timestamp: string;
-            /** Value */
-            value?: number | null;
+            /** Column */
+            column?: string | null;
             /** Z Score */
             z_score?: number | null;
+            /** Severity */
+            severity?: string | null;
+            /** Method */
+            method?: string | null;
+            /** Value */
+            value?: number | null;
+            /**
+             * Agreement
+             * @description True when both LSTM and statistical detectors flagged this timestamp
+             * @default false
+             */
+            agreement: boolean;
         };
         /**
          * UploadInferenceResponse
          * @description Response from POST /api/inference/upload (cold-run CSV scoring).
          */
         UploadInferenceResponse: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id: string;
+            /** Sequences Processed */
+            sequences_processed: number;
             /** Anomalies Detected */
             anomalies_detected: number;
             /** Anomaly Scores */
             anomaly_scores: number[];
+            /** High Anomalies */
+            high_anomalies?: components["schemas"]["UploadHighAnomalyDetail"][];
+            /**
+             * Episodes
+             * @description Contiguous per-channel anomaly episodes (Task 5). One continuous event is one episode with start/end/duration.
+             */
+            episodes?: components["schemas"]["AnomalyEpisodeSchema"][];
+            /** Threshold Used */
+            threshold_used: number;
+            /** Threshold Method */
+            threshold_method: string;
+            /** Imputed Channels */
+            imputed_channels?: string[];
+            statistical_summary?: components["schemas"]["StatisticalColdRunSummary"] | null;
+            /** Embeddings */
+            embeddings?: number[][];
+            /** Uncertainties */
+            uncertainties?: number[];
+            /** Embedding Dim */
+            embedding_dim: number;
+            /**
+             * Sequence Timestamps
+             * @description ISO timestamp per sequence (aligned with anomaly_scores)
+             */
+            sequence_timestamps?: string[];
             /**
              * Data Persisted
              * @default false
              */
             data_persisted: boolean;
-            /** Embedding Dim */
-            embedding_dim: number;
-            /** Embeddings */
-            embeddings?: number[][];
-            /** Greenhouse Id */
-            greenhouse_id: string;
-            /** High Anomalies */
-            high_anomalies?: components["schemas"]["UploadHighAnomalyDetail"][];
-            /** Imputed Channels */
-            imputed_channels?: string[];
-            /** Model Id */
-            model_id?: string | null;
-            /**
-             * Model Trained
-             * @default false
-             */
-            model_trained: boolean;
-            /**
-             * Raw Rows Uploaded
-             * @default 0
-             */
-            raw_rows_uploaded: number;
             /**
              * Rows Uploaded
              * @default 0
@@ -2947,23 +3469,19 @@ export interface components {
              */
             sensor_rows_uploaded: number;
             /**
-             * Sequence Timestamps
-             * @description ISO timestamp per sequence (aligned with anomaly_scores)
+             * Raw Rows Uploaded
+             * @default 0
              */
-            sequence_timestamps?: string[];
-            /** Sequences Processed */
-            sequences_processed: number;
-            statistical_summary?: components["schemas"]["StatisticalColdRunSummary"] | null;
-            /** Tenant Id */
-            tenant_id: string;
-            /** Threshold Method */
-            threshold_method: string;
-            /** Threshold Used */
-            threshold_used: number;
+            raw_rows_uploaded: number;
+            /**
+             * Model Trained
+             * @default false
+             */
+            model_trained: boolean;
+            /** Model Id */
+            model_id?: string | null;
             /** Training Skipped Reason */
             training_skipped_reason?: string | null;
-            /** Uncertainties */
-            uncertainties?: number[];
         };
         /**
          * UploadJobAcceptedResponse
@@ -2972,10 +3490,10 @@ export interface components {
         UploadJobAcceptedResponse: {
             /** Job Id */
             job_id: string;
-            /** Poll Url */
-            poll_url: string;
             /** Portion Count */
             portion_count: number;
+            /** Poll Url */
+            poll_url: string;
         };
         /**
          * UploadResponse
@@ -2984,10 +3502,32 @@ export interface components {
          */
         UploadResponse: {
             /**
+             * Uploaded
+             * @description Number of sensor records successfully inserted into the database
+             */
+            uploaded: number;
+            /**
              * Errors
              * @description Number of records that failed validation or processing constraints
              */
             errors: number;
+            /**
+             * Skipped
+             * @description Number of records skipped during insertion (e.g. duplicate rows)
+             */
+            skipped: number;
+            /**
+             * Ranges
+             * @description Dictionary mapping each sensor key (temperature, humidity, co2, light) to its observed range
+             */
+            ranges: {
+                [key: string]: components["schemas"]["SensorRange"];
+            };
+            /**
+             * Tenant Id
+             * @description Identifier of the tenant associated with the upload
+             */
+            tenant_id: string;
             /**
              * Greenhouse Id
              * @description Identifier of the greenhouse associated with the upload
@@ -2998,41 +3538,19 @@ export interface components {
              * @description Optional detailed informational or warning status message from the upload processing
              */
             message?: string | null;
-            /**
-             * Ranges
-             * @description Dictionary mapping each sensor key (temperature, humidity, co2, light) to its observed range
-             */
-            ranges: {
-                [key: string]: components["schemas"]["SensorRange"];
-            };
-            /**
-             * Skipped
-             * @description Number of records skipped during insertion (e.g. duplicate rows)
-             */
-            skipped: number;
-            /**
-             * Tenant Id
-             * @description Identifier of the tenant associated with the upload
-             */
-            tenant_id: string;
-            /**
-             * Uploaded
-             * @description Number of sensor records successfully inserted into the database
-             */
-            uploaded: number;
         };
         /** ValidationError */
         ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
             /** Location */
             loc: (string | number)[];
             /** Message */
             msg: string;
             /** Error Type */
             type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
         };
         /**
          * StatisticsResponse
@@ -3045,20 +3563,30 @@ export interface components {
              */
             customer_id: string;
             /**
+             * Total Feedback
+             * @description Total feedback entries
+             */
+            total_feedback: number;
+            /**
              * High Quality Feedback
              * @description High-quality feedback entries
              */
             high_quality_feedback: number;
             /**
-             * Last Retrain
-             * @description ISO timestamp of last retrain
-             */
-            last_retrain?: string | null;
-            /**
              * Operator Count
              * @description Distinct operators who gave feedback
              */
             operator_count: number;
+            /**
+             * Retrainings Completed
+             * @description Number of completed retraining cycles
+             */
+            retrainings_completed: number;
+            /**
+             * Last Retrain
+             * @description ISO timestamp of last retrain
+             */
+            last_retrain?: string | null;
             /**
              * Operator Reliability
              * @description Per-operator reliability scores
@@ -3066,16 +3594,6 @@ export interface components {
             operator_reliability?: {
                 [key: string]: number;
             };
-            /**
-             * Retrainings Completed
-             * @description Number of completed retraining cycles
-             */
-            retrainings_completed: number;
-            /**
-             * Total Feedback
-             * @description Total feedback entries
-             */
-            total_feedback: number;
         };
         /**
          * StatisticsResponse
@@ -3083,10 +3601,10 @@ export interface components {
          */
         src__api__schemas__incidents__StatisticsResponse: {
             /**
-             * Avg Time To Resolve Minutes
-             * @description Mean minutes from detection to resolution
+             * Total Incidents
+             * @description Total stored incidents
              */
-            avg_time_to_resolve_minutes?: number | null;
+            total_incidents: number;
             /**
              * Resolved Incidents
              * @description Resolved incidents
@@ -3098,15 +3616,15 @@ export interface components {
              */
             resolved_rate: number;
             /**
+             * Avg Time To Resolve Minutes
+             * @description Mean minutes from detection to resolution
+             */
+            avg_time_to_resolve_minutes?: number | null;
+            /**
              * Top Root Causes
              * @description Most frequent root causes
              */
             top_root_causes?: components["schemas"]["RootCauseCount"][];
-            /**
-             * Total Incidents
-             * @description Total stored incidents
-             */
-            total_incidents: number;
         };
     };
     responses: never;
@@ -3117,15 +3635,121 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    get_enriched_anomalies_api_anomalies_enriched_get: {
+    get_health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_db_health_health_db_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    run_bootstrap_api_v1_bootstrap_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_run_bootstrap_api_v1_bootstrap_run_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_csv_api_upload_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_csv_api_upload_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_tenant_data_api_upload_data_delete: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
-                start: string;
-                end: string;
-                threshold: number;
-                limit?: number | null;
             };
             header?: never;
             path?: never;
@@ -3139,9 +3763,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -3155,15 +3777,11 @@ export interface operations {
             };
         };
     };
-    get_anomaly_groups_api_anomalies_groups_get: {
+    remove_live_demo_data_api_upload_live_data_delete: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
-                start: string;
-                end: string;
-                threshold: number;
-                group_by: "date" | "type" | "sensor";
             };
             header?: never;
             path?: never;
@@ -3193,12 +3811,48 @@ export interface operations {
             };
         };
     };
-    validate_api_key_api_auth_validate_get: {
+    inject_test_anomalies_api_upload_inject_test_anomalies_post: {
         parameters: {
             query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["Body_inject_test_anomalies_api_upload_inject_test_anomalies_post"];
             };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_synthetic_anomalies_api_upload_inject_test_anomalies_delete: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                /** @description Specific type to remove; omit to remove all synthetic anomalies */
+                anomaly_type?: string | null;
+            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3213,596 +3867,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    learning_progress_api_feedback_learning_progress__tenant_id__get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LearningProgressResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    mark_feedback_api_feedback_mark_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FeedbackMarkRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FeedbackMarkResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    mark_anomaly_integrated_api_feedback_mark_anomaly_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MarkAnomalyIntegratedRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MarkAnomalyIntegratedResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    record_outcome_api_feedback_record_outcome_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RecordOutcomeRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RecordOutcomeResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    feedback_statistics_api_feedback_statistics__tenant_id__get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["src__api__schemas__feedback__StatisticsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    gas_readings_api_gas_readings_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id: string;
-                /** @description Lookback window in hours */
-                hours?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GasReadingsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    gas_summary_api_gas_summary_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id: string;
-                /** @description Lookback window in hours */
-                hours?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GasSummaryResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    clear_incidents_api_incidents_clear_delete: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-            };
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    find_nearby_incidents_api_incidents_nearby_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                /** @description ISO timestamp to match */
-                timestamp: string;
-                greenhouse_id?: string | null;
-                window_min?: number;
-            };
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IncidentResponse"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_open_incidents_api_incidents_open_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                limit?: number;
-            };
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IncidentResponse"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_recurring_issues_api_incidents_recurring_issues_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                min_occurrences?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RecurringIssue"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    resolve_incident_api_incidents_resolve__incident_id__post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                incident_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["IncidentResolveRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    find_similar_api_incidents_similar_get: {
-        parameters: {
-            query: {
-                /** @description Query embedding (LATENT_DIM floats) */
-                embedding: number[];
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                k?: number;
-                max_age_days?: number | null;
-                resolved_only?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IncidentResponse"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_statistics_api_incidents_statistics_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["src__api__schemas__incidents__StatisticsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    store_incident_api_incidents_store_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["IncidentCreateRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IncidentStoreResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    suggest_fixes_api_incidents_suggest_fixes_get: {
-        parameters: {
-            query: {
-                /** @description Query embedding (LATENT_DIM floats) */
-                embedding: number[];
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                k?: number;
-                min_confidence?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuggestionsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_incident_api_incidents__incident_id__get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-            };
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path: {
-                incident_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IncidentResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3836,76 +3900,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InferenceResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    batch_inference_api_inference_batch_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BatchInferenceRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BatchInferenceResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    comprehensive_inference_api_inference_comprehensive_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ComprehensiveInferenceRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ComprehensiveInferenceResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3985,243 +3979,20 @@ export interface operations {
             };
         };
     };
-    get_jobs_api_jobs_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                job_type?: string | null;
-                status?: string | null;
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JobListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_job_status_api_jobs__job_id__get: {
+    comprehensive_inference_api_inference_comprehensive_post: {
         parameters: {
             query?: never;
-            header?: never;
-            path: {
-                job_id: string;
+            header?: {
+                "X-API-Key"?: string | null;
             };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JobStatusResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    cancel_job_api_jobs__job_id__cancel_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                job_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JobStatusResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    stream_job_events_api_jobs__job_id__events_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                job_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_drift_api_learning_drift_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DriftStateResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_history_api_learning_history_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-                greenhouse_id?: string | null;
-                event_type?: string | null;
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LearningHistoryEntry"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    observe_sequences_async_api_learning_jobs_observe_post: {
-        parameters: {
-            query?: never;
-            header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ObserveRequest"];
+                "application/json": components["schemas"]["ComprehensiveInferenceRequest"];
             };
         };
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    clear_models_api_learning_models_delete: {
-        parameters: {
-            query: {
-                tenant_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4229,7 +4000,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ComprehensiveInferenceResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4243,47 +4014,18 @@ export interface operations {
             };
         };
     };
-    get_active_model_version_api_learning_models__tenant_id__active_version_get: {
+    batch_inference_api_inference_batch_post: {
         parameters: {
             query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
+            header?: {
+                "X-API-Key"?: string | null;
             };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ActiveModelVersionResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    observe_sequences_api_learning_observe_post: {
-        parameters: {
-            query?: never;
-            header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ObserveRequest"];
+                "application/json": components["schemas"]["BatchInferenceRequest"];
             };
         };
         responses: {
@@ -4293,71 +4035,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ObserveResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    predict_sequence_api_learning_predict_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PredictRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PredictResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_statistics_api_learning_statistics_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LearnerStatisticsResponse"];
+                    "application/json": components["schemas"]["BatchInferenceResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4372,140 +4050,6 @@ export interface operations {
         };
     };
     get_active_model_api_models__tenant_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    activate_model_api_models__tenant_id__activate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ActivateRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    rollback_model_api_models__tenant_id__rollback_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RollbackRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    train_customer_model_api_models__tenant_id__train_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_training_status_api_models__tenant_id__training_status_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4602,6 +4146,140 @@ export interface operations {
             };
         };
     };
+    train_customer_model_api_models__tenant_id__train_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_training_status_api_models__tenant_id__training_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rollback_model_api_models__tenant_id__rollback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RollbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    activate_model_api_models__tenant_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     delete_model_version_api_models__tenant_id__versions__model_id__delete: {
         parameters: {
             query?: {
@@ -4623,6 +4301,786 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    store_incident_api_incidents_store_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IncidentCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentStoreResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    find_similar_api_incidents_similar_get: {
+        parameters: {
+            query: {
+                /** @description Query embedding (LATENT_DIM floats) */
+                embedding: number[];
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                k?: number;
+                max_age_days?: number | null;
+                resolved_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suggest_fixes_api_incidents_suggest_fixes_get: {
+        parameters: {
+            query: {
+                /** @description Query embedding (LATENT_DIM floats) */
+                embedding: number[];
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                k?: number;
+                min_confidence?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_incident_api_incidents_resolve__incident_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IncidentResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_statistics_api_incidents_statistics_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["src__api__schemas__incidents__StatisticsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_recurring_issues_api_incidents_recurring_issues_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                min_occurrences?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecurringIssue"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_open_incidents_api_incidents_open_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                limit?: number;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    find_nearby_incidents_api_incidents_nearby_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                /** @description ISO timestamp to match */
+                timestamp: string;
+                greenhouse_id?: string | null;
+                window_min?: number;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_incidents_api_incidents_clear_delete: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_incident_api_incidents__incident_id__get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    observe_sequences_api_learning_observe_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObserveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObserveResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    observe_sequences_async_api_learning_jobs_observe_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObserveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    predict_sequence_api_learning_predict_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PredictRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PredictResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_statistics_api_learning_statistics_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearnerStatisticsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_history_api_learning_history_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                event_type?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningHistoryEntry"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_drift_api_learning_drift_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftStateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_active_model_version_api_learning_models__tenant_id__active_version_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveModelVersionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_models_api_learning_models_delete: {
+        parameters: {
+            query: {
+                tenant_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_feedback_api_feedback_mark_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeedbackMarkRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackMarkResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    feedback_statistics_api_feedback_statistics__tenant_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["src__api__schemas__feedback__StatisticsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    learning_progress_api_feedback_learning_progress__tenant_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningProgressResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_outcome_api_feedback_record_outcome_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecordOutcomeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecordOutcomeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_anomaly_integrated_api_feedback_mark_anomaly_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkAnomalyIntegratedRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarkAnomalyIntegratedResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4668,18 +5126,19 @@ export interface operations {
             };
         };
     };
-    check_dhcp_fingerprint_api_network_dhcp_fingerprint_post: {
+    gas_summary_api_gas_summary_get: {
         parameters: {
-            query?: never;
+            query: {
+                tenant_id: string;
+                greenhouse_id: string;
+                /** @description Lookback window in hours */
+                hours?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DHCPCheckRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4687,7 +5146,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                    "application/json": components["schemas"]["GasSummaryResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4701,18 +5160,19 @@ export interface operations {
             };
         };
     };
-    check_rtt_jitter_api_network_rtt_jitter_post: {
+    gas_readings_api_gas_readings_get: {
         parameters: {
-            query?: never;
+            query: {
+                tenant_id: string;
+                greenhouse_id: string;
+                /** @description Lookback window in hours */
+                hours?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RTTCheckRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4720,7 +5180,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RTTCheckResponse"];
+                    "application/json": components["schemas"]["GasReadingsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4734,18 +5194,16 @@ export interface operations {
             };
         };
     };
-    check_service_response_api_network_service_response_post: {
+    get_job_status_api_jobs__job_id__get: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                job_id: string;
+            };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ServiceCheckRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4753,7 +5211,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                    "application/json": components["schemas"]["JobStatusResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4767,18 +5225,16 @@ export interface operations {
             };
         };
     };
-    check_tcp_handshake_api_network_tcp_handshake_post: {
+    stream_job_events_api_jobs__job_id__events_get: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                job_id: string;
+            };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TCPCheckRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4786,7 +5242,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -4800,13 +5256,225 @@ export interface operations {
             };
         };
     };
-    get_anomaly_readings_api_readings_anomalies_get: {
+    cancel_job_api_jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_jobs_api_jobs_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                job_type?: string | null;
+                status?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    live_source_status_api_live_status_get: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
-                hours_back: number;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_live_scope_endpoint_api_live_resume_post: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_live_events_api_live_events_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                last_event_id?: string | null;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_readings_window_api_readings_window_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                start: string;
+                end: string;
                 limit?: number | null;
+                max_points?: number | null;
+                include_scores?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_readings_recent_api_readings_recent_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                hours?: number;
+                limit?: number | null;
+                max_points?: number | null;
+                include_scores?: boolean;
             };
             header?: never;
             path?: never;
@@ -4908,46 +5576,12 @@ export interface operations {
             };
         };
     };
-    get_greenhouses_api_readings_greenhouses_get: {
-        parameters: {
-            query: {
-                tenant_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: string[];
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_incidents_api_readings_incidents_get: {
+    get_anomaly_readings_api_readings_anomalies_get: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
-                start?: string | null;
-                end?: string | null;
+                hours_back: number;
                 limit?: number | null;
             };
             header?: never;
@@ -5049,15 +5683,44 @@ export interface operations {
             };
         };
     };
-    get_readings_recent_api_readings_recent_get: {
+    get_greenhouses_api_readings_greenhouses_get: {
         parameters: {
             query: {
                 tenant_id: string;
-                greenhouse_id?: string;
-                hours?: number;
-                limit?: number | null;
-                max_points?: number | null;
-                include_scores?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string[];
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_greenhouse_api_readings_greenhouses_post: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id: string;
             };
             header?: never;
             path?: never;
@@ -5087,16 +5750,321 @@ export interface operations {
             };
         };
     };
-    get_readings_window_api_readings_window_get: {
+    get_incidents_api_readings_incidents_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                start?: string | null;
+                end?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_rtt_jitter_api_network_rtt_jitter_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RTTCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RTTCheckResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_iat_api_network_iat_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IATCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IATCheckResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_tcp_handshake_api_network_tcp_handshake_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TCPCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_dhcp_fingerprint_api_network_dhcp_fingerprint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DHCPCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_service_response_api_network_service_response_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServiceCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnomalyFlagResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    fit_threat_detector_api_network_threat_fit_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThreatFitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreatFitResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    score_threat_api_network_threat_score_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThreatScoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreatScoreResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_anomaly_groups_api_anomalies_groups_get: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
                 start: string;
                 end: string;
+                threshold?: number | null;
+                group_by: "date" | "type" | "sensor";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_enriched_anomalies_api_anomalies_enriched_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                start: string;
+                end: string;
+                threshold?: number | null;
                 limit?: number | null;
-                max_points?: number | null;
-                include_scores?: boolean;
             };
             header?: never;
             path?: never;
@@ -5126,18 +6094,16 @@ export interface operations {
             };
         };
     };
-    upload_csv_api_upload_post: {
+    validate_api_key_api_auth_validate_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "multipart/form-data": components["schemas"]["Body_upload_csv_api_upload_post"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -5145,7 +6111,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UploadResponse"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -5159,13 +6127,15 @@ export interface operations {
             };
         };
     };
-    clear_tenant_data_api_upload_data_delete: {
+    get_operational_config_api_config_operational_get: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5177,7 +6147,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OperationalConfigResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5191,85 +6161,21 @@ export interface operations {
             };
         };
     };
-    inject_test_anomalies_api_upload_inject_test_anomalies_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/x-www-form-urlencoded": components["schemas"]["Body_inject_test_anomalies_api_upload_inject_test_anomalies_post"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    remove_synthetic_anomalies_api_upload_inject_test_anomalies_delete: {
+    put_operational_config_api_config_operational_put: {
         parameters: {
             query: {
                 tenant_id: string;
                 greenhouse_id?: string;
-                /** @description Specific type to remove; omit to remove all synthetic anomalies */
-                anomaly_type?: string | null;
             };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
+            header?: {
+                "X-API-Key"?: string | null;
             };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    run_bootstrap_api_v1_bootstrap_run_post: {
-        parameters: {
-            query?: never;
-            header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_run_bootstrap_api_v1_bootstrap_run_post"];
+                "application/json": components["schemas"]["OperationalConfigRequest"];
             };
         };
         responses: {
@@ -5279,7 +6185,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BootstrapRunResponse"];
+                    "application/json": components["schemas"]["OperationalConfigResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5293,7 +6199,7 @@ export interface operations {
             };
         };
     };
-    get_health_health_get: {
+    get_crop_profiles_api_config_crop_profiles_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -5315,10 +6221,15 @@ export interface operations {
             };
         };
     };
-    get_db_health_health_db_get: {
+    get_seasonal_baselines_api_baselines_seasonal_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5333,6 +6244,15 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -74,8 +74,28 @@ jobs:
             exit 1
           fi
 
-      - name: Run pgvector integration tests
+      - name: Run PostgreSQL-only tests
         env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          # POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py overwrites
+          # DATABASE_URL with the SQLite test database before any test module is
+          # imported, so every test here skipped and this job reported green
+          # while exercising nothing.
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
-          pytest -m postgres tests/db/test_incident_memory_postgres.py -v
+          pytest -m postgres -v \
+            tests/db/test_incident_memory_postgres.py \
+            tests/db/test_023_nonfinite_postgres.py
+
+      - name: Fail if any PostgreSQL-only test was skipped
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+        run: |
+          # A skip here means the suite silently stopped covering Postgres —
+          # the failure mode this job was added to prevent.
+          pytest -m postgres -q --override-ini="addopts=" \
+            tests/db/test_incident_memory_postgres.py \
+            tests/db/test_023_nonfinite_postgres.py 2>&1 | tee /tmp/pg-tests.log
+          if grep -qE "[0-9]+ skipped" /tmp/pg-tests.log; then
+            echo "PostgreSQL-only tests were skipped — they are not actually running"
+            exit 1
+          fi
