@@ -30,14 +30,21 @@ New columns
 Step 1: add columns (DDL)
 --------------------------
 Both are nullable with no default → metadata-only DDL on Postgres, no table
-rewrite, no long lock.  Each column is added only when absent: the batched
-backfill below commits, which commits this DDL too, so an interrupted run
-leaves the columns present with the revision unstamped.  Re-running must
-resume rather than fail on DuplicateColumnError.
+rewrite, no long lock.  Each column is added only when absent, so a database
+left half-upgraded by the earlier commit-per-batch version of this migration
+(columns present, revision unstamped) resumes instead of failing on
+DuplicateColumnError.
 
 Step 2–4: batched backfill (idempotent via score_scale IS NULL)
 --------------------------------------------------------------
-Each batch commits independently; the job is resumable.
+Batching bounds how many rows are held in memory at once; it does NOT commit.
+An earlier version called ``connection.commit()`` per batch, which is invalid
+inside the transaction alembic opens around a migration — the next statement
+died with "Can't operate on closed transaction inside context manager", after
+the commit had already made Step 1's DDL permanent.  That is what left
+production half-upgraded.  The whole migration is now one transaction: it
+either lands completely or rolls back.  The loops still terminate because each
+UPDATE sets score_scale, and a transaction sees its own writes.
 
 Cohort rules (§5.2):
 
@@ -230,7 +237,6 @@ def _backfill_live(connection: sa.engine.Connection) -> int:
             ),
             params,
         )
-        connection.commit()
         updated += len(rows)
     return updated
 
@@ -277,7 +283,6 @@ def _backfill_synthetic(connection: sa.engine.Connection) -> int:
             ),
             params,
         )
-        connection.commit()
         updated += len(rows)
     return updated
 
@@ -334,7 +339,6 @@ def _backfill_legacy(connection: sa.engine.Connection) -> int:
             ),
             params,
         )
-        connection.commit()
         updated += len(rows)
     return updated
 
@@ -360,14 +364,13 @@ def _backfill_nonfinite_remaining(connection: sa.engine.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 def upgrade() -> None:
-    # Steps 2–4 commit each backfill batch (see _backfill_* helpers), which
-    # also commits Step 1's DDL.  A run interrupted mid-backfill therefore
-    # leaves the columns in place with the revision unstamped, and a plain
-    # add_column would then raise DuplicateColumnError on every subsequent
-    # deploy — observed in production, where it blocked the API (and with it
-    # migration 024) for two days.  Adding only what is missing makes the whole
-    # migration resumable, matching the `score_scale IS NULL` idempotency the
-    # backfill already relies on.
+    # The earlier commit-per-batch version of this migration committed Step 1's
+    # DDL before dying on the first statement after that commit, so production
+    # was left with the columns present and the revision unstamped.  A plain
+    # add_column then raised DuplicateColumnError on every subsequent deploy,
+    # which blocked the API — and with it migration 024 — for two days.  Adding
+    # only what is missing lets such a database resume; the commits themselves
+    # are gone (see the Step 2–4 note in the module docstring).
     # get_bind() is the connection inside the alembic migration context.
     connection = op.get_bind()
     existing = {
@@ -433,7 +436,6 @@ def downgrade() -> None:
             ),
             params,
         )
-        connection.commit()
 
     op.drop_column("sensor_readings", "score_scale")
     op.drop_column("sensor_readings", "anomaly_score_raw")
