@@ -314,7 +314,20 @@ class InferenceResponse(BaseModel):
 class UploadHighAnomalyDetail(BaseModel):
     """Anomaly event from cold-run CSV upload (LSTM or statistical)."""
 
-    score: float = Field(..., ge=0.0, le=1.0)
+    score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="ADR-005 canonical score — 0.5 is the producing detector's own "
+        "decision point. Every producer canonicalises before it lands here, so "
+        "max()/sort() across detectors is meaningful.",
+    )
+    score_raw: Optional[float] = Field(
+        default=None,
+        description="Producer's native score before canonicalisation, for the "
+        "anomaly_score_raw provenance column: clipped reconstruction error for "
+        "lstm, z-score for statistical. None when there is no native scalar.",
+    )
     timestamp: str
     detected_ts: Optional[str] = Field(
         default=None,

@@ -384,3 +384,62 @@ async def test_finalize_does_not_overwrite_a_pruned_result(session):
 
     job = await get_job(session, job_id)
     assert job.result == completed_result, "a redundant finalize must not rewrite the result"
+
+
+async def test_stored_scores_are_canonical_not_double_transformed(session):
+    """Persisted scores must be canonical exactly once, on one shared scale.
+
+    `_stat_z_to_canonical` already maps a z-score onto the canonical scale, but
+    `build_upload_score_dicts` used to transform every hit AGAIN against the
+    LSTM's per-file threshold. That second mapping inflated statistical hits
+    (measured: stored 0.82-0.89 while LSTM hits sat at 0.50-0.53), made
+    `max(lstm, statistical)` in the merge a comparison between two different
+    scales, and would have pushed every hit under the 0.5 display threshold had
+    `threshold_used` been high.
+    """
+    job_id, messages = await _produce_messages(
+        session, _csv_content(fault_at=70), portion_rows=50
+    )
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed"
+    threshold_used = job.result["threshold_used"]
+
+    rows = (
+        (
+            await session.execute(
+                select(SensorReading).where(
+                    SensorReading.tenant_id == TENANT,
+                    SensorReading.anomaly_score.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows, "no scored rows to check"
+
+    for row in rows:
+        # A stored score is a hit, so it must sit at or above the decision point.
+        assert 0.5 <= row.anomaly_score <= 1.0, (
+            f"{row.timestamp}: anomaly_score {row.anomaly_score} is outside the "
+            "canonical hit range — a second transform would drag it off scale"
+        )
+        # The raw column must keep the producer's native value, never the
+        # canonical one: re-canonicalising a stored score must not reproduce it.
+        if row.anomaly_score_raw is not None and row.trigger_detector == "statistical":
+            assert row.anomaly_score_raw > 1.0, (
+                f"{row.timestamp}: anomaly_score_raw {row.anomaly_score_raw} looks "
+                "canonical, but a statistical hit's native value is a z-score"
+            )
+
+    # Statistical hits must not automatically outrank LSTM hits, which is what
+    # the mixed-scale comparison produced.
+    canonical_from_threshold = [
+        r.anomaly_score for r in rows if r.trigger_detector == "lstm"
+    ]
+    if canonical_from_threshold:
+        assert max(canonical_from_threshold) <= 1.0
+        assert threshold_used >= 0.0

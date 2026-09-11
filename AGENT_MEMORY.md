@@ -3,6 +3,78 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Production incident: stuck uploads + missing anomalies — RESOLVED (2026-09-11)**
+
+Two user-visible symptoms, one root cause: upload jobs hung at `finalizing` forever,
+and no anomalies appeared for any newly uploaded file.
+
+**Root cause — `connection.commit()` inside an alembic migration.**
+Alembic wraps a migration in a transaction. Migration 023 committed per backfill
+batch, which closes that context: the next statement dies with
+`InvalidRequestError: Can't operate on closed transaction inside context manager`
+(`023_canonical_anomaly_score.py:246` in `_backfill_synthetic`) — and by then the
+commit has already made Step 1's `ADD COLUMN` DDL permanent.
+
+The cascade from there:
+1. Columns `anomaly_score_raw` + `score_scale` committed, revision never stamped.
+2. Every later deploy re-ran 023 and died on `DuplicateColumnError`.
+3. `docker/start-api.sh` runs `alembic upgrade head`, so **the API deploy failed**
+   (`e3177700`, Sep 10) and Railway kept the Sep 8 release serving. Migration 024
+   never applied.
+4. The **worker does not run migrations** and deployed fine on the new code, so
+   `apply_anomaly_scores` wrote to `trigger_channel` — a column that did not exist
+   (`UndefinedColumnError`).
+5. `apply_anomaly_scores` is the only write of `anomaly_score` on the upload path →
+   every flagged row lost its score → the anomalies page filters on
+   `anomaly_score >= threshold` → **empty**.
+6. `_finalize` claims the job by moving it to `finalizing` *before* that write. On
+   redelivery the transition no longer matched `running`/`pending`, so it logged
+   "already claimed — skipping", returned successfully, and acked. The DLQ hook
+   never fired → **job wedged in `finalizing` with no error surfaced**.
+
+**Fixes** (PR #62 `4c6332e`, PR #63 `234cab7`):
+- 023 no longer commits — one atomic transaction, lands completely or rolls back.
+  Batching stays (bounds rows held in memory); loops still terminate because each
+  UPDATE sets `score_scale` and a transaction sees its own writes.
+- 023 adds each column only when absent, so the already-corrupted production DB
+  could resume instead of failing on `DuplicateColumnError`.
+- `_finalize` re-claims a job still in `finalizing` (which by construction cannot
+  have finished — `set_job_result` always writes a terminal status), so repeated
+  failure now reaches the DLQ hook and marks the job `failed` **with the error
+  visible**. A guard skips the recompute when portion blobs were already pruned, so
+  a duplicate delivery cannot overwrite a good result with an empty one.
+
+**How production actually recovered:** deploy `0cc6626b` ran the migration three
+times; the per-batch commits made it *crash-forward* (each restart resumed where the
+last committed), and once every cohort was back-filled no commit fired, so the third
+attempt completed and 024 applied. `set -euo pipefail` in `start-api.sh` worked
+correctly throughout — the earlier deploys genuinely failed.
+
+**Verification.** SQLite does not reproduce the commit bug at all, so it was verified
+against a real PostgreSQL 17 + pgvector instance (pgvector is built for pg17/pg18,
+NOT pg16): pre-fix + seeded rows reproduced the exact production error and schema
+state (`alembic_version=022`, 023's columns present, 024's absent); post-fix upgraded
+that corrupted DB to 024 with 0 rows left unclassified; downgrade 024→022 and
+re-upgrade round-tripped. Confirmed in prod: `/api/anomalies/groups` returns HTTP 200
+(that endpoint selects `trigger_channel`), worker logs clean.
+
+**Why it shipped.** `.github/workflows/postgres-tests.yml` ran `alembic upgrade head`
+against an **empty** database — the backfill loops never executed, so a migration that
+only breaks once it has rows to touch upgraded clean. CI now stops at 022, seeds one
+row per cohort, continues to head, and asserts every row was classified. Same blind
+spot applies to any future migration test.
+
+**Known issue, not yet fixed — double canonical transform.** Statistical scores are
+transformed twice: `_stat_z_to_canonical` (`upload_portions.py:60`) maps z → canonical
+[0,1], then `build_upload_score_dicts` runs `canonical()` again with the LSTM file
+threshold as `p`. `high_anomalies` is therefore a mixed-scale list (LSTM entries carry
+raw clipped scores, statistical entries carry canonical ones). Measured on a full-year
+file: LSTM rows store 0.500–0.534 while statistical rows store 0.816–0.893, so
+statistical hits systematically outrank LSTM ones — and score drives severity banding
+plus `peak_score` in episode grouping. Would also suppress anomalies below the 0.5
+display threshold if `threshold_used` were ever high.
+
+## Previous Phase
 **Four-test Fix — COMPLETE (2026-09-10)**
 
 Fixed four test failures exposed by running the full `pytest tests/ --ignore=tests/load`
