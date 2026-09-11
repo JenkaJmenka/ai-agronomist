@@ -451,6 +451,13 @@ class TestUpgradeDowngradeRoundTrip:
 
 class TestNonFiniteGuard:
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="SQLite coerces float('nan') to NULL on insert into a REAL "
+        "column, so the stored-NaN premise is unreachable and the backfill's "
+        "anomaly_score IS NOT NULL filter skips the row. The guard is verified "
+        "for real in tests/db/test_023_nonfinite_postgres.py (NaN and +-Inf).",
+    )
     def test_nan_in_live_row_becomes_null_with_unknown_scale(self, conn):
         """NaN anomaly_score in a live row is neutralised by the backfill."""
         _add_columns(conn)
