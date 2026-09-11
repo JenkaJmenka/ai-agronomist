@@ -39,6 +39,8 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.db.models import Base, SensorReading
+
 pytestmark = pytest.mark.postgres
 
 _TENANT = "nonfinite_guard_probe"
@@ -73,21 +75,34 @@ def _database_url() -> str | None:
 async def pg_engine():
     url = _database_url()
     if url is None:
-        pytest.skip("DATABASE_URL is not a PostgreSQL URL")
+        pytest.skip("No PostgreSQL URL configured")
     engine = create_async_engine(url, poolclass=None)
     try:
         async with engine.begin() as conn:
+            # Do not assume the table is there. test_incident_memory_postgres's
+            # fixture runs Base.metadata.drop_all on teardown, so whether this
+            # file finds a schema depends on test order — which it must not.
+            # create_all is checkfirst by default, so this is a no-op against
+            # the migrated schema CI builds first.
+            await conn.run_sync(
+                Base.metadata.create_all, tables=[SensorReading.__table__]
+            )
             await conn.execute(
                 text("DELETE FROM sensor_readings WHERE tenant_id = :t"),
                 {"t": _TENANT},
             )
         yield engine
     finally:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("DELETE FROM sensor_readings WHERE tenant_id = :t"),
-                {"t": _TENANT},
-            )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("DELETE FROM sensor_readings WHERE tenant_id = :t"),
+                    {"t": _TENANT},
+                )
+        except Exception:
+            # Another module's teardown may have dropped the table already;
+            # there is nothing of ours left to clean up in that case.
+            pass
         await engine.dispose()
 
 
