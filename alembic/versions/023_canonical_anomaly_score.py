@@ -30,7 +30,10 @@ New columns
 Step 1: add columns (DDL)
 --------------------------
 Both are nullable with no default → metadata-only DDL on Postgres, no table
-rewrite, no long lock.
+rewrite, no long lock.  Each column is added only when absent: the batched
+backfill below commits, which commits this DDL too, so an interrupted run
+leaves the columns present with the revision unstamped.  Re-running must
+resume rather than fail on DuplicateColumnError.
 
 Step 2–4: batched backfill (idempotent via score_scale IS NULL)
 --------------------------------------------------------------
@@ -357,20 +360,32 @@ def _backfill_nonfinite_remaining(connection: sa.engine.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 def upgrade() -> None:
-    # Step 1 — Add columns.
-    # Both nullable with no default → metadata-only DDL on Postgres.
-    op.add_column(
-        "sensor_readings",
-        sa.Column("anomaly_score_raw", sa.Float(), nullable=True),
-    )
-    op.add_column(
-        "sensor_readings",
-        sa.Column("score_scale", sa.String(16), nullable=True),
-    )
-
-    # Steps 2–4 — batched backfill.
+    # Steps 2–4 commit each backfill batch (see _backfill_* helpers), which
+    # also commits Step 1's DDL.  A run interrupted mid-backfill therefore
+    # leaves the columns in place with the revision unstamped, and a plain
+    # add_column would then raise DuplicateColumnError on every subsequent
+    # deploy — observed in production, where it blocked the API (and with it
+    # migration 024) for two days.  Adding only what is missing makes the whole
+    # migration resumable, matching the `score_scale IS NULL` idempotency the
+    # backfill already relies on.
     # get_bind() is the connection inside the alembic migration context.
     connection = op.get_bind()
+    existing = {
+        col["name"] for col in sa.inspect(connection).get_columns("sensor_readings")
+    }
+
+    # Step 1 — Add columns.
+    # Both nullable with no default → metadata-only DDL on Postgres.
+    if "anomaly_score_raw" not in existing:
+        op.add_column(
+            "sensor_readings",
+            sa.Column("anomaly_score_raw", sa.Float(), nullable=True),
+        )
+    if "score_scale" not in existing:
+        op.add_column(
+            "sensor_readings",
+            sa.Column("score_scale", sa.String(16), nullable=True),
+        )
 
     # Live cohort first (most valuable provenance).
     _backfill_live(connection)

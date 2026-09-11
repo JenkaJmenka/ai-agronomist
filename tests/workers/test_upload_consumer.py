@@ -15,7 +15,7 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.db.jobs import get_job
+from src.db.jobs import get_job, try_transition
 from src.db.models import Base, JobPortion, RawReading, SensorReading
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.workers.upload_consumer import (
@@ -319,3 +319,68 @@ async def test_async_finalize_persists_trigger_channel(session):
             f"Row at {row.timestamp} has trigger_channel={row.trigger_channel!r} "
             "but trigger_detector is NULL"
         )
+
+
+async def test_finalize_retries_after_a_failed_write(session):
+    """A finalize that raises mid-write must stay retryable, not wedge the job.
+
+    _finalize claims the job by moving it to 'finalizing' before it writes.
+    When the write raised — in production, apply_anomaly_scores hitting a
+    column migration 024 had never created — the redelivered message could no
+    longer match 'running'/'pending', logged "already claimed", and acked.  The
+    DLQ hook never fired, so the job sat in 'finalizing' forever showing no
+    error while its anomaly scores were silently never written.
+    """
+    job_id, messages = await _produce_messages(
+        session, _csv_content(fault_at=70), portion_rows=50
+    )
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    assert len(finalize_msgs) == 1
+
+    write_failure = RuntimeError('column "trigger_channel" does not exist')
+    with patch(
+        "src.workers.upload_consumer.apply_anomaly_scores", side_effect=write_failure
+    ):
+        with pytest.raises(RuntimeError):
+            await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "finalizing", "the claim happened before the failing write"
+
+    # Redelivery must re-claim and finish rather than short-circuit.
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed"
+    assert job.result["anomalies_detected"] > 0
+    scored = await session.execute(
+        select(func.count(SensorReading.id)).where(
+            SensorReading.tenant_id == TENANT,
+            SensorReading.anomaly_score.isnot(None),
+        )
+    )
+    assert scored.scalar() > 0, "the retry must write the scores the first attempt lost"
+
+
+async def test_finalize_does_not_overwrite_a_pruned_result(session):
+    """A duplicate delivery racing a finished finalize must not blank the result.
+
+    prune_portion_results nulls the per-portion blobs, so recomputing after a
+    successful finalize would rebuild an empty response and overwrite a good
+    result with zeros.
+    """
+    job_id, messages = await _produce_messages(session, _csv_content(), portion_rows=50)
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    completed_result = job.result
+    assert job.status == "completed"
+
+    # Force the status back to simulate a duplicate delivery arriving while the
+    # winning attempt was still between its claim and its terminal write.
+    await try_transition(session, job_id, "completed", "finalizing")
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.result == completed_result, "a redundant finalize must not rewrite the result"
