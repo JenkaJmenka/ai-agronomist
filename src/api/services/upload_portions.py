@@ -60,6 +60,21 @@ def _stat_z_to_canonical(z_score: float) -> float:
     can = _canonical_transform(z_score, COLD_RUN_STAT_Z_MIN, None)
     return can if can is not None else 0.5
 
+
+def _lstm_score_to_canonical(score: float, threshold_used: float) -> float:
+    """Map a clipped LSTM reconstruction score to the canonical [0, 1] scale.
+
+    Decision point p = the file-calibrated ``threshold_used`` (the LSTM's own
+    cutoff for this upload), unbounded branch, same as the statistical mapping.
+
+    Falls back to 0.5 — the decision point — when the transform is undefined
+    (``threshold_used <= 0``, reachable when >99.9% of a file scores zero).
+    Callers only build these for scores already above the threshold, so the
+    decision point is the honest floor.
+    """
+    can = _canonical_transform(score, threshold_used, None)
+    return can if can is not None else 0.5
+
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
 
 
@@ -442,7 +457,14 @@ def finalize_scores(
     lstm_high = [
         UploadHighAnomalyDetail(
             sequence_index=seq_idx,
-            score=float(score),
+            # The LSTM's own decision point is the file-calibrated threshold, so
+            # that is its `p`.  Canonicalising here rather than at persist time is
+            # what makes this list single-scale: _merge_by_timestamp takes
+            # max(lstm, statistical) and episode grouping derives peak_score from
+            # it, and neither is meaningful while the two detectors disagree about
+            # what the number means.
+            score=_lstm_score_to_canonical(float(score), threshold_used),
+            score_raw=float(score),
             timestamp=sequence_timestamps[seq_idx]
             if seq_idx < len(sequence_timestamps)
             else "unknown",
@@ -464,6 +486,7 @@ def finalize_scores(
     stat_high = [
         UploadHighAnomalyDetail(
             score=_stat_z_to_canonical(detail.z_score),
+            score_raw=detail.z_score,
             timestamp=detail.timestamp,
             detector="statistical",
             column=detail.column,

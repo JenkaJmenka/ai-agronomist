@@ -308,8 +308,13 @@ async def apply_anomaly_scores(
             except (ValueError, TypeError):
                 continue
             row: dict[str, Any] = {"ts": ts, "score": float(score)}
-            if anomaly_score_raw_by_timestamp is not None and key in anomaly_score_raw_by_timestamp:
-                row["raw_score"] = float(anomaly_score_raw_by_timestamp[key])
+            if anomaly_score_raw_by_timestamp is not None:
+                # Set the key unconditionally — None when this producer has no
+                # native score — for the same reason as the trigger fields below:
+                # executemany binds one statement across every param row, so a
+                # row missing a key fails the whole batch.
+                raw_value = anomaly_score_raw_by_timestamp.get(key)
+                row["raw_score"] = None if raw_value is None else float(raw_value)
             if score_scale is not None:
                 row["scale"] = score_scale
             if trigger_data_by_timestamp is not None:

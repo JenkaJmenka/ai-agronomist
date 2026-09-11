@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.main import app
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import CANONICAL_ANOMALY_THRESHOLD
 from src.db.models import Base, SensorReading
 from src.db.session import get_db
 
@@ -292,5 +294,14 @@ class TestCsvUploadErrorPaths:
         assert len(payload["high_anomalies"]) == 1
         entry = payload["high_anomalies"][0]
         assert entry["sequence_index"] == 5
-        assert entry["score"] == pytest.approx(0.95)
+        # ADR-005: `score` is canonical (0.5 == this detector's own decision
+        # point, here the per-file threshold) and `score_raw` keeps the native
+        # value. Derive the expectation from the transform and the threshold the
+        # response reports rather than hardcoding a literal, so the scale is
+        # pinned instead of silently drifting (same approach as f711333).
+        assert entry["score_raw"] == pytest.approx(0.95)
+        assert entry["score"] == pytest.approx(
+            _canonical_score(0.95, payload["threshold_used"], None)
+        )
+        assert entry["score"] >= CANONICAL_ANOMALY_THRESHOLD
         assert entry["timestamp"].startswith("2026-06-06T11:")

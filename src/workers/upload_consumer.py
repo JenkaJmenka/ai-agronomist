@@ -297,10 +297,9 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     )
 
     if payload.get("persist_data"):
-        # ADR-005: canonical scores + raw scores keyed by timestamp.
+        # ADR-005: canonical scores + producer-native scores keyed by timestamp.
         _canonical_by_ts, _raw_by_ts = build_upload_score_dicts(
             response.high_anomalies,
-            response.threshold_used,
         )
         await apply_anomaly_scores(
             db=db,
