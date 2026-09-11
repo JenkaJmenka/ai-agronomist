@@ -46,8 +46,33 @@ jobs:
       - name: Run Alembic migrations
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          PGPASSWORD: postgres
         run: |
+          # Stop short of 023 and seed one row per backfill cohort. An empty
+          # database never enters 023's backfill loops, so a migration that
+          # only breaks once it has rows to touch upgrades clean here and
+          # fails in production instead — which is exactly what happened.
+          alembic upgrade 022
+          psql -h localhost -U postgres -d test_db -c "
+            INSERT INTO sensor_readings
+              (tenant_id, greenhouse_id, timestamp, temperature, humidity,
+               co2, light, anomaly_score, source, anomaly_type)
+            VALUES
+              ('t1','gh','2026-01-01T00:00:00Z',21,60,420,500,0.21,'live',NULL),
+              ('t1','gh','2026-01-02T00:00:00Z',21,60,420,500,0.90,NULL,'heat_spike'),
+              ('t1','gh','2026-01-03T00:00:00Z',21,60,420,500,0.44,NULL,NULL);"
           alembic upgrade head
+
+      - name: Verify migration 023 classified every seeded row
+        env:
+          PGPASSWORD: postgres
+        run: |
+          unscaled=$(psql -h localhost -U postgres -d test_db -tAc \
+            "SELECT count(*) FROM sensor_readings WHERE score_scale IS NULL;")
+          if [ "$unscaled" != "0" ]; then
+            echo "023 left $unscaled row(s) unclassified — a backfill loop bailed out early"
+            exit 1
+          fi
 
       - name: Run pgvector integration tests
         env:
