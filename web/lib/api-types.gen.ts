@@ -1161,7 +1161,8 @@ export interface paths {
          * Get Readings Window
          * @description Merged raw+canonical rows for an inclusive window (hard row cap applies).
          *
-         *     G1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);
+         *     G1: `max_points` LTTB-downsamples the rows; `anomaly_threshold` is the
+         *     client's display threshold and keeps every row it would highlight;
          *     `include_scores=false` trims anomaly_score from the payload.
          */
         get: operations["get_readings_window_api_readings_window_get"];
@@ -5437,6 +5438,7 @@ export interface operations {
                 limit?: number | null;
                 max_points?: number | null;
                 include_scores?: boolean;
+                anomaly_threshold?: number | null;
             };
             header?: never;
             path?: never;
@@ -5475,6 +5477,7 @@ export interface operations {
                 limit?: number | null;
                 max_points?: number | null;
                 include_scores?: boolean;
+                anomaly_threshold?: number | null;
             };
             header?: never;
             path?: never;

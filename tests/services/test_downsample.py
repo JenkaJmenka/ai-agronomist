@@ -95,3 +95,49 @@ def test_rows_without_scores_downsample_cleanly():
     out, downsampled = downsample_rows(rows, 200)
     assert downsampled is True
     assert len(out) <= 200
+
+
+def test_threshold_preserves_every_row_the_client_would_highlight():
+    """Reported 2026-09-14: bands vanished on wide windows.
+
+    The quantile heuristic only protects the top decile, so a row scoring
+    just above the client's display threshold was left to LTTB and silently
+    dropped — the chart kept the dip's shape and lost the flag.
+    """
+    peaks = list(range(0, 4000, 400))  # clear top-decile spikes
+    mids = list(range(37, 4000, 97))  # above the 0.15 display threshold, below the peaks
+    rows = _make_rows(4000, anomaly_at=peaks)
+    for i in mids:
+        rows[i]["anomaly_score"] = 0.30
+
+    without, _ = downsample_rows([dict(r) for r in rows], 500)
+    with_threshold, _ = downsample_rows([dict(r) for r in rows], 500, 0.15)
+
+    kept_without = {r["timestamp"] for r in without}
+    kept_with = {r["timestamp"] for r in with_threshold}
+    survived_without = sum(1 for i in mids if rows[i]["timestamp"] in kept_without)
+    survived_with = sum(1 for i in mids if rows[i]["timestamp"] in kept_with)
+
+    assert survived_with == len(mids), "a flagged row the client bands was dropped"
+    # Guards the regression itself: without the threshold these are lost.
+    assert survived_without < len(mids)
+
+
+def test_live_scored_window_still_downsamples():
+    """The live path scores every reading; a low threshold must not keep them all."""
+    rows = _make_rows(5000)
+    for i, row in enumerate(rows):
+        row["anomaly_score"] = 0.20 + 0.001 * (i % 50)  # every row clears 0.15
+
+    out, downsampled = downsample_rows(rows, 500, 0.15)
+
+    assert downsampled is True
+    # Falls back to the quantile heuristic rather than returning the window.
+    assert len(out) < 1000
+
+
+def test_threshold_above_every_score_falls_back_to_the_heuristic():
+    rows = _make_rows(3000, anomaly_at=[11, 1500, 2999])
+    with_threshold, _ = downsample_rows([dict(r) for r in rows], 300, 0.99)
+    without, _ = downsample_rows([dict(r) for r in rows], 300)
+    assert [r["timestamp"] for r in with_threshold] == [r["timestamp"] for r in without]
