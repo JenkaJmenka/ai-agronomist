@@ -35,7 +35,12 @@ class AnomalyEpisodeSummary(BaseModel):
     first_value: Optional[float] = None
     last_value: Optional[float] = None
     peak_value: Optional[float] = None
+    # Band-relative: is this getting worse?  Only meaningful when `direction`
+    # says which side of the band was breached, so "flat" whenever it is null.
     trend: Literal["worsening", "easing", "flat"]
+    # Factual: which way the value moved.  Available for every channel,
+    # including SCADA columns with no configured band.
+    movement: Literal["rising", "falling", "steady"] = "steady"
     slope_per_hour: Optional[float] = None
     affected_sensors: list[str]
     headline: str

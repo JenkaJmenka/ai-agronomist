@@ -15,6 +15,9 @@ export type EpisodeDirection = (typeof EPISODE_DIRECTIONS)[number];
 export const EPISODE_TRENDS = ["worsening", "easing", "flat"] as const;
 export type EpisodeTrend = (typeof EPISODE_TRENDS)[number];
 
+export const EPISODE_MOVEMENTS = ["rising", "falling", "steady"] as const;
+export type EpisodeMovement = (typeof EPISODE_MOVEMENTS)[number];
+
 const episodeSampleSchema = z.object({
   timestamp: z.string(),
   anomaly_score: z.number().nullable().optional(),
@@ -40,7 +43,10 @@ const episodeSchema = z.object({
   last_value: z.number().nullable(),
   /** The extremum reached during the episode — min for a drop, max for a spike. */
   peak_value: z.number().nullable(),
+  /** Band-relative severity direction; "flat" whenever `direction` is null. */
   trend: z.enum(EPISODE_TRENDS),
+  /** Which way the value actually moved — available on every channel. */
+  movement: z.enum(EPISODE_MOVEMENTS).default("steady"),
   slope_per_hour: z.number().nullable(),
   affected_sensors: z.array(z.string()).default([]),
   headline: z.string(),

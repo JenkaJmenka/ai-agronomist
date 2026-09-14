@@ -5,6 +5,7 @@ import {
   channelUnit,
   directionArrow,
   formatChannel,
+  formatDevelopment,
   formatDuration,
   formatEpisodeSpan,
   formatTrend,
@@ -28,6 +29,7 @@ function episode(overrides: Partial<AnomalyEpisode> = {}): AnomalyEpisode {
     last_value: 30,
     peak_value: 29,
     trend: "worsening",
+    movement: "falling",
     slope_per_hour: -2.7,
     affected_sensors: ["humidity"],
     headline: "Unexpected humidity drop: 29.0% (50% lower bound), worsening over 45 min",
@@ -122,5 +124,25 @@ describe("channelUnit and formatChannel", () => {
   it("sentence-cases the channel name", () => {
     expect(formatChannel("humidity")).toBe("Humidity");
     expect(formatChannel("root_zone_temp")).toBe("Root zone temp");
+  });
+});
+
+describe("formatDevelopment", () => {
+  it("prefers the band-relative trend when there is one", () => {
+    expect(formatDevelopment(episode())).toBe("worsening");
+  });
+
+  it("falls back to movement for a channel with no band", () => {
+    // SCADA channels get no direction, so trend is always flat — reporting it
+    // alone labelled a climbing heating temperature as "steady".
+    expect(formatDevelopment(episode({ direction: null, trend: "flat", movement: "rising" }))).toBe(
+      "rising",
+    );
+  });
+
+  it("still says steady when the value genuinely held", () => {
+    expect(formatDevelopment(episode({ direction: null, trend: "flat", movement: "steady" }))).toBe(
+      "steady",
+    );
   });
 });

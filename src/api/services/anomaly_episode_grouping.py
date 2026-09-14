@@ -17,7 +17,7 @@ from src.api.services.anomaly_episode_rows import (
     _build_row_infos,
     _finite_or_none,
 )
-from src.api.services.anomaly_episode_trend import _build_headline, _trend_from_values
+from src.api.services.anomaly_episode_trend import _build_headline, _episode_dynamics
 from src.api.services.sample_enrichment import _iso
 from src.config import ANOMALY_EPISODE_GAP_SECONDS, ANOMALY_GROUP_SAMPLE_IDS, ANOMALY_TREND_FLAT_DEADBAND
 from src.models.episode_grouper import _severity_rank
@@ -137,7 +137,7 @@ def _flush_episode(
     severity = max(severities, key=_severity_rank) or "normal"
 
     valued = [(info.dt, info.value) for info in group if info.value is not None]
-    trend, slope_per_hour = _trend_from_values(
+    trend, movement, slope_per_hour = _episode_dynamics(
         [dt for dt, _ in valued], [v for _, v in valued],
         channel=channel, direction=direction, deadband=deadband,
     )
@@ -152,7 +152,7 @@ def _flush_episode(
             if sensor not in affected_sensors:
                 affected_sensors.append(sensor)
 
-    headline = _build_headline(channel, peak_value, duration_seconds, trend)
+    headline = _build_headline(channel, peak_value, duration_seconds, trend, movement)
 
     ranked = sorted(group, key=lambda info: info.score, reverse=True)
     top_rows = sorted(ranked[:sample_limit], key=lambda info: info.dt, reverse=True)
@@ -173,6 +173,7 @@ def _flush_episode(
         "last_value": _finite_or_none(group[-1].value),
         "peak_value": _finite_or_none(peak_value),
         "trend": trend,
+        "movement": movement,
         "slope_per_hour": _finite_or_none(slope_per_hour),
         "affected_sensors": affected_sensors,
         "headline": headline,

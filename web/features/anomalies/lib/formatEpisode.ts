@@ -36,8 +36,34 @@ const TREND_LABELS: Readonly<Record<AnomalyEpisode["trend"], string>> = {
   flat: "steady",
 };
 
+const MOVEMENT_LABELS: Readonly<Record<AnomalyEpisode["movement"], string>> = {
+  rising: "rising",
+  falling: "falling",
+  steady: "steady",
+};
+
 export function formatTrend(trend: AnomalyEpisode["trend"]): string {
   return TREND_LABELS[trend];
+}
+
+/**
+ * How the episode developed: the band-relative trend when there is one,
+ * otherwise the plain movement.
+ *
+ * SCADA channels have no configured band, so they never get a direction and
+ * their trend is always "flat". Showing only the trend labelled a heating
+ * temperature climbing 18.4 → 21.7 as "steady"; the movement says "rising".
+ */
+export function formatDevelopment(episode: AnomalyEpisode): string {
+  if (episode.trend !== "flat") return TREND_LABELS[episode.trend];
+  return MOVEMENT_LABELS[episode.movement];
+}
+
+/** Arrow for the value's direction of travel; empty when it held steady. */
+export function movementArrow(movement: AnomalyEpisode["movement"]): string {
+  if (movement === "rising") return "↗";
+  if (movement === "falling") return "↘";
+  return "";
 }
 
 /**

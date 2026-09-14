@@ -19,10 +19,11 @@ import {
   channelUnit,
   directionArrow,
   formatChannel,
+  formatDevelopment,
   formatDuration,
   formatEpisodeSpan,
-  formatTrend,
   formatValueRange,
+  movementArrow,
 } from "@/features/anomalies/lib/formatEpisode";
 import { windowFromSelectedTimestamps } from "@/lib/selectionWindow";
 import { SEVERITY_ORDER, type Severity } from "@/lib/severity";
@@ -107,10 +108,14 @@ function EpisodeSummary({ episode }: { readonly episode: AnomalyEpisode }) {
         <span className="font-medium text-text">
           {formatChannel(episode.channel)} {episode.direction ?? "anomaly"}
         </span>
-        <span aria-hidden="true">{directionArrow(episode.direction)}</span>
+        {/* Band breach direction when there is one; otherwise which way the
+            value travelled, so an unbounded channel still reads as moving. */}
+        <span aria-hidden="true">
+          {episode.direction ? directionArrow(episode.direction) : movementArrow(episode.movement)}
+        </span>
         {valueRange ? <span className="tabular-nums">{valueRange}</span> : null}
         <span>·</span>
-        <span data-testid="episode-trend">{formatTrend(episode.trend)}</span>
+        <span data-testid="episode-trend">{formatDevelopment(episode)}</span>
         {episode.detector !== "unknown" ? (
           <>
             <span>·</span>

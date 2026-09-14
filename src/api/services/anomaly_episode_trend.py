@@ -17,56 +17,84 @@ from src.api.services.fault_classification import (
 )
 
 Trend = Literal["worsening", "easing", "flat"]
+Movement = Literal["rising", "falling", "steady"]
 
 _SECONDS_PER_HOUR = 3600.0
 
 
-def _trend_from_values(
+def _slope_per_hour(times: list[datetime], values: list[float]) -> float | None:
+    """Least-squares slope of the trigger value, in value units per hour."""
+    if len(times) < 2:
+        return None
+
+    t0 = times[0]
+    xs = [(t - t0).total_seconds() / _SECONDS_PER_HOUR for t in times]
+
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(values) / n
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values))
+    denominator = sum((x - mean_x) ** 2 for x in xs)
+    if denominator == 0:
+        return None
+
+    slope = numerator / denominator
+    return slope if math.isfinite(slope) else None
+
+
+def _movement_from_slope(
+    slope: float, values: list[float], *, channel: str, deadband: float,
+) -> Movement:
+    """Which way the channel moved, with a deadband so noise reads steady.
+
+    The deadband is a fraction of the channel's band span per hour; a channel
+    with no configured band falls back to its own mean magnitude so the
+    threshold stays proportional to the units in play.
+    """
+    bounds = _SENSOR_BOUNDS.get(channel)
+    if bounds is not None:
+        span = bounds[1] - bounds[0]
+    else:
+        span = abs(sum(values) / len(values)) or 1.0
+    if abs(slope) <= deadband * span:
+        return "steady"
+    return "rising" if slope > 0 else "falling"
+
+
+def _episode_dynamics(
     times: list[datetime],
     values: list[float],
     *,
     channel: str,
     direction: Direction,
     deadband: float,
-) -> tuple[Trend, float | None]:
-    """Least-squares slope of the trigger value, oriented by direction.
+) -> tuple[Trend, Movement, float | None]:
+    """Classify an episode's value series as a movement and, if possible, a trend.
 
-    For a ``drop``, a falling slope is worsening; for a ``spike``, a rising
-    slope is worsening.  Without a known direction (in-band trigger value, or
-    an unbounded channel) there is no notion of "bad" direction, so the
-    result is always "flat" — guessing would misinform the operator.  Slope
-    magnitude below ``deadband`` (fraction of the channel's band span per
-    hour) also reads as "flat" so sensor noise doesn't flip the label.
+    ``movement`` is factual — the channel rose, fell, or held steady — and is
+    available for every channel, including SCADA columns with no configured
+    band.  ``trend`` is the band-relative reading (is this getting *worse*?),
+    which only means anything once ``direction`` says which side of the band
+    was breached; without it the trend stays "flat" rather than guessing which
+    way is bad.
+
+    Reporting only the trend made every unbounded channel read "steady" even
+    while it moved sharply — `calculated_heating_temp` climbing 18.4 -> 21.7
+    was labelled flat.  The movement carries that signal instead.
     """
-    if len(times) < 2 or direction is None:
-        return "flat", None
+    slope = _slope_per_hour(times, values)
+    if slope is None:
+        return "flat", "steady", None
 
-    t0 = times[0]
-    xs = [(t - t0).total_seconds() / _SECONDS_PER_HOUR for t in times]
-    ys = values
-
-    n = len(xs)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    denominator = sum((x - mean_x) ** 2 for x in xs)
-    if denominator == 0:
-        return "flat", None
-
-    slope = numerator / denominator  # value units per hour
-    if not math.isfinite(slope):
-        return "flat", None
-
-    bounds = _SENSOR_BOUNDS.get(channel)
-    span = (bounds[1] - bounds[0]) if bounds is not None else abs(mean_y) or 1.0
-    if abs(slope) <= deadband * span:
-        return "flat", slope
+    movement = _movement_from_slope(slope, values, channel=channel, deadband=deadband)
+    if direction is None or movement == "steady":
+        return "flat", movement, slope
 
     if direction == "drop":
-        trend: Trend = "worsening" if slope < 0 else "easing"
+        trend: Trend = "worsening" if movement == "falling" else "easing"
     else:  # "spike"
-        trend = "worsening" if slope > 0 else "easing"
-    return trend, slope
+        trend = "worsening" if movement == "rising" else "easing"
+    return trend, movement, slope
 
 
 def _format_duration(duration_seconds: float) -> str:
@@ -79,11 +107,21 @@ def _format_duration(duration_seconds: float) -> str:
 
 
 def _build_headline(
-    channel: str, peak_value: float | None, duration_seconds: float, trend: Trend,
+    channel: str,
+    peak_value: float | None,
+    duration_seconds: float,
+    trend: Trend,
+    movement: Movement = "steady",
 ) -> str:
-    """One sentence: the extremum reasoning plus duration and trend."""
+    """One sentence: the extremum reasoning plus duration and how it developed.
+
+    Prefers the band-relative trend when there is one; otherwise falls back to
+    the factual movement, so an unbounded channel reads "rising over 45 min"
+    rather than the misleading "flat".
+    """
     reasoning = _simple_reasoning_from_values(channel, peak_value)
     duration_text = _format_duration(duration_seconds)
     if duration_seconds <= 0:
         return f"{reasoning} ({duration_text})"
-    return f"{reasoning}, {trend} over {duration_text}"
+    development = trend if trend != "flat" else movement
+    return f"{reasoning}, {development} over {duration_text}"

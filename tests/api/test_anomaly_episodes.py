@@ -159,6 +159,46 @@ class TestTrendAndExtremum:
         rows = [_row(m, value=v) for m, v in zip((0, 5, 10, 15), (30.0, 30.1, 30.0, 30.1))]
         assert build_episodes(rows)[0]["trend"] == "flat"
 
+    def test_unbounded_channel_reports_movement_instead_of_false_steady(self):
+        """Production regression: SCADA channels have no band, so no direction.
+
+        Trend was the only signal reported, and trend requires a direction — so
+        every unbounded channel read "steady" no matter how hard it moved.
+        `calculated_heating_temp` climbing 18.4 -> 21.7 over 2 hours was
+        labelled flat with slope=None. 71% of live episodes looked like this.
+        """
+        # 5-minute spacing — wider than ANOMALY_EPISODE_GAP_SECONDS would split
+        # these into single-sample episodes and the assertions would pass
+        # vacuously on a slope that was never computed.
+        rows = [
+            _row(m, value=v, channel="calculated_heating_temp")
+            for m, v in zip((0, 5, 10, 15, 20), (18.4, 19.2, 20.1, 21.0, 21.7))
+        ]
+        episodes = build_episodes(rows)
+        assert len(episodes) == 1, "rows must form one episode for the slope to mean anything"
+        episode = episodes[0]
+        assert episode["sample_count"] == 5
+        assert episode["direction"] is None      # no band configured — correct
+        assert episode["trend"] == "flat"        # band-relative, unavailable
+        assert episode["movement"] == "rising"   # but the fact is reported
+        assert episode["slope_per_hour"] is not None
+        assert episode["slope_per_hour"] > 0
+        assert "rising" in episode["headline"]
+
+    def test_genuinely_constant_unbounded_channel_is_steady(self):
+        """Night-time light really is flat — movement must not overclaim."""
+        rows = [_row(m, value=0.0, channel="light") for m in (0, 5, 10, 15)]
+        episodes = build_episodes(rows)
+        assert len(episodes) == 1
+        assert episodes[0]["sample_count"] == 4
+        assert episodes[0]["movement"] == "steady"
+
+    def test_bounded_channel_still_reports_both(self):
+        rows = [_row(m, value=v) for m, v in zip((0, 5, 10, 15), (45.0, 40.0, 35.0, 30.0))]
+        episode = build_episodes(rows)[0]
+        assert episode["trend"] == "worsening"
+        assert episode["movement"] == "falling"
+
     def test_peak_value_is_the_extremum_not_the_highest_scoring_row(self):
         """Regression: the headline must quote the worst reading reached.
 
