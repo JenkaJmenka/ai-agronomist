@@ -140,6 +140,43 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+test("falls back to per-sample rows when the episodes endpoint is unavailable", async ({
+  page,
+}) => {
+  // Production regression: web and api deploy independently, so the UI shipped
+  // ahead of /api/anomalies/episodes and every anomalies page 500'd. The page
+  // must degrade to the per-sample view, not become a dead end.
+  await page.route("**/api/bff/anomalies/episodes**", (route) =>
+    route.fulfill({ status: 500, json: { message: "An internal server error occurred." } }),
+  );
+  await page.route("**/api/bff/anomalies/enriched**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [
+          {
+            timestamp: "2026-12-25T10:00:00+00:00",
+            anomaly_score: 0.85,
+            fault_type: "spike_fault",
+            reasoning: "Unexpected humidity drop: 32.0% (50% lower bound)",
+            affected_sensors: ["humidity"],
+            incident_id: null,
+          },
+        ],
+        count: 1,
+        anomaly_count: 13,
+      },
+    }),
+  );
+
+  await page.goto("/anomalies");
+
+  await expect(page.getByTestId("episode-fallback")).toBeVisible();
+  await expect(page.getByText("Episode merging is unavailable")).toBeVisible();
+  // The operator still sees their anomalies rather than an error.
+  await expect(page.getByTestId("fault-type").first()).toBeVisible();
+  await expect(page.getByText("Could not load anomaly episodes")).toBeHidden();
+});
+
 test("the landing view shows merged episodes, not one row per 5-min sample", async ({ page }) => {
   // Regression: episodes first shipped only into Table view, so the default
   // Graphical view still listed every sample and the merge was invisible.

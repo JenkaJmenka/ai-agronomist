@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { Chip } from "@/components/ui/Chip";
 import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
@@ -34,6 +34,15 @@ interface EpisodeTableProps {
   readonly threshold: number;
   /** When set, clicking an episode zooms the chart to its span. */
   readonly onWindowSelect?: SelectionWindowHandler;
+  /**
+   * Rendered instead of an error when /anomalies/episodes is unreachable.
+   *
+   * The web and api services deploy independently, so the UI can ship ahead of
+   * the endpoint it calls. Without this the anomalies page is a dead end during
+   * that window; with it the page silently serves the per-sample view until the
+   * API catches up.
+   */
+  readonly fallback?: ReactNode;
 }
 
 const EXPORT_HEADERS = [
@@ -172,6 +181,7 @@ export function EpisodeTable({
   windowEnd,
   threshold,
   onWindowSelect,
+  fallback,
 }: EpisodeTableProps) {
   const state = useAnomalyEpisodes({
     windowStart,
@@ -190,6 +200,16 @@ export function EpisodeTable({
   }
 
   if (state.isError) {
+    if (fallback !== undefined) {
+      return (
+        <div data-testid="episode-fallback">
+          <p className="mb-3 text-xs text-text-muted">
+            Episode merging is unavailable right now — showing individual readings.
+          </p>
+          {fallback}
+        </div>
+      );
+    }
     return (
       <p role="alert" className="py-4 text-center text-sm text-sev-critical">
         Could not load anomaly episodes ({fetchErrorHint(state.error)}).

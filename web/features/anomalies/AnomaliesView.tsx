@@ -197,6 +197,15 @@ function AnomaliesBody() {
                 windowEnd={windowEnd}
                 threshold={threshold}
                 onWindowSelect={onTableRowSelect}
+                fallback={
+                  <AnomalyTable
+                    mode="top"
+                    anomalies={tableAnomalies}
+                    enrichment={enrichment.byTimestamp}
+                    isEnrichmentLoading={enrichment.isLoading}
+                    onWindowSelect={onTableRowSelect}
+                  />
+                }
               />
             ) : (
               <AnomalyTable
@@ -253,7 +262,18 @@ function AnomaliesBody() {
               ))}
             </div>
             {tableMode === "episodes" ? (
-              <EpisodeTable windowStart={windowStart} windowEnd={windowEnd} threshold={threshold} />
+              <EpisodeTable
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+                fallback={
+                  <GroupedAnomalies
+                    windowStart={windowStart}
+                    windowEnd={windowEnd}
+                    threshold={threshold}
+                  />
+                }
+              />
             ) : (
               <GroupedAnomalies
                 windowStart={windowStart}
