@@ -1364,3 +1364,19 @@ RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
 RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
     os.environ.get("RECOVERY_KNOCKON_WINDOW_HOURS", "4.0")
 )
+
+# Query-time episode merging (docs/architecture/episode_grouping.md) — groups
+# historical flagged rows into episodes at request time, reusing the same
+# contiguity rule as the upload-path detector so the two views never disagree.
+# NOTE: placed here (not near ANOMALY_GROUP_SAMPLE_IDS) because the default
+# below references EPISODE_GAP_SECONDS, which must already be defined.
+ANOMALY_EPISODE_GAP_SECONDS: int = int(
+    os.environ.get("ANOMALY_EPISODE_GAP_SECONDS", str(EPISODE_GAP_SECONDS))
+)
+ANOMALY_EPISODE_MAX: int = int(os.environ.get("ANOMALY_EPISODE_MAX", "200"))
+# Slope magnitude below this fraction of the channel's band span per hour
+# reads as "flat" rather than worsening/easing — keeps sensor noise from
+# flipping the trend label.
+ANOMALY_TREND_FLAT_DEADBAND: float = float(
+    os.environ.get("ANOMALY_TREND_FLAT_DEADBAND", "0.05")
+)

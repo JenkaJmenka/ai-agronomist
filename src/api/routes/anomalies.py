@@ -9,7 +9,9 @@ from fastapi_cache.decorator import cache
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.query_params import parse_iso_param
+from src.api.schemas.anomaly_episodes import AnomalyEpisodesResponse
 from src.api.services import readings_service
+from src.api.services.anomaly_episode_service import fetch_anomaly_episodes
 from src.api.services.anomaly_group_service import (
     _build_sorted_incidents,
     _enrich_samples_fast,
@@ -105,6 +107,65 @@ async def get_anomaly_groups(
     return {
         "groups": groups,
         "group_by": group_by,
+        "anomaly_count": anomaly_count,
+        "threshold": effective_threshold,
+        "score_scale_version": 2,
+    }
+
+
+@router.get("/episodes", response_model=AnomalyEpisodesResponse)
+@cache(expire=REDIS_CACHE_EXPIRE_SECONDS)
+async def get_anomaly_episodes(
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query(default="default"),
+    start: str = Query(...),
+    end: str = Query(...),
+    threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Query-time anomaly episode merging — one row per continuous event.
+
+    Merges contiguous 5-minute flagged rows sharing a (channel, detector,
+    direction) key into episodes with start/end/duration/trend, reusing the
+    same contiguity rule as the upload-path detector
+    (``src/models/episode_grouper.py``) so the two views never disagree.  See
+    ``docs/architecture/episode_grouping.md`` and
+    ``src/api/services/anomaly_episode_service.py`` for the grouping rules.
+
+    Episodes are built from EVERY flagged row in the window
+    (``_fetch_minimal_flagged_rows``), never from a top-N-by-score subset —
+    grouping a top-N list would manufacture gaps that do not exist in the
+    data.  Episodes are ranked by ``peak_score`` and capped at
+    ``ANOMALY_EPISODE_MAX`` only after grouping.
+
+    ADR-005 §2 — threshold is optional, same handling as ``/groups``: the
+    server defaults to ``CANONICAL_ANOMALY_THRESHOLD`` and echoes the
+    effective value in the response.
+    """
+    effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
+    scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
+
+    # Fetch incidents once — shared by episode enrichment and anomaly_count.
+    incidents = await _load_incidents(db, **scope, start=start, end=end)
+
+    # Exact flagged row count (DISTINCT timestamps, never capped).
+    anomaly_count = await readings_service.count_flagged_rows(
+        db, **scope, **window, threshold=effective_threshold
+    )
+
+    episodes = await fetch_anomaly_episodes(
+        db,
+        **scope,
+        **window,
+        threshold=effective_threshold,
+        sample_limit=ANOMALY_GROUP_SAMPLE_IDS,
+        incidents=incidents,
+    )
+
+    return {
+        "episodes": episodes,
+        "episode_count": len(episodes),
         "anomaly_count": anomaly_count,
         "threshold": effective_threshold,
         "score_scale_version": 2,

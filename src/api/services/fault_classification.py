@@ -7,7 +7,7 @@ No I/O, no database access, no pandas.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from src.config import (
     CO2_RANGE,
@@ -257,6 +257,30 @@ _SIMPLE_REASONING_UNITS: dict[str, str] = {
 }
 
 
+def _direction_from_value(
+    channel: str, value: float | None
+) -> Literal["drop", "spike"] | None:
+    """Classify a channel's value as a bounds-violation direction, or None.
+
+    Single source of truth for "did this value spike or drop" — used both by
+    the reasoning-text generator below and by query-time episode grouping
+    (anomaly_episode_service.py), where direction is part of the grouping key.
+    Returns None when the channel has no known bounds or the value sits
+    in-band (no direction to report).
+    """
+    if value is None:
+        return None
+    bounds = _SENSOR_BOUNDS.get(channel)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    if value > hi:
+        return "spike"
+    if value < lo:
+        return "drop"
+    return None
+
+
 def _simple_reasoning_from_values(channel: str, value: float | None) -> str:
     """Generate a compact reasoning string for the single channel that fired.
 
@@ -278,17 +302,18 @@ def _simple_reasoning_from_values(channel: str, value: float | None) -> str:
             f"Anomaly detected on {channel!r} — value not recorded"
         )
     unit = _SIMPLE_REASONING_UNITS.get(channel, "")
+    direction = _direction_from_value(channel, value)
     bounds = _SENSOR_BOUNDS.get(channel)
-    if bounds is not None:
-        lo, hi = bounds
-        if value > hi:
-            return (
-                f"Unexpected {channel} spike: {value:.1f}{unit}"
-                f" ({hi:.0f}{unit} upper bound)"
-            )
-        if value < lo:
-            return (
-                f"Unexpected {channel} drop: {value:.1f}{unit}"
-                f" ({lo:.0f}{unit} lower bound)"
-            )
+    if direction == "spike" and bounds is not None:
+        _, hi = bounds
+        return (
+            f"Unexpected {channel} spike: {value:.1f}{unit}"
+            f" ({hi:.0f}{unit} upper bound)"
+        )
+    if direction == "drop" and bounds is not None:
+        lo, _ = bounds
+        return (
+            f"Unexpected {channel} drop: {value:.1f}{unit}"
+            f" ({lo:.0f}{unit} lower bound)"
+        )
     return f"Unusual {channel} reading: {value:.1f}{unit}"
