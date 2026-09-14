@@ -9,6 +9,7 @@ statistically grounded detection threshold.
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from typing import Any
 
@@ -110,14 +111,23 @@ class POTThresholdFitter:
         return self._threshold
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize state for JSON persistence."""
+        """Serialize state for JSON persistence.
+
+        ``threshold`` is emitted as ``None`` while it is still infinite — the
+        warm-up value meaning "not fitted yet".  JSON has no infinity literal:
+        SQLite accepts the non-standard ``Infinity`` token, but PostgreSQL
+        rejects it, so writing the raw value made every save of the tenant's
+        learning state fail.  Since the save failed the state never persisted,
+        the fitter was rebuilt with ``inf`` on the next run, and the next save
+        failed identically — warm-up could never end in production.
+        """
         return {
             "q": self._q,
             "fpr": self._fpr,
             "min_peaks": self._min_peaks,
             "buffer_size": self._buffer.maxlen,
             "buffer": list(self._buffer),
-            "threshold": self._threshold,
+            "threshold": self._threshold if math.isfinite(self._threshold) else None,
             "n_since_fit": self._n_since_fit,
         }
 
@@ -132,6 +142,11 @@ class POTThresholdFitter:
         )
         for val in d.get("buffer", []):
             fitter._buffer.append(val)
-        fitter._threshold = d.get("threshold", float("inf"))
+        # None round-trips back to the warm-up sentinel; `.get` default alone
+        # is not enough because the key is present and explicitly null.
+        stored_threshold = d.get("threshold")
+        fitter._threshold = (
+            float("inf") if stored_threshold is None else float(stored_threshold)
+        )
         fitter._n_since_fit = d.get("n_since_fit", 0)
         return fitter

@@ -98,6 +98,29 @@ logger = logging.getLogger(__name__)
 PIPELINE_VERSION = "2.0"
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively replace non-finite floats with None for a JSON column.
+
+    SQLite accepts the non-standard ``Infinity``/``NaN`` tokens, PostgreSQL
+    rejects them with ``invalid input syntax for type json``.  A single
+    non-finite leaf anywhere in the payload therefore fails the whole write in
+    production while passing every local test.
+
+    This is a net at the write boundary — values should be finite before they
+    get here (see ``POTThresholdFitter.to_dict``).  It exists because the
+    failure mode is silent: the save is caught and logged as non-critical, so
+    the tenant's learning state simply stops persisting with nothing surfacing
+    to the operator.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def _season_for_timestamp(
     ts: datetime,
     season_map: dict[str, str],
@@ -1718,7 +1741,7 @@ class ComprehensiveInferencePipeline:
         """Persist EWMA, POT, and CUSUM trackers for a tenant into LearningState.state_json."""
         self._tracker_cache[customer_id] = (ewma, pot)
 
-        tracker_payload = {"ewma": ewma.to_dict(), "pot": pot.to_dict()}
+        tracker_payload = _json_safe({"ewma": ewma.to_dict(), "pot": pot.to_dict()})
         _cusum = self._cusum_cache.get(customer_id)
         _ema_bl = self._ema_cache.get(customer_id)
         try:
@@ -1732,9 +1755,9 @@ class ComprehensiveInferencePipeline:
                         "ewma_pot_trackers": tracker_payload
                     }
                     if _cusum is not None:
-                        initial_state["cusum_state"] = _cusum.to_dict()
+                        initial_state["cusum_state"] = _json_safe(_cusum.to_dict())
                     if _ema_bl is not None:
-                        initial_state["ema_baseline_state"] = _ema_bl.to_dict()
+                        initial_state["ema_baseline_state"] = _json_safe(_ema_bl.to_dict())
                     db.add(LearningState(
                         customer_id=customer_id,
                         state_json=initial_state,
@@ -1743,9 +1766,9 @@ class ComprehensiveInferencePipeline:
                     current = dict(row.state_json or {})
                     current["ewma_pot_trackers"] = tracker_payload
                     if _cusum is not None:
-                        current["cusum_state"] = _cusum.to_dict()
+                        current["cusum_state"] = _json_safe(_cusum.to_dict())
                     if _ema_bl is not None:
-                        current["ema_baseline_state"] = _ema_bl.to_dict()
+                        current["ema_baseline_state"] = _json_safe(_ema_bl.to_dict())
                     row.state_json = current
             # savepoint auto-commits on clean __aexit__
         except Exception:
