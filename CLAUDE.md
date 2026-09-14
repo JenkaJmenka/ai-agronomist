@@ -29,6 +29,25 @@ You plan, decompose, delegate, analyze outcomes, and decide next steps.
 - **Done signals:** `tasks/done/<agent-name>.json`
 - **Watcher log:** `tasks/watcher.log`
 
+### Always run Python through `./venv/bin/python`
+
+```bash
+./venv/bin/python -m pytest tests/ -q     # correct
+python3 -m pytest tests/ -q               # WRONG — system interpreter
+```
+
+Bare `python3` resolves to the system Python, which does not have this project's
+dependencies. The failure mode is deceptive rather than obvious: the repo has a
+top-level `alembic/` directory, so with the real package absent `import alembic`
+still *succeeds* as a namespace package — `alembic.__file__` is `None` and the
+error surfaces later as `ModuleNotFoundError: No module named 'alembic.config'`,
+which reads like a broken install rather than the wrong interpreter.
+
+This has already cost two sessions: migration tests were twice written off as
+"pre-existing broken alembic install" and excluded from runs. Under the venv they
+pass. Before reporting any test failure as pre-existing, re-run it with
+`./venv/bin/python`.
+
 ## Agent model assignment
 
 | Agent | Model | Reason |
@@ -186,7 +205,7 @@ Pydantic v2, SQLAlchemy 2.x async. After writing: run smoke tests, fix until gre
 
 **qa-engineer:**
 ```
-Target 90% coverage. Run: python3 -m pytest tests/ --cov=src --cov-fail-under=90
+Target 90% coverage. Run: ./venv/bin/python -m pytest tests/ --cov=src --cov-fail-under=90
 Iterate max 4 times. Write coverage summary to docs/coverage/.
 ```
 
