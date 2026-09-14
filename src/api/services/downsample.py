@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.config import DOWNSAMPLE_ANOMALY_QUANTILE
+from src.config import DOWNSAMPLE_ANOMALY_BUDGET_RATIO, DOWNSAMPLE_ANOMALY_QUANTILE
 
 _TIMESTAMP_KEY = "timestamp"
 _SCORE_KEY = "anomaly_score"
@@ -85,12 +85,27 @@ def _lttb_indices(ys: list[float], n_out: int) -> list[int]:
     return indices
 
 
-def _anomaly_indices(rows: list[dict[str, Any]]) -> set[int]:
-    """Indices whose anomaly_score stands out from the window's baseline.
+def _anomaly_indices(
+    rows: list[dict[str, Any]],
+    max_points: int,
+    threshold: float | None = None,
+) -> set[int]:
+    """Indices to preserve through downsampling.
 
-    A row is preserved when its score clears BOTH the configured top
-    quantile and the midpoint between the median and the max — so uniform
-    low scores mark nothing, while sparse spikes are always kept.
+    With ``threshold`` (the client's display threshold), every row the client
+    would highlight is preserved — that is the set the chart paints bands
+    over, so dropping any of them makes a real anomaly silently unbandable.
+
+    The threshold path is skipped when the flagged rows cannot fit within
+    ``DOWNSAMPLE_ANOMALY_BUDGET_RATIO`` of the budget: the live path scores
+    every reading, so a low threshold can flag the whole window and there
+    would be nothing left to downsample.
+
+    Without ``threshold`` (or when it flags too much) a row is preserved when
+    its score clears BOTH the configured top quantile and the midpoint
+    between the median and the max — so uniform low scores mark nothing,
+    while sparse spikes are always kept. That heuristic protects only the top
+    decile, which is why callers that know their threshold should pass it.
     """
     scored = [
         (i, float(row[_SCORE_KEY]))
@@ -99,6 +114,12 @@ def _anomaly_indices(rows: list[dict[str, Any]]) -> set[int]:
     ]
     if not scored:
         return set()
+
+    if threshold is not None:
+        flagged = {i for i, score in scored if score >= threshold}
+        if flagged and len(flagged) <= int(max_points * DOWNSAMPLE_ANOMALY_BUDGET_RATIO):
+            return flagged
+
     values = sorted(score for _, score in scored)
     median = values[len(values) // 2]
     peak = values[-1]
@@ -112,8 +133,12 @@ def _anomaly_indices(rows: list[dict[str, Any]]) -> set[int]:
 def downsample_rows(
     rows: list[dict[str, Any]],
     max_points: int,
+    threshold: float | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Reduce `rows` to at most `max_points`, preserving anomaly rows.
+
+    Pass ``threshold`` (the client's display threshold) so the rows the
+    client will highlight survive; see :func:`_anomaly_indices`.
 
     Returns (rows, downsampled). Order is preserved (input must be
     timestamp-ordered, as the readings endpoints guarantee).
@@ -124,7 +149,7 @@ def downsample_rows(
     channels = _numeric_channels(rows)
     ys = [_representative_value(row, channels) for row in rows]
     keep = set(_lttb_indices(ys, max_points))
-    anomalies = _anomaly_indices(rows)
+    anomalies = _anomaly_indices(rows, max_points, threshold)
     keep |= anomalies
 
     if len(keep) > max_points:

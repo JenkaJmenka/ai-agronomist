@@ -3093,7 +3093,7 @@
           "Readings"
         ],
         "summary": "Get Readings Window",
-        "description": "Merged raw+canonical rows for an inclusive window (hard row cap applies).\n\nG1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);\n`include_scores=false` trims anomaly_score from the payload.",
+        "description": "Merged raw+canonical rows for an inclusive window (hard row cap applies).\n\nG1: `max_points` LTTB-downsamples the rows; `anomaly_threshold` is the\nclient's display threshold and keeps every row it would highlight;\n`include_scores=false` trims anomaly_score from the payload.",
         "operationId": "get_readings_window_api_readings_window_get",
         "parameters": [
           {
@@ -3177,6 +3177,24 @@
               "type": "boolean",
               "default": true,
               "title": "Include Scores"
+            }
+          },
+          {
+            "name": "anomaly_threshold",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 1.0,
+                  "minimum": 0.0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anomaly Threshold"
             }
           }
         ],
@@ -3289,6 +3307,24 @@
               "type": "boolean",
               "default": true,
               "title": "Include Scores"
+            }
+          },
+          {
+            "name": "anomaly_threshold",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 1.0,
+                  "minimum": 0.0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anomaly Threshold"
             }
           }
         ],

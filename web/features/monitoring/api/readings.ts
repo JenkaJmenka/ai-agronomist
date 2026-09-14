@@ -37,11 +37,25 @@ async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * Tell the server which rows the chart will band, so downsampling keeps them.
+ * Without this the server guesses (top-decile scores only) and drops flagged
+ * rows the client would have highlighted.
+ */
+function setDownsampleParams(
+  q: URLSearchParams,
+  params: { maxPoints?: number; threshold?: number },
+): void {
+  if (params.maxPoints) q.set("max_points", String(params.maxPoints));
+  if (params.threshold !== undefined) q.set("anomaly_threshold", String(params.threshold));
+}
+
 export function fetchRecentReadings(params: {
   tenant: string;
   gh: string;
   hours?: number;
   maxPoints?: number;
+  threshold?: number;
   signal?: AbortSignal;
 }): Promise<RecentReadingsResponse> {
   const q = new URLSearchParams({
@@ -49,7 +63,7 @@ export function fetchRecentReadings(params: {
     greenhouse_id: params.gh,
     hours: String(params.hours ?? 168),
   });
-  if (params.maxPoints) q.set("max_points", String(params.maxPoints));
+  setDownsampleParams(q, params);
   return fetchJson(`/api/bff/readings/recent?${q}`, params.signal);
 }
 
@@ -59,6 +73,7 @@ export function fetchWindowReadings(params: {
   from: Date;
   to: Date;
   maxPoints?: number;
+  threshold?: number;
   signal?: AbortSignal;
 }): Promise<WindowReadingsResponse> {
   const q = new URLSearchParams({
@@ -67,7 +82,7 @@ export function fetchWindowReadings(params: {
     start: params.from.toISOString(),
     end: params.to.toISOString(),
   });
-  if (params.maxPoints) q.set("max_points", String(params.maxPoints));
+  setDownsampleParams(q, params);
   return fetchJson(`/api/bff/readings/window?${q}`, params.signal);
 }
 

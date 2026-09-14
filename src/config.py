@@ -1131,7 +1131,14 @@ REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS
 DOWNSAMPLE_MAX_POINTS_FLOOR: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_FLOOR", "100"))
 DOWNSAMPLE_MAX_POINTS_CEIL: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_CEIL", "10000"))
 # Rows whose anomaly_score sits in this top quantile always survive downsampling.
+# Fallback only — used when the caller does not say which rows it will highlight.
 DOWNSAMPLE_ANOMALY_QUANTILE: float = float(os.environ.get("DOWNSAMPLE_ANOMALY_QUANTILE", "0.90"))
+# Share of the point budget reserved for threshold-flagged rows. The live path
+# scores EVERY reading, so preserving all flagged rows unconditionally would
+# defeat downsampling; past this share we fall back to the quantile heuristic.
+DOWNSAMPLE_ANOMALY_BUDGET_RATIO: float = float(
+    os.environ.get("DOWNSAMPLE_ANOMALY_BUDGET_RATIO", "0.5")
+)
 
 # Anomaly aggregation endpoints (migration plan G3/G4).
 ANOMALY_ENRICHED_DEFAULT_LIMIT: int = int(

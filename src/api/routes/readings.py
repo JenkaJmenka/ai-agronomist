@@ -27,8 +27,13 @@ def _shape_rows(
     rows: list[dict[str, Any]],
     max_points: Optional[int],
     include_scores: bool,
+    threshold: Optional[float] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Apply G1 downsampling/score-stripping; extras are {} when a no-op.
+
+    ``threshold`` is the client's display threshold — rows at or above it are
+    preserved through downsampling so the chart can band every anomaly it
+    would otherwise highlight.
 
     Additive contract: with max_points unset and include_scores=True the
     response is byte-identical to the pre-G1 behavior.
@@ -36,7 +41,7 @@ def _shape_rows(
     extras: dict[str, Any] = {}
     if max_points is not None:
         original_count = len(rows)
-        rows, downsampled = downsample_rows(rows, max_points)
+        rows, downsampled = downsample_rows(rows, max_points, threshold)
         if downsampled:
             extras = {"downsampled": True, "original_count": original_count}
     if not include_scores:
@@ -59,11 +64,13 @@ async def get_readings_window(
         default=None, ge=DOWNSAMPLE_MAX_POINTS_FLOOR, le=DOWNSAMPLE_MAX_POINTS_CEIL
     ),
     include_scores: bool = Query(default=True),
+    anomaly_threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Merged raw+canonical rows for an inclusive window (hard row cap applies).
 
-    G1: `max_points` LTTB-downsamples the rows (anomaly rows preserved);
+    G1: `max_points` LTTB-downsamples the rows; `anomaly_threshold` is the
+    client's display threshold and keeps every row it would highlight;
     `include_scores=false` trims anomaly_score from the payload.
     """
     rows = await readings_service.fetch_merged_readings(
@@ -74,7 +81,7 @@ async def get_readings_window(
         end=_parse_iso(end, "end"),
         limit=limit,
     )
-    rows, extras = _shape_rows(rows, max_points, include_scores)
+    rows, extras = _shape_rows(rows, max_points, include_scores, anomaly_threshold)
     return {"rows": rows, "count": len(rows), **extras}
 
 
@@ -89,6 +96,7 @@ async def get_readings_recent(
         default=None, ge=DOWNSAMPLE_MAX_POINTS_FLOOR, le=DOWNSAMPLE_MAX_POINTS_CEIL
     ),
     include_scores: bool = Query(default=True),
+    anomaly_threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Bounded landing-page load: the most recent `hours` of merged readings.
@@ -113,7 +121,7 @@ async def get_readings_recent(
         end=end,
         limit=limit,
     )
-    rows, extras = _shape_rows(rows, max_points, include_scores)
+    rows, extras = _shape_rows(rows, max_points, include_scores, anomaly_threshold)
     return {
         "rows": rows,
         "count": len(rows),
