@@ -21,6 +21,8 @@
   --radius-control: 6px;
   --radius-card: 8px;
   --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.08);
+  /* uPlot drag-select overlay; its own default is a light-only black wash. */
+  --chart-select-overlay: rgb(0 0 0 / 0.07);
 }
 
 [data-theme="dark"] {
@@ -32,6 +34,7 @@
   --text-muted: #93a197;
   --accent: #22c55e;
   --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
+  --chart-select-overlay: rgb(255 255 255 / 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -44,6 +47,7 @@
     --text-muted: #93a197;
     --accent: #22c55e;
     --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
+    --chart-select-overlay: rgb(255 255 255 / 0.12);
   }
 }
 
@@ -67,6 +71,12 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+
+/* uPlot ships light-only chrome. Axis/grid/tick colors paint to canvas and are
+   themed in components/charts/chartTheme.ts; these are the DOM parts. */
+.u-select {
+  background: var(--chart-select-overlay);
 }
 
 /* Metrics and tables always align digits. */
