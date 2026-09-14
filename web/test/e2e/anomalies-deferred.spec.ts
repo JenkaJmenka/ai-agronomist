@@ -52,6 +52,9 @@ test("top anomalies show G4 fault labels and channel-aware jump", async ({ page 
   );
 
   await page.goto("/anomalies");
+  // The landing view now opens on merged episodes; these assertions
+  // cover the flat per-sample table, which is one toggle away.
+  await page.getByTestId("chart-anomaly-mode").getByRole("button", { name: "Samples" }).click();
   await expect(page.getByTestId("fault-type").first()).toHaveText("Spike fault");
   await expect(page.getByTestId("reasoning").first()).toContainText("Transient spike");
 

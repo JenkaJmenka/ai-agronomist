@@ -31,6 +31,14 @@ const TABLE_MODE_LABELS: Readonly<Record<TableMode, string>> = {
   grouped: "Grouped",
 };
 
+/** Graphical view anomaly list. Episodes lead here too — this is the landing view. */
+type ChartMode = "episodes" | "samples";
+
+const CHART_MODE_LABELS: Readonly<Record<ChartMode, string>> = {
+  episodes: "Episodes",
+  samples: "Samples",
+};
+
 function AnomaliesBody() {
   const {
     rows,
@@ -47,6 +55,7 @@ function AnomaliesBody() {
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
   const [tableMode, setTableMode] = useState<TableMode>("episodes");
+  const [chartMode, setChartMode] = useState<ChartMode>("episodes");
   const [{ from, to }] = useDateRange();
   const { tenant, gh } = useScope();
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -160,30 +169,62 @@ function AnomaliesBody() {
               scopeKey={scopeKey}
             />
           </Card>
-          <Card title="Top anomalies">
-            <AnomalyTable
-              mode="top"
-              anomalies={tableAnomalies}
-              enrichment={enrichment.byTimestamp}
-              isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onTableRowSelect}
-            />
+          <Card title={chartMode === "episodes" ? "Anomaly episodes" : "Top anomalies"}>
+            <div
+              className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+              data-testid="chart-anomaly-mode"
+            >
+              <span className="text-text-muted">Show</span>
+              {(["episodes", "samples"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={chartMode === mode}
+                  onClick={() => setChartMode(mode)}
+                  className={`rounded-[var(--radius-control)] border px-3 py-1 ${
+                    chartMode === mode
+                      ? "border-accent font-medium text-accent"
+                      : "border-border text-text-muted hover:text-text"
+                  }`}
+                >
+                  {CHART_MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            {chartMode === "episodes" ? (
+              <EpisodeTable
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+                onWindowSelect={onTableRowSelect}
+              />
+            ) : (
+              <AnomalyTable
+                mode="top"
+                anomalies={tableAnomalies}
+                enrichment={enrichment.byTimestamp}
+                isEnrichmentLoading={enrichment.isLoading}
+                onWindowSelect={onTableRowSelect}
+              />
+            )}
           </Card>
-          <Card
-            title={
-              anomalyTotal !== null && anomalyTotal > 0
-                ? `All anomalies (${anomalyTotal.toLocaleString()})`
-                : "All anomalies"
-            }
-          >
-            <AnomalyTable
-              mode="all"
-              anomalies={tableAnomalies}
-              enrichment={enrichment.byTimestamp}
-              isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onTableRowSelect}
-            />
-          </Card>
+          {chartMode === "samples" ? (
+            <Card
+              title={
+                anomalyTotal !== null && anomalyTotal > 0
+                  ? `All anomalies (${anomalyTotal.toLocaleString()})`
+                  : "All anomalies"
+              }
+            >
+              <AnomalyTable
+                mode="all"
+                anomalies={tableAnomalies}
+                enrichment={enrichment.byTimestamp}
+                isEnrichmentLoading={enrichment.isLoading}
+                onWindowSelect={onTableRowSelect}
+              />
+            </Card>
+          ) : null}
         </RefetchingBlock>
       ) : (
         <RefetchingBlock isRefetching={isDimmed}>

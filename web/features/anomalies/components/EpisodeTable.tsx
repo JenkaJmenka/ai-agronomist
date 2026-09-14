@@ -24,12 +24,16 @@ import {
   formatTrend,
   formatValueRange,
 } from "@/features/anomalies/lib/formatEpisode";
+import { windowFromSelectedTimestamps } from "@/lib/selectionWindow";
 import { SEVERITY_ORDER, type Severity } from "@/lib/severity";
+import type { SelectionWindowHandler } from "@/lib/useTimestampRowSelection";
 
 interface EpisodeTableProps {
   readonly windowStart: string | null;
   readonly windowEnd: string | null;
   readonly threshold: number;
+  /** When set, clicking an episode zooms the chart to its span. */
+  readonly onWindowSelect?: SelectionWindowHandler;
 }
 
 const EXPORT_HEADERS = [
@@ -48,6 +52,18 @@ const EXPORT_HEADERS = [
 
 function asSeverity(value: string): Severity | undefined {
   return value in SEVERITY_ORDER ? (value as Severity) : undefined;
+}
+
+/**
+ * Chart focus for an episode: its whole span, not a single instant.
+ *
+ * A one-sample episode has start === end; windowFromSelectedTimestamps pads
+ * that to a usable window rather than a zero-width one.
+ */
+export function episodeChartWindow(
+  episode: Pick<AnomalyEpisode, "start_ts" | "end_ts">,
+): { from: Date; to: Date } | null {
+  return windowFromSelectedTimestamps([episode.start_ts, episode.end_ts]);
 }
 
 /** One merged event: span, span length, channel movement, and trend. */
@@ -151,7 +167,12 @@ function buildExportRows(episodes: readonly AnomalyEpisode[]): unknown[][] {
  * A continuous event is one row here instead of N five-minute samples;
  * expanding it reveals the raw samples the server merged.
  */
-export function EpisodeTable({ windowStart, windowEnd, threshold }: EpisodeTableProps) {
+export function EpisodeTable({
+  windowStart,
+  windowEnd,
+  threshold,
+  onWindowSelect,
+}: EpisodeTableProps) {
   const state = useAnomalyEpisodes({
     windowStart,
     windowEnd,
@@ -198,6 +219,7 @@ export function EpisodeTable({ windowStart, windowEnd, threshold }: EpisodeTable
           {state.episodes.length.toLocaleString()} episode
           {state.episodes.length === 1 ? "" : "s"}
           {sampleTotal > 0 ? ` merged from ${sampleTotal.toLocaleString()} samples` : ""}
+          {onWindowSelect ? " · click an episode to zoom the chart to its span" : ""}
         </span>
         <span className="ml-auto">
           <ExportCsvButton
@@ -214,6 +236,14 @@ export function EpisodeTable({ windowStart, windowEnd, threshold }: EpisodeTable
           <details
             key={episode.episode_id}
             className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
+            // onToggle on <details> rather than onClick on <summary>: the
+            // summary is natively interactive, so an onClick there trips the
+            // static-element a11y rule. Zoom on open only, not on collapse.
+            onToggle={(event) => {
+              if (!onWindowSelect || !event.currentTarget.open) return;
+              const win = episodeChartWindow(episode);
+              if (win) onWindowSelect(win.from, win.to);
+            }}
           >
             <EpisodeSummary episode={episode} />
             <ul className="divide-y divide-border border-t border-border">

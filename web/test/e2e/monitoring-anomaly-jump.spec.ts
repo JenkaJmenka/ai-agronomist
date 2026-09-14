@@ -56,6 +56,9 @@ test("jump link carries every affected sensor and the threshold", async ({ page 
   );
 
   await page.goto("/anomalies");
+  // The landing view now opens on merged episodes; these assertions
+  // cover the flat per-sample table, which is one toggle away.
+  await page.getByTestId("chart-anomaly-mode").getByRole("button", { name: "Samples" }).click();
   const jump = page
     .getByRole("link", {
       name: `Open ${rows[ANOMALY_HOURS[0]].timestamp} in Monitoring`,
@@ -94,6 +97,9 @@ test("clicking the jump opens Monitoring with the affected sensors selected", as
   );
 
   await page.goto("/anomalies");
+  // The landing view now opens on merged episodes; these assertions
+  // cover the flat per-sample table, which is one toggle away.
+  await page.getByTestId("chart-anomaly-mode").getByRole("button", { name: "Samples" }).click();
   await page
     .getByRole("link", { name: `Open ${rows[ANOMALY_HOURS[0]].timestamp} in Monitoring` })
     .first()

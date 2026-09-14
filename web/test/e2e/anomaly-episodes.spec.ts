@@ -140,6 +140,35 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+test("the landing view shows merged episodes, not one row per 5-min sample", async ({ page }) => {
+  // Regression: episodes first shipped only into Table view, so the default
+  // Graphical view still listed every sample and the merge was invisible.
+  await page.goto("/anomalies");
+
+  await expect(page.getByTestId("episode-table")).toBeVisible();
+  await expect(page.getByTestId("episode-summary")).toHaveCount(2);
+  await expect(page.getByText("Anomaly episodes")).toBeVisible();
+  // The flat per-sample table must not be what greets the operator.
+  await expect(page.getByText("Top anomalies")).toBeHidden();
+});
+
+test("samples toggle restores the flat per-sample tables", async ({ page }) => {
+  await page.goto("/anomalies");
+  await page.getByTestId("chart-anomaly-mode").getByRole("button", { name: "Samples" }).click();
+
+  await expect(page.getByTestId("episode-table")).toBeHidden();
+  await expect(page.getByText("Top anomalies")).toBeVisible();
+  await expect(page.getByText(/All anomalies/)).toBeVisible();
+});
+
+test("clicking an episode zooms the chart to its span and expands it", async ({ page }) => {
+  await page.goto("/anomalies");
+  await expect(page.getByTestId("episode-table")).toContainText("click an episode to zoom");
+
+  await page.getByTestId("episode-summary").first().click();
+  await expect(page.getByTestId("episode-sample-row").first()).toBeVisible();
+});
+
 test("table view merges contiguous samples into one episode per event", async ({ page }) => {
   await page.goto("/anomalies");
   await page.getByRole("tab", { name: "Table view" }).click();
