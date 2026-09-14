@@ -5,6 +5,7 @@ import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 
 import { readChartBaseline } from "@/components/charts/chartBaseline";
+import { subscribeToThemeChange, themedAxisDefaults } from "@/components/charts/chartTheme";
 import { TIME_X_AXIS } from "@/components/charts/timeAxis";
 import { panWindow, scaleWindowSec, zoomWindow } from "@/components/charts/timeWindow";
 
@@ -55,23 +56,38 @@ const PAN_FRACTION = 0.15;
 /** Per-notch scale factor for scroll zoom (out when scrolling down). */
 const ZOOM_FACTOR = 1.15;
 
-/** Merge shared time x-axis defaults; chart-specific axis fields still win. */
-function withTimeAxis(
+/**
+ * Merge shared time x-axis defaults and theme colors; chart-specific axis
+ * fields still win. Nested grid/ticks/border merge per key so a caller passing
+ * ``grid: { show: false }`` does not also drop the themed stroke.
+ */
+function withChartDefaults(
   options: Omit<uPlot.Options, "width" | "height">,
 ): Omit<uPlot.Options, "width" | "height"> {
-  const incoming = options.axes ?? [{}, {}];
+  // An absent or empty `axes` still needs an x and a y axis to theme.
+  const incoming = options.axes?.length ? options.axes : [{}, {}];
+  const themed = themedAxisDefaults();
   const axes = incoming.map((axis, index) => {
-    if (index !== 0) return axis ?? {};
+    const caller = axis ?? {};
+    const withTime =
+      index === 0
+        ? {
+            ...TIME_X_AXIS,
+            ...caller,
+            values: caller.values ?? TIME_X_AXIS.values,
+            space: caller.space ?? TIME_X_AXIS.space,
+            gap: caller.gap ?? TIME_X_AXIS.gap,
+            size: caller.size ?? TIME_X_AXIS.size,
+          }
+        : caller;
     return {
-      ...TIME_X_AXIS,
-      ...axis,
-      values: axis?.values ?? TIME_X_AXIS.values,
-      space: axis?.space ?? TIME_X_AXIS.space,
-      gap: axis?.gap ?? TIME_X_AXIS.gap,
-      size: axis?.size ?? TIME_X_AXIS.size,
+      ...themed,
+      ...withTime,
+      grid: { ...themed.grid, ...caller.grid },
+      ticks: { ...themed.ticks, ...caller.ticks },
+      border: { ...themed.border, ...caller.border },
     };
   });
-  if (axes.length === 0) axes.push({ ...TIME_X_AXIS });
   return { ...options, axes };
 }
 
@@ -109,7 +125,7 @@ export function UPlotChart({
     const container = containerRef.current;
     if (!container) return;
 
-    const merged = withTimeAxis(options);
+    const merged = withChartDefaults(options);
     const chart = new uPlot(
       { ...merged, width: container.clientWidth, height },
       dataRef.current,
@@ -174,9 +190,14 @@ export function UPlotChart({
     container.addEventListener("wheel", handleWheel, { passive: false });
     container.addEventListener("dblclick", handleDblClick);
 
+    // Axis colors are resolved at draw time, so a repaint is all a theme
+    // flip needs — no rebuild, so the current zoom/pan window survives.
+    const unsubscribeTheme = subscribeToThemeChange(() => chart.redraw());
+
     return () => {
       container.removeEventListener("wheel", handleWheel);
       container.removeEventListener("dblclick", handleDblClick);
+      unsubscribeTheme();
       observer.disconnect();
       chart.destroy();
       chartRef.current = null;
