@@ -117,6 +117,9 @@ test("grouped view switches to G3 server groups at 500+ anomalies", async ({ pag
 
   await page.goto("/anomalies");
   await page.getByRole("tab", { name: "Table view" }).click();
+  // Table view opens on merged Episodes; these assertions cover the
+  // grouped sub-view, which is now one click away.
+  await page.getByRole("button", { name: "Grouped" }).click();
 
   const serverGrouped = page.getByTestId("server-grouped");
   await expect(serverGrouped).toBeVisible();
@@ -149,6 +152,9 @@ test("grouped view counts exact G2 flagged rows, not downsampled chart rows", as
 
   await page.goto("/anomalies");
   await page.getByRole("tab", { name: "Table view" }).click();
+  // Table view opens on merged Episodes; these assertions cover the
+  // grouped sub-view, which is now one click away.
+  await page.getByRole("button", { name: "Grouped" }).click();
   await expect(page.getByText("5 anomalies · 3 groups")).toBeVisible();
 });
 
@@ -183,6 +189,9 @@ test("table view sensors cell never renders empty while enrichment is in flight"
 
   await page.goto("/anomalies");
   await page.getByRole("tab", { name: "Table view" }).click();
+  // Table view opens on merged Episodes; these assertions cover the
+  // grouped sub-view, which is now one click away.
+  await page.getByRole("button", { name: "Grouped" }).click();
 
   // Wait for at least one grouped row to appear (flagged data is available).
   await expect(page.getByTestId("grouped-anomaly-row").first()).toBeVisible();

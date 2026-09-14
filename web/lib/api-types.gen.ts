@@ -1527,6 +1527,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/anomalies/episodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Anomaly Episodes
+         * @description Query-time anomaly episode merging — one row per continuous event.
+         *
+         *     Merges contiguous 5-minute flagged rows sharing a (channel, detector,
+         *     direction) key into episodes with start/end/duration/trend, reusing the
+         *     same contiguity rule as the upload-path detector
+         *     (``src/models/episode_grouper.py``) so the two views never disagree.  See
+         *     ``docs/architecture/episode_grouping.md`` and
+         *     ``src/api/services/anomaly_episode_service.py`` for the grouping rules.
+         *
+         *     Episodes are built from EVERY flagged row in the window
+         *     (``_fetch_minimal_flagged_rows``), never from a top-N-by-score subset —
+         *     grouping a top-N list would manufacture gaps that do not exist in the
+         *     data.  Episodes are ranked by ``peak_score`` and capped at
+         *     ``ANOMALY_EPISODE_MAX`` only after grouping.
+         *
+         *     ADR-005 §2 — threshold is optional, same handling as ``/groups``: the
+         *     server defaults to ``CANONICAL_ANOMALY_THRESHOLD`` and echoes the
+         *     effective value in the response.
+         */
+        get: operations["get_anomaly_episodes_api_anomalies_episodes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/anomalies/enriched": {
         parameters: {
             query?: never;
@@ -1718,6 +1755,26 @@ export interface components {
             checkpoint_path: string;
         };
         /**
+         * AnomalyEpisodeSample
+         * @description One raw flagged row inside an episode's sample list.
+         */
+        AnomalyEpisodeSample: {
+            /** Timestamp */
+            timestamp: string;
+            /** Anomaly Score */
+            anomaly_score?: number | null;
+            /** Affected Sensors */
+            affected_sensors: string[];
+            /** Reasoning */
+            reasoning?: string | null;
+            /** Values */
+            values: {
+                [key: string]: number;
+            };
+            /** Detected Severity */
+            detected_severity?: string | null;
+        };
+        /**
          * AnomalyEpisodeSchema
          * @description One continuous anomaly event on a single channel (Task 5).
          */
@@ -1755,6 +1812,73 @@ export interface components {
             detected_ts?: string | null;
             /** Frozen Value */
             frozen_value?: number | null;
+        };
+        /**
+         * AnomalyEpisodeSummary
+         * @description One contiguous anomaly event, merged from 5-minute flagged rows.
+         */
+        AnomalyEpisodeSummary: {
+            /** Episode Id */
+            episode_id: string;
+            /** Channel */
+            channel: string;
+            /** Detector */
+            detector: string;
+            /** Direction */
+            direction?: ("drop" | "spike") | null;
+            /** Start Ts */
+            start_ts: string;
+            /** End Ts */
+            end_ts: string;
+            /** Duration Seconds */
+            duration_seconds: number;
+            /** Sample Count */
+            sample_count: number;
+            /** Peak Score */
+            peak_score: number;
+            /** Peak Ts */
+            peak_ts: string;
+            /** Severity */
+            severity: string;
+            /** First Value */
+            first_value?: number | null;
+            /** Last Value */
+            last_value?: number | null;
+            /** Peak Value */
+            peak_value?: number | null;
+            /**
+             * Trend
+             * @enum {string}
+             */
+            trend: "worsening" | "easing" | "flat";
+            /** Slope Per Hour */
+            slope_per_hour?: number | null;
+            /** Affected Sensors */
+            affected_sensors: string[];
+            /** Headline */
+            headline: string;
+            /** Is Truncated Start */
+            is_truncated_start: boolean;
+            /** Is Truncated End */
+            is_truncated_end: boolean;
+            /** Samples */
+            samples: components["schemas"]["AnomalyEpisodeSample"][];
+        };
+        /**
+         * AnomalyEpisodesResponse
+         * @description Response body for GET /api/anomalies/episodes.
+         */
+        AnomalyEpisodesResponse: {
+            /** Episodes */
+            episodes: components["schemas"]["AnomalyEpisodeSummary"][];
+            /** Episode Count */
+            episode_count: number;
+            /** Anomaly Count */
+            anomaly_count: number;
+            /** Threshold */
+            threshold: number;
+            /** Score Scale Version */
+            score_scale_version: number;
         };
         /** AnomalyFlagResponse */
         AnomalyFlagResponse: {
@@ -5452,9 +5576,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5491,9 +5613,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5529,9 +5649,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5563,9 +5681,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5599,9 +5715,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5635,9 +5749,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -5774,9 +5886,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -6043,9 +6153,42 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_anomaly_episodes_api_anomalies_episodes_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+                start: string;
+                end: string;
+                threshold?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnomalyEpisodesResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6081,9 +6224,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

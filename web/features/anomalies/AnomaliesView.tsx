@@ -7,6 +7,7 @@ import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
+import { EpisodeTable } from "@/features/anomalies/components/EpisodeTable";
 import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomalies";
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
@@ -21,6 +22,14 @@ import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 
 type ViewMode = "graphical" | "table";
+
+/** Table view sub-mode. Episodes lead: one row per event, not per 5-min sample. */
+type TableMode = "episodes" | "grouped";
+
+const TABLE_MODE_LABELS: Readonly<Record<TableMode, string>> = {
+  episodes: "Episodes",
+  grouped: "Grouped",
+};
 
 function AnomaliesBody() {
   const {
@@ -37,6 +46,7 @@ function AnomaliesBody() {
     originalCount,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
+  const [tableMode, setTableMode] = useState<TableMode>("episodes");
   const [{ from, to }] = useDateRange();
   const { tenant, gh } = useScope();
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -177,12 +187,39 @@ function AnomaliesBody() {
         </RefetchingBlock>
       ) : (
         <RefetchingBlock isRefetching={isDimmed}>
-          <Card title="Detected anomalies (grouped)">
-            <GroupedAnomalies
-              windowStart={windowStart}
-              windowEnd={windowEnd}
-              threshold={threshold}
-            />
+          <Card
+            title={tableMode === "episodes" ? "Anomaly episodes" : "Detected anomalies (grouped)"}
+          >
+            <div
+              className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+              data-testid="table-mode"
+            >
+              <span className="text-text-muted">Show</span>
+              {(["episodes", "grouped"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={tableMode === mode}
+                  onClick={() => setTableMode(mode)}
+                  className={`rounded-[var(--radius-control)] border px-3 py-1 ${
+                    tableMode === mode
+                      ? "border-accent font-medium text-accent"
+                      : "border-border text-text-muted hover:text-text"
+                  }`}
+                >
+                  {TABLE_MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            {tableMode === "episodes" ? (
+              <EpisodeTable windowStart={windowStart} windowEnd={windowEnd} threshold={threshold} />
+            ) : (
+              <GroupedAnomalies
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+              />
+            )}
           </Card>
         </RefetchingBlock>
       )}
