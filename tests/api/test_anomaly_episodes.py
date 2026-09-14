@@ -110,6 +110,30 @@ class TestGroupingKey:
         assert len(episodes) == 2
         assert {e["channel"] for e in episodes} == {"humidity", "temperature"}
 
+    def test_in_band_and_out_of_band_rows_on_one_channel_do_not_crash(self):
+        """Production regression: direction is None for an in-band value.
+
+        A window mixing a flagged out-of-band reading with a flagged in-band one
+        on the same channel and detector put None and "drop" in the same sort
+        key, and None is not orderable against str — every request 500'd with
+        TypeError. Every other test here gives each row a direction, so the
+        suite stayed green while production was down.
+        """
+        rows = [
+            _row(0, value=HUMIDITY_DROP),    # below the 50% bound -> "drop"
+            _row(5, value=65.0),             # inside the band     -> None
+            _row(10, value=HUMIDITY_SPIKE),  # above the 80% bound -> "spike"
+        ]
+        episodes = build_episodes(rows)
+        assert {e["direction"] for e in episodes} == {"drop", None, "spike"}
+
+    def test_rows_without_a_direction_group_normally(self):
+        rows = [_row(m, value=65.0) for m in (0, 5, 10)]
+        episodes = build_episodes(rows)
+        assert len(episodes) == 1
+        assert episodes[0]["direction"] is None
+        assert episodes[0]["sample_count"] == 3
+
     def test_null_trigger_channel_falls_back_to_value_inference(self):
         """Rows pre-dating migration 024 have no trigger_channel/detector."""
         rows = [_row(m, channel=None, detector=None) for m in (0, 5)]

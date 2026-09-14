@@ -56,7 +56,13 @@ def build_episodes(
     if not infos:
         return []
 
-    infos.sort(key=lambda info: ((info.channel, info.detector, info.direction), info.dt))
+    # direction is None for in-band values, and None is not orderable against
+    # str — sorting a window that mixes both raises TypeError.  Substitute ""
+    # for ordering only; the grouping key below still compares the real value,
+    # so a None-direction run stays its own episode.
+    infos.sort(
+        key=lambda info: (info.channel, info.detector, info.direction or "", info.dt)
+    )
 
     episodes: list[dict[str, Any]] = []
     current_key: tuple[str, str, Direction] | None = None
