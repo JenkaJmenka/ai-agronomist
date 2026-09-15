@@ -130,9 +130,10 @@ async def post_backfill_scores(
 ) -> BackfillScoresResponse:
     """Backfill anomaly scores for a tenant/greenhouse/window."""
     try:
-        detector = await resolve_tenant_detector(
+        resolved = await resolve_tenant_detector(
             db, request.tenant_id, request.checkpoint_path
         )
+        detector = resolved.detector
     except NoActiveModelError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
