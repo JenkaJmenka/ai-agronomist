@@ -3,6 +3,44 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Online learner deque-slicing crash — FIXED (2026-09-15)**
+
+`OnlineLearner.losses` is a `collections.deque(maxlen=2000)` but five call sites
+sliced it with `[start:stop]` syntax, which `deque` does not support. Every slice
+raised `TypeError: sequence index must be integer, not 'slice'` once the learner had
+observed ≥ `_MIN_TREND_HISTORY` (100) sequences.
+
+Affected methods: `predict()`, `needs_retraining()`, `get_statistics()`.
+Consequence: drift-triggered retraining could never fire; predict trend was always
+unavailable; statistics crashed when `update_history` had entries.
+
+**Fix:** convert `deque` → `list` at each slice site (5 edits in
+`src/models/online_learner.py`). Deques are maxlen=2000 / maxlen=500, so the
+copy is negligible. Existing tests had masked the bug by replacing `self.losses`
+with a plain `list` in the test fixture rather than feeding data through `observe()`.
+
+**Regression tests added** (3 new tests in `tests/models/test_online_learner.py`,
+class `TestDequeSlicingRegression`): feed ≥ `_MIN_TREND_HISTORY` observations through
+`observe()` to populate the real deque, then assert `needs_retraining()`, `predict()`,
+and `get_statistics()` all return without raising.
+
+**Findings (no change, report only):**
+- **(a) Score-scale mismatch:** `predict()` scores with `F.mse_loss(recon, x)` (pure
+  MSE) while `observe()` uses `model.loss_function` (MSE + beta·KL). The replay
+  buffer priorities and the reported `anomaly_score` are therefore on different scales.
+  This means high-KL sequences get over-prioritised in replay relative to their
+  reconstruction quality, and the anomaly score reported to callers understates the
+  loss the model actually trained against.
+- **(b) Anomaly-teaching risk:** `observe()` trains on EVERY sequence unconditionally,
+  and `sample_prioritized()` oversamples the highest-loss ones. For a VAE normality
+  model this teaches it to reconstruct anomalies, eroding detection sensitivity over
+  time. Recommendation: gate `observe()` behind an anomaly-score threshold (e.g. skip
+  training on sequences whose score exceeds the 95th percentile of the buffer), or
+  weight anomalous sequences DOWN rather than up in the replay sampler.
+
+All tests: 102 selected (online_learner or learning) — 102 passed, 0 failed.
+
+## Previous Phase
 **Production incident: stuck uploads + missing anomalies — RESOLVED (2026-09-11)**
 
 Two user-visible symptoms, one root cause: upload jobs hung at `finalizing` forever,
