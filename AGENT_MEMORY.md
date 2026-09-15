@@ -3,6 +3,60 @@
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Current Phase
+**Live/mock SCADA contamination — ROOT-CAUSED, contained, design landed (2026-09-15)**
+
+User reported anomalies jumping from 191/year to 8,279. Verified against prod:
+not a detection regression. A mock SCADA generator was writing white noise into a
+REAL tenant scope.
+
+- `MOCK_SCADA_ENABLED` defaulted **True**, `MOCK_SCADA_SCOPES` defaulted
+  `"tenant_1:gh_A"` (a real client scope), `LIVE_PERSIST_ENABLED` defaulted True
+  (`src/config.py:1156,1157,1175`). A zero-config deploy wrote synthetic rows
+  into customer data.
+- Generation is unconditional from API boot (`src/api/main.py:128` →
+  `LiveRuntime.start()`). `src/live/sources/mock.py:161` is `while
+  self._is_connected:` — no subscriber gate. The *Live* button only SUBSCRIBES;
+  it never controlled generation.
+- Each value is `diurnal_sine(hour) + IID gauss(0, sigma)` — white noise, no
+  temporal state. Measured consecutive deltas matched the configured sigmas
+  exactly (temp median 0.47 vs predicted 2σ/√π = 0.56).
+- Prod evidence: ordinary days had exactly 288 rows (client CSV, 5-min,
+  `source="Timestamp"`); 2026-09-14/15 had 11,119 and 19,394 EXTRA rows at ~2s
+  cadence, `source="live"`. **96.7% of flagged anomalies came from live rows.**
+  The client CSV was clean: 105,120 timestamps, every gap exactly 300.0s.
+- The whole historical year had `anomaly_score = NULL` — it was never scored, so
+  191 vs 8,279 compared two different populations.
+
+**Contained:** user set `MOCK_SCADA_ENABLED=false` and purged `source='live'`
+rows via `DELETE /upload/live-data` (`wipe_live_demo_data`). Confirmed fixed.
+
+**Design:** `docs/architecture/live_on_demand_lifecycle.md` (781 lines). Redis
+lease-based per-scope lifecycle, client-driven heartbeat renewal (SSE frames
+deliberately do NOT renew — a half-open TCP socket would pin the generator open),
+reconciler on a 5s tick, safe defaults, and a 409 guardrail refusing mock
+generation into a scope holding client data. Phase 1 is config-only and ships
+alone.
+
+**Two bugs the design surfaced (verified, NOT yet fixed):**
+- `GET /api/live/status` derives `greenhouse_status` from
+  `runtime.source_statuses()` (`routes/live.py:132-148`), which returns `[]` for a
+  scope with no merger (`runtime.py:172-175`). Under on-demand, a merely *idle*
+  scope reports `no_source`, telling the operator to reconfigure
+  `LIVE_SOURCES_JSON`. Must read the scope registry, not the merger map.
+- `LiveToggle.tsx` calls `await setLive(true)` before `resumeLiveScope()` and
+  swallows its failure in a bare `catch {}` — the toggle flips even when the
+  backend call fails.
+
+**Still open (verified, not dispatched):** episode jump window replaces the
+operator's date range (`anomalyJumpWindow.ts`, `DEFAULT_PAD_HOURS=12`, centers on
+the clicked sample not the episode); `root_cause_analyzer.py:265` reads RH from
+the normalized model input and formats it as a percent ("Humidity at 1.0%" on a
+row whose values say `humidity=55.87`); episode grouping collapses on
+`detector='unknown'`/`direction=null` (one 7,321-sample 16.6h "light" episode);
+three disagreeing anomaly counts on one screen; `COLD_RUN_PERCENTILE=99.9` flags
+a fixed 0.1% of any file by construction.
+
+## Previous Phase
 **Online learner deque-slicing crash — FIXED (2026-09-15)**
 
 `OnlineLearner.losses` is a `collections.deque(maxlen=2000)` but five call sites
