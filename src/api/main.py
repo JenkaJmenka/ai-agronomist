@@ -42,6 +42,7 @@ from src.mq.connection import close_mq
 from src.api.routes import (
     anomalies,
     auth,
+    backfill,
     bootstrap,
     feedback,
     feedback_integrated,
@@ -342,6 +343,7 @@ app.include_router(anomalies.router)
 app.include_router(auth.router)
 app.include_router(operational_config.router)
 app.include_router(seasonal_baselines.router)
+app.include_router(backfill.router)
 
 
 @app.get("/metrics", include_in_schema=False)
