@@ -24,7 +24,11 @@ from src.config import ANOMALY_SCALING_FACTOR, INPUT_DIM, SCORE_SCALE_CALIBRATIO
 from src.db.models import Base, SensorReading
 from src.db.session import get_db
 from src.vendors.csv_adapter import CSVAdapter
-from tests.integration.conftest_pipeline import baseline_sequences, sample_sequence
+from tests.integration.conftest_pipeline import (
+    baseline_sequences,
+    patch_active_model,
+    sample_sequence,
+)
 
 # ADR-005: patch_detector returns raw=1.5 → batch_score=clip(1.5/ANOMALY_SCALING_FACTOR, 0, 1)=0.75
 # → canonical(0.75, p=0.8, hi=1.0) = 0.5 * 0.75 / 0.8 ≈ 0.469
@@ -39,10 +43,7 @@ _EXPECTED_ANOMALY_SCORE: float = _canonical_score(  # type: ignore[assignment]
 def _post_comprehensive(
     client: TestClient, payload: dict, checkpoint_path: str
 ) -> Any:
-    with patch(
-        "src.api.routes.inference_integrated._resolve_checkpoint",
-        return_value=checkpoint_path,
-    ):
+    with patch_active_model(checkpoint_path):
         return client.post("/api/inference/comprehensive", json=payload)
 
 
@@ -593,10 +594,7 @@ class TestBatchAndMonitoring:
             "greenhouse_id": "gh_1",
             "sequences": [sample_sequence(1), sample_sequence(2), sample_sequence(3)],
         }
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post("/api/inference/batch", json=payload)
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
@@ -622,10 +620,7 @@ class TestBatchAndMonitoring:
             "customer_id": "tenant_e2e_metrics",
             "sequences": [sample_sequence(10), sample_sequence(12)],
         }
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             client.post("/api/inference/batch", json=payload)
 
         metrics = client.get("/api/monitoring/metrics?hours=24").json()

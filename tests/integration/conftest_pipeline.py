@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Generator, List
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.api.main import app
 from src.api.services.comprehensive_pipeline import build_default_baseline
+from src.api.services.detector_cache import ResolvedDetector
 from src.api.services.orchestrator_registry import clear_orchestrator_cache
 from src.config import INPUT_DIM, LATENT_DIM, MODEL_CONFIG, RANDOM_SEED, SEQ_LEN
 from src.db.models import Base
@@ -51,6 +53,26 @@ def checkpoint_path(tmp_path) -> str:
         path,
     )
     return path
+
+
+@contextmanager
+def patch_active_model(checkpoint_path: str) -> Generator[None, None, None]:
+    """Bypass ModelRegistry/artifact-store resolution for tests that only
+    care about pipeline behaviour, not resolution itself — loads the real
+    checkpoint at *checkpoint_path* as if it were the tenant's active model.
+    Resolution logic itself (registry lookup, db:// artifact resolution, the
+    no-active-model error) is covered directly against a real ModelRegistry
+    in TestResolveActiveModel (test_phase4_integration.py).
+    """
+    resolved = ResolvedDetector(
+        detector=AnomalyDetector(checkpoint_path=checkpoint_path),
+        checkpoint_path=checkpoint_path,
+    )
+    with patch(
+        "src.api.routes.inference_integrated.resolve_tenant_detector",
+        new=AsyncMock(return_value=resolved),
+    ):
+        yield
 
 
 @pytest.fixture

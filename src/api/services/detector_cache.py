@@ -4,12 +4,13 @@
 should this tenant's request use" into a loaded, cached ``AnomalyDetector``.
 It mirrors the resolution the /inference routes do inline (ModelRegistry
 lookup, then artifact_store.resolve_checkpoint for db:// paths) so callers
-outside inference.py — e.g. the backfill endpoint — don't grow a third copy
-of that glue.
+outside inference.py — e.g. the backfill and comprehensive-inference
+endpoints — don't grow yet another copy of that glue.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,24 @@ class NoActiveModelError(RuntimeError):
     """No usable model could be resolved for a tenant."""
 
 
+@dataclass(frozen=True)
+class ResolvedDetector:
+    """A loaded detector plus the resolved checkpoint path that produced it.
+
+    Callers that keep their own secondary cache on top of this one (e.g. the
+    ComprehensiveInferencePipeline cache in inference_integrated.py) need a
+    stable, collision-free key. ``checkpoint_path`` here is post-resolution
+    (a real local path, never a raw ``db://`` reference): resolve_checkpoint
+    is content-addressed, so two different db:// artifacts always resolve to
+    two different local paths, and the same artifact always resolves to the
+    same one — unlike the raw registry value, which was the bug this type
+    exists to prevent from recurring.
+    """
+
+    detector: AnomalyDetector
+    checkpoint_path: Optional[str]
+
+
 def get_cached_detector(checkpoint_path: Optional[str]) -> AnomalyDetector:
     """Return a cached detector, loading and storing on first use."""
     key = checkpoint_path or _BASELINE_CACHE_KEY
@@ -43,7 +62,7 @@ async def resolve_tenant_detector(
     db: AsyncSession,
     tenant_id: str,
     explicit_checkpoint_path: Optional[str] = None,
-) -> AnomalyDetector:
+) -> ResolvedDetector:
     """Resolve the model a tenant is actually running and return a detector.
 
     An *explicit_checkpoint_path*, when given, wins outright — but still goes
@@ -53,7 +72,8 @@ async def resolve_tenant_detector(
 
     Unlike ``AnomalyDetector(checkpoint_path=None)``, this never falls back to
     a filesystem baseline: worker-trained checkpoints live in the DB artifact
-    store on deployments with no shared filesystem, so a silent fallback here
+    store on deployments with no shared filesystem (and no baseline ships in
+    the container image at all — see Dockerfile), so a silent fallback here
     would just relocate this class of bug rather than fix it.
     """
     if explicit_checkpoint_path is not None:
@@ -76,7 +96,10 @@ async def resolve_tenant_detector(
             f"({checkpoint_path!r}): {exc}"
         ) from exc
 
-    return get_cached_detector(checkpoint_path)
+    return ResolvedDetector(
+        detector=get_cached_detector(checkpoint_path),
+        checkpoint_path=checkpoint_path,
+    )
 
 
 def clear_detector_cache() -> None:
