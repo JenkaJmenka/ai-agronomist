@@ -7,12 +7,17 @@ Covers:
 - Tenant isolation: backfill for tenant A never touches tenant B rows.
 - source='live' rows are excluded from scoring and write-back.
 - Route responds correctly (happy path + validation errors).
+- Model resolution: registry lookup, db:// artifact resolution, explicit
+  checkpoint_path, and the no-active-model error path (all previously
+  untested — the route-level fixture used to mock the detector directly,
+  bypassing resolution entirely).
 """
 
 from __future__ import annotations
 
 import datetime
 import math
+import tempfile
 from typing import AsyncGenerator
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy import select
 
 from src.api.main import app
+from src.api.services.detector_cache import NoActiveModelError, resolve_tenant_detector
 from src.api.services.score_backfill import (
     BackfillResult,
     _SCORE_SCALE,
@@ -33,6 +39,8 @@ from src.api.services.score_backfill import (
 from src.config import ANOMALY_SCALING_FACTOR, SEQ_LEN
 from src.db.models import Base, SensorReading
 from src.db.session import get_db
+from src.models.artifact_store import DB_SCHEME, put_checkpoint
+from src.models.model_registry import ModelRegistry
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -515,6 +523,14 @@ async def route_db() -> AsyncGenerator[AsyncSession, None]:
         for i in range(30):
             session.add(_sensor_row(tenant_id=TENANT, greenhouse_id=GH, index=i))
         await session.commit()
+        # Registry lookup is exercised for real here — the route no longer
+        # skips resolution, so TENANT needs an active deployment or every
+        # route test would hit the no-active-model error path.
+        await ModelRegistry(session).register_model(
+            customer_id=TENANT,
+            model_type="lstm_vae",
+            checkpoint_path="models/checkpoints/fixture_active.pt",
+        )
         yield session
     await engine.dispose()
 
@@ -525,9 +541,10 @@ def api_client(route_db: AsyncSession):
         yield route_db
 
     app.dependency_overrides[get_db] = override_get_db
-    # Patch the detector cache so no checkpoint file is needed.
+    # Patch the detector cache (not resolution) so no checkpoint file needs
+    # to exist on disk — resolution itself runs for real against route_db.
     with patch(
-        "src.api.routes.backfill.get_cached_detector",
+        "src.api.services.detector_cache.get_cached_detector",
         return_value=_mock_detector_with_outlier(),
     ):
         with TestClient(app) as client:
@@ -602,3 +619,152 @@ class TestBackfillRoute:
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()
         assert body["batches_processed"] >= 1
+
+    def test_no_active_model_returns_503_naming_tenant(
+        self, api_client: TestClient
+    ) -> None:
+        """A tenant with no registry deployment must fail clearly, not with
+        a bare 'models/baseline.pt not found' (the original production bug)."""
+        unregistered_tenant = "tenant_no_active_model"
+        resp = api_client.post(
+            "/api/backfill/scores",
+            json={
+                "tenant_id": unregistered_tenant,
+                "greenhouse_id": GH,
+                "start": _BASE_TS.isoformat(),
+                "end": (_BASE_TS + 29 * _STEP).isoformat(),
+            },
+        )
+        assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        message = resp.json()["message"]
+        assert unregistered_tenant in message
+        assert "ModelRegistry" in message
+
+
+# ---------------------------------------------------------------------------
+# Model resolution — src.api.services.detector_cache.resolve_tenant_detector
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTenantDetector:
+    """Exercises the resolution logic directly (registry + artifact_store),
+    with only the final model load (get_cached_detector) mocked. A test that
+    mocks the detector alone would miss this class of bug entirely."""
+
+    @pytest_asyncio.fixture
+    async def resolution_db(self) -> AsyncGenerator[AsyncSession, None]:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(
+            bind=engine, class_=AsyncSession, expire_on_commit=False
+        )
+        async with factory() as session:
+            yield session
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_no_checkpoint_uses_registry_active_model(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        await ModelRegistry(resolution_db).register_model(
+            customer_id=TENANT,
+            model_type="lstm_vae",
+            checkpoint_path="models/checkpoints/registered.pt",
+        )
+        with patch(
+            "src.api.services.detector_cache.get_cached_detector"
+        ) as mock_get_detector:
+            mock_get_detector.return_value = _mock_detector()
+            await resolve_tenant_detector(resolution_db, TENANT)
+        mock_get_detector.assert_called_once_with("models/checkpoints/registered.pt")
+
+    @pytest.mark.asyncio
+    async def test_explicit_checkpoint_path_overrides_registry(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        await ModelRegistry(resolution_db).register_model(
+            customer_id=TENANT,
+            model_type="lstm_vae",
+            checkpoint_path="models/checkpoints/registered.pt",
+        )
+        with patch(
+            "src.api.services.detector_cache.get_cached_detector"
+        ) as mock_get_detector:
+            mock_get_detector.return_value = _mock_detector()
+            await resolve_tenant_detector(
+                resolution_db, TENANT, "models/checkpoints/explicit.pt"
+            )
+        mock_get_detector.assert_called_once_with("models/checkpoints/explicit.pt")
+
+    @pytest.mark.asyncio
+    async def test_explicit_db_path_is_resolved_through_artifact_store(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        """A caller-supplied db:// path must still be resolved to a local
+        cache file, not handed to the detector as-is."""
+        with tempfile.NamedTemporaryFile(suffix=".pt") as tmp:
+            tmp.write(b"fake-checkpoint-bytes")
+            tmp.flush()
+            artifact_path = await put_checkpoint(
+                resolution_db, "checkpoints/explicit-db", tmp.name
+            )
+        assert artifact_path.startswith(DB_SCHEME)
+
+        with patch(
+            "src.api.services.detector_cache.get_cached_detector"
+        ) as mock_get_detector:
+            mock_get_detector.return_value = _mock_detector()
+            await resolve_tenant_detector(resolution_db, TENANT, artifact_path)
+
+        assert mock_get_detector.call_count == 1
+        (resolved_path,), _ = mock_get_detector.call_args
+        assert not resolved_path.startswith(DB_SCHEME)
+        assert resolved_path.endswith(".pt")
+
+    @pytest.mark.asyncio
+    async def test_registry_db_path_is_also_resolved(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        """The active-deployment path (not just an explicit one) must also
+        go through db:// resolution — this is exactly the branch the
+        production bug skipped."""
+        with tempfile.NamedTemporaryFile(suffix=".pt") as tmp:
+            tmp.write(b"fake-checkpoint-bytes")
+            tmp.flush()
+            artifact_path = await put_checkpoint(
+                resolution_db, "checkpoints/registry-db", tmp.name
+            )
+        await ModelRegistry(resolution_db).register_model(
+            customer_id=TENANT,
+            model_type="lstm_vae",
+            checkpoint_path=artifact_path,
+        )
+
+        with patch(
+            "src.api.services.detector_cache.get_cached_detector"
+        ) as mock_get_detector:
+            mock_get_detector.return_value = _mock_detector()
+            await resolve_tenant_detector(resolution_db, TENANT)
+
+        (resolved_path,), _ = mock_get_detector.call_args
+        assert not resolved_path.startswith(DB_SCHEME)
+        assert resolved_path.endswith(".pt")
+
+    @pytest.mark.asyncio
+    async def test_no_active_model_raises_naming_tenant(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        with pytest.raises(NoActiveModelError, match=TENANT):
+            await resolve_tenant_detector(resolution_db, TENANT)
+
+    @pytest.mark.asyncio
+    async def test_missing_artifact_raises_no_active_model_error(
+        self, resolution_db: AsyncSession
+    ) -> None:
+        """A db:// path pointing at a deleted/never-uploaded artifact must
+        surface as the same actionable error, not a bare FileNotFoundError."""
+        with pytest.raises(NoActiveModelError, match=TENANT):
+            await resolve_tenant_detector(
+                resolution_db, TENANT, f"{DB_SCHEME}checkpoints/does-not-exist"
+            )

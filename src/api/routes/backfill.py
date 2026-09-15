@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.services.detector_cache import get_cached_detector
+from src.api.services.detector_cache import NoActiveModelError, resolve_tenant_detector
 from src.api.services.score_backfill import BackfillResult, backfill_scores
 from src.db.session import get_db
 
@@ -60,8 +60,9 @@ class BackfillScoresRequest(BaseModel):
     checkpoint_path: Optional[str] = Field(
         default=None,
         description=(
-            "Optional path to a specific model checkpoint. "
-            "Defaults to the current baseline model."
+            "Optional path to a specific model checkpoint (local path or a "
+            "db://model_artifacts/... artifact reference). Defaults to the "
+            "tenant's active ModelRegistry deployment."
         ),
     )
 
@@ -129,7 +130,14 @@ async def post_backfill_scores(
 ) -> BackfillScoresResponse:
     """Backfill anomaly scores for a tenant/greenhouse/window."""
     try:
-        detector = get_cached_detector(request.checkpoint_path)
+        detector = await resolve_tenant_detector(
+            db, request.tenant_id, request.checkpoint_path
+        )
+    except NoActiveModelError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
