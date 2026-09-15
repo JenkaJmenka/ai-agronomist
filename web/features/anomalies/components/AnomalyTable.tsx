@@ -20,6 +20,9 @@ import {
 export const TOP_ANOMALIES_CAP = 50;
 
 const SEVERITY_LABEL = {
+  // Server sentinel for "never run through severity classification" — not a
+  // real low-severity verdict, so it must read differently from "Normal".
+  unclassified: "Unclassified",
   normal: "Normal",
   warning: "Warning",
   lstm: "LSTM / drift",

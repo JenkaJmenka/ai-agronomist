@@ -12,6 +12,7 @@ import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomali
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
+import { useAnomalyCount } from "@/features/anomalies/hooks/useAnomalyCount";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
@@ -72,17 +73,25 @@ function AnomaliesBody() {
     enabled: rows.length > 0 && !isRefetching,
     limit: SERVER_GROUPING_THRESHOLD,
   });
+  // Cheap exact count (G2) — the one authoritative anomaly total for the
+  // page. G4's anomaly_count is also exact but is fetched alongside a
+  // 40+ second row payload in production and, on error, previously fell
+  // back to the downsampled chart row count with no indication it was an
+  // estimate. This is faster, independent of /episodes and /enriched, and
+  // reused below so the episode panel's count can never drift from the
+  // header's.
+  const anomalyCountState = useAnomalyCount({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: rows.length > 0 && !isRefetching,
+  });
+  const anomalyTotal = anomalyCountState.count;
+  const tableAnomalies = enrichment.topRows ?? anomalies;
 
   // Dim + debounced URL write for chart drag-select / scroll-zoom.
   const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({ from, to });
-  // Use the exact count from the enriched response once known; while the slow
-  // G4 request is in flight show null (not the downsampled anomalies.length
-  // which can be 35 instead of the true 2649, causing GroupedAnomalies to
-  // pick the wrong routing path and render silently-blank enrichment cells).
-  const anomalyTotal: number | null =
-    enrichment.anomalyCount ?? (enrichment.isLoading ? null : anomalies.length);
-  const tableAnomalies = enrichment.topRows ?? anomalies;
 
   // Scope key ties the chart baseline to this page + tenant + greenhouse.
   const scopeKey = `anomalies:${tenant}:${gh}`;
@@ -131,13 +140,13 @@ function AnomaliesBody() {
               </button>
             ))}
           </div>
-          <p className="text-sm tabular-nums">
+          <p className="text-sm tabular-nums" data-testid="anomaly-count-summary">
             {anomalyTotal !== null ? (
               <span className="font-semibold">{anomalyTotal.toLocaleString()}</span>
             ) : (
               <span className="font-semibold text-text-muted">—</span>
             )}
-            <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} in </span>
+            <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} (exact) in </span>
             <span className="font-semibold">{originalCount.toLocaleString()}</span>
             <span className="text-text-muted"> points</span>
           </p>
@@ -197,6 +206,7 @@ function AnomaliesBody() {
                 windowEnd={windowEnd}
                 threshold={threshold}
                 onWindowSelect={onTableRowSelect}
+                anomalyCount={anomalyTotal}
                 fallback={
                   <AnomalyTable
                     mode="top"
@@ -266,6 +276,7 @@ function AnomaliesBody() {
                 windowStart={windowStart}
                 windowEnd={windowEnd}
                 threshold={threshold}
+                anomalyCount={anomalyTotal}
                 fallback={
                   <GroupedAnomalies
                     windowStart={windowStart}

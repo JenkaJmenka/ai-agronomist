@@ -18,6 +18,15 @@ export type EpisodeTrend = (typeof EPISODE_TRENDS)[number];
 export const EPISODE_MOVEMENTS = ["rising", "falling", "steady"] as const;
 export type EpisodeMovement = (typeof EPISODE_MOVEMENTS)[number];
 
+/**
+ * Mirrors ANOMALY_EPISODE_MAX in src/config.py (default 200). The backend
+ * ranks episodes by peak_score and caps the returned list at this many —
+ * episode_count already reflects the capped length, so an episode list at
+ * exactly this length is the only client-side signal that more episodes
+ * exist in the window than are shown.
+ */
+export const ANOMALY_EPISODE_MAX = 200;
+
 const episodeSampleSchema = z.object({
   timestamp: z.string(),
   anomaly_score: z.number().nullable().optional(),

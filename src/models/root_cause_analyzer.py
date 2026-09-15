@@ -42,6 +42,7 @@ from src.models.diagnosis_rules import (
     _INDICATOR_EVIDENCE,
     _MEDIUM_SEVERITY_PATTERNS,
 )
+from src.models.root_cause_reasoning import format_rule_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class RootCauseAnalyzer:
         attribution: Dict[str, float],
         sequence: np.ndarray,
         customer_profile: Optional[Dict[str, Any]] = None,
+        physical_sequence: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """Generate a root cause hypothesis.
 
@@ -98,9 +100,14 @@ class RootCauseAnalyzer:
                 (e.g. ``"drift"``, ``"spike"``, ``"dependency"``).
             attribution: From ``AnomalyAttributor.attribute_sequence()``
                 — sensor name → normalized contribution (sums to ~1.0).
-            sequence: Sensor readings, shape ``(seq_len, input_dim)``.
+            sequence: Sensor readings in **model-input (normalized) units**,
+                shape ``(seq_len, input_dim)``.
             customer_profile: Optional customer-specific context for
                 future rule personalization (currently unused).
+            physical_sequence: The same window in **physical units**
+                (°C, %RH, ppm, lux), same shape.  The only source operator-
+                facing reasoning may quote numbers from; when omitted, the
+                reasoning describes the fault without quoting a reading.
 
         Returns:
             Dict with ``root_cause``, ``confidence``, ``reasoning``,
@@ -128,7 +135,9 @@ class RootCauseAnalyzer:
             return {
                 "root_cause": top_match["cause"],
                 "confidence": top_match["confidence"],
-                "reasoning": self._format_rule_description(top_match, sequence),
+                "reasoning": format_rule_reasoning(
+                    top_match, physical_sequence, self.sensor_names
+                ),
                 "supporting_evidence": self._gather_evidence(
                     sequence, top_match
                 ),
@@ -252,31 +261,6 @@ class RootCauseAnalyzer:
                 return True
 
         return False
-
-    def _format_rule_description(
-        self, match: Dict[str, Any], sequence: np.ndarray
-    ) -> str:
-        """Build operator-facing reasoning, injecting measured RH when needed."""
-        template = match.get("description_template")
-        if not template:
-            return str(match.get("description", ""))
-        rh = float("nan")
-        try:
-            hum_idx = self.sensor_names.index("humidity")
-            rh = float(np.asarray(sequence)[-1, hum_idx])
-        except (ValueError, IndexError):
-            pass
-        from src.models.setpoint_scada_detector import humidity_reasoning_text
-
-        rh_phrase = (
-            humidity_reasoning_text(rh)
-            if np.isfinite(rh)
-            else "Humidity elevated"
-        )
-        try:
-            return template.format(rh_phrase=rh_phrase, rh=rh)
-        except (KeyError, ValueError):
-            return str(match.get("description", rh_phrase))
 
     def _gather_evidence(
         self, sequence: np.ndarray, match: Dict[str, Any]

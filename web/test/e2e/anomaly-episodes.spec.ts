@@ -200,12 +200,23 @@ test("samples toggle restores the flat per-sample tables", async ({ page }) => {
   await expect(page.getByText(/All anomalies/)).toBeVisible();
 });
 
-test("clicking an episode zooms the chart to its span and expands it", async ({ page }) => {
+test("expanding an episode reveals its samples without an explicit zoom", async ({ page }) => {
   await page.goto("/anomalies");
-  await expect(page.getByTestId("episode-table")).toContainText("click an episode to zoom");
+  await expect(page.getByTestId("episode-table")).toContainText('"Zoom to span" focuses the chart');
 
+  // Regression: expanding used to zoom the chart too, silently replacing the
+  // operator's date range. Expanding must stay a pure disclosure action.
   await page.getByTestId("episode-summary").first().click();
   await expect(page.getByTestId("episode-sample-row").first()).toBeVisible();
+});
+
+test('the explicit "Zoom to span" control does not expand the episode', async ({ page }) => {
+  await page.goto("/anomalies");
+
+  await page.getByTestId("episode-zoom-button").first().click();
+
+  // Zooming is a distinct act from disclosure — the samples stay collapsed.
+  await expect(page.getByTestId("episode-sample-row").first()).toBeHidden();
 });
 
 test("table view merges contiguous samples into one episode per event", async ({ page }) => {

@@ -18,8 +18,14 @@ from src.api.services.anomaly_episode_rows import (
     _finite_or_none,
 )
 from src.api.services.anomaly_episode_trend import _build_headline, _episode_dynamics
+from src.api.services.fault_classification import _SENSOR_BOUNDS, _UNKNOWN_KEY
 from src.api.services.sample_enrichment import _iso
-from src.config import ANOMALY_EPISODE_GAP_SECONDS, ANOMALY_GROUP_SAMPLE_IDS, ANOMALY_TREND_FLAT_DEADBAND
+from src.config import (
+    ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION,
+    ANOMALY_EPISODE_GAP_SECONDS,
+    ANOMALY_GROUP_SAMPLE_IDS,
+    ANOMALY_TREND_FLAT_DEADBAND,
+)
 from src.models.episode_grouper import _severity_rank
 
 
@@ -51,6 +57,15 @@ def build_episodes(
     window boundary, so comparing against min/max of the data would mark the
     first and last episode of every query as truncated regardless of whether
     anything was actually cut off.  When omitted, both flags are False.
+
+    Rows whose ``trigger_detector``/direction were never persisted (LSTM-only
+    score backfill, live ingestion) degrade to ``detector="unknown"``,
+    ``direction=None`` — a key that, alone, cannot distinguish two unrelated
+    in-band excursions on the same channel.  When BOTH components are
+    degraded on a contiguous run, ``_degraded_value_span_exceeded`` also caps
+    how far the group's value may drift before splitting, so an all-day
+    in-band ramp (e.g. the light channel's diurnal curve) cannot present as
+    one multi-hour episode just because nothing ever breached a bound.
     """
     infos = _build_row_infos(row_dicts)
     if not infos:
@@ -70,7 +85,15 @@ def build_episodes(
 
     for info in infos:
         key = (info.channel, info.detector, info.direction)
-        if key != current_key:
+        must_split = key != current_key
+        if not must_split:
+            gap = (info.dt - current_group[-1].dt).total_seconds()
+            must_split = gap > gap_seconds
+        if not must_split and _is_degraded_key(info.detector, info.direction):
+            must_split = _degraded_value_span_exceeded(
+                current_group, info.value, info.channel,
+            )
+        if must_split:
             _flush_episode(
                 current_group, episodes, deadband, sample_limit,
                 window_start, window_end,
@@ -78,20 +101,56 @@ def build_episodes(
             current_key = key
             current_group = [info]
         else:
-            gap = (info.dt - current_group[-1].dt).total_seconds()
-            if gap > gap_seconds:
-                _flush_episode(
-                    current_group, episodes, deadband, sample_limit,
-                    window_start, window_end,
-                )
-                current_group = [info]
-            else:
-                current_group.append(info)
+            current_group.append(info)
 
     _flush_episode(
         current_group, episodes, deadband, sample_limit, window_start, window_end,
     )
     return episodes
+
+
+def _is_degraded_key(detector: str, direction: Direction) -> bool:
+    """True when neither the detector nor the direction is real evidence.
+
+    ``detector == "unknown"`` only happens for rows whose ``trigger_detector``
+    was never persisted (see module docstring); ``direction is None`` also
+    happens legitimately for real detector rows whose value never breaches a
+    configured band (an LSTM multivariate hit, say).  Only the conjunction of
+    both is the degenerate case this guards against — a single missing
+    component still leaves one real signal in the key.
+    """
+    return detector == _UNKNOWN_KEY and direction is None
+
+
+def _degraded_value_span_exceeded(
+    group: list[_RowInfo],
+    candidate_value: float | None,
+    channel: str,
+    fraction: float = ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION,
+) -> bool:
+    """True if adding ``candidate_value`` widens a degraded group past its cap.
+
+    Every row already in ``group`` shares an in-band value for ``channel``
+    (that is what put them on a ``direction=None`` key), so the group's value
+    envelope is bounded by the channel's configured band already — this just
+    refuses to let a degraded-key run consume more than ``fraction`` of it.
+    A channel with no configured band (``_SENSOR_BOUNDS`` has no entry — e.g.
+    an unresolved channel or a SCADA column) has nothing to measure drift
+    against, so the check is skipped and time-gap contiguity alone decides.
+    """
+    if candidate_value is None:
+        return False
+    bounds = _SENSOR_BOUNDS.get(channel)
+    if bounds is None:
+        return False
+    span = bounds[1] - bounds[0]
+    if span <= 0:
+        return False
+    values = [info.value for info in group if info.value is not None]
+    values.append(candidate_value)
+    if len(values) < 2:
+        return False
+    return (max(values) - min(values)) > fraction * span
 
 
 def _episode_extremum(
@@ -134,7 +193,7 @@ def _flush_episode(
     peak_info = group[peak_idx]
 
     severities = [info.row.get("detected_severity") for info in group]
-    severity = max(severities, key=_severity_rank) or "normal"
+    severity = max(severities, key=_severity_rank) or "unclassified"
 
     valued = [(info.dt, info.value) for info in group if info.value is not None]
     trend, movement, slope_per_hour = _episode_dynamics(

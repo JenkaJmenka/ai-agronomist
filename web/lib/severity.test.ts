@@ -66,11 +66,32 @@ describe("resolveRowSeverity", () => {
     });
     expect(result).toBe<Severity>("warning");
   });
+
+  it("round-trips the server's 'unclassified' sentinel instead of re-deriving from score", () => {
+    // episode_grouper.py::_severity_rank emits "unclassified" for rows that
+    // were never run through severity classification (e.g. an LSTM-only hit
+    // with no per-column attribution) — not "assessed and found benign".
+    // Re-deriving from score/threshold here would silently discard that and
+    // could even produce "normal", reintroducing the exact lie the backend
+    // rename was meant to remove.
+    const result = resolveRowSeverity({
+      score: 0.9,
+      threshold: 0.15,
+      detectedSeverity: "unclassified",
+    });
+    expect(result).toBe<Severity>("unclassified");
+  });
 });
 
 // ─── SEVERITY_ORDER ───────────────────────────────────────────────────────────
 
 describe("SEVERITY_ORDER", () => {
+  it("places unclassified below normal, not at the same rank", () => {
+    // Ranking it with "normal" would claim the row was assessed and found
+    // benign, when it means the opposite: never assessed at all.
+    expect(SEVERITY_ORDER.unclassified).toBeLessThan(SEVERITY_ORDER.normal);
+  });
+
   it("places urgent above critical", () => {
     expect(SEVERITY_ORDER.urgent).toBeGreaterThan(SEVERITY_ORDER.critical);
   });
@@ -101,8 +122,15 @@ describe("urgent label and style coverage", () => {
     expect(typeof SEVERITY_ORDER.urgent).toBe("number");
   });
 
-  it("all five severity levels have a defined order weight", () => {
-    const severities: Severity[] = ["normal", "warning", "lstm", "critical", "urgent"];
+  it("all six severity levels have a defined order weight", () => {
+    const severities: Severity[] = [
+      "unclassified",
+      "normal",
+      "warning",
+      "lstm",
+      "critical",
+      "urgent",
+    ];
     for (const sev of severities) {
       expect(SEVERITY_ORDER[sev]).toBeDefined();
     }

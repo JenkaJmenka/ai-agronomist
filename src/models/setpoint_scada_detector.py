@@ -26,6 +26,7 @@ from src.config import (
     PLANT_TEMP_COLUMN_ALIASES,
     RH_ABSOLUTE_MAX_PERCENT,
     RH_CRIT_PERCENT,
+    RH_PLAUSIBLE_RANGE_PERCENT,
     SETPOINT_COLUMN_ALIASES,
     SETPOINT_TEMP_DELTA_C,
     SOLAR_COLUMN_ALIASES,
@@ -106,11 +107,31 @@ def climate_context_from_mapping(mapping: Optional[Mapping[str, Any]]) -> Climat
     )
 
 
-def humidity_reasoning_text(rh: float) -> str:
-    """Natural-language RH phrase — never 'at maximum' unless RH ≥ 98%."""
+def humidity_reasoning_text(rh: Optional[float]) -> str:
+    """Natural-language RH phrase from a *physical* relative humidity.
+
+    Two callers share this formatter, so it guards its own input rather
+    than trusting them: a value outside ``RH_PLAUSIBLE_RANGE_PERCENT`` is
+    not RH in percent (normalized model input reads as 0–1.7) and must not
+    be quoted to an operator. Never claims 'at maximum' below
+    ``RH_ABSOLUTE_MAX_PERCENT``.
+    """
+    if not _is_plausible_rh(rh):
+        return "Humidity reading unavailable"
     if rh >= RH_ABSOLUTE_MAX_PERCENT:
         return f"Humidity at maximum ({rh:.1f}%)"
     return f"Humidity at {rh:.1f}%"
+
+
+def _is_plausible_rh(rh: Optional[float]) -> bool:
+    """True when ``rh`` can be quoted as a physical relative humidity."""
+    if rh is None:
+        return False
+    value = float(rh)
+    if not np.isfinite(value):
+        return False
+    low, high = RH_PLAUSIBLE_RANGE_PERCENT
+    return low <= value <= high
 
 
 def _clamp01(x: float) -> float:

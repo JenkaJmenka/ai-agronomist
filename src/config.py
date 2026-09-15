@@ -241,6 +241,26 @@ COLD_RUN_THRESHOLD_METHOD: str = "percentile"
 COLD_RUN_PERCENTILE: float = 99.9
 COLD_RUN_MIN_ANOMALIES: int = 1
 COLD_RUN_BASELINE_FRACTION: float = 0.2
+
+# Absolute anomalousness gate layered on top of the file-relative threshold
+# above.  COLD_RUN_PERCENTILE is a quantile of the uploaded file's own scores,
+# so it flags 0.1 % of ANY file by construction — a clean 105 120-row year
+# yields ~105 "anomalies" and a 10x larger file yields 10x more.  The gate
+# raises the threshold to median + z * MAD of the same scores, which tracks how
+# far the tail sits from the bulk instead of how many rows there are: a clean
+# file then yields zero hits and a file with N genuine faults yields ~N.
+#
+# Disabled by default.  It only ever RAISES the threshold, so enabling it can
+# never add anomalies, but it does move the ADR-005 canonical anchor
+# (canonical 0.5 == threshold) for every score in the file, and it changes what
+# tests/api/test_inference_upload_cold_run.py asserts about anomalies_detected
+# and threshold_method.  Enable per-deployment after validating the hit counts
+# against a labelled file.
+COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
+# Robust z-score a raw score must clear above the bulk of the distribution.
+# Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
+# "anomalous" starts.
+COLD_RUN_ROBUST_GATE_Z: float = float(os.environ.get("COLD_RUN_ROBUST_GATE_Z", "5.5"))
 # Rolling-window statistical detection (5-min data → 288 = 24 h).
 COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
@@ -781,6 +801,13 @@ OVERHEAT_OUTDOOR_TEMP_C: float = float(os.environ.get("OVERHEAT_OUTDOOR_TEMP_C",
 # Relative humidity condensation / dehumidification thresholds.
 RH_CRIT_PERCENT: float = float(os.environ.get("RH_CRIT_PERCENT", "95.0"))
 RH_ABSOLUTE_MAX_PERCENT: float = float(os.environ.get("RH_ABSOLUTE_MAX_PERCENT", "98.0"))
+
+# Range a value must fall inside before operator-facing text may quote it as a
+# relative humidity percentage.  Anything outside is not RH in physical units —
+# most likely a normalized model input, which is how "Humidity at 1.0%" reached
+# the UI for a 55.9 % RH row.  Callers that cannot prove a number is physical
+# must describe the condition without quoting it.
+RH_PLAUSIBLE_RANGE_PERCENT: Tuple[float, float] = (0.0, 100.0)
 # Humidity deficit (g/m³) at/below which dehumidification is considered failed.
 # Corrected 2026-07: rescaled 10× (was 0.5) after psychrometric HD coefficient
 # fix (216.7 → 2167.0 for kPa inputs).  The old 0.5 was calibrated to an HD
@@ -1379,4 +1406,20 @@ ANOMALY_EPISODE_MAX: int = int(os.environ.get("ANOMALY_EPISODE_MAX", "200"))
 # flipping the trend label.
 ANOMALY_TREND_FLAT_DEADBAND: float = float(
     os.environ.get("ANOMALY_TREND_FLAT_DEADBAND", "0.05")
+)
+
+# Rows whose trigger_detector/direction were never persisted (LSTM-only score
+# backfill, live ingestion — neither writes the migration-024 trigger columns)
+# fall back to a degraded grouping key: detector="unknown", direction=None.
+# That key alone cannot tell two unrelated in-band excursions on the same
+# channel apart, so a channel that spends all day inside its normal band
+# (e.g. the light curve's diurnal ramp) merges into one multi-hour "episode".
+# When both components are degraded simultaneously, cap how far a group's
+# value is allowed to drift — as a fraction of the channel's configured band
+# span — before forcing a split, even if consecutive rows are within
+# ANOMALY_EPISODE_GAP_SECONDS of each other.  No-ops for channels with no
+# configured band (SCADA columns) — there is nothing to measure the drift
+# against, so those fall back to time-gap-only contiguity.
+ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION: float = float(
+    os.environ.get("ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION", "0.25")
 )

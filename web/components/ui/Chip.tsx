@@ -8,6 +8,9 @@ interface ChipProps {
 }
 
 const SEVERITY_CLASSES: Record<Severity, string> = {
+  // Neutral gray, not a color on the sev- scale — "unclassified" means "never
+  // scored", not a real (and reassuring) low-severity verdict like "normal".
+  unclassified: "bg-text-muted/15 text-text-muted",
   normal: "bg-sev-normal/15 text-sev-normal",
   warning: "bg-sev-warning/15 text-sev-warning",
   lstm: "bg-sev-lstm/15 text-sev-lstm",
