@@ -244,8 +244,10 @@ class OnlineLearner:
 
         trend = None
         if len(self.losses) >= _MIN_TREND_HISTORY:
-            recent_avg = float(np.mean(self.losses[-ONLINE_TREND_WINDOW:]))
-            historical_avg = float(np.mean(self.losses[:-ONLINE_TREND_WINDOW]))
+            # deque does not support slicing; convert to list first
+            losses_list = list(self.losses)
+            recent_avg = float(np.mean(losses_list[-ONLINE_TREND_WINDOW:]))
+            historical_avg = float(np.mean(losses_list[:-ONLINE_TREND_WINDOW]))
             trend = "increasing" if recent_avg > historical_avg else "stable"
 
         return {
@@ -270,7 +272,7 @@ class OnlineLearner:
                 "std": float(np.std(self.losses)) if self.losses else None,
             },
             "update_history": {
-                key: values[-ONLINE_LOG_EVERY_N_UPDATES:]
+                key: list(values)[-ONLINE_LOG_EVERY_N_UPDATES:]
                 for key, values in self.update_history.items()
             },
         }
@@ -283,8 +285,10 @@ class OnlineLearner:
         if len(self.losses) < _MIN_TREND_HISTORY:
             return False
 
-        recent_avg = float(np.mean(self.losses[-ONLINE_TREND_WINDOW:]))
-        historical_avg = float(np.mean(self.losses[:-ONLINE_TREND_WINDOW]))
+        # deque does not support slicing; convert to list first
+        losses_list = list(self.losses)
+        recent_avg = float(np.mean(losses_list[-ONLINE_TREND_WINDOW:]))
+        historical_avg = float(np.mean(losses_list[:-ONLINE_TREND_WINDOW]))
         drift = (recent_avg - historical_avg) / (historical_avg + NUMERICAL_EPSILON)
         return drift > threshold
 

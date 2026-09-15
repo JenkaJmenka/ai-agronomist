@@ -273,6 +273,60 @@ class TestOnlineLearnerPredict:
 
 
 # ---------------------------------------------------------------------------
+# Regression: deque slicing crash after _MIN_TREND_HISTORY observations
+# ---------------------------------------------------------------------------
+
+
+class TestDequeSlicingRegression:
+    """Regression tests for the deque-slicing TypeError.
+
+    collections.deque does not support slice indexing.  Before the fix,
+    predict(), needs_retraining(), and get_statistics() all raised
+    ``TypeError: sequence index must be integer, not 'slice'`` once
+    ``len(self.losses) >= _MIN_TREND_HISTORY``.
+
+    These tests feed observations through observe() so that self.losses
+    is a real deque (not a plain list injected in the test), reproducing
+    the exact production crash path.
+    """
+
+    @pytest.fixture
+    def learner_past_trend_threshold(self, model: LSTMVAE) -> OnlineLearner:
+        """A learner that has observed enough sequences to activate trend logic."""
+        from src.models.online_learner import _MIN_TREND_HISTORY
+
+        learner = OnlineLearner(
+            model=model, tenant_id="regression", use_ewc=False, **FAST_LEARNER_KWARGS
+        )
+        rng = np.random.default_rng(42)
+        for _ in range(_MIN_TREND_HISTORY):
+            seq = rng.random((SEQ_LEN, INPUT_DIM)).astype(np.float32)
+            learner.observe(seq)
+        assert len(learner.losses) >= _MIN_TREND_HISTORY
+        return learner
+
+    def test_needs_retraining_no_crash_after_min_trend_history(
+        self, learner_past_trend_threshold: OnlineLearner
+    ) -> None:
+        result = learner_past_trend_threshold.needs_retraining()
+        assert isinstance(result, bool)
+
+    def test_predict_no_crash_after_min_trend_history(
+        self, learner_past_trend_threshold: OnlineLearner
+    ) -> None:
+        seq = np.random.default_rng(99).random((SEQ_LEN, INPUT_DIM)).astype(np.float32)
+        result = learner_past_trend_threshold.predict(seq)
+        assert result["trend"] in ("increasing", "stable")
+
+    def test_get_statistics_no_crash_after_min_trend_history(
+        self, learner_past_trend_threshold: OnlineLearner
+    ) -> None:
+        stats = learner_past_trend_threshold.get_statistics()
+        assert stats["loss_statistics"]["mean"] is not None
+        assert isinstance(stats["update_history"], dict)
+
+
+# ---------------------------------------------------------------------------
 # OnlineLearningManager — per-tenant isolation
 # ---------------------------------------------------------------------------
 
