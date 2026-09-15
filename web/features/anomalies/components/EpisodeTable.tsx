@@ -2,38 +2,23 @@
 
 import { type ReactNode, useEffect, useState } from "react";
 
-import { Chip } from "@/components/ui/Chip";
 import { ExportCsvButton } from "@/components/ui/ExportCsvButton";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { paginateItems, TABLE_PAGE_SIZE, TablePagination } from "@/components/ui/TablePagination";
-import type { AnomalyEpisode, AnomalyEpisodeSample } from "@/features/anomalies/api/episodes";
-import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
+import { ANOMALY_EPISODE_MAX, type AnomalyEpisode } from "@/features/anomalies/api/episodes";
+import { EpisodeSampleRow } from "@/features/anomalies/components/EpisodeSampleRow";
+import { EpisodeSummary } from "@/features/anomalies/components/EpisodeSummary";
 import { useAnomalyEpisodes } from "@/features/anomalies/hooks/useAnomalyEpisodes";
 import { fetchErrorHint } from "@/features/anomalies/lib/classifyFetchError";
-import {
-  formatSensorList,
-  formatSensorValues,
-} from "@/features/anomalies/lib/formatAnomalyDetails";
-import {
-  channelUnit,
-  directionArrow,
-  formatChannel,
-  formatDevelopment,
-  formatDuration,
-  formatEpisodeSpan,
-  formatValueRange,
-  movementArrow,
-} from "@/features/anomalies/lib/formatEpisode";
 import { windowFromSelectedTimestamps } from "@/lib/selectionWindow";
-import { SEVERITY_ORDER, type Severity } from "@/lib/severity";
 import type { SelectionWindowHandler } from "@/lib/useTimestampRowSelection";
 
 interface EpisodeTableProps {
   readonly windowStart: string | null;
   readonly windowEnd: string | null;
   readonly threshold: number;
-  /** When set, clicking an episode zooms the chart to its span. */
+  /** When set, the explicit "Zoom to span" control on each episode is shown. */
   readonly onWindowSelect?: SelectionWindowHandler;
   /**
    * Rendered instead of an error when /anomalies/episodes is unreachable.
@@ -44,6 +29,13 @@ interface EpisodeTableProps {
    * API catches up.
    */
   readonly fallback?: ReactNode;
+  /**
+   * Exact flagged-row count for the window, from the same source as the page
+   * header (G2 /readings/anomalies-in-window) — reused here rather than this
+   * endpoint's own `anomaly_count` so the two numbers on screen can never
+   * drift apart from independent cache timing. Null while unresolved.
+   */
+  readonly anomalyCount: number | null;
 }
 
 const EXPORT_HEADERS = [
@@ -60,10 +52,6 @@ const EXPORT_HEADERS = [
   "headline",
 ] as const;
 
-function asSeverity(value: string): Severity | undefined {
-  return value in SEVERITY_ORDER ? (value as Severity) : undefined;
-}
-
 /**
  * Chart focus for an episode: its whole span, not a single instant.
  *
@@ -74,89 +62,6 @@ export function episodeChartWindow(
   episode: Pick<AnomalyEpisode, "start_ts" | "end_ts">,
 ): { from: Date; to: Date } | null {
   return windowFromSelectedTimestamps([episode.start_ts, episode.end_ts]);
-}
-
-/** One merged event: span, span length, channel movement, and trend. */
-function EpisodeSummary({ episode }: { readonly episode: AnomalyEpisode }) {
-  const unit = channelUnit(episode.channel);
-  const severity = asSeverity(episode.severity);
-  const valueRange = formatValueRange(episode, unit);
-  const isClipped = episode.is_truncated_start || episode.is_truncated_end;
-
-  return (
-    <summary className="cursor-pointer px-4 py-2.5 text-sm" data-testid="episode-summary">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="font-medium tabular-nums">
-          {formatEpisodeSpan(episode.start_ts, episode.end_ts)}
-        </span>
-        <span className="text-text-muted tabular-nums">
-          {/* A clipped episode ran past the queried window, so its span is a floor. */}
-          {isClipped ? "≥ " : ""}
-          {formatDuration(episode.duration_seconds)}
-        </span>
-        <span className="text-text-muted tabular-nums">
-          {episode.sample_count.toLocaleString()} sample
-          {episode.sample_count === 1 ? "" : "s"}
-        </span>
-        {severity ? (
-          <Chip severity={severity}>{episode.peak_score.toFixed(3)}</Chip>
-        ) : (
-          <span className="tabular-nums text-text-muted">{episode.peak_score.toFixed(3)}</span>
-        )}
-      </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
-        <span className="font-medium text-text">
-          {formatChannel(episode.channel)} {episode.direction ?? "anomaly"}
-        </span>
-        {/* Band breach direction when there is one; otherwise which way the
-            value travelled, so an unbounded channel still reads as moving. */}
-        <span aria-hidden="true">
-          {episode.direction ? directionArrow(episode.direction) : movementArrow(episode.movement)}
-        </span>
-        {valueRange ? <span className="tabular-nums">{valueRange}</span> : null}
-        <span>·</span>
-        <span data-testid="episode-trend">{formatDevelopment(episode)}</span>
-        {episode.detector !== "unknown" ? (
-          <>
-            <span>·</span>
-            <span>{episode.detector}</span>
-          </>
-        ) : null}
-      </div>
-    </summary>
-  );
-}
-
-/** One raw 5-minute sample inside an expanded episode. */
-function EpisodeSampleRow({
-  sample,
-  fallbackChannel,
-}: {
-  readonly sample: AnomalyEpisodeSample;
-  readonly fallbackChannel: string;
-}) {
-  const sensors = sample.affected_sensors.length > 0 ? sample.affected_sensors : [fallbackChannel];
-  return (
-    <li className="flex flex-col gap-1 px-4 py-2 text-sm" data-testid="episode-sample-row">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="tabular-nums">{sample.timestamp.replace("T", " ").slice(0, 19)}</span>
-        {sample.anomaly_score !== null && sample.anomaly_score !== undefined ? (
-          <span className="tabular-nums text-text-muted">{sample.anomaly_score.toFixed(3)}</span>
-        ) : null}
-        <span className="ml-auto">
-          <MonitoringJumpLink timestamp={sample.timestamp} channels={sensors} />
-        </span>
-      </div>
-      <div className="grid gap-0.5 text-xs text-text-muted sm:grid-cols-[7rem_1fr]">
-        <span className="font-medium text-text">Sensors</span>
-        <span>{formatSensorList(sensors)}</span>
-        <span className="font-medium text-text">Values</span>
-        <span className="tabular-nums">{formatSensorValues(sample.values, sensors) || "—"}</span>
-        <span className="font-medium text-text">Reasoning</span>
-        <span>{sample.reasoning?.trim() || "—"}</span>
-      </div>
-    </li>
-  );
 }
 
 function buildExportRows(episodes: readonly AnomalyEpisode[]): unknown[][] {
@@ -187,6 +92,7 @@ export function EpisodeTable({
   threshold,
   onWindowSelect,
   fallback,
+  anomalyCount,
 }: EpisodeTableProps) {
   const state = useAnomalyEpisodes({
     windowStart,
@@ -235,7 +141,9 @@ export function EpisodeTable({
     pageIndex: safePage,
     pageCount,
   } = paginateItems(state.episodes, pageIndex, TABLE_PAGE_SIZE);
-  const sampleTotal = state.anomalyCount ?? 0;
+  // Hitting the cap is the only signal more episodes exist — the endpoint
+  // never reports an uncapped total (see ANOMALY_EPISODE_MAX).
+  const isCapped = state.episodes.length >= ANOMALY_EPISODE_MAX;
 
   return (
     <div className="space-y-3" data-testid="episode-table">
@@ -243,8 +151,19 @@ export function EpisodeTable({
         <span>
           {state.episodes.length.toLocaleString()} episode
           {state.episodes.length === 1 ? "" : "s"}
-          {sampleTotal > 0 ? ` merged from ${sampleTotal.toLocaleString()} samples` : ""}
-          {onWindowSelect ? " · click an episode to zoom the chart to its span" : ""}
+          {isCapped
+            ? // Capped: the shown episodes' samples no longer add up to the
+              // window total, so state the exact total separately instead of
+              // claiming these episodes "merged" all of it.
+              ` (top ${ANOMALY_EPISODE_MAX} by peak score — more exist)${
+                anomalyCount !== null
+                  ? ` · ${anomalyCount.toLocaleString()} anomalies in this window (exact)`
+                  : ""
+              }`
+            : anomalyCount !== null && anomalyCount > 0
+              ? ` merged from ${anomalyCount.toLocaleString()} samples`
+              : ""}
+          {onWindowSelect ? ' · "Zoom to span" focuses the chart on an episode' : ""}
         </span>
         <span className="ml-auto">
           <ExportCsvButton
@@ -261,22 +180,25 @@ export function EpisodeTable({
           <details
             key={episode.episode_id}
             className="rounded-[var(--radius-card)] border border-border bg-bg-elevated"
-            // onToggle on <details> rather than onClick on <summary>: the
-            // summary is natively interactive, so an onClick there trips the
-            // static-element a11y rule. Zoom on open only, not on collapse.
-            onToggle={(event) => {
-              if (!onWindowSelect || !event.currentTarget.open) return;
-              const win = episodeChartWindow(episode);
-              if (win) onWindowSelect(win.from, win.to);
-            }}
           >
-            <EpisodeSummary episode={episode} />
+            <EpisodeSummary
+              episode={episode}
+              onZoomToSpan={
+                onWindowSelect
+                  ? () => {
+                      const win = episodeChartWindow(episode);
+                      if (win) onWindowSelect(win.from, win.to);
+                    }
+                  : undefined
+              }
+            />
             <ul className="divide-y divide-border border-t border-border">
               {episode.samples.map((sample) => (
                 <EpisodeSampleRow
                   key={sample.timestamp}
                   sample={sample}
                   fallbackChannel={episode.channel}
+                  episodeSpan={{ start_ts: episode.start_ts, end_ts: episode.end_ts }}
                 />
               ))}
             </ul>

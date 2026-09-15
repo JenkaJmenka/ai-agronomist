@@ -1124,6 +1124,9 @@ class ComprehensiveInferencePipeline:
             pattern_type=pattern_type,
             attribution=attribution_result["attribution"],
             sequence=seq_array,
+            # Reasoning text quotes readings, so it needs °C / %RH / ppm / lux —
+            # seq_array is normalized and reads as "Humidity at 1.0%".
+            physical_sequence=_denormed_for_noise,
         )
         if rule_profile is not None:
             root_cause_result = {
@@ -1159,7 +1162,9 @@ class ComprehensiveInferencePipeline:
             "affected_sensors": affected_sensors,
             "pattern_type": pattern_type,
             "pattern_explanation": pattern_result.get("explanation", ""),
-            "sensor_values_at_peak": self._peak_sensor_values(seq_array),
+            # Physical units: this is operator-facing (°C, %RH, ppm, lux),
+            # and every documented consumer reads it as such.
+            "sensor_values_at_peak": self._peak_sensor_values(_denormed_for_noise),
             "detector_scores": detector_scores,
             "ensemble_score": ensemble_result.ensemble_score,
             "ensemble_agreement": ensemble_result.agreement_count,

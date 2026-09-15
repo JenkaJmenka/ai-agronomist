@@ -36,7 +36,7 @@ def _row(
     score: float = 0.8,
     channel: str | None = "humidity",
     detector: str | None = "statistical",
-    severity: str = "warning",
+    severity: str | None = "warning",
 ) -> dict:
     """One flagged row dict in the shape ``_row_dict_from_minimal`` produces."""
     ts = BASE_TS + datetime.timedelta(minutes=minutes)
@@ -144,6 +144,81 @@ class TestGroupingKey:
         assert len(episodes) == 1
         assert episodes[0]["channel"] == "humidity"
         assert episodes[0]["detector"] == "unknown"
+
+    def test_degraded_key_splits_on_excessive_in_band_drift(self):
+        """Production regression: a 16.6h diurnal light curve as one episode.
+
+        Rows with no persisted trigger_detector (LSTM score-backfill, live
+        ingestion) collapse to detector="unknown"; an in-band value never
+        gets a direction either. Alone, (channel, "unknown", None) cannot
+        tell two unrelated in-band excursions apart, so every row on the
+        channel within the 600s gap merged into one episode regardless of
+        how far the value had actually moved — a full diurnal ramp reported
+        as a single anomaly.
+        """
+        # All four values sit inside the 50-80 humidity band (direction stays
+        # None throughout); each 5-minute step is well within the 600s gap.
+        rows = [
+            _row(m, value=v, detector=None, severity=None)
+            for m, v in zip((0, 5, 10, 15), (55.0, 58.0, 62.0, 67.0))
+        ]
+        episodes = build_episodes(rows)
+        assert [e["sample_count"] for e in episodes] == [3, 1], (
+            "the run must split once cumulative drift exceeds "
+            "ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION of the band span"
+        )
+        assert {e["detector"] for e in episodes} == {"unknown"}
+        assert {e["direction"] for e in episodes} == {None}
+
+    def test_degraded_key_within_span_cap_still_merges(self):
+        """The new guard must not fragment a genuinely flat degraded run."""
+        rows = [
+            _row(m, value=v, detector=None, severity=None)
+            for m, v in zip((0, 5, 10, 15), (55.0, 56.0, 55.5, 56.5))
+        ]
+        episodes = build_episodes(rows)
+        assert len(episodes) == 1
+        assert episodes[0]["sample_count"] == 4
+
+    def test_well_formed_key_with_large_drift_still_merges(self):
+        """Existing contiguity for a real detector must be unchanged.
+
+        Same drift as the degraded-key regression above, but with a real
+        ``detector`` — the value-span guard only ever engages when BOTH the
+        detector and the direction are missing.
+        """
+        rows = [
+            _row(m, value=v, detector="statistical")
+            for m, v in zip((0, 5, 10, 15), (55.0, 58.0, 62.0, 67.0))
+        ]
+        episodes = build_episodes(rows)
+        assert len(episodes) == 1
+        assert episodes[0]["sample_count"] == 4
+
+
+class TestSeverityFallback:
+    def test_group_with_no_severity_data_reports_unclassified(self):
+        """No detector ever persists the literal 'normal' severity.
+
+        LSTM-only hits never carry a severity, and neither does the LSTM
+        score-backfill or live-ingestion write path — detected_severity is
+        NULL for all of them.  Silently reporting "normal" would tell the
+        operator these were assessed and found benign, when they were never
+        assessed at all.
+        """
+        rows = [_row(m, severity=None) for m in (0, 5)]
+        episode = build_episodes(rows)[0]
+        assert episode["severity"] == "unclassified"
+
+    def test_severity_never_reports_the_literal_normal_value(self):
+        rows = [_row(m, severity=None) for m in (0, 5, 10)]
+        episode = build_episodes(rows)[0]
+        assert episode["severity"] != "normal"
+
+    def test_real_severity_still_wins_over_missing_rows(self):
+        rows = [_row(0, severity=None), _row(5, severity="critical")]
+        episode = build_episodes(rows)[0]
+        assert episode["severity"] == "critical"
 
 
 class TestTrendAndExtremum:

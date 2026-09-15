@@ -2,6 +2,88 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Anomaly episode grouping collapse — FIXED (2026-09-15)
+
+Task from team-lead: episodes were collapsing to (channel,) whenever both
+`detector` and `direction` degraded simultaneously (`detector="unknown"`,
+`direction=None`), merging a full diurnal channel curve into one fake
+multi-hour episode (the previously-reported 7,321-sample 16.6h "light"
+episode). Verified against prod (post mock-data purge): 29/126 episodes had
+`detector="unknown"`, 83/126 had `direction=null`.
+
+**Root cause (producer gap, not a read-path bug):** only the CSV/portioned
+upload write path (`csv_persist.apply_anomaly_scores` +
+`build_trigger_data_by_timestamp`) ever populates `trigger_channel`,
+`trigger_detector`, `detected_severity`, `trigger_value`. Two other writers
+of `anomaly_score` never touch those columns at all:
+- `src/api/services/score_backfill.py::_write_scores` — the LSTM-only
+  historical backfill (the pass that scored the previously-NULL historical
+  year, see prior phase entry above).
+- `src/live/persistence.py::_event_to_row` — live ingestion.
+Both leave `trigger_channel`/`trigger_detector`/`detected_severity` NULL
+forever. The read path's NULL fallback (`anomaly_episode_rows.py`) then
+turns missing `trigger_detector` into `"unknown"`, and `direction=None` is
+independently — and correctly — the outcome whenever the resolved value
+never breaches the channel's configured band (true for real LSTM-detector
+rows too, e.g. a multivariate hit). The bug is specifically the conjunction:
+only when BOTH are missing does the 3-part grouping key degrade to
+effectively `(channel,)`.
+
+**Severity finding that reversed the task's suggested fix:** grep-verified
+no detector ever persists the literal string `"normal"` to
+`detected_severity`. Statistical hits are filtered to
+`severity in ("critical","warning")` before reaching `high_anomalies`
+(`upload_portions.py:499`); LSTM hits never set `severity` at all
+(`UploadHighAnomalyDetail.severity: Optional[str] = None`, never passed at
+upload_portions.py:457-475); stuck_fault is always `"urgent"`. So the
+51/126 `severity="normal"` episodes the task reported were 100%
+`_severity_rank`'s missing-data fallback — never a real "assessed as
+benign" classification. Excluding them from the anomaly list/count (the
+task's suggested approach) would have silently hidden every LSTM-only
+detection, a materially worse regression than the display problem. Renamed
+the fallback sentinel from `"normal"` to `"unclassified"` instead
+(`episode_grouper._severity_rank`, shared by both grouping paths) — honest
+about missing data without dropping real detections.
+
+**Fix:** `src/api/services/anomaly_episode_grouping.py` — added
+`_is_degraded_key()` (true only when `detector=="unknown"` AND
+`direction is None`) and `_degraded_value_span_exceeded()`, which additionally
+caps a degraded-key group's value envelope at
+`ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION` (new config, default 0.25) of
+the channel's configured band span before allowing a merge, even when the
+time gap is within `ANOMALY_EPISODE_GAP_SECONDS`. No-ops for channels with
+no configured band (nothing to measure drift against). Well-formed keys
+(real detector or real direction) are completely unaffected — verified with
+a same-drift-different-detector regression test. Did NOT touch
+`src/models/episode_grouper.py`'s upload-path grouping key/gap logic: its
+`detector` is always a real value there (`"lstm"`/`"statistical"`/
+`"stuck_fault"`, upload_portions.py:471/491/etc.), never a NULL-column
+fallback, so `_is_degraded_key`'s precondition cannot occur in that path —
+only `_severity_rank` needed to change there, since it's shared.
+
+**Not fixed (flagged for follow-up, needs coordination):** `score_backfill.py`
+and `live/persistence.py` could write `trigger_detector="lstm"` themselves
+(both docstrings confirm LSTM is the only detector run) to shrink the
+degraded-key population going forward. Left out of this change — touching
+two more write paths changes grouping boundaries for ALL historical
+backfilled/live data, which given how much this data has been in flux
+recently (see live/mock-SCADA phase above) seemed worth a separate,
+coordinated decision rather than folding into a grouping-logic fix.
+
+Files: `src/config.py` (new `ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION`),
+`src/api/services/anomaly_episode_grouping.py`, `src/models/episode_grouper.py`
+(`_severity_rank` + `_flush_group` fallback rename only),
+`src/api/schemas/anomaly_episodes.py` (severity field doc comment),
+`tests/api/test_anomaly_episodes.py` (+9 tests: degraded-key split,
+degraded-key-within-cap no-split, well-formed-key-unaffected, severity
+fallback x3, existing 6 untouched).
+
+**Tests:** `tests/api/test_anomaly_episodes.py` 35/35 passed (was 26).
+`./venv/bin/python -m pytest tests/ -q -k 'episode or grouping or anomal'`:
+429 passed, 0 failed. `./venv/bin/python -m pytest tests/api/ tests/models/ -q
+--ignore=tests/api/test_023_resumable.py`: 1784 passed, 3 xfailed
+(pre-existing), 0 failed.
+
 ## Current Phase
 **Live/mock SCADA contamination — ROOT-CAUSED, contained, design landed (2026-09-15)**
 
@@ -3556,3 +3638,13 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
   - `peak_value` was the trigger value at the **highest-scoring** row, not the episode **extremum**. On the 2026-12-25 humidity drop (values `32,32,32,31,30,30,30,29,29,30`) it returned `32.0` and the headline read "Unexpected humidity drop: 32.0%" — telling the operator humidity bottomed at 32% when it reached 29%. Now `min()` for a `drop`, `max()` for a `spike`, falling back to the score-based value only when `direction is None`. `peak_score`/`peak_ts` still describe the highest-scoring row.
 - **Verified independently, not taken on report**: grouping the real 50-row export reproduces 14 episodes, matching a from-scratch prototype written before any implementation. All three high-risk behaviours are mutation-tested in `tests/api/test_anomaly_episodes.py` — reverting each fix makes the named test fail. Note the regression-gate line above cites `tests/test_episode_grouping.py`, a path that does not exist (the file is under `tests/api/`); the "631 passed" figure was never reproduced and should not be relied on. Independently measured: `tests/api/` → **655 passed, 1 failed** (pre-existing broken alembic install, `alembic.__file__` is `None`).
 - **Follow-up shipped separately**: tests in `7737f7d` (24 tests, 93.33% on the new modules), `web/` EpisodeTable in `34a79af`.
+
+## RH-scale reasoning bug + cold-run threshold audit (ML, 2026-09-15)
+- **Defect 1 (fixed)**: `RootCauseAnalyzer._format_rule_description` read humidity from the **normalized model-input** array, so `humidity_reasoning_text` — a formatter shared with `SetpointAwareScadaDetector._humidity_rules`, which feeds it **physical** %RH — printed "Humidity at 1.0%" for rows measuring 80 %RH. With `HUMIDITY_RANGE=(50,80)`, normalized values span ~0–1.7 for real RH 50–100, which is exactly the "1.0%–1.7%" range seen in the CSV export. The formatter was fed two different scales by its two callers.
+- **Fix**: `analyze()` gained `physical_sequence` (the denormalized window); the pipeline passes `_denormed_for_noise`. Reasoning text now quotes only `physical_sequence` and **drops the number entirely** when no physical window is supplied — no denormalization is guessed at inside the analyzer. Three layers: (1) thread physical units, (2) `humidity_reasoning_text` refuses values outside new `RH_PLAUSIBLE_RANGE_PERCENT` regardless of caller, (3) two templates per rule so the "elevated moisture load" claim requires RH ≥ `RH_CRIT_PERCENT` — the saturation *pattern* alone can fire at ordinary humidity.
+- **Second bug found in the same audit**: `sensor_values_at_peak` in `comprehensive_pipeline.py` was also built from `seq_array` (normalized) while `docs/plans/operator-feedback-ensemble-model-improvement-plan.md:322` documents it as physical (`temperature: 42.1`). Switched to `_denormed_for_noise`. No test asserted on it — it was silently wrong in every persisted anomaly.
+- **Refactor forced by the 300-line rule**: text generation moved to new `src/models/root_cause_reasoning.py`; `root_cause_analyzer.py` 330 → 313 lines.
+- **Defect 2 (investigated; mechanism shipped OFF)**: `COLD_RUN_THRESHOLD_METHOD` defaults to `"percentile"`, so `_calibrate_pot` — and therefore `COLD_RUN_MIN_ANOMALIES` — is **dead code in production**. The threshold is purely `np.percentile(scores, 99.9)`, which flags 0.1 % of any file by construction. Measured: a clean 105,120-row Gaussian yields 106 hits; the same file with 40 injected faults also yields 106 (the 40 faults plus 66 innocent rows). A median+5.5·MAD gate yields 0 and exactly 40 respectively.
+- **Why it is not just a count knob**: `threshold_used` is also the ADR-005 canonical anchor (`p` in `score_transform.canonical`, canonical 0.5 == threshold) for both `upload_portions` and `score_backfill`. Raising it rescales every score in the file and shifts the lstm-vs-statistical `max()` in `_merge_by_timestamp`, changing episode `peak_score` ordering — not only which rows survive.
+- **Shipped**: `COLD_RUN_ROBUST_GATE_ENABLED` (default `False`) + `COLD_RUN_ROBUST_GATE_Z` (5.5, matching `COLD_RUN_STAT_Z_MIN`). The gate can only raise the threshold. Verified with `COLD_RUN_ROBUST_GATE_ENABLED=1` against the full suite: the only genuine breakage is `tests/api/test_inference_upload_cold_run.py::test_inference_upload_cold_run_greenhouse_fixture`, which asserts `anomalies_detected > 0` and `threshold_method in ("pot","percentile")` against a mocked **uniform `linspace(0.05, 0.12)`** score ramp — a file with no tail, which correctly yields zero under the gate. That assertion encodes a product decision (is "zero anomalies in a clean file" an acceptable response?) and was left for the owner to make.
+- **Gate**: `./venv/bin/python -m pytest tests/ -q` → **2949 passed, 16 skipped, 3 xfailed**. Mandated selection (`-k 'root_cause or diagnosis or threshold or cold_run'`) → **230 passed**.

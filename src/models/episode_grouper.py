@@ -73,9 +73,9 @@ class AnomalyEpisode:
 
 
 def _severity_rank(sev: str | None) -> int:
-    """Numeric rank for severity comparison (higher = more severe)."""
-    ranks = {"normal": 0, "warning": 1, "critical": 2, "urgent": 3}
-    return ranks.get(sev or "normal", 0)
+    """Numeric rank for severity comparison; no detector persists "normal"."""
+    ranks = {"unclassified": 0, "warning": 1, "critical": 2, "urgent": 3}
+    return ranks.get(sev or "unclassified", 0)
 
 
 def group_alerts_into_episodes(
@@ -291,7 +291,7 @@ def _flush_group(
         duration_seconds=duration,
         peak_score=peak,
         sample_count=len(group),
-        severity=best_sev or "normal",
+        severity=best_sev or "unclassified",
         is_recovery=is_recovery,
         is_ongoing=is_ongoing,
         onset_ts=onset_ts,

@@ -31,6 +31,11 @@ class AnomalyEpisodeSummary(BaseModel):
     sample_count: int
     peak_score: float
     peak_ts: str
+    # "urgent"/"critical"/"warning" when a row in the episode carries a real
+    # detected_severity; "unclassified" when none does (LSTM-only hits never
+    # get one, and neither does the LSTM score-backfill/live-ingestion write
+    # paths) — never "normal": no detector persists that value (see
+    # episode_grouper._severity_rank).
     severity: str
     first_value: Optional[float] = None
     last_value: Optional[float] = None
