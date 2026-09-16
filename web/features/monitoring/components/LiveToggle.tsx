@@ -32,6 +32,12 @@ interface LiveToggleProps {
  * the moment the operator turns Live off.
  * Always re-snaps the current preset (or default 24h) to an end anchor of
  * max(now, newest stored reading) so the chart matches the Period control.
+ *
+ * This is also the ONLY resume path on pages that render LiveToggle without
+ * mounting useLiveReadings (Thresholds, Anomalies — via SharedViewControls);
+ * MonitoringView/HomeView/LiveBadge/LiveAnomalyStrip get a second one-shot
+ * resume from useLiveReadings for the reload-with-?live=true case, but this
+ * click handler must still resume on those other pages by itself.
  */
 export function LiveToggle({ pageId }: LiveToggleProps) {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
@@ -62,6 +68,18 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     // Flip live + optimistic wall-clock window immediately so SSE ticks land
     // inside the lookback (never anchor to a future historical CSV max).
     await setLive(true);
+
+    // Resume before anything else in this branch (including the awaits
+    // below) so a fast toggle-off can never race ahead of it. handleClick
+    // runs once per click; if the operator clicks off again before the
+    // bounds fetch below resolves, that later pause must always land after
+    // this resume for last-click-wins to hold at the server.
+    try {
+      await resumeLiveScope({ tenant, gh });
+    } catch {
+      // Stream may still work if the scope was never muted.
+    }
+
     const optimisticEnd = periodWindowEnd({ maxTimestamp: null, live: true });
     const optimistic = windowForPeriod(hours, optimisticEnd);
     rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
@@ -77,13 +95,6 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
       await setRange(next);
     } catch {
       // Keep the optimistic wall-clock window.
-    }
-
-    // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
-    try {
-      await resumeLiveScope({ tenant, gh });
-    } catch {
-      // Stream may still work if scope was never muted.
     }
   }
 
