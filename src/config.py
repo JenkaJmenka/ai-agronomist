@@ -1185,6 +1185,11 @@ MOCK_SCADA_SCOPES: str = os.environ.get("MOCK_SCADA_SCOPES", "tenant_1:gh_A")
 MOCK_SCADA_INTERVAL_SECONDS: float = float(os.environ.get("MOCK_SCADA_INTERVAL_SECONDS", "2.0"))
 MOCK_SCADA_ANOMALY_RATE: float = float(os.environ.get("MOCK_SCADA_ANOMALY_RATE", "0.02"))
 
+# Live sources stay muted until an explicit Go Live from the UI, so mock/SCADA
+# data never pollutes an uploaded CSV dataset. Set to true for headless/demo
+# deployments that want data flowing without a browser.
+LIVE_AUTOSTART_ENABLED: bool = _env_flag("LIVE_AUTOSTART_ENABLED", False)
+
 # Merge grace period: wait this long for all sources to report before
 # emitting a merged reading (handles clock skew between vendors).
 LIVE_MERGE_GRACE_SECONDS: float = float(os.environ.get("LIVE_MERGE_GRACE_SECONDS", "1.0"))

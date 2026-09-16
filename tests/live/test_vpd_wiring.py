@@ -326,9 +326,14 @@ class TestVpdRuntimeIntegration:
 
     @pytest.mark.asyncio
     async def test_published_event_carries_vpd(
-        self, hub: LiveHub, fake_redis: FakeRedis,
+        self, hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A merged reading published to the hub carries vpd with source 'derived'."""
+        """A merged reading published to the hub carries vpd with source 'derived'.
+
+        Idle-by-default (LIVE_AUTOSTART_ENABLED=False) spawns no scope tasks,
+        so opt in explicitly to exercise the streaming path.
+        """
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
 

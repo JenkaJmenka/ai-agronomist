@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api/live", tags=["Live"])
 _GH_STATUS_NOT_REGISTERED = "not_registered"
 _GH_STATUS_NO_SOURCE = "no_source"
 _GH_STATUS_LIVE = "live"
+_GH_STATUS_PAUSED = "paused"
 
 _SSE_HEADERS: dict[str, str] = {
     "Cache-Control": "no-store",
@@ -106,20 +107,22 @@ async def live_source_status(
     ::
 
         {
-          "greenhouse_status": "not_registered" | "no_source" | "live",
+          "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
           "sources": [...]
         }
 
-    The ``greenhouse_status`` discriminator lets callers tell apart three
+    The ``greenhouse_status`` discriminator lets callers tell apart the
     empty-source states that previously all returned ``{"sources": []}``
-    and were indistinguishable:
+    and were indistinguishable, plus a configured-but-idle state:
 
     * ``not_registered`` — no greenhouse record in the registry or any
       readings table; the tenant needs to be provisioned.
     * ``no_source``      — greenhouse exists but the live runtime is not
       watching it; use POST /api/readings/greenhouses to register and
       configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.
-    * ``live``           — the runtime has an active scope for this
+    * ``paused``         — the scope is configured but its connectors are
+      not running (idle pending Go Live, or explicitly paused).
+    * ``live``            — the runtime has an active scope for this
       greenhouse (sources may still have ``last_seen: null`` while the
       first ticks arrive).
 
@@ -134,10 +137,15 @@ async def live_source_status(
         sources = runtime.source_statuses(tenant_id, greenhouse_id)
 
     if sources:
-        # Runtime has an active scope → greenhouse is live (data may not have
-        # arrived yet; last_seen: null is the expected "connected, warming up"
-        # state for a freshly started scope).
-        greenhouse_status = _GH_STATUS_LIVE
+        # Runtime has a configured scope for this greenhouse. Distinguish
+        # "actively streaming" from "configured but idle" (pre-Go Live or
+        # explicitly paused) when we can determine that — runtime is None
+        # in the readings-service fallback mode, where we can't tell, so
+        # default to the pre-existing "live" behavior.
+        if runtime is not None and not runtime.is_scope_active(tenant_id, greenhouse_id):
+            greenhouse_status = _GH_STATUS_PAUSED
+        else:
+            greenhouse_status = _GH_STATUS_LIVE
     else:
         # Distinguish "greenhouse unknown" from "greenhouse known but no source".
         exists = await readings_service.greenhouse_exists(
@@ -159,20 +167,47 @@ async def resume_live_scope_endpoint(
     greenhouse_id: str = Query(default="default"),
     auth_tenant: Optional[str] = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """Explicitly re-enable live publish/persistence after Clear all data.
+    """Explicitly start the scope's connectors and re-enable persistence.
 
     Called when the operator turns Go Live on — not on every SSE reconnect,
-    which would immediately re-seed the wiped database.
+    which would immediately re-seed the wiped database. Spawns the merger
+    and connector tasks for this scope (idempotent) so idle scopes don't
+    stream until this is called.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
     runtime = getattr(request.app.state, "live_runtime", None)
     if runtime is not None:
-        runtime.resume_persistence(tenant_id, greenhouse_id)
+        await runtime.start_scope(tenant_id, greenhouse_id)
         return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     from src.live.scope_control import resume_live_scope
 
     resume_live_scope(tenant_id, greenhouse_id)
     return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+
+
+@router.post("/pause")
+async def pause_live_scope_endpoint(
+    request: Request,
+    tenant_id: str = Query(..., min_length=1),
+    greenhouse_id: str = Query(default="default"),
+    auth_tenant: Optional[str] = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Explicitly stop the scope's connectors when the operator turns Go Live off.
+
+    Mutes persistence and cancels the merger + connector tasks for this
+    scope so historical windows show only uploaded data and no mock/SCADA
+    reading is generated at all — mirrors /resume for the opposite
+    transition.
+    """
+    enforce_tenant_access(auth_tenant, tenant_id)
+    runtime = getattr(request.app.state, "live_runtime", None)
+    if runtime is not None:
+        await runtime.stop_scope(tenant_id, greenhouse_id)
+        return {"paused": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    from src.live.scope_control import suppress_live_scope
+
+    suppress_live_scope(tenant_id, greenhouse_id)
+    return {"paused": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
 
 
 @router.get("/events")
