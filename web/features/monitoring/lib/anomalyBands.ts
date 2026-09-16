@@ -63,6 +63,25 @@ function isFlagged(row: SensorRow, threshold: number, options?: AnomalyBandOptio
 }
 
 /**
+ * Which rows to band.
+ *
+ * Focus attribution narrows the run set, but it must never erase the highlight
+ * entirely: an anomaly jump can carry `channel=measured_hd` while the detector
+ * attributes the same rows to `temperature`/`humidity`. Enrichment arrives
+ * after the first paint, so filtering to nothing made the band flash on and
+ * then vanish. When focus matches no flagged row, fall back to score alone.
+ */
+function flaggedRows(
+  rows: readonly SensorRow[],
+  threshold: number,
+  options: AnomalyBandOptions | undefined,
+): boolean[] {
+  const focused = rows.map((row) => isFlagged(row, threshold, options));
+  if (focused.some(Boolean)) return focused;
+  return rows.map((row) => isScoreFlagged(row, threshold));
+}
+
+/**
  * Contiguous runs of rows scoring at/above the threshold, padded by half the
  * sampling step on each side so bands cover the anomalous region rather than
  * hairline-marking single samples. Rows must be timestamp-ordered (they are —
@@ -76,6 +95,7 @@ export function computeAnomalyBands(
   if (options?.enabled === false) return [];
   if (rows.length === 0) return [];
 
+  const flagged = flaggedRows(rows, threshold, options);
   const timesSec = rows.map((row) => new Date(row.timestamp).getTime() / 1000);
   const lastTime = timesSec.at(-1) ?? timesSec[0];
   const avgStep = rows.length > 1 ? (lastTime - timesSec[0]) / (rows.length - 1) : 0;
@@ -84,7 +104,7 @@ export function computeAnomalyBands(
   const bands: AnomalyBand[] = [];
   let runStart = -1;
   for (let i = 0; i < rows.length; i++) {
-    if (isFlagged(rows[i], threshold, options)) {
+    if (flagged[i]) {
       if (runStart === -1) runStart = i;
       continue;
     }

@@ -70,4 +70,20 @@ describe("computeAnomalyBands", () => {
     expect(bands).toHaveLength(1);
     expect(bands[0][0]).toBeLessThan(BASE_S + 1);
   });
+
+  it("keeps score-based bands when focus matches none of the attributed sensors", () => {
+    // Episode jump carries channel=measured_hd, detector attributes
+    // temperature/humidity — bands used to vanish once enrichment landed.
+    const rows = makeRows([0.9, 0.9, 0.01]);
+    const affected = new Map<string, readonly string[]>([
+      [rows[0].timestamp, ["temperature", "humidity"]],
+      [rows[1].timestamp, ["temperature", "humidity"]],
+    ]);
+    const bands = computeAnomalyBands(rows, 0.15, {
+      focusVisible: ["measured_hd"],
+      affectedByTimestamp: affected,
+    });
+    expect(bands).toHaveLength(1);
+    expect(computeAnomalyBands(rows, 0.15)).toEqual(bands);
+  });
 });
