@@ -69,16 +69,17 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     // inside the lookback (never anchor to a future historical CSV max).
     await setLive(true);
 
-    // Resume before anything else in this branch (including the awaits
-    // below) so a fast toggle-off can never race ahead of it. handleClick
-    // runs once per click; if the operator clicks off again before the
-    // bounds fetch below resolves, that later pause must always land after
-    // this resume for last-click-wins to hold at the server.
-    try {
-      await resumeLiveScope({ tenant, gh });
-    } catch {
+    // Dispatch resume before anything else in this branch, but don't await
+    // it — the round trip would delay the optimistic window snap and bounds
+    // fetch below by a full request. Safety doesn't come from awaiting; it
+    // comes from this request hitting the wire before any later toggle-off
+    // click's pause request can, combined with the backend's asyncio.Lock
+    // serializing start_scope/stop_scope. As long as resume is dispatched
+    // first, last-click-wins holds at the server even though we move on
+    // here before it resolves.
+    resumeLiveScope({ tenant, gh }).catch(() => {
       // Stream may still work if the scope was never muted.
-    }
+    });
 
     const optimisticEnd = periodWindowEnd({ maxTimestamp: null, live: true });
     const optimistic = windowForPeriod(hours, optimisticEnd);

@@ -51,32 +51,42 @@ beforeEach(() => {
 afterEach(cleanup);
 
 // ---------------------------------------------------------------------------
-// Resume-before-bounds ordering (fixes the toggle-on/toggle-off race: a fast
-// off-click must never pause a scope that hasn't been resumed yet at the
-// server, which would leave the scope running while the UI shows Live off).
+// Resume-before-bounds dispatch order (fixes the toggle-on/toggle-off race: a
+// fast off-click's pause must never be sent before the resume for the same
+// toggle-on, which would leave the scope running while the UI shows Live
+// off). The resume request itself is no longer awaited — dispatch order,
+// not resolution order, is what the server's asyncio.Lock relies on — so
+// the bounds fetch is expected to proceed without waiting for resume to
+// settle.
 // ---------------------------------------------------------------------------
 
 describe("LiveToggle — resume ordering on toggle-on", () => {
-  it("awaits resumeLiveScope before starting the bounds fetch", async () => {
+  it("initiates resumeLiveScope before fetchReadingsBounds, without waiting for it to resolve", async () => {
+    const callOrder: string[] = [];
     let resolveResume: () => void = () => {};
     const resumeDeferred = new Promise<void>((resolve) => {
       resolveResume = resolve;
     });
-    resumeLiveScopeMock.mockReturnValue(resumeDeferred);
-    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+    resumeLiveScopeMock.mockImplementation(() => {
+      callOrder.push("resume");
+      return resumeDeferred;
+    });
+    fetchReadingsBoundsMock.mockImplementation(async () => {
+      callOrder.push("bounds");
+      return { min_timestamp: null, max_timestamp: null };
+    });
 
     render(<LiveToggle pageId="monitoring" />);
     fireEvent.click(screen.getByTestId("live-toggle"));
 
-    await waitFor(() => expect(resumeLiveScopeMock).toHaveBeenCalledTimes(1));
+    // The bounds fetch proceeds even while resume's promise is still
+    // pending — proving the wait was removed, not just reordered.
+    await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
+
+    expect(callOrder).toEqual(["resume", "bounds"]);
     expect(resumeLiveScopeMock).toHaveBeenCalledWith({ tenant: "tenant_1", gh: "gh_A" });
 
-    // While the resume request is still in flight, the bounds fetch (and
-    // therefore any later window snap) must not have started yet.
-    expect(fetchReadingsBoundsMock).not.toHaveBeenCalled();
-
     resolveResume();
-    await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
   });
 
   it("still starts the bounds fetch when resumeLiveScope rejects (tolerant)", async () => {
