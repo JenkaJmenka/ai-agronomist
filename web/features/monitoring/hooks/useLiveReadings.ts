@@ -9,6 +9,7 @@ import {
   liveAnomalyEventSchema,
   liveReadingEventSchema,
   resetEventSchema,
+  resumeLiveScope,
   type SourceStatus,
   sourceStatusEventSchema,
   toSensorRow,
@@ -244,6 +245,27 @@ export function useLiveReadings(enabled: boolean): UseLiveReadingsResult {
       staleTimerRef.current = null;
     }
   }, [enabled]);
+
+  // -------------------------------------------------------------------------
+  // One-shot resume for a live session that starts without a toggle click —
+  // e.g. loading `?live=true` directly, or switching tenant/gh while live is
+  // already on. Scopes now start muted (backend default + Clear all data),
+  // so without this the SSE connection above would open and simply receive
+  // nothing.
+  //
+  // WHY this can't live in the SSE effect: that effect also re-runs on
+  // reconnect (its deps include `sseFailed`), and src/live/scope_control.py
+  // documents that an automatic resume on reconnect would re-seed a database
+  // the operator just wiped via Clear all data. This effect depends only on
+  // [enabled, tenant, gh] — not on reconnect state — so it fires once per
+  // mount/scope and never again for the same live session.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!enabled) return;
+    resumeLiveScope({ tenant, gh }).catch(() => {
+      // Stream may still work if the scope was never muted.
+    });
+  }, [enabled, tenant, gh]);
 
   // -------------------------------------------------------------------------
   // Fallback polling when SSE is broken.

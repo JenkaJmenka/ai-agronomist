@@ -3,7 +3,7 @@
 import { parseAsBoolean, useQueryState } from "nuqs";
 import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
-import { resumeLiveScope } from "@/features/monitoring/api/live";
+import { pauseLiveScope, resumeLiveScope } from "@/features/monitoring/api/live";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
 import { rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
 import {
@@ -26,7 +26,10 @@ interface LiveToggleProps {
 
 /**
  * Live toggle — drives the `live` URL param.
- * Enabling live resumes a scope muted by Clear all data, then streams.
+ * Enabling live resumes the scope (muted on the backend by default and by
+ * Clear all data) so it starts publishing/persisting again, then streams.
+ * Disabling live pauses the scope so mock-SCADA rows stop landing in the DB
+ * the moment the operator turns Live off.
  * Always re-snaps the current preset (or default 24h) to an end anchor of
  * max(now, newest stored reading) so the chart matches the Period control.
  */
@@ -40,6 +43,13 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     const next = !live;
     if (!next) {
       await setLive(false);
+      // Tolerant like resumeLiveScope below — a failed pause must not block
+      // the toggle flipping off; the backend also mutes on its own gates.
+      try {
+        await pauseLiveScope({ tenant, gh });
+      } catch {
+        // Scope may already be muted, or the request raced a page unload.
+      }
       return;
     }
 

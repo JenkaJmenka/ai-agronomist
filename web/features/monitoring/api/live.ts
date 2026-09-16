@@ -132,26 +132,55 @@ export const statusResponseSchema = z.object({
 
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
 
+// ---------------------------------------------------------------------------
+// POST /api/bff/live/{resume,pause}  (live scope control)
+// ---------------------------------------------------------------------------
+
 const resumeResponseSchema = z.object({
   resumed: z.boolean(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });
 
+const pauseResponseSchema = z.object({
+  paused: z.boolean(),
+  tenant_id: z.string(),
+  greenhouse_id: z.string(),
+});
+
+/** POST the tenant/gh scope to a live-control action and zod-parse the response. */
+async function postLiveScopeAction<T>(
+  action: "resume" | "pause",
+  params: { tenant: string; gh: string },
+  schema: z.ZodType<T>,
+): Promise<T> {
+  const query = new URLSearchParams({
+    tenant_id: params.tenant,
+    greenhouse_id: params.gh,
+  });
+  const res = await fetch(`/api/bff/live/${action}?${query}`, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(`Failed to ${action} live scope (${res.status})`);
+  }
+  return schema.parse(await res.json());
+}
+
 /**
  * Re-enable live publish/persistence after Clear all data muted the scope.
  * Called when the operator turns Go Live on.
  */
 export async function resumeLiveScope(params: { tenant: string; gh: string }): Promise<void> {
-  const query = new URLSearchParams({
-    tenant_id: params.tenant,
-    greenhouse_id: params.gh,
-  });
-  const res = await fetch(`/api/bff/live/resume?${query}`, { method: "POST" });
-  if (!res.ok) {
-    throw new Error(`Failed to resume live scope (${res.status})`);
-  }
-  resumeResponseSchema.parse(await res.json());
+  await postLiveScopeAction("resume", params, resumeResponseSchema);
+}
+
+/**
+ * Mute live publish/persistence for a scope. Live scopes now start muted on
+ * the backend, so this is called when the operator turns Go Live off, to
+ * stop synthetic mock-SCADA rows from continuing to land in the DB behind
+ * the UI's back.
+ */
+export async function pauseLiveScope(params: { tenant: string; gh: string }): Promise<void> {
+  await postLiveScopeAction("pause", params, pauseResponseSchema);
 }
 
 // ---------------------------------------------------------------------------

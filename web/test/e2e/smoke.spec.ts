@@ -134,6 +134,15 @@ test("monitoring family screens stay navigable after the first open", async ({ p
     }),
   );
   await page.route("**/api/bff/live/events**", (route) => route.fulfill({ status: 204, body: "" }));
+  // live=true in the URL triggers the one-shot resume-on-mount effect
+  // (useLiveReadings) on every page in this nav chain — unmocked it would
+  // fall through to the BFF proxy's dead-port 502 path instead of a
+  // controlled response.
+  await page.route("**/api/bff/live/resume**", (route) =>
+    route.fulfill({
+      json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
+  );
 
   await page.goto("/monitoring?live=true&refresh=10");
   await expect(page.getByRole("heading", { name: "Monitoring" })).toBeVisible();
