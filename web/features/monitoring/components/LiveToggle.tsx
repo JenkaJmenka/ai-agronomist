@@ -3,7 +3,7 @@
 import { parseAsBoolean, useQueryState } from "nuqs";
 import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
-import { resumeLiveScope } from "@/features/monitoring/api/live";
+import { pauseLiveScope, resumeLiveScope } from "@/features/monitoring/api/live";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
 import { rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
 import {
@@ -26,9 +26,18 @@ interface LiveToggleProps {
 
 /**
  * Live toggle — drives the `live` URL param.
- * Enabling live resumes a scope muted by Clear all data, then streams.
+ * Enabling live resumes the scope (muted on the backend by default and by
+ * Clear all data) so it starts publishing/persisting again, then streams.
+ * Disabling live pauses the scope so mock-SCADA rows stop landing in the DB
+ * the moment the operator turns Live off.
  * Always re-snaps the current preset (or default 24h) to an end anchor of
  * max(now, newest stored reading) so the chart matches the Period control.
+ *
+ * This is also the ONLY resume path on pages that render LiveToggle without
+ * mounting useLiveReadings (Thresholds, Anomalies — via SharedViewControls);
+ * MonitoringView/HomeView/LiveBadge/LiveAnomalyStrip get a second one-shot
+ * resume from useLiveReadings for the reload-with-?live=true case, but this
+ * click handler must still resume on those other pages by itself.
  */
 export function LiveToggle({ pageId }: LiveToggleProps) {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
@@ -40,6 +49,13 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     const next = !live;
     if (!next) {
       await setLive(false);
+      // Tolerant like resumeLiveScope below — a failed pause must not block
+      // the toggle flipping off; the backend also mutes on its own gates.
+      try {
+        await pauseLiveScope({ tenant, gh });
+      } catch {
+        // Scope may already be muted, or the request raced a page unload.
+      }
       return;
     }
 
@@ -52,6 +68,19 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     // Flip live + optimistic wall-clock window immediately so SSE ticks land
     // inside the lookback (never anchor to a future historical CSV max).
     await setLive(true);
+
+    // Dispatch resume before anything else in this branch, but don't await
+    // it — the round trip would delay the optimistic window snap and bounds
+    // fetch below by a full request. Safety doesn't come from awaiting; it
+    // comes from this request hitting the wire before any later toggle-off
+    // click's pause request can, combined with the backend's asyncio.Lock
+    // serializing start_scope/stop_scope. As long as resume is dispatched
+    // first, last-click-wins holds at the server even though we move on
+    // here before it resolves.
+    resumeLiveScope({ tenant, gh }).catch(() => {
+      // Stream may still work if the scope was never muted.
+    });
+
     const optimisticEnd = periodWindowEnd({ maxTimestamp: null, live: true });
     const optimistic = windowForPeriod(hours, optimisticEnd);
     rememberChartBaseline(optimistic.from, optimistic.to, scopeKey);
@@ -67,13 +96,6 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
       await setRange(next);
     } catch {
       // Keep the optimistic wall-clock window.
-    }
-
-    // Explicit resume after Clear all — SSE reconnect alone must not re-seed.
-    try {
-      await resumeLiveScope({ tenant, gh });
-    } catch {
-      // Stream may still work if scope was never muted.
     }
   }
 

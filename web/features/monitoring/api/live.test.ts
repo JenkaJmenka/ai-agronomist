@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   anomalyDetailEventSchema,
   heartbeatEventSchema,
   liveAnomalyEventSchema,
   liveReadingEventSchema,
+  pauseLiveScope,
   resetEventSchema,
+  resumeLiveScope,
   sourceStatusEventSchema,
   statusResponseSchema,
   toSensorRow,
@@ -291,6 +293,71 @@ describe("statusResponseSchema", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sources).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pauseLiveScope / resumeLiveScope
+// ---------------------------------------------------------------------------
+
+function mockFetchOk(body: unknown): { url: string; init?: RequestInit } {
+  const captured: { url: string; init?: RequestInit } = { url: "" };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      captured.url = String(input);
+      captured.init = init;
+      return Promise.resolve({ ok: true, json: async () => body });
+    }),
+  );
+  return captured;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("pauseLiveScope", () => {
+  it("POSTs to /api/bff/live/pause with tenant_id and greenhouse_id", async () => {
+    const captured = mockFetchOk({ paused: true, tenant_id: "t1", greenhouse_id: "gh_A" });
+
+    await pauseLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(captured.url).toContain("/api/bff/live/pause?");
+    expect(captured.url).toContain("tenant_id=t1");
+    expect(captured.url).toContain("greenhouse_id=gh_A");
+    expect(captured.init?.method).toBe("POST");
+  });
+
+  it("throws when the response is not ok", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).rejects.toThrow("500");
+  });
+
+  it("throws when the response body fails schema validation", async () => {
+    mockFetchOk({ paused: "not-a-boolean" });
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).rejects.toThrow();
+  });
+});
+
+describe("resumeLiveScope", () => {
+  it("POSTs to /api/bff/live/resume with tenant_id and greenhouse_id", async () => {
+    const captured = mockFetchOk({ resumed: true, tenant_id: "t1", greenhouse_id: "gh_A" });
+
+    await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(captured.url).toContain("/api/bff/live/resume?");
+    expect(captured.url).toContain("tenant_id=t1");
+    expect(captured.url).toContain("greenhouse_id=gh_A");
+    expect(captured.init?.method).toBe("POST");
+  });
+
+  it("throws when the response is not ok", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    await expect(resumeLiveScope({ tenant: "t1", gh: "gh_A" })).rejects.toThrow("404");
   });
 });
 

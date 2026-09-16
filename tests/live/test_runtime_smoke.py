@@ -136,8 +136,15 @@ async def test_build_from_config_creates_scope(hub: LiveHub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_readings_published_to_hub(hub: LiveHub, fake_redis: FakeRedis) -> None:
-    """After start(), at least one reading event is published within 3 s."""
+async def test_readings_published_to_hub(
+    hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After start(), at least one reading event is published within 3 s.
+
+    Idle-by-default (LIVE_AUTOSTART_ENABLED=False) spawns no scope tasks, so
+    opt in explicitly to exercise the streaming path.
+    """
+    monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
     runtime = LiveRuntime.build_from_config(hub)
     await runtime.start()
     try:
@@ -148,16 +155,19 @@ async def test_readings_published_to_hub(hub: LiveHub, fake_redis: FakeRedis) ->
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_all_tasks_cleanly(hub: LiveHub) -> None:
+async def test_stop_cancels_all_tasks_cleanly(
+    hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """stop() cancels all tasks without leaving pending tasks or raising."""
+    monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
     runtime = LiveRuntime.build_from_config(hub)
     await runtime.start()
-    assert runtime._tasks, "Expected at least one task after start()"
+    assert runtime._all_tasks(), "Expected at least one task after start()"
 
     await runtime.stop()
 
     # All tasks must be done after stop().
-    assert not runtime._tasks, "Expected task list to be cleared after stop()"
+    assert not runtime._all_tasks(), "Expected task list to be cleared after stop()"
 
 
 @pytest.mark.asyncio
@@ -190,9 +200,10 @@ async def test_source_statuses_unknown_scope_returns_empty(hub: LiveHub) -> None
 
 @pytest.mark.asyncio
 async def test_scorer_passthrough_when_unavailable(
-    hub: LiveHub, fake_redis: FakeRedis
+    hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When LiveScorer is unavailable, readings are still published (passthrough)."""
+    monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
     runtime = LiveRuntime.build_from_config(hub)
     # Scorer should be None since we injected the broken sentinel.
     assert runtime._scopes[0].scorer is None
@@ -206,11 +217,14 @@ async def test_scorer_passthrough_when_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_start_stop_idempotent_no_pending_tasks(hub: LiveHub) -> None:
+async def test_start_stop_idempotent_no_pending_tasks(
+    hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """After stop(), no asyncio tasks created by the runtime are still pending."""
+    monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
     runtime = LiveRuntime.build_from_config(hub)
     await runtime.start()
-    task_names = {t.get_name() for t in runtime._tasks}
+    task_names = {t.get_name() for t in runtime._all_tasks()}
 
     await runtime.stop()
 
