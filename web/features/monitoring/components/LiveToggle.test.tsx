@@ -162,6 +162,27 @@ describe("LiveToggle — reacts to resume's scope_status", () => {
     expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument();
   });
 
+  it("leaves the toggle ON with no alert when scope_status is unmanaged (runtime unavailable)", async () => {
+    // "unmanaged" means the API couldn't determine the verdict — not that
+    // the scope is known-unconfigured. Reacting to it would regress the
+    // tolerant behavior for an indeterminate response.
+    resumeLiveScopeMock.mockResolvedValue({
+      resumed: false,
+      scope_status: "unmanaged",
+      tenant_id: "tenant_1",
+      greenhouse_id: "gh_A",
+    });
+    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+
+    render(<LiveToggle pageId="monitoring" />);
+    fireEvent.click(screen.getByTestId("live-toggle"));
+
+    await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
+
+    expect(setLiveMock).not.toHaveBeenCalledWith(false);
+    expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument();
+  });
+
   it("clears a stale not_configured message when the scope changes, without a click", async () => {
     resumeLiveScopeMock.mockResolvedValue({
       resumed: false,

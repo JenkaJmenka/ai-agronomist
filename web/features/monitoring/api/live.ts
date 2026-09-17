@@ -141,10 +141,16 @@ export type StatusResponse = z.infer<typeof statusResponseSchema>;
  * during a rolling deploy window won't send it yet (deploy-skew history —
  * see project memory). Treat its absence as "no new information", not
  * failure.
+ *
+ * "unmanaged" is the runtime-unavailable case: when app.state.live_runtime
+ * is None the route has no runtime to ask and no way to tell started/
+ * already_running/not_configured apart, so it says so rather than
+ * guessing. It is NOT a "not configured" verdict — the toggle must treat
+ * it as indeterminate, not act on it.
  */
 const resumeResponseSchema = z.object({
   resumed: z.boolean(),
-  scope_status: z.enum(["started", "already_running", "not_configured"]).optional(),
+  scope_status: z.enum(["started", "already_running", "not_configured", "unmanaged"]).optional(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });
@@ -153,7 +159,7 @@ export type ResumeLiveScopeResult = z.infer<typeof resumeResponseSchema>;
 
 const pauseResponseSchema = z.object({
   paused: z.boolean(),
-  scope_status: z.enum(["stopped", "not_running", "not_configured"]).optional(),
+  scope_status: z.enum(["stopped", "not_running", "not_configured", "unmanaged"]).optional(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });

@@ -357,6 +357,17 @@ describe("pauseLiveScope", () => {
 
     await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).resolves.toBeUndefined();
   });
+
+  it("parses scope_status: unmanaged (runtime-unavailable case)", async () => {
+    mockFetchOk({
+      paused: true,
+      scope_status: "unmanaged",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).resolves.toBeUndefined();
+  });
 });
 
 describe("resumeLiveScope", () => {
@@ -416,6 +427,19 @@ describe("resumeLiveScope", () => {
 
     expect(result.resumed).toBe(false);
     expect(result.scope_status).toBe("not_configured");
+  });
+
+  it("parses scope_status: unmanaged (runtime-unavailable case) without throwing", async () => {
+    mockFetchOk({
+      resumed: false,
+      scope_status: "unmanaged",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    const result = await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(result.scope_status).toBe("unmanaged");
   });
 });
 
