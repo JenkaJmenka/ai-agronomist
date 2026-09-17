@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, useQueryState } from "nuqs";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { pauseLiveScope, resumeLiveScope } from "@/features/monitoring/api/live";
@@ -50,6 +50,15 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   const { tenant, gh } = useScope();
   const scopeKey = `${pageId}:${tenant}:${gh}`;
   const [notConfigured, setNotConfigured] = useState(false);
+
+  // The not_configured verdict is per-scope — it must not outlive the scope
+  // it was about. LiveToggle does not remount when tenant/gh change (the URL
+  // update is shallow, via TenantSelector's own useQueryStates), so without
+  // this the message would keep pointing at a greenhouse the operator has
+  // already navigated away from.
+  useEffect(() => {
+    setNotConfigured(false);
+  }, [tenant, gh]);
 
   async function handleClick(): Promise<void> {
     const next = !live;

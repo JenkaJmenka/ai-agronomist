@@ -24,8 +24,9 @@ vi.mock("@/lib/useDateRange", () => ({
   useDateRange: () => [{ from: null, to: null }, setRangeMock],
 }));
 
+const useScopeMock = vi.fn().mockReturnValue({ tenant: "tenant_1", gh: "gh_A" });
 vi.mock("@/lib/useScope", () => ({
-  useScope: () => ({ tenant: "tenant_1", gh: "gh_A" }),
+  useScope: () => useScopeMock(),
 }));
 
 const resumeLiveScopeMock = vi.fn();
@@ -46,6 +47,7 @@ beforeEach(() => {
   resumeLiveScopeMock.mockReset();
   pauseLiveScopeMock.mockReset();
   fetchReadingsBoundsMock.mockReset();
+  useScopeMock.mockReturnValue({ tenant: "tenant_1", gh: "gh_A" });
 });
 
 afterEach(cleanup);
@@ -158,5 +160,31 @@ describe("LiveToggle — reacts to resume's scope_status", () => {
 
     expect(setLiveMock).not.toHaveBeenCalledWith(false);
     expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument();
+  });
+
+  it("clears a stale not_configured message when the scope changes, without a click", async () => {
+    resumeLiveScopeMock.mockResolvedValue({
+      resumed: false,
+      scope_status: "not_configured",
+      tenant_id: "tenant_1",
+      greenhouse_id: "gh_A",
+    });
+    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+
+    const { rerender } = render(<LiveToggle pageId="monitoring" />);
+    fireEvent.click(screen.getByTestId("live-toggle"));
+
+    expect(await screen.findByTestId("live-not-configured")).toBeInTheDocument();
+
+    // Operator switches to a different, configured greenhouse — TenantSelector
+    // writes the URL via its own useQueryStates, LiveToggle re-renders with a
+    // new scope but does not remount, so its local state would otherwise
+    // survive the switch.
+    useScopeMock.mockReturnValue({ tenant: "tenant_1", gh: "gh_B" });
+    rerender(<LiveToggle pageId="monitoring" />);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument(),
+    );
   });
 });
