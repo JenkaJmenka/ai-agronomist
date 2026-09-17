@@ -340,6 +340,34 @@ describe("pauseLiveScope", () => {
 
     await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).rejects.toThrow();
   });
+
+  it("parses a response with scope_status", async () => {
+    mockFetchOk({
+      paused: true,
+      scope_status: "stopped",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).resolves.toBeUndefined();
+  });
+
+  it("parses a response without scope_status (deploy-skew: older API)", async () => {
+    mockFetchOk({ paused: true, tenant_id: "t1", greenhouse_id: "gh_A" });
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).resolves.toBeUndefined();
+  });
+
+  it("parses scope_status: unmanaged (runtime-unavailable case)", async () => {
+    mockFetchOk({
+      paused: true,
+      scope_status: "unmanaged",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    await expect(pauseLiveScope({ tenant: "t1", gh: "gh_A" })).resolves.toBeUndefined();
+  });
 });
 
 describe("resumeLiveScope", () => {
@@ -358,6 +386,60 @@ describe("resumeLiveScope", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
 
     await expect(resumeLiveScope({ tenant: "t1", gh: "gh_A" })).rejects.toThrow("404");
+  });
+
+  it("returns the parsed result, including scope_status, instead of void", async () => {
+    mockFetchOk({
+      resumed: true,
+      scope_status: "started",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    const result = await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(result).toEqual({
+      resumed: true,
+      scope_status: "started",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+  });
+
+  it("parses a response without scope_status (deploy-skew: older API)", async () => {
+    mockFetchOk({ resumed: true, tenant_id: "t1", greenhouse_id: "gh_A" });
+
+    const result = await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(result.scope_status).toBeUndefined();
+    expect(result.resumed).toBe(true);
+  });
+
+  it("parses scope_status: not_configured with resumed: false", async () => {
+    mockFetchOk({
+      resumed: false,
+      scope_status: "not_configured",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    const result = await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(result.resumed).toBe(false);
+    expect(result.scope_status).toBe("not_configured");
+  });
+
+  it("parses scope_status: unmanaged (runtime-unavailable case) without throwing", async () => {
+    mockFetchOk({
+      resumed: false,
+      scope_status: "unmanaged",
+      tenant_id: "t1",
+      greenhouse_id: "gh_A",
+    });
+
+    const result = await resumeLiveScope({ tenant: "t1", gh: "gh_A" });
+
+    expect(result.scope_status).toBe("unmanaged");
   });
 });
 

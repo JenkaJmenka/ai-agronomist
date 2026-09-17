@@ -173,16 +173,50 @@ async def resume_live_scope_endpoint(
     which would immediately re-seed the wiped database. Spawns the merger
     and connector tasks for this scope (idempotent) so idle scopes don't
     stream until this is called.
+
+    ``resumed`` means exactly one thing: live data will flow for this scope
+    from now on. ``scope_status`` explains why:
+
+    * ``started``         — the scope was idle; its tasks were just spawned.
+    * ``already_running`` — the scope was already streaming (idempotent
+      no-op call) — a success, not a failure.
+    * ``not_configured``  — this tenant/greenhouse has no source wired up in
+      ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever
+      flow; ``resumed`` is False here so a green Go Live toggle doesn't lie
+      to the operator.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
     runtime = getattr(request.app.state, "live_runtime", None)
     if runtime is not None:
-        await runtime.start_scope(tenant_id, greenhouse_id)
-        return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+        if not runtime.is_scope_configured(tenant_id, greenhouse_id):
+            return {
+                "resumed": False,
+                "scope_status": "not_configured",
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+            }
+        started = await runtime.start_scope(tenant_id, greenhouse_id)
+        return {
+            "resumed": True,
+            "scope_status": "started" if started else "already_running",
+            "tenant_id": tenant_id,
+            "greenhouse_id": greenhouse_id,
+        }
+
+    # No runtime on app.state (live sources disabled for this deployment).
+    # scope_control only tracks a suppression flag — it has no notion of
+    # which scopes are configured — so we can't honestly report "started"
+    # vs "already_running" vs "not_configured" here without fabricating an
+    # answer. "unmanaged" says so plainly rather than guessing.
     from src.live.scope_control import resume_live_scope
 
     resume_live_scope(tenant_id, greenhouse_id)
-    return {"resumed": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    return {
+        "resumed": True,
+        "scope_status": "unmanaged",
+        "tenant_id": tenant_id,
+        "greenhouse_id": greenhouse_id,
+    }
 
 
 @router.post("/pause")
@@ -198,16 +232,45 @@ async def pause_live_scope_endpoint(
     scope so historical windows show only uploaded data and no mock/SCADA
     reading is generated at all — mirrors /resume for the opposite
     transition.
+
+    Unlike /resume, ``paused`` is always True: nothing streams for this
+    scope once the call returns, whether it was running, already idle, or
+    never configured — there's no "wrong" outcome to flag. ``scope_status``
+    records which case it was, for diagnostics only:
+
+    * ``stopped``        — the scope was running; its tasks were cancelled.
+    * ``not_running``    — the scope was already idle (idempotent no-op).
+    * ``not_configured`` — this tenant/greenhouse has no source wired up;
+      there was nothing to stop.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
     runtime = getattr(request.app.state, "live_runtime", None)
     if runtime is not None:
-        await runtime.stop_scope(tenant_id, greenhouse_id)
-        return {"paused": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+        if not runtime.is_scope_configured(tenant_id, greenhouse_id):
+            return {
+                "paused": True,
+                "scope_status": "not_configured",
+                "tenant_id": tenant_id,
+                "greenhouse_id": greenhouse_id,
+            }
+        stopped = await runtime.stop_scope(tenant_id, greenhouse_id)
+        return {
+            "paused": True,
+            "scope_status": "stopped" if stopped else "not_running",
+            "tenant_id": tenant_id,
+            "greenhouse_id": greenhouse_id,
+        }
+
+    # See /resume above for why "unmanaged" rather than guessing.
     from src.live.scope_control import suppress_live_scope
 
     suppress_live_scope(tenant_id, greenhouse_id)
-    return {"paused": True, "tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
+    return {
+        "paused": True,
+        "scope_status": "unmanaged",
+        "tenant_id": tenant_id,
+        "greenhouse_id": greenhouse_id,
+    }
 
 
 @router.get("/events")

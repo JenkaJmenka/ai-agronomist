@@ -262,6 +262,14 @@ export function useLiveReadings(enabled: boolean): UseLiveReadingsResult {
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!enabled) return;
+    // Deliberately not reacting to scope_status here (unlike LiveToggle's
+    // click handler): this hook only returns data, it does not own the
+    // `live` URL param, and it mounts from three independent pages
+    // (HomeView, MonitoringView, useAnomalies). Reverting `live` from here
+    // would need its own useQueryState writer racing LiveToggle's, with no
+    // shared ordering guarantee. A `?live=true` reload of an unconfigured
+    // scope still recovers: the stale-timer above already flags "no data
+    // arriving" the same way it would for any other silent stream.
     resumeLiveScope({ tenant, gh }).catch(() => {
       // Stream may still work if the scope was never muted.
     });
