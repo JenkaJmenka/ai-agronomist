@@ -99,3 +99,64 @@ describe("LiveToggle — resume ordering on toggle-on", () => {
     await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
   });
 });
+
+// ---------------------------------------------------------------------------
+// scope_status reaction — an unconfigured scope will never stream, so the
+// toggle must not keep claiming Live. A missing scope_status (deploy-skew:
+// older API) must never revert the toggle.
+// ---------------------------------------------------------------------------
+
+describe("LiveToggle — reacts to resume's scope_status", () => {
+  it("reverts the toggle and shows a message when scope_status is not_configured", async () => {
+    resumeLiveScopeMock.mockResolvedValue({
+      resumed: false,
+      scope_status: "not_configured",
+      tenant_id: "tenant_1",
+      greenhouse_id: "gh_A",
+    });
+    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+
+    render(<LiveToggle pageId="monitoring" />);
+    fireEvent.click(screen.getByTestId("live-toggle"));
+
+    await waitFor(() => expect(setLiveMock).toHaveBeenCalledWith(false));
+    expect(await screen.findByTestId("live-not-configured")).toHaveTextContent(
+      "No live data source is configured for this greenhouse.",
+    );
+  });
+
+  it("leaves the toggle alone when scope_status is absent (older API)", async () => {
+    resumeLiveScopeMock.mockResolvedValue({
+      resumed: true,
+      tenant_id: "tenant_1",
+      greenhouse_id: "gh_A",
+    });
+    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+
+    render(<LiveToggle pageId="monitoring" />);
+    fireEvent.click(screen.getByTestId("live-toggle"));
+
+    await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
+
+    expect(setLiveMock).not.toHaveBeenCalledWith(false);
+    expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument();
+  });
+
+  it("leaves the toggle alone when scope_status is started", async () => {
+    resumeLiveScopeMock.mockResolvedValue({
+      resumed: true,
+      scope_status: "started",
+      tenant_id: "tenant_1",
+      greenhouse_id: "gh_A",
+    });
+    fetchReadingsBoundsMock.mockResolvedValue({ min_timestamp: null, max_timestamp: null });
+
+    render(<LiveToggle pageId="monitoring" />);
+    fireEvent.click(screen.getByTestId("live-toggle"));
+
+    await waitFor(() => expect(fetchReadingsBoundsMock).toHaveBeenCalledTimes(1));
+
+    expect(setLiveMock).not.toHaveBeenCalledWith(false);
+    expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument();
+  });
+});

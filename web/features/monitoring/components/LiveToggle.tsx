@@ -1,6 +1,7 @@
 "use client";
 
 import { parseAsBoolean, useQueryState } from "nuqs";
+import { useState } from "react";
 import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { pauseLiveScope, resumeLiveScope } from "@/features/monitoring/api/live";
@@ -38,16 +39,22 @@ interface LiveToggleProps {
  * MonitoringView/HomeView/LiveBadge/LiveAnomalyStrip get a second one-shot
  * resume from useLiveReadings for the reload-with-?live=true case, but this
  * click handler must still resume on those other pages by itself.
+ *
+ * If resume comes back `scope_status: "not_configured"`, the scope has no
+ * live source and will never stream, so the toggle reverts to off and shows
+ * an inline explanation instead of leaving the UI stuck claiming Live.
  */
 export function LiveToggle({ pageId }: LiveToggleProps) {
   const [live, setLive] = useQueryState("live", parseAsBoolean.withDefault(false));
   const [{ from, to }, setRange] = useDateRange();
   const { tenant, gh } = useScope();
   const scopeKey = `${pageId}:${tenant}:${gh}`;
+  const [notConfigured, setNotConfigured] = useState(false);
 
   async function handleClick(): Promise<void> {
     const next = !live;
     if (!next) {
+      setNotConfigured(false);
       await setLive(false);
       // Tolerant like resumeLiveScope below — a failed pause must not block
       // the toggle flipping off; the backend also mutes on its own gates.
@@ -58,6 +65,8 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
       }
       return;
     }
+
+    setNotConfigured(false);
 
     const matched = from && to ? matchPeriodId(from, to) : DEFAULT_PERIOD_ID;
     const hours =
@@ -77,9 +86,19 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
     // serializing start_scope/stop_scope. As long as resume is dispatched
     // first, last-click-wins holds at the server even though we move on
     // here before it resolves.
-    resumeLiveScope({ tenant, gh }).catch(() => {
-      // Stream may still work if the scope was never muted.
-    });
+    resumeLiveScope({ tenant, gh })
+      .then((result) => {
+        // scope_status is optional (older API during a deploy window) — an
+        // absent field means no new information, so leave the toggle alone.
+        // Only revert on the explicit "will never stream" verdict.
+        if (result.scope_status === "not_configured") {
+          setNotConfigured(true);
+          void setLive(false);
+        }
+      })
+      .catch(() => {
+        // Stream may still work if the scope was never muted.
+      });
 
     const optimisticEnd = periodWindowEnd({ maxTimestamp: null, live: true });
     const optimistic = windowForPeriod(hours, optimisticEnd);
@@ -100,21 +119,28 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   }
 
   return (
-    <Button
-      variant={live ? "primary" : "secondary"}
-      size="sm"
-      onClick={() => void handleClick()}
-      aria-pressed={live}
-      data-testid="live-toggle"
-      data-live={live ? "true" : "false"}
-    >
-      <span
-        className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-          live ? "animate-pulse bg-green-400" : "bg-text-muted"
-        }`}
-        aria-hidden="true"
-      />
-      Live
-    </Button>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        variant={live ? "primary" : "secondary"}
+        size="sm"
+        onClick={() => void handleClick()}
+        aria-pressed={live}
+        data-testid="live-toggle"
+        data-live={live ? "true" : "false"}
+      >
+        <span
+          className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+            live ? "animate-pulse bg-green-400" : "bg-text-muted"
+          }`}
+          aria-hidden="true"
+        />
+        Live
+      </Button>
+      {notConfigured ? (
+        <p role="alert" className="text-sm text-sev-critical" data-testid="live-not-configured">
+          No live data source is configured for this greenhouse.
+        </p>
+      ) : null}
+    </div>
   );
 }

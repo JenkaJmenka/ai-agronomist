@@ -136,14 +136,24 @@ export type StatusResponse = z.infer<typeof statusResponseSchema>;
 // POST /api/bff/live/{resume,pause}  (live scope control)
 // ---------------------------------------------------------------------------
 
+/**
+ * `scope_status` is optional: an older API deployed ahead of the frontend
+ * during a rolling deploy window won't send it yet (deploy-skew history —
+ * see project memory). Treat its absence as "no new information", not
+ * failure.
+ */
 const resumeResponseSchema = z.object({
   resumed: z.boolean(),
+  scope_status: z.enum(["started", "already_running", "not_configured"]).optional(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });
 
+export type ResumeLiveScopeResult = z.infer<typeof resumeResponseSchema>;
+
 const pauseResponseSchema = z.object({
   paused: z.boolean(),
+  scope_status: z.enum(["stopped", "not_running", "not_configured"]).optional(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });
@@ -167,10 +177,16 @@ async function postLiveScopeAction<T>(
 
 /**
  * Re-enable live publish/persistence after Clear all data muted the scope.
- * Called when the operator turns Go Live on.
+ * Called when the operator turns Go Live on. Returns the parsed result so
+ * callers can react to `scope_status: "not_configured"` — an HTTP 200 that
+ * will never actually stream because the greenhouse has no configured live
+ * source.
  */
-export async function resumeLiveScope(params: { tenant: string; gh: string }): Promise<void> {
-  await postLiveScopeAction("resume", params, resumeResponseSchema);
+export async function resumeLiveScope(params: {
+  tenant: string;
+  gh: string;
+}): Promise<ResumeLiveScopeResult> {
+  return postLiveScopeAction("resume", params, resumeResponseSchema);
 }
 
 /**
