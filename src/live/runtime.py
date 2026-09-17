@@ -279,6 +279,17 @@ class LiveRuntime:
         """Whether a scope's merger + connector tasks are currently running."""
         return bool(self._scope_tasks.get((tenant_id, greenhouse_id)))
 
+    def is_scope_configured(self, tenant_id: str, greenhouse_id: str) -> bool:
+        """Whether this runtime has a source wired up for tenant/greenhouse.
+
+        Lets callers (POST /resume, /pause) distinguish "not configured" —
+        no ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON`` entry, so live data
+        will never flow no matter how many times Go Live is toggled — from
+        "configured but idle", which ``start_scope``'s bare ``False`` return
+        cannot tell apart on its own.
+        """
+        return (tenant_id, greenhouse_id) in self._scopes_by_key
+
     def source_statuses(self, tenant_id: str, greenhouse_id: str) -> list[dict[str, str | None]]:
         """Return current health for each source in the given scope.
 

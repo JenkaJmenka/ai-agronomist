@@ -4,7 +4,11 @@ Covers: pause suppresses the scope gate (mirrors /resume, which already
 clears it); pause/resume are idempotent and return 200 when live_runtime is
 None; pause/resume delegate to LiveRuntime.stop_scope/start_scope when a
 runtime is present; the full lifecycle (task spawn/cancel, not just the
-suppression flag) driven end to end through a real LiveRuntime.
+suppression flag) driven end to end through a real LiveRuntime; and the
+``scope_status`` discriminator that tells "not configured" (live will never
+flow) apart from "already running" (live is flowing, this was a no-op) —
+the regression this endpoint previously collapsed into a blanket
+``resumed: true``.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from tests.live.conftest import _safe_redis_close
 
 _TENANT = "tenant_1"
 _GREENHOUSE = "gh_A"
+_UNCONFIGURED_GREENHOUSE = "gh_never_configured"
 
 
 @pytest_asyncio.fixture
@@ -57,7 +62,8 @@ class TestPauseResumeRoundTrip:
     async def test_pause_suppresses_then_resume_clears(
         self, async_client: AsyncClient
     ) -> None:
-        """No runtime on app.state — pause/resume fall back to scope_control directly."""
+        """No runtime on app.state — pause/resume fall back to scope_control
+        directly, which can't tell configured scopes apart, hence "unmanaged"."""
         assert not is_live_scope_suppressed(_TENANT, _GREENHOUSE)
 
         resp = await async_client.post(
@@ -67,6 +73,7 @@ class TestPauseResumeRoundTrip:
         assert resp.status_code == 200
         assert resp.json() == {
             "paused": True,
+            "scope_status": "unmanaged",
             "tenant_id": _TENANT,
             "greenhouse_id": _GREENHOUSE,
         }
@@ -77,7 +84,12 @@ class TestPauseResumeRoundTrip:
             params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
         )
         assert resp.status_code == 200
-        assert resp.json()["resumed"] is True
+        assert resp.json() == {
+            "resumed": True,
+            "scope_status": "unmanaged",
+            "tenant_id": _TENANT,
+            "greenhouse_id": _GREENHOUSE,
+        }
         assert not is_live_scope_suppressed(_TENANT, _GREENHOUSE)
 
     @pytest.mark.asyncio
@@ -91,6 +103,7 @@ class TestPauseResumeRoundTrip:
             )
             assert resp.status_code == 200
             assert resp.json()["paused"] is True
+            assert resp.json()["scope_status"] == "unmanaged"
         assert is_live_scope_suppressed(_TENANT, _GREENHOUSE)
 
     @pytest.mark.asyncio
@@ -98,6 +111,7 @@ class TestPauseResumeRoundTrip:
         self, async_client: AsyncClient
     ) -> None:
         mock_runtime = MagicMock()
+        mock_runtime.is_scope_configured = MagicMock(return_value=True)
         mock_runtime.stop_scope = AsyncMock(return_value=True)
         app.state.live_runtime = mock_runtime
 
@@ -107,6 +121,7 @@ class TestPauseResumeRoundTrip:
         )
         assert resp.status_code == 200
         assert resp.json()["paused"] is True
+        assert resp.json()["scope_status"] == "stopped"
         mock_runtime.stop_scope.assert_awaited_once_with(_TENANT, _GREENHOUSE)
         # Routed through the runtime, not scope_control directly.
         assert not is_live_scope_suppressed(_TENANT, _GREENHOUSE)
@@ -116,6 +131,7 @@ class TestPauseResumeRoundTrip:
         self, async_client: AsyncClient
     ) -> None:
         mock_runtime = MagicMock()
+        mock_runtime.is_scope_configured = MagicMock(return_value=True)
         mock_runtime.start_scope = AsyncMock(return_value=True)
         app.state.live_runtime = mock_runtime
 
@@ -125,7 +141,57 @@ class TestPauseResumeRoundTrip:
         )
         assert resp.status_code == 200
         assert resp.json()["resumed"] is True
+        assert resp.json()["scope_status"] == "started"
         mock_runtime.start_scope.assert_awaited_once_with(_TENANT, _GREENHOUSE)
+
+    @pytest.mark.asyncio
+    async def test_resume_on_unconfigured_scope_reports_not_configured(
+        self, async_client: AsyncClient
+    ) -> None:
+        """The regression this fix exists for: an unconfigured scope must not
+        report resumed: true — no data will ever flow no matter the toggle."""
+        mock_runtime = MagicMock()
+        mock_runtime.is_scope_configured = MagicMock(return_value=False)
+        mock_runtime.start_scope = AsyncMock(return_value=False)
+        app.state.live_runtime = mock_runtime
+
+        resp = await async_client.post(
+            "/api/live/resume",
+            params={"tenant_id": _TENANT, "greenhouse_id": _UNCONFIGURED_GREENHOUSE},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "resumed": False,
+            "scope_status": "not_configured",
+            "tenant_id": _TENANT,
+            "greenhouse_id": _UNCONFIGURED_GREENHOUSE,
+        }
+        # start_scope must not even be called — is_scope_configured short-circuits.
+        mock_runtime.start_scope.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pause_on_unconfigured_scope_reports_not_configured(
+        self, async_client: AsyncClient
+    ) -> None:
+        """paused stays True (nothing streams either way) but scope_status
+        says there was nothing to stop."""
+        mock_runtime = MagicMock()
+        mock_runtime.is_scope_configured = MagicMock(return_value=False)
+        mock_runtime.stop_scope = AsyncMock(return_value=False)
+        app.state.live_runtime = mock_runtime
+
+        resp = await async_client.post(
+            "/api/live/pause",
+            params={"tenant_id": _TENANT, "greenhouse_id": _UNCONFIGURED_GREENHOUSE},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "paused": True,
+            "scope_status": "not_configured",
+            "tenant_id": _TENANT,
+            "greenhouse_id": _UNCONFIGURED_GREENHOUSE,
+        }
+        mock_runtime.stop_scope.assert_not_awaited()
 
 
 class TestPauseResumeDriveRealRuntimeLifecycle:
@@ -169,6 +235,7 @@ class TestPauseResumeDriveRealRuntimeLifecycle:
             params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
         )
         assert resp.status_code == 200
+        assert resp.json()["scope_status"] == "started"
         assert real_runtime.is_scope_active(_TENANT, _GREENHOUSE)
         assert not is_live_scope_suppressed(_TENANT, _GREENHOUSE)
 
@@ -177,5 +244,68 @@ class TestPauseResumeDriveRealRuntimeLifecycle:
             params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
         )
         assert resp.status_code == 200
+        assert resp.json()["scope_status"] == "stopped"
         assert not real_runtime.is_scope_active(_TENANT, _GREENHOUSE)
         assert is_live_scope_suppressed(_TENANT, _GREENHOUSE)
+
+    @pytest.mark.asyncio
+    async def test_resume_called_twice_second_call_is_already_running(
+        self, async_client: AsyncClient, real_runtime: LiveRuntime
+    ) -> None:
+        """This is the regression this design exists to prevent: a second
+        /resume on a scope that is already live must NOT report resumed:
+        false — the operator's toggle is already correctly on."""
+        app.state.live_runtime = real_runtime
+
+        first = await async_client.post(
+            "/api/live/resume",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
+        )
+        assert first.json()["resumed"] is True
+        assert first.json()["scope_status"] == "started"
+
+        second = await async_client.post(
+            "/api/live/resume",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
+        )
+        assert second.json()["resumed"] is True
+        assert second.json()["scope_status"] == "already_running"
+        assert real_runtime.is_scope_active(_TENANT, _GREENHOUSE)
+
+    @pytest.mark.asyncio
+    async def test_pause_on_idle_configured_scope_is_not_running(
+        self, async_client: AsyncClient, real_runtime: LiveRuntime
+    ) -> None:
+        """A configured scope that was never resumed — pausing it is a
+        harmless idempotent no-op, not an error."""
+        app.state.live_runtime = real_runtime
+        assert not real_runtime.is_scope_active(_TENANT, _GREENHOUSE)
+
+        resp = await async_client.post(
+            "/api/live/pause",
+            params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["paused"] is True
+        assert resp.json()["scope_status"] == "not_running"
+
+    @pytest.mark.asyncio
+    async def test_resume_on_unconfigured_scope_never_starts_tasks(
+        self, async_client: AsyncClient, real_runtime: LiveRuntime
+    ) -> None:
+        """A real runtime, but a greenhouse outside MOCK_SCADA_SCOPES —
+        resumed must be false and no tasks may be spawned."""
+        app.state.live_runtime = real_runtime
+
+        resp = await async_client.post(
+            "/api/live/resume",
+            params={"tenant_id": _TENANT, "greenhouse_id": _UNCONFIGURED_GREENHOUSE},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "resumed": False,
+            "scope_status": "not_configured",
+            "tenant_id": _TENANT,
+            "greenhouse_id": _UNCONFIGURED_GREENHOUSE,
+        }
+        assert not real_runtime.is_scope_active(_TENANT, _UNCONFIGURED_GREENHOUSE)
