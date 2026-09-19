@@ -19,8 +19,19 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.cache_invalidation import invalidate_response_cache
-from src.config import SYNTHETIC_ANOMALY_SCORE_RANGE, SYNTHETIC_CONTEXT_SCORE_RANGE
+from src.config import (
+    GAS_SENSOR_COLUMNS,
+    SYNTHETIC_ANOMALY_SCORE_RANGE,
+    SYNTHETIC_CONTEXT_SCORE_RANGE,
+)
 from src.db.models import RawReading, SensorReading
+
+# Gas-panel columns (dedicated instrument, e.g. gas_co2) are a DIFFERENT
+# INSTRUMENT from the climate channels of the same short name (e.g. co2) --
+# see src/vendors/csv_adapter.py:346. Bound once as a frozenset so both
+# _pick_col() and the raw-spike column selection below can exclude gas
+# columns without re-deriving the set on every call.
+_GAS_SENSOR_COLUMNS: frozenset[str] = frozenset(GAS_SENSOR_COLUMNS)
 
 # Per-type injection profile, as a tuple of:
 #   - canonical sensor fields to make anomalous (others stay normal)
@@ -129,9 +140,27 @@ def _anomaly_value_directed(
 
 
 def _pick_col(col_values: dict, keywords: list, fallback: float) -> float:
-    """Return the first col_values entry whose name contains any of the keywords."""
+    """Return the col_values entry matching keywords, preferring exact matches.
+
+    Gas-panel columns are excluded outright: every canonical field this feeds
+    (temperature/humidity/co2/light) is a climate reading, and a gas-panel
+    instrument (e.g. gas_co2) must never be mistaken for its climate namesake
+    (e.g. co2). Exact keyword-name matches are checked -- in keyword-priority
+    order -- before substring matches are tried, also in keyword-priority
+    order, so CSV column order can never decide the outcome (e.g. a file
+    that happens to list gas_co2 before co2 must still resolve climate co2
+    correctly, and greenhouse_temp must still beat a co-present temperature
+    column per caller-supplied priority).
+    """
+    candidates = {
+        col: v for col, v in col_values.items() if col.lower() not in _GAS_SENSOR_COLUMNS
+    }
     for kw in keywords:
-        for col, v in col_values.items():
+        for col, v in candidates.items():
+            if col.lower() == kw:
+                return v
+    for kw in keywords:
+        for col, v in candidates.items():
             if kw in col.lower():
                 return v
     return fallback
@@ -206,8 +235,18 @@ async def inject_synthetic_anomalies(
     score_lo = round(_SCORE_LO + _spread_lo_frac * _SCORE_SPAN, 4)
     score_hi = round(min(_SCORE_HI, _SCORE_LO + (_spread_lo_frac + _spread_width_frac) * _SCORE_SPAN), 4)
     _ctx_lo, _ctx_hi = SYNTHETIC_CONTEXT_SCORE_RANGE  # (0.05, 0.20)
+    # Targeted types (non-empty raw_keywords, e.g. co2_surge -> ["co2"]) must
+    # not bleed across instruments: "co2" substring-matches "gas_co2", which
+    # would fabricate gas-panel spikes for a purely climate anomaly. Untargeted
+    # types (random, multi_sensor -- raw_keywords == []) deliberately spike
+    # every raw column, gas included, per the profile comment above.
     raw_spike_cols: set[str] = (
-        {col for col in col_stats if any(kw in col.lower() for kw in raw_keywords)}
+        {
+            col
+            for col in col_stats
+            if any(kw in col.lower() for kw in raw_keywords)
+            and col.lower() not in _GAS_SENSOR_COLUMNS
+        }
         if raw_keywords
         else set(col_stats.keys())
     )
