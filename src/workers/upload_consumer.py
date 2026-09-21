@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.schemas.sensor_data import StatisticalAnomalyDetail
+from src.api.schemas.sensor_data import StatisticalAnomalyDetail, UploadHighAnomalyDetail
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
@@ -29,6 +29,7 @@ from src.api.services.upload_portions import (
     finalize_scores,
     score_portion,
 )
+from src.models.stuck_fault_detector import StuckCarry
 from src.db.jobs import (
     get_job,
     increment_progress,
@@ -60,17 +61,24 @@ async def _portion_already_recorded(
 
 
 def _portion_result_payload(
-    portion: PortionScores, sensor_rows: int, raw_rows: int
+    portion: PortionScores,
+    sensor_rows: int,
+    raw_rows: int,
+    stuck_carry: StuckCarry | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "scores": portion.scores,
         "sequence_timestamps": portion.sequence_timestamps,
         "stat_hits": [hit.model_dump() for hit in portion.stat_hits],
+        "stuck_hits": [hit.model_dump() for hit in portion.stuck_hits],
         "rows_processed": portion.rows_processed,
         "stat_columns": None,  # filled below when known
         "sensor_rows": sensor_rows,
         "raw_rows": raw_rows,
     }
+    if stuck_carry is not None:
+        payload["stuck_carry_state"] = stuck_carry.to_dict()
+    return payload
 
 
 async def handle_upload_portion(
@@ -114,9 +122,22 @@ async def handle_upload_portion(
         )
         return
 
-    stat_carry = StatCarry(rows=list(msg.stat_carry_rows))
+    stat_carry = StatCarry(
+        rows=list(msg.stat_carry_rows),
+        total_rows=msg.stat_carry_prior_rows,
+    )
 
-    def _score() -> PortionScores:
+    # Deserialise the wall-clock stuck-fault carry state embedded by the producer.
+    # The producer ran detect_chunk sequentially for each portion before publishing,
+    # so each message carries the exact carry state that precedes this portion —
+    # safe to use even when portions arrive out of order or are retried.
+    stuck_carry: StuckCarry | None = (
+        StuckCarry.from_dict(msg.stuck_carry_state)
+        if msg.stuck_carry_state
+        else None
+    )
+
+    def _score() -> tuple[PortionScores, StuckCarry | None]:
         # Torch model load + inference are CPU-bound for minutes on large
         # portions. Run OFF the event loop: a blocked loop cannot answer AMQP
         # heartbeats, and the broker then resets the connection mid-handling
@@ -133,8 +154,9 @@ async def handle_upload_portion(
             detector=detector,
             seq_len=msg.seq_len,
             include_embeddings=False,
+            stuck_carry=stuck_carry,
         )
-        return result
+        return result, stuck_carry
 
     async with atimed(
         logger,
@@ -143,7 +165,7 @@ async def handle_upload_portion(
         portion=msg.portion_idx,
         rows=len(msg.rows or []),
     ):
-        portion = await asyncio.to_thread(_score)
+        portion, updated_stuck_carry = await asyncio.to_thread(_score)
 
     sensor_rows = raw_rows = 0
     if msg.persist_data:
@@ -174,7 +196,7 @@ async def handle_upload_portion(
             sensor_rows = s_ins + s_upd
             raw_rows = r_ins + r_upd
 
-    payload = _portion_result_payload(portion, sensor_rows, raw_rows)
+    payload = _portion_result_payload(portion, sensor_rows, raw_rows, updated_stuck_carry)
     payload["stat_columns"] = stat_carry.columns
     recorded = await record_portion_result(
         db,
@@ -259,6 +281,7 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     sensor_rows_total = 0
     raw_rows_total = 0
     seen_hits: set[tuple[str, str]] = set()
+    last_stuck_carry_state: dict[str, Any] | None = None
 
     for row in portion_rows:
         if row.status != "completed" or not row.result:
@@ -272,11 +295,18 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 continue
             seen_hits.add(key)
             hits.append(hit)
+
+        # Collect per-portion stuck_fault alerts (detected during portion scoring).
+        stuck_hits: list[UploadHighAnomalyDetail] = [
+            UploadHighAnomalyDetail(**h) for h in stored.get("stuck_hits", [])
+        ]
+
         portions.append(
             PortionScores(
                 scores=stored.get("scores", []),
                 sequence_timestamps=stored.get("sequence_timestamps", []),
                 stat_hits=hits,
+                stuck_hits=stuck_hits,
                 rows_processed=stored.get("rows_processed", 0),
             )
         )
@@ -286,7 +316,29 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         sensor_rows_total += stored.get("sensor_rows", 0)
         raw_rows_total += stored.get("raw_rows", 0)
 
+        # Track the last stored stuck_carry_state (portions are loaded in order
+        # by portion_idx, so the last completed portion's state is the right one
+        # for the flush call in finalize_scores).
+        if stored.get("stuck_carry_state"):
+            last_stuck_carry_state = stored["stuck_carry_state"]
+
+    # Reconstruct the final stuck_carry for flush (still-open freezes at EOF).
+    # Falls back to a fresh carry (with imputed_channels set) when no portion
+    # stored a carry state — e.g. older job rows or all portions failed.
     payload = job.payload or {}
+    if last_stuck_carry_state is not None:
+        finalize_stuck_carry: StuckCarry | None = StuckCarry.from_dict(
+            last_stuck_carry_state
+        )
+    elif payload.get("imputed_channels"):
+        # No portions stored a carry state (legacy job or all portions failed),
+        # but we still need to pass imputed_channels to avoid false stuck alerts.
+        finalize_stuck_carry = StuckCarry(
+            skip_channels=frozenset(payload["imputed_channels"])
+        )
+    else:
+        finalize_stuck_carry = None
+
     response, _ = finalize_scores(
         portions,
         tenant_id=job.tenant_id,
@@ -294,6 +346,7 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         imputed_channels=payload.get("imputed_channels", []),
         stat_carry=stat_carry,
         include_embeddings=False,
+        stuck_carry=finalize_stuck_carry,
     )
 
     if payload.get("persist_data"):

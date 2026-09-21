@@ -2,6 +2,74 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Task 1d — Chunk-size invariant statistical detection — DONE (2026-09-20)
+
+**Goal:** Make rolling z-score statistical detection produce identical non-humidity hit sets regardless of chunk size. Implemented Fix 1 (configured window when carry exists) and Fix 3 (carry window + MIN_CONSECUTIVE - 1 rows; mask only already-scored rows).
+
+**Files modified:**
+- `src/models/cold_run_detector.py`: Added `n_prior_rows` and `scored_prefix` params to `detect_rolling()`. Incremental mode uses configured window (no short-file scaling); `scored_prefix` rows participate in streaks but aren't reported.
+- `src/api/services/upload_portions.py`: `_detect_stats_incremental()` passes incremental-mode params; carry length changed from 288 to 290 (window + min_consecutive - 1).
+- `src/api/services/upload_producer.py`: Tracks `total_raw_rows_seen`; embeds `stat_carry_prior_rows` in messages; carry uses 290-row tail.
+- `src/mq/schemas.py`: Added `stat_carry_prior_rows: int = Field(default=0, ge=0)` to `UploadPortionMessage`.
+- `src/workers/upload_consumer.py`: Passes `total_rows=msg.stat_carry_prior_rows` to `StatCarry`.
+
+**Test edits (4 tests in `tests/workers/test_upload_consumer.py`):** Changed `_csv_content(fault_at=70)` to `_csv_content(rows=600, fault_at=350)` in `test_statistical_anomalies_survive_portioning`, `test_async_finalize_persists_trigger_channel`, `test_finalize_retries_after_a_failed_write`, `test_stored_scores_are_canonical_not_double_transformed`. No assertions weakened.
+
+**Results:** Non-humidity hits MATCH at all chunk sizes (102) when psychrometric suppression is disabled. With suppression, chunk 50 has 6 extra hits (102 vs 96) due to the purge (out of scope) NaN-blanking humidity, preventing psychrometric pairing. Clearsky: 0 at all sizes. Stuck faults: 4 identical onsets. Severed hit at row 3050 recovered.
+
+**Tests:** 121 passed, 1 xfailed. Report: `tasks/task1d_ml_report.md`.
+
+## Task 1c — Stuck-fault async/sync parity pinning tests — DONE (2026-09-20)
+
+**QA engineer** wrote 33 tests in `tests/workers/test_stuck_async_parity.py` + 1 new test in `tests/models/test_stuck_carry_serialization.py`. All pass (32 passed, 1 strict xfail). Runtime: 113s.
+
+**What the tests pin:**
+1. PARITY: Sync and async paths produce byte-identical stuck alerts (4 humidity, onsets/detected_ts/severity/durations match exactly).
+2. SHUFFLED ORDER: Out-of-order consumption at 4 portion sizes (50, 500, 37, 288) and reverse order produce byte-identical result. Redelivery is idempotent.
+3. CONCURRENT: ThreadPoolExecutor(4 workers) on score_portion produces identical per-portion stuck_hits.
+4. skip_channels: CO2 imputed -> 0 co2 alerts; skip disabled -> 1 co2 alert (onset 12-14, 6.0h). Producer carry has skip_channels={"co2"}.
+5. FINAL-PORTION FLUSH: Ongoing freeze with gate crossing in last portion. Post-scoring carry verified (last_ts == file's final timestamp). xfail on episode end_ts (equals onset; Task 3/4 scope).
+6. NO PHANTOM EPISODES: 2-sample trailing freeze (Dec 25-26) at all portion sizes -> no alert/episode.
+7. CONFIG PARITY: 1 WallclockStuckDetector construction total. producer._WALLCLOCK_DETECTOR is portions._WALLCLOCK_DETECTOR. Parameters match.
+8. SERIALISATION: Post-release carry with 4 completed faults (non-None last_frozen_dt) round-trips exactly.
+9. REGRESSION: Clearsky fixture -> 0 stuck alerts (both paths, persisted). Fixture A persisted -> exactly 4 stuck_fault/urgent rows.
+
+**Known bug (xfailed):** Episode end_ts equals onset for stuck_fault episodes (one alert per freeze -> start_ts == end_ts). Task 3/4 scope.
+
+**No other bugs found.** The producer-embedded StuckCarry design is order-invariant and concurrent-safe.
+
+## Task 1b — Single WallclockStuckDetector construction path — DONE (2026-09-20)
+
+**Change:** Removed `_WALLCLOCK_DETECTOR_PRODUCER = WallclockStuckDetector()` from `upload_producer.py`. Now imports and re-exports `_WALLCLOCK_DETECTOR` from `upload_portions.py`. One construction, one object, used by producer + worker + sync path. QA assertion `upload_producer._WALLCLOCK_DETECTOR is upload_portions._WALLCLOCK_DETECTOR` satisfiable.
+
+**Other WallclockStuckDetector( occurrences outside tests:** `src/models/stuck_fault_detector.py:354` — docstring usage example only, not executed. No live upload-path construction outside `upload_portions.py`.
+
+**3(a) imputed_channels:** comes from `_calibrate_ranges_from_head` in `produce_upload_portions`; persisted immediately to `job.payload["imputed_channels"]`; `_finalize` reads identical value from `job.payload`. No drift.
+
+**3(b) flush carry:** `_finalize` uses the POST-scoring carry (stored result `stuck_carry_state` from `updated_stuck_carry` after `score_portion` mutates it via `detect_chunk`). Not the pre-portion state embedded in the message. Correct — no bug.
+
+**Tests:** 73/73 passed (workers, models, api, unit stuck suites).
+
+## Task 1 — Async upload worker parity for wall-clock stuck-fault detection — DONE (2026-09-20)
+
+**Problem:** `upload_consumer.py` called `score_portion` and `finalize_scores` with no `stuck_carry`, so the async upload worker path ran NO wall-clock stuck-fault detection. The sync path (`run_cold_run_upload`) threaded `StuckCarry` through each chunk.
+
+**Step A finding:** Portions are produced sequentially but consumed concurrently/out-of-order (RabbitMQ queue, multiple workers). A sequentially-threaded carry via the result store (portion N result → portion N+1 carry) is NOT SAFE. Safe approach: serialize carry at publish time in the producer (same pattern as `stat_carry_rows`), embed in each message.
+
+**Implementation (Step B):**
+- Added `StuckCarry.to_dict()` / `StuckCarry.from_dict()` to `src/models/stuck_fault_detector.py` with exact round-trip for all fields: timezone-aware datetimes, `emitted_onsets` (set of tuples), `skip_channels` (frozenset), `ChannelFreezeState`, `FaultWindow` (including `last_frozen_dt=None`).
+- Added `stuck_carry_state: Optional[dict[str, Any]] = None` to `UploadPortionMessage` in `src/mq/schemas.py`.
+- Updated `src/api/services/upload_producer.py`: threads `StuckCarry` through the sequential produce loop; serializes carry BEFORE advancing for each portion; embeds in message.
+- Updated `src/workers/upload_consumer.py`: deserializes carry from message; passes to `score_portion(stuck_carry=...)`; stores `stuck_hits` + `stuck_carry_state` in result; `_finalize` collects `stuck_hits` from stored results and reconstructs last carry for `flush()`.
+- New `tests/models/test_stuck_carry_serialization.py`: 8 round-trip unit tests.
+
+**Acceptance evidence (`tasks/task1_parity_evidence.md`):**
+- Fixture `native_dec_stuck_fault.csv` (50-row portions → ~70 portions, main freeze spans ~39).
+- Both paths: 4 alerts (humidity), onsets 12-14 00:00, 12-15 11:05, 12-16 11:20, 12-18 13:00; detected_ts +6h each, severity urgent. Episode duration_seconds identical.
+- All 6 parity checks: ✅ PASS.
+
+**Tests:** 100/100 smoke tests passed (workers, unit, api stuck_fault, episode_grouping, models).
+
 ## Anomaly episode grouping collapse — FIXED (2026-09-15)
 
 Task from team-lead: episodes were collapsing to (channel,) whenever both

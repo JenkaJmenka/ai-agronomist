@@ -19,12 +19,24 @@ from src.api.services.cold_run_upload import (
     _read_chunks,
     _strip_raw_records,
 )
-from src.config import COLD_RUN_STAT_ROLLING_WINDOW, UPLOAD_PORTION_ROWS
+from src.config import (
+    COLD_RUN_STAT_MIN_CONSECUTIVE,
+    COLD_RUN_STAT_ROLLING_WINDOW,
+    UPLOAD_PORTION_ROWS,
+)
 from src.db.jobs import create_job, get_job, set_total_portions, update_job
+from src.models.stuck_fault_detector import StuckCarry
 from src.mq.publisher import publish_json
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE, UPLOAD_PORTIONS_QUEUE
 from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
+
+# Single shared detector instance — same object used by score_portion/finalize_scores
+# in upload_portions.  Both the producer's sequential produce loop and the worker
+# replay path must use identical detector config so emitted_onsets dedup stays
+# consistent.  Importing the singleton from upload_portions (where it is
+# constructed) guarantees that invariant.
+from src.api.services.upload_portions import _WALLCLOCK_DETECTOR  # noqa: E402
 
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
 
@@ -108,19 +120,43 @@ async def produce_upload_portions(
     portion_idx = 0
     prev_normalized_tail: list[dict[str, Any]] = []
     prev_raw_tail: list[dict[str, Any]] = []
+    total_raw_rows_seen: int = 0
+
+    # Carry length for statistical detection: window + min_consecutive - 1 so
+    # a streak straddling a chunk boundary keeps its earlier rows.
+    _stat_carry_len = COLD_RUN_STAT_ROLLING_WINDOW + COLD_RUN_STAT_MIN_CONSECUTIVE - 1
+
+    # Thread wall-clock stuck-fault carry through the sequential produce pass.
+    # Portions may be consumed out of order or concurrently, so the carry state
+    # for each portion must be pre-computed here (at publish time) and embedded
+    # in the message — the same pattern as stat_carry_rows for statistical detection.
+    stuck_carry = StuckCarry(skip_channels=frozenset(imputed_channels))
 
     for raw_chunk in _read_chunks(tmp_path, portion_rows, csv_props):
         if raw_chunk.empty:
             continue
+
+        normalized_chunk_df = None
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
             adapter.validate(normalized_chunk)
             normalized_rows = _normalized_records(normalized_chunk)
+            normalized_chunk_df = normalized_chunk  # keep reference for stuck detection
         except Exception:
             normalized_rows = []
 
         raw_df, _ = parse_raw_rows(raw_chunk)
         raw_rows = _raw_records(raw_df) if not raw_df.empty else []
+
+        # Serialise carry state BEFORE advancing it for this portion.
+        # Workers receive the pre-portion state, re-run detect_chunk, and store
+        # the updated state — allowing finalize to call flush with the last
+        # portion's carry regardless of the order portions were processed.
+        carry_state_before = stuck_carry.to_dict()
+
+        # Advance the carry for this portion (sequential — producer reads in order).
+        if normalized_chunk_df is not None and not normalized_chunk_df.empty:
+            _WALLCLOCK_DETECTOR.detect_chunk(normalized_chunk_df, stuck_carry)
 
         message = UploadPortionMessage(
             job_id=job_id,
@@ -131,10 +167,12 @@ async def produce_upload_portions(
             raw_rows=raw_rows,
             overlap_rows=prev_normalized_tail,
             stat_carry_rows=prev_raw_tail,
+            stat_carry_prior_rows=total_raw_rows_seen,
             adaptive_ranges=[list(r) for r in adaptive_ranges],
             checkpoint_path=checkpoint_path,
             seq_len=seq_len,
             persist_data=persist_data,
+            stuck_carry_state=carry_state_before,
         )
         await publish_json(UPLOAD_PORTIONS_QUEUE, message)
         portion_idx += 1
@@ -142,7 +180,8 @@ async def produce_upload_portions(
         if normalized_rows:
             prev_normalized_tail = normalized_rows[-(seq_len - 1):]
         if raw_rows:
-            prev_raw_tail = (prev_raw_tail + raw_rows)[-COLD_RUN_STAT_ROLLING_WINDOW:]
+            total_raw_rows_seen += len(raw_rows)
+            prev_raw_tail = (prev_raw_tail + raw_rows)[-_stat_carry_len:]
 
     completed, failed = await set_total_portions(db, job_id, portion_idx)
     if portion_idx > 0 and completed + failed >= portion_idx:

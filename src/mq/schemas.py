@@ -18,6 +18,16 @@ class UploadPortionMessage(BaseModel):
     sensor columns); `raw_rows` are the NaN-stripped original records used for
     statistical detection and RawReading persistence — the worker never needs
     the CSV file or adapter.
+
+    ``stuck_carry_state`` is the serialised ``StuckCarry`` state BEFORE this
+    portion, computed by the producer during its sequential CSV pass.  Workers
+    deserialise it, run ``detect_chunk``, and store the updated state alongside
+    ``stuck_hits`` in the portion result so ``_finalize`` can call ``flush``
+    with the carry from the last completed portion.
+
+    Portions are published before the total is known and may be consumed out of
+    order / concurrently; the producer-embedded carry is the only safe way to
+    thread wall-clock stuck-fault state across portion boundaries.
     """
 
     job_id: str
@@ -30,10 +40,17 @@ class UploadPortionMessage(BaseModel):
     raw_rows: list[dict[str, Any]] = Field(default_factory=list)
     overlap_rows: list[dict[str, Any]] = Field(default_factory=list)
     stat_carry_rows: list[dict[str, Any]] = Field(default_factory=list)
+    # Total raw rows seen by the producer *before* this portion (global row
+    # index of stat_carry_rows[0]).  Workers use this to compute the
+    # global-index mask for incremental statistical detection.  Defaults to
+    # 0 so messages published before this field existed still parse.
+    stat_carry_prior_rows: int = Field(default=0, ge=0)
     adaptive_ranges: list[list[float]]
     checkpoint_path: Optional[str] = None
     seq_len: int = 20
     persist_data: bool = False
+    # Wall-clock stuck-fault carry state (producer-computed, portion-specific).
+    stuck_carry_state: Optional[dict[str, Any]] = None
 
 
 class UploadPrepareMessage(BaseModel):

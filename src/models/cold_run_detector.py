@@ -175,9 +175,52 @@ class ColdRunStatisticalDetector:
         *,
         window: int = COLD_RUN_STAT_ROLLING_WINDOW,
         columns: list[str] | None = None,
+        n_prior_rows: int | None = None,
+        scored_prefix: int = 0,
     ) -> list[RollingAnomaly]:
-        """Flag sudden deviations vs a recent rolling baseline (not seasonal drift)."""
-        effective_window = _effective_rolling_window(len(readings), window)
+        """Flag sudden deviations vs a recent rolling baseline (not seasonal drift).
+
+        Parameters
+        ----------
+        window : int
+            Rolling window size.  In legacy (single-call) mode this may be
+            scaled down for short files via ``_effective_rolling_window``.
+            In incremental mode (``n_prior_rows is not None``) it is used
+            as-is — the caller is responsible for passing the configured
+            ``COLD_RUN_STAT_ROLLING_WINDOW``.
+
+        n_prior_rows : int | None
+            Global row index of ``readings[0]``.  ``None`` (default)
+            triggers legacy single-call behaviour where the window is
+            scaled for short files and positions 0..effective_window are
+            blanket-masked.  Any ``int`` (including 0) activates
+            **incremental mode**: the configured *window* is used
+            unchanged, and the mask uses the global row index
+            (``n_prior_rows + position < window``).
+
+            **Residual limitation (incremental mode):** a multi-chunk file
+            shorter than ``2 * window`` rows cannot know its final length
+            at the first portion, so it is scored with the full *window*
+            (fewer early hits) whereas the same file in ONE call uses the
+            halved window from ``_effective_rolling_window``.  Production
+            chunk size (≥ 5 000 rows) means exposure is nil.
+
+        scored_prefix : int
+            Number of leading rows in *readings* that were already scored
+            in a prior call.  They participate in streak computation (so a
+            run of ``min_consecutive`` candidates straddling a chunk
+            boundary is not severed) but are **not reported** as new hits.
+            Only meaningful in incremental mode (``n_prior_rows is not
+            None``); ignored otherwise.
+        """
+        if n_prior_rows is not None:
+            # -- incremental (portioned) mode ---------------------------------
+            # Use the configured window; no short-file scaling.
+            effective_window = window
+        else:
+            # -- legacy (single-call) mode ------------------------------------
+            effective_window = _effective_rolling_window(len(readings), window)
+
         if effective_window <= 0 or len(readings) <= effective_window:
             return []
 
@@ -214,6 +257,18 @@ class ColdRunStatisticalDetector:
                 (z_score_series >= self._z_min)
             )
 
+            # Mask positions whose rolling baseline in THIS array is incomplete.
+            # In both modes the first ``effective_window`` positions lack a
+            # full-length rolling window, so their z-scores would differ from
+            # the reference single-chunk computation and must not participate
+            # in candidate/streak evaluation.
+            #
+            # The *only* carry rows that participate in streaks live at
+            # positions ``effective_window`` .. ``scored_prefix - 1``.  With
+            # carry_len = window + min_consecutive - 1, there are exactly
+            # ``min_consecutive - 1`` such rows, and their rolling windows
+            # ARE full (≥ ``window`` values), matching the single-chunk
+            # baseline at the same global row index.
             is_anomaly_candidate.iloc[:effective_window] = False
 
             streak_series = is_anomaly_candidate.groupby((~is_anomaly_candidate).cumsum()).cumsum()
@@ -221,6 +276,10 @@ class ColdRunStatisticalDetector:
             anomaly_indices = streak_series[streak_series >= self._min_consecutive].index
 
             for idx in anomaly_indices:
+                # In incremental mode, skip carry rows (already scored).
+                if n_prior_rows is not None and idx < scored_prefix:
+                    continue
+
                 val = series.iloc[idx]
                 z_score = float(z_score_series.iloc[idx])
 

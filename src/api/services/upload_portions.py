@@ -27,6 +27,7 @@ from src.api.schemas.sensor_data import (
 from src.api.services.score_transform import canonical as _canonical_transform
 from src.config import (
     ANOMALY_SCALING_FACTOR,
+    COLD_RUN_STAT_MIN_CONSECUTIVE,
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
@@ -152,17 +153,41 @@ def _detect_stats_incremental(
 ) -> list[StatisticalAnomalyDetail]:
     """Rolling statistical detection over carry+portion, deduped across portions.
 
-    The carry keeps the last COLD_RUN_STAT_ROLLING_WINDOW raw rows so portion
-    boundaries do not blind the rolling baseline; hits already reported for a
-    (timestamp, column) pair are dropped.
+    The carry keeps the last ``COLD_RUN_STAT_ROLLING_WINDOW +
+    COLD_RUN_STAT_MIN_CONSECUTIVE - 1`` raw rows so that:
+
+    * the rolling baseline has enough history (``window`` rows), and
+    * a streak of ``min_consecutive`` candidates straddling a chunk
+      boundary is not severed (the extra ``min_consecutive - 1`` rows
+      preserve the tail of a streak started in the prior portion).
+
+    In incremental mode the configured ``COLD_RUN_STAT_ROLLING_WINDOW``
+    is always used as-is (no short-file scaling) and positions are
+    masked by **global** row index (rows with global index < window
+    can never fire), matching the reference single-chunk computation.
+
+    Hits already reported for a ``(timestamp, column)`` pair are dropped
+    via ``stat_carry.seen`` as a safety-net dedup.
     """
     if not raw_rows:
         return []
     detector = ColdRunStatisticalDetector()
     if stat_carry.columns is None:
         stat_carry.columns = detector._discover_columns(raw_rows)
-    rows = stat_carry.rows + raw_rows
-    hits = detector.detect_rolling(rows, columns=stat_carry.columns)
+
+    carry_rows = stat_carry.rows
+    rows = carry_rows + raw_rows
+
+    # Global row index of carry_rows[0] (or raw_rows[0] when no carry).
+    n_prior = max(0, stat_carry.total_rows - len(carry_rows))
+    scored_prefix = len(carry_rows)
+
+    hits = detector.detect_rolling(
+        rows,
+        columns=stat_carry.columns,
+        n_prior_rows=n_prior,
+        scored_prefix=scored_prefix,
+    )
 
     fresh: list[StatisticalAnomalyDetail] = []
     for hit in hits:
@@ -188,7 +213,10 @@ def _detect_stats_incremental(
     if hit_timestamps:
         _extract_psychro_context(rows, hit_timestamps, stat_carry)
 
-    stat_carry.rows = rows[-COLD_RUN_STAT_ROLLING_WINDOW:]
+    # Carry length: window (for rolling baseline) + min_consecutive - 1
+    # (for streak continuity across chunk boundaries).
+    carry_len = COLD_RUN_STAT_ROLLING_WINDOW + COLD_RUN_STAT_MIN_CONSECUTIVE - 1
+    stat_carry.rows = rows[-carry_len:]
     stat_carry.total_rows += len(raw_rows)
     return fresh
 

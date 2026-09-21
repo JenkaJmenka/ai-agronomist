@@ -204,6 +204,15 @@ class StuckCarry:
     exited a detected fault.  Used by the statistical detector to purge
     contaminated baseline values and by episode grouping to tag recovery
     alerts.
+
+    Serialisation
+    -------------
+    ``to_dict`` / ``from_dict`` produce a JSON-safe round-trip.  The async
+    upload path (RabbitMQ workers) embeds the carry state in each portion
+    message so workers can re-run detection independently — portions are
+    processed concurrently and may arrive out of order, so the carry must be
+    pre-computed by the sequential producer and shipped with each message
+    rather than threaded through the result store.
     """
 
     channels: dict[str, ChannelFreezeState] = field(default_factory=dict)
@@ -215,6 +224,120 @@ class StuckCarry:
     skip_channels: frozenset[str] = field(default_factory=frozenset)
     recovery_channels: dict[str, FaultWindow] = field(default_factory=dict)
     completed_faults: list[FaultWindow] = field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # Serialisation helpers (async upload path: carry travels in messages)
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-safe dict.
+
+        Round-trip contract:
+        - All ``datetime`` fields are stored as ISO-8601 strings with UTC
+          offset (``+00:00``), so ``fromisoformat`` reconstructs timezone-
+          aware objects unambiguously.
+        - ``emitted_onsets`` (``set[tuple[str, str]]``) is stored as a list
+          of 2-element lists; ``from_dict`` restores the set of tuples.
+        - ``skip_channels`` (``frozenset``) is stored as a list of strings.
+        """
+
+        def _dt_str(dt: datetime | None) -> str | None:
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+
+        def _freeze_state(s: ChannelFreezeState) -> dict[str, Any]:
+            return {
+                "frozen_value": s.frozen_value,
+                "onset_ts": s.onset_ts,
+                "onset_dt": _dt_str(s.onset_dt),
+                "last_ts": s.last_ts,
+                "last_dt": _dt_str(s.last_dt),
+                "sample_count": s.sample_count,
+            }
+
+        def _fault_window(fw: FaultWindow) -> dict[str, Any]:
+            return {
+                "channel": fw.channel,
+                "onset_ts": fw.onset_ts,
+                "onset_dt": _dt_str(fw.onset_dt),
+                "end_ts": fw.end_ts,
+                "end_dt": _dt_str(fw.end_dt),
+                "last_frozen_ts": fw.last_frozen_ts,
+                "last_frozen_dt": _dt_str(fw.last_frozen_dt),
+            }
+
+        return {
+            "channels": {ch: _freeze_state(s) for ch, s in self.channels.items()},
+            "chunk_medians": list(self.chunk_medians),
+            "last_timestamp_dt": _dt_str(self.last_timestamp_dt),
+            "is_cadence_flagged": self.is_cadence_flagged,
+            "cadence_median_seconds": self.cadence_median_seconds,
+            "emitted_onsets": [list(pair) for pair in self.emitted_onsets],
+            "skip_channels": list(self.skip_channels),
+            "recovery_channels": {
+                ch: _fault_window(fw) for ch, fw in self.recovery_channels.items()
+            },
+            "completed_faults": [_fault_window(fw) for fw in self.completed_faults],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StuckCarry":
+        """Deserialise from the dict produced by ``to_dict``.
+
+        Restores timezone-aware UTC datetimes, set-of-tuples for
+        ``emitted_onsets``, and ``frozenset`` for ``skip_channels``.
+        """
+
+        def _parse_dt(s: str | None) -> datetime | None:
+            if s is None:
+                return None
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        def _freeze_state(sd: dict[str, Any]) -> ChannelFreezeState:
+            return ChannelFreezeState(
+                frozen_value=float(sd["frozen_value"]),
+                onset_ts=sd["onset_ts"],
+                onset_dt=_parse_dt(sd["onset_dt"]),  # type: ignore[arg-type]
+                last_ts=sd["last_ts"],
+                last_dt=_parse_dt(sd["last_dt"]),  # type: ignore[arg-type]
+                sample_count=int(sd["sample_count"]),
+            )
+
+        def _fault_window(fd: dict[str, Any]) -> FaultWindow:
+            return FaultWindow(
+                channel=fd["channel"],
+                onset_ts=fd["onset_ts"],
+                onset_dt=_parse_dt(fd["onset_dt"]),  # type: ignore[arg-type]
+                end_ts=fd["end_ts"],
+                end_dt=_parse_dt(fd["end_dt"]),  # type: ignore[arg-type]
+                last_frozen_ts=fd.get("last_frozen_ts"),
+                last_frozen_dt=_parse_dt(fd.get("last_frozen_dt")),
+            )
+
+        return cls(
+            channels={
+                ch: _freeze_state(sd) for ch, sd in d.get("channels", {}).items()
+            },
+            chunk_medians=list(d.get("chunk_medians", [])),
+            last_timestamp_dt=_parse_dt(d.get("last_timestamp_dt")),
+            is_cadence_flagged=bool(d.get("is_cadence_flagged", False)),
+            cadence_median_seconds=d.get("cadence_median_seconds"),
+            emitted_onsets={tuple(pair) for pair in d.get("emitted_onsets", [])},  # type: ignore[misc]
+            skip_channels=frozenset(d.get("skip_channels", [])),
+            recovery_channels={
+                ch: _fault_window(fd)
+                for ch, fd in d.get("recovery_channels", {}).items()
+            },
+            completed_faults=[
+                _fault_window(fd) for fd in d.get("completed_faults", [])
+            ],
+        )
 
 
 class WallclockStuckDetector:
