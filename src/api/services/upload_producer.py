@@ -27,7 +27,11 @@ from src.config import (
 from src.db.jobs import create_job, get_job, set_total_portions, update_job
 from src.models.stuck_fault_detector import StuckCarry
 from src.mq.publisher import publish_json
-from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
+from src.mq.schemas import (
+    UPLOAD_PORTION_SCHEMA_VERSION,
+    UploadFinalizeMessage,
+    UploadPortionMessage,
+)
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE, UPLOAD_PORTIONS_QUEUE
 from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
 
@@ -173,6 +177,7 @@ async def produce_upload_portions(
             seq_len=seq_len,
             persist_data=persist_data,
             stuck_carry_state=carry_state_before,
+            schema_version=UPLOAD_PORTION_SCHEMA_VERSION,
         )
         await publish_json(UPLOAD_PORTIONS_QUEUE, message)
         portion_idx += 1

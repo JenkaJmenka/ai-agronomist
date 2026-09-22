@@ -75,8 +75,8 @@ def _make_full_carry() -> StuckCarry:
                 channel="humidity",
                 onset_ts="2026-12-14T00:00:00+00:00",
                 onset_dt=_utc(2026, 12, 14),
-                end_ts="2026-12-15T10:55:00+00:00",
-                end_dt=_utc(2026, 12, 15, 10, 55),
+                release_ts="2026-12-15T10:55:00+00:00",
+                release_dt=_utc(2026, 12, 15, 10, 55),
                 last_frozen_ts="2026-12-15T10:50:00+00:00",
                 last_frozen_dt=_utc(2026, 12, 15, 10, 50),
             )
@@ -86,10 +86,10 @@ def _make_full_carry() -> StuckCarry:
                 channel="humidity",
                 onset_ts="2026-12-14T00:00:00+00:00",
                 onset_dt=_utc(2026, 12, 14),
-                end_ts="2026-12-15T10:55:00+00:00",
-                end_dt=end_dt,
-                last_frozen_ts=None,
-                last_frozen_dt=None,
+                release_ts="2026-12-15T10:55:00+00:00",
+                release_dt=end_dt,
+                last_frozen_ts="2026-12-15T10:50:00+00:00",
+                last_frozen_dt=_utc(2026, 12, 15, 10, 50),
             )
         ],
     )
@@ -150,18 +150,14 @@ def _assert_carry_equal(original: StuckCarry, restored: StuckCarry) -> None:
 def _assert_fw_equal(ofw: FaultWindow, rfw: FaultWindow) -> None:
     assert ofw.channel == rfw.channel
     assert ofw.onset_ts == rfw.onset_ts
-    assert ofw.end_ts == rfw.end_ts
+    assert ofw.release_ts == rfw.release_ts
     assert ofw.last_frozen_ts == rfw.last_frozen_ts
     assert rfw.onset_dt.tzinfo is not None
     assert ofw.onset_dt == rfw.onset_dt
-    assert rfw.end_dt.tzinfo is not None
-    assert ofw.end_dt == rfw.end_dt
-    if ofw.last_frozen_dt is None:
-        assert rfw.last_frozen_dt is None
-    else:
-        assert rfw.last_frozen_dt is not None
-        assert rfw.last_frozen_dt.tzinfo is not None
-        assert ofw.last_frozen_dt == rfw.last_frozen_dt
+    assert rfw.release_dt.tzinfo is not None
+    assert ofw.release_dt == rfw.release_dt
+    assert rfw.last_frozen_dt.tzinfo is not None
+    assert ofw.last_frozen_dt == rfw.last_frozen_dt
 
 
 # ---------------------------------------------------------------------------
@@ -223,25 +219,30 @@ class TestStuckCarryRoundTrip:
         assert restored.channels["humidity"].onset_dt == dt
         assert restored.channels["humidity"].onset_dt.tzinfo is not None
 
-    def test_null_last_frozen_dt_preserved(self):
-        """FaultWindow.last_frozen_dt=None round-trips without raising."""
+    def test_fault_window_last_frozen_fields_required(self):
+        """FaultWindow.last_frozen_ts/dt are now required (non-Optional).
+
+        The detector always knows last_frozen at release time.  Verify
+        a populated FaultWindow round-trips with all three temporal
+        markers intact.
+        """
         carry = StuckCarry(
             completed_faults=[
                 FaultWindow(
                     channel="humidity",
                     onset_ts="2026-12-14T00:00:00+00:00",
                     onset_dt=_utc(2026, 12, 14),
-                    end_ts="2026-12-15T10:55:00+00:00",
-                    end_dt=_utc(2026, 12, 15, 10, 55),
-                    last_frozen_ts=None,
-                    last_frozen_dt=None,
+                    release_ts="2026-12-15T10:55:00+00:00",
+                    release_dt=_utc(2026, 12, 15, 10, 55),
+                    last_frozen_ts="2026-12-15T10:50:00+00:00",
+                    last_frozen_dt=_utc(2026, 12, 15, 10, 50),
                 )
             ]
         )
         restored = StuckCarry.from_dict(carry.to_dict())
         assert len(restored.completed_faults) == 1
-        assert restored.completed_faults[0].last_frozen_dt is None
-        assert restored.completed_faults[0].last_frozen_ts is None
+        assert restored.completed_faults[0].last_frozen_dt == _utc(2026, 12, 15, 10, 50)
+        assert restored.completed_faults[0].last_frozen_ts == "2026-12-15T10:50:00+00:00"
 
     def test_double_round_trip_is_stable(self):
         """Applying to_dict/from_dict twice must produce the same result."""
@@ -296,8 +297,8 @@ class TestStuckCarryRoundTrip:
                     channel="humidity",
                     onset_ts="2026-12-18T13:00:00+00:00",
                     onset_dt=_utc(2026, 12, 18, 13, 0),
-                    end_ts="2026-12-25T08:55:00+00:00",
-                    end_dt=_utc(2026, 12, 25, 8, 55),
+                    release_ts="2026-12-25T08:55:00+00:00",
+                    release_dt=_utc(2026, 12, 25, 8, 55),
                     last_frozen_ts="2026-12-25T08:50:00+00:00",
                     last_frozen_dt=_utc(2026, 12, 25, 8, 50),
                 ),
@@ -307,8 +308,8 @@ class TestStuckCarryRoundTrip:
                     channel="humidity",
                     onset_ts="2026-12-14T00:00:00+00:00",
                     onset_dt=_utc(2026, 12, 14),
-                    end_ts="2026-12-15T10:55:00+00:00",
-                    end_dt=_utc(2026, 12, 15, 10, 55),
+                    release_ts="2026-12-15T10:55:00+00:00",
+                    release_dt=_utc(2026, 12, 15, 10, 55),
                     last_frozen_ts="2026-12-15T10:50:00+00:00",
                     last_frozen_dt=_utc(2026, 12, 15, 10, 50),
                 ),
@@ -316,8 +317,8 @@ class TestStuckCarryRoundTrip:
                     channel="humidity",
                     onset_ts="2026-12-15T11:05:00+00:00",
                     onset_dt=_utc(2026, 12, 15, 11, 5),
-                    end_ts="2026-12-16T09:15:00+00:00",
-                    end_dt=_utc(2026, 12, 16, 9, 15),
+                    release_ts="2026-12-16T09:15:00+00:00",
+                    release_dt=_utc(2026, 12, 16, 9, 15),
                     last_frozen_ts="2026-12-16T09:10:00+00:00",
                     last_frozen_dt=_utc(2026, 12, 16, 9, 10),
                 ),
@@ -325,8 +326,8 @@ class TestStuckCarryRoundTrip:
                     channel="humidity",
                     onset_ts="2026-12-16T11:20:00+00:00",
                     onset_dt=_utc(2026, 12, 16, 11, 20),
-                    end_ts="2026-12-18T11:20:00+00:00",
-                    end_dt=_utc(2026, 12, 18, 11, 20),
+                    release_ts="2026-12-18T11:20:00+00:00",
+                    release_dt=_utc(2026, 12, 18, 11, 20),
                     last_frozen_ts="2026-12-18T11:15:00+00:00",
                     last_frozen_dt=_utc(2026, 12, 18, 11, 15),
                 ),
@@ -334,8 +335,8 @@ class TestStuckCarryRoundTrip:
                     channel="humidity",
                     onset_ts="2026-12-18T13:00:00+00:00",
                     onset_dt=_utc(2026, 12, 18, 13, 0),
-                    end_ts="2026-12-25T08:55:00+00:00",
-                    end_dt=_utc(2026, 12, 25, 8, 55),
+                    release_ts="2026-12-25T08:55:00+00:00",
+                    release_dt=_utc(2026, 12, 25, 8, 55),
                     last_frozen_ts="2026-12-25T08:50:00+00:00",
                     last_frozen_dt=_utc(2026, 12, 25, 8, 50),
                 ),

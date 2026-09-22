@@ -172,22 +172,38 @@ class ChannelFreezeState:
 class FaultWindow:
     """Recorded fault period for post-fault baseline cleanup.
 
-    ``end_ts`` / ``end_dt`` point to the first **non-frozen** sample
-    (the release point) — used for recovery-window and baseline-purge
-    calculations.
+    Three temporal markers per fault:
 
-    ``last_frozen_ts`` / ``last_frozen_dt`` point to the last sample
-    that was still at the frozen value — used for accurate frozen-span
-    duration (onset → last frozen sample).
+    ``onset_ts`` / ``onset_dt``
+        First frozen sample — the beginning of the fault.
+
+    ``last_frozen_ts`` / ``last_frozen_dt``
+        Last sample that was still at the frozen value.  Required
+        (always known by the detector at release time).  Baseline
+        exclusion uses ``[onset_ts, last_frozen_ts]``.
+
+    ``release_ts`` / ``release_dt``
+        First **non-frozen** sample after the freeze ended — the
+        release point.  Alert suppression uses
+        ``[onset_ts, release_ts + N]``.
+
+    ``end_ts`` is deliberately **not** a FaultWindow field.
+    ``anomaly_episodes.end_ts`` (Task 3) equals ``last_frozen_ts``
+    — the last sample inside the fault, not the release.
+
+    The serialised carry format (``to_dict`` / ``from_dict``) uses
+    ``release_ts`` / ``release_dt`` as keys.  No legacy-key alias is
+    maintained: the serialised carry exists only on this unmerged
+    branch and was never deployed.
     """
 
     channel: str
     onset_ts: str
     onset_dt: datetime
-    end_ts: str
-    end_dt: datetime
-    last_frozen_ts: str | None = None
-    last_frozen_dt: datetime | None = None
+    release_ts: str
+    release_dt: datetime
+    last_frozen_ts: str
+    last_frozen_dt: datetime
 
 
 @dataclass
@@ -263,8 +279,8 @@ class StuckCarry:
                 "channel": fw.channel,
                 "onset_ts": fw.onset_ts,
                 "onset_dt": _dt_str(fw.onset_dt),
-                "end_ts": fw.end_ts,
-                "end_dt": _dt_str(fw.end_dt),
+                "release_ts": fw.release_ts,
+                "release_dt": _dt_str(fw.release_dt),
                 "last_frozen_ts": fw.last_frozen_ts,
                 "last_frozen_dt": _dt_str(fw.last_frozen_dt),
             }
@@ -314,10 +330,10 @@ class StuckCarry:
                 channel=fd["channel"],
                 onset_ts=fd["onset_ts"],
                 onset_dt=_parse_dt(fd["onset_dt"]),  # type: ignore[arg-type]
-                end_ts=fd["end_ts"],
-                end_dt=_parse_dt(fd["end_dt"]),  # type: ignore[arg-type]
-                last_frozen_ts=fd.get("last_frozen_ts"),
-                last_frozen_dt=_parse_dt(fd.get("last_frozen_dt")),
+                release_ts=fd["release_ts"],
+                release_dt=_parse_dt(fd["release_dt"]),  # type: ignore[arg-type]
+                last_frozen_ts=fd["last_frozen_ts"],
+                last_frozen_dt=_parse_dt(fd["last_frozen_dt"]),  # type: ignore[arg-type]
             )
 
         return cls(
@@ -462,8 +478,8 @@ class WallclockStuckDetector:
                             channel=channel,
                             onset_ts=state.onset_ts,
                             onset_dt=state.onset_dt,
-                            end_ts=ts_iso,
-                            end_dt=row_dt,
+                            release_ts=ts_iso,
+                            release_dt=row_dt,
                             last_frozen_ts=state.last_ts,
                             last_frozen_dt=state.last_dt,
                         )

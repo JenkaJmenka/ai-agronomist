@@ -176,6 +176,7 @@ Do them in this order. The dependencies are real, not bureaucratic.
 | 3 | Recalibrate two broken detectors | `STEP-3-recalibrate-detectors.md` | **Step 2** |
 | 4 | Add the new detectors to uploads | `STEP-4-detector-fanout.md` | **Step 3** |
 | 5 | One incident per event, not per row | `STEP-5-episode-incidents.md` | Step 4 |
+| — | **Deploy mixed-version safety** | `deploy.md` | before any production deploy |
 
 Each runbook names the agent prompt it uses; all five live in
 `docs/runbooks/prompts/`. The runbook is for you; the prompt is for the agent.

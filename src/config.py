@@ -261,6 +261,18 @@ COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", F
 # Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
 # "anomalous" starts.
 COLD_RUN_ROBUST_GATE_Z: float = float(os.environ.get("COLD_RUN_ROBUST_GATE_Z", "5.5"))
+# Hours after FaultWindow.release_ts (first non-frozen sample) during which
+# statistical hits on the faulted channel are suppressed.  Distinct from
+# baseline exclusion, which ends at last_frozen_ts.
+#
+# Rationale: after a stuck fault releases, the rolling baseline
+# (window=288, min_periods=72) needs 72 valid samples to produce a non-NaN
+# rolling mean.  At the fixture's 5-min cadence, 72 samples ≈ 6.0 h wall-
+# clock.  Measured on the Dec stuck-fault fixture: 73 valid samples / 6.08 h
+# for the last release (12-25 08:55 → first non-NaN at 15:00).  N = 6 h
+# covers the measured blind time within one sample.
+COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS: float = 6.0
+
 # Rolling-window statistical detection (5-min data → 288 = 24 h).
 COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
