@@ -2,6 +2,28 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Task 1f Phase 3 — Async/sync parity + psychro_context merge-warning coverage — DONE (2026-09-23)
+
+**Goal:** Close two real coverage gaps: (1) full CHUNK_SIZES async-vs-sync statistical hit SET parity on both fixtures, (2) unit + integration tests for `_merge_psychro_contexts` duplicate-timestamp handling (warning on differing values, silence on identical values).
+
+**Files written (tests/ only, no src/ changes):**
+- `tests/workers/test_stat_chunk_invariance.py`: Added `TestAsyncParityFullChunkSizes` class (5 parametrized tests across CHUNK_SIZES=[50, 288, 500, 5000, 10^7]) on FIXTURE_A.
+- `tests/workers/test_baseline_exclusion.py`: Added `TestAsyncSyncStatHitSetParity` class (5 parametrized tests across same CHUNK_SIZES) on SYNTH_FIXTURE + `_sync_cache_synth` helper.
+- `tests/workers/test_merge_psychro_contexts.py`: NEW file — 11 tests in 3 classes (`TestIdenticalDuplicates`, `TestDifferingDuplicates`, `TestNaturalPsychroContextDuplicates`).
+
+**Results:**
+- FIXTURE_A: 102 stat hits sync == 102 async at all 5 chunk sizes.
+- SYNTH: 11 stat hits sync == 11 async at all 5 chunk sizes.
+- chunk_size=10^7 (single portion) works without error on both fixtures.
+- Identical duplicates: merged once, zero warnings.
+- Differing duplicates: exactly 1 WARNING logged per mismatch with correct message format, lowest portion_idx value kept, no exception.
+- Out-of-order input: first-seen wins (function trusts caller's ascending-sort contract).
+- Natural overlaps in both fixtures: always identical (zero DIFFERING warnings).
+
+**Regression:** 287 passed, 2 xfailed (subset run). Zero regressions vs baseline.
+
+**Report:** `tasks/task1f_phase3_qa_report.md`
+
 ## Deploy-Compatibility Tests (schema_version) — DONE (2026-09-22)
 
 **Goal:** Pin the schema_version deploy-compatibility behaviour as permanent tests (Step 2 item 4 of the merge gate). Evidence from `tasks/task1f_backend_report.md` sections C/D was measured ad-hoc; these tests make it permanent.

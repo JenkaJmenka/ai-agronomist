@@ -330,6 +330,55 @@ class TestExclusionOn:
 
 
 # =========================================================================
+# 1b. Full async-vs-sync statistical hit SET parity (Gap 1, task 1f phase 3)
+# =========================================================================
+
+
+_sync_cache_synth: dict[int, Any] = {}
+
+
+async def _run_sync_cached_synth(chunk_size: int) -> Any:
+    """Run sync cold_run_upload on SYNTH_FIXTURE, caching by chunk_size."""
+    if chunk_size in _sync_cache_synth:
+        return _sync_cache_synth[chunk_size]
+    resp = await _run_sync(SYNTH_FIXTURE, chunk_size)
+    _sync_cache_synth[chunk_size] = resp
+    return resp
+
+
+class TestAsyncSyncStatHitSetParity:
+    """Full statistical hit SET (all columns) must be identical between sync
+    and async at all five chunk sizes on the synthetic fixture.
+
+    Gap 1 coverage: the original TestExclusionOn.test_async_zero_humidity_hits
+    only checked the humidity hit COUNT at portion_rows=[50, 500].  This class
+    asserts the FULL canonical hit set (timestamp, column, z_score) matches
+    sync at every chunk size.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk{c}")
+    async def test_stat_hit_set_match_sync_synth(self, chunk_size: int):
+        """Async stat hit set equals sync at every chunk size on SYNTH_FIXTURE."""
+        sync_resp = await _run_sync_cached_synth(chunk_size)
+        async_result, _ = await _run_async_pipeline(SYNTH_FIXTURE, chunk_size)
+
+        sync_hits = _stat_hit_set(sync_resp)
+        async_hits = _stat_hit_set(async_result)
+
+        assert async_hits == sync_hits, (
+            f"chunk_size={chunk_size}: async stat hits diverge from sync.\n"
+            f"Only in sync: {sync_hits - async_hits}\n"
+            f"Only in async: {async_hits - sync_hits}"
+        )
+        # Record counts for the report
+        print(
+            f"\n[SYNTH chunk_size={chunk_size}] "
+            f"sync={len(sync_hits)} async={len(async_hits)}"
+        )
+
+
+# =========================================================================
 # 2. Exclusion OFF: humidity hits DO appear
 # =========================================================================
 

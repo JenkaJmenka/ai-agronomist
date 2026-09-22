@@ -426,3 +426,41 @@ class TestAsyncParity:
             if h.get("detector") == "statistical"
         }
         assert len(async_stat) == EXPECTED_STAT_TOTAL
+
+
+# =========================================================================
+# e2. Async parity — full CHUNK_SIZES (Gap 1, task 1f phase 3)
+# =========================================================================
+
+
+class TestAsyncParityFullChunkSizes:
+    """Async statistical hit SETS equal sync across ALL five chunk sizes.
+
+    Gap 1 coverage: the original TestAsyncParity only tested portion_rows=50
+    and portion_rows=500.  This class parametrizes over the full
+    CHUNK_SIZES = [50, 288, 500, 5000, 10**7] on FIXTURE_A
+    (native_dec_stuck_fault.csv).  chunk_size=10**7 means a single portion
+    in the async pipeline — the producer should still work correctly with
+    one giant portion.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk{c}")
+    async def test_stat_hit_set_match_sync_all_sizes(self, chunk_size: int):
+        """Async stat hit set equals sync at every chunk size in CHUNK_SIZES."""
+        sync_resp = await _run_sync_cached(FIXTURE_A, chunk_size)
+        async_result, _ = await _run_async_pipeline(FIXTURE_A, chunk_size)
+
+        sync_hits = _stat_hit_set(sync_resp)
+        async_hits = _stat_hit_set(async_result)
+
+        assert async_hits == sync_hits, (
+            f"chunk_size={chunk_size}: async stat hits diverge from sync.\n"
+            f"Only in sync: {sync_hits - async_hits}\n"
+            f"Only in async: {async_hits - sync_hits}"
+        )
+        # Record counts for the report
+        print(
+            f"\n[FIXTURE_A chunk_size={chunk_size}] "
+            f"sync={len(sync_hits)} async={len(async_hits)}"
+        )
