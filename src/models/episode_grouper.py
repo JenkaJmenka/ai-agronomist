@@ -205,10 +205,9 @@ def _stuck_fault_duration(
     fw = fault_index.get(fw_key)
 
     if fw is not None:
-        # Use the last frozen sample, not the first non-frozen sample
-        # (release point).  end_dt is one sampling interval past the
-        # actual frozen span; last_frozen_dt is the correct boundary.
-        boundary_dt = fw.last_frozen_dt if fw.last_frozen_dt is not None else fw.end_dt
+        # Use the last frozen sample, not the release (first non-frozen)
+        # sample.  last_frozen_dt is the correct boundary for the frozen span.
+        boundary_dt = fw.last_frozen_dt
         full_duration = (boundary_dt - fw.onset_dt).total_seconds()
         return full_duration, False
 
@@ -263,7 +262,7 @@ def _flush_group(
         fw = recovery_channels[actual_channel]
         _RECOVERY_WINDOW_HOURS = 4.0
         try:
-            fault_end_dt = _parse_iso(fw.end_ts)
+            fault_end_dt = _parse_iso(fw.release_ts)
             gap_hours = (
                 (start_dt - fault_end_dt).total_seconds() / 3600.0
             )

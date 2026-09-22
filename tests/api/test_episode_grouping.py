@@ -194,13 +194,31 @@ class TestFixtureAEpisodes:
             f"got {len(humidity_stuck)}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "follow-up task: repurpose is_recovery as cross-channel tagging "
+            "— faulted-channel recovery episodes can no longer occur because "
+            "the 6 h post-release suppression window exceeds the 4 h recovery "
+            "window"
+        ),
+    )
     def test_stuck_fault_outranks_recovery(self):
         """The stuck fault episode (score=1.0) outranks recovery."""
         humidity_stuck = [
             e for e in self.stuck_episodes if e.channel == "humidity"
         ]
-        if not humidity_stuck or not self.humidity_recovery:
-            pytest.skip("Missing stuck or recovery episodes")
+        # Precondition: both stuck and recovery episodes must exist.
+        # If neither exists the test MUST fail (not skip silently).
+        assert humidity_stuck, (
+            "No humidity stuck_fault episodes found — precondition failed"
+        )
+        assert self.humidity_recovery, (
+            "No humidity recovery episodes found — the 6 h post-release "
+            "suppression window (COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS) "
+            "exceeds the 4 h recovery window (RECOVERY_KNOCKON_WINDOW_HOURS), "
+            "so humidity recovery episodes can no longer occur"
+        )
         stuck_peak = max(e.peak_score for e in humidity_stuck)
         recovery_peak = max(
             (e.peak_score for e in self.humidity_recovery),

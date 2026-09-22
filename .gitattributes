@@ -1,0 +1,24 @@
+# .gitattributes — line-ending policy for AI Agronomist
+# Stops the "LF will be replaced by CRLF" warnings on Windows and ensures
+# shell scripts and Dockerfiles always have LF endings on checkout.
+
+# Default: let Git normalise text files automatically.
+# Files with LF in the index (the whole repo as of 2026-09-21) stay LF.
+* text=auto
+
+# ── Explicit LF-only ──────────────────────────────────────────────────────────
+# These must have LF on all platforms; CRLF breaks shebangs and bash execution.
+*.sh        text eol=lf
+Dockerfile* text eol=lf
+*.py        text eol=lf
+
+# ── Binary files ──────────────────────────────────────────────────────────────
+# Mark explicitly so text=auto never tries to normalise them.
+*.pt        binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.db        binary

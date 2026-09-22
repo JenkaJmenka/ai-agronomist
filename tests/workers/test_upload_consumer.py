@@ -214,7 +214,11 @@ async def test_statistical_anomalies_survive_portioning(session):
     from src.api.services.cold_run_upload import run_cold_run_upload
     from src.vendors.csv_adapter import CSVAdapter
 
-    csv_content = _csv_content(fault_at=70)
+    # rows=600 / fault_at=350: the file must be long enough for the
+    # incremental carry to reach window-size (288) before the fault, and
+    # the fault must sit beyond the window mask so it appears in both
+    # sync and portioned paths.
+    csv_content = _csv_content(rows=600, fault_at=350)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
         tmp.write(csv_content)
@@ -287,8 +291,8 @@ async def test_async_finalize_persists_trigger_channel(session):
     trigger_channel / trigger_detector / detected_severity even when a
     statistical anomaly was the triggering event.  This test ensures parity.
     """
-    # Use a fault-at-70 CSV so the statistical detector fires on temperature.
-    csv_content = _csv_content(fault_at=70)
+    # rows=600 / fault_at=350: see test_statistical_anomalies_survive_portioning.
+    csv_content = _csv_content(rows=600, fault_at=350)
     job_id, messages = await _produce_messages(session, csv_content, portion_rows=50)
 
     finalize_msgs = await _consume_all(session, messages, _mock_detector())
@@ -332,7 +336,7 @@ async def test_finalize_retries_after_a_failed_write(session):
     error while its anomaly scores were silently never written.
     """
     job_id, messages = await _produce_messages(
-        session, _csv_content(fault_at=70), portion_rows=50
+        session, _csv_content(rows=600, fault_at=350), portion_rows=50
     )
     finalize_msgs = await _consume_all(session, messages, _mock_detector())
     assert len(finalize_msgs) == 1
@@ -398,7 +402,7 @@ async def test_stored_scores_are_canonical_not_double_transformed(session):
     `threshold_used` been high.
     """
     job_id, messages = await _produce_messages(
-        session, _csv_content(fault_at=70), portion_rows=50
+        session, _csv_content(rows=600, fault_at=350), portion_rows=50
     )
     finalize_msgs = await _consume_all(session, messages, _mock_detector())
     await handle_upload_finalize(finalize_msgs[0], session)

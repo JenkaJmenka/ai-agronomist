@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,8 @@ from src.api.schemas.sensor_data import (
 from src.api.services.score_transform import canonical as _canonical_transform
 from src.config import (
     ANOMALY_SCALING_FACTOR,
+    COLD_RUN_STAT_MIN_CONSECUTIVE,
+    COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS,
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
@@ -41,9 +44,28 @@ from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
 from src.models.episode_grouper import group_alerts_into_episodes
 from src.models.stuck_fault_detector import (
+    FaultWindow,
     StuckCarry,
     WallclockStuckDetector,
 )
+
+# ---------------------------------------------------------------------------
+# Exact canonical column names for the air-temperature and relative-humidity
+# sensors as produced by csv_adapter.parse_raw_rows (via _RAW_COLUMN_ALIASES
+# and _canonicalize_raw_column).  These match REQUIRED_SENSOR_COLS[0] and [1]
+# in src/vendors/csv_adapter.py.
+#
+# These are the ONLY columns that participate in:
+#   - Psychrometric pair suppression (_suppress_psychrometric_pairs)
+#   - Alert suppression window matching (_suppress_fault_window_hits)
+#   - Baseline exclusion matching (_exclude_faults_from_baseline)
+#
+# Other temperature-like columns (measured_plant_temp, outdoor_temp, pipe
+# temps) are NOT air-temperature partners and are never matched by these
+# constants.
+# ---------------------------------------------------------------------------
+AIR_TEMPERATURE_COLUMN: str = "temperature"
+RELATIVE_HUMIDITY_COLUMN: str = "humidity"
 
 
 def _stat_z_to_canonical(z_score: float) -> float:
@@ -152,17 +174,41 @@ def _detect_stats_incremental(
 ) -> list[StatisticalAnomalyDetail]:
     """Rolling statistical detection over carry+portion, deduped across portions.
 
-    The carry keeps the last COLD_RUN_STAT_ROLLING_WINDOW raw rows so portion
-    boundaries do not blind the rolling baseline; hits already reported for a
-    (timestamp, column) pair are dropped.
+    The carry keeps the last ``COLD_RUN_STAT_ROLLING_WINDOW +
+    COLD_RUN_STAT_MIN_CONSECUTIVE - 1`` raw rows so that:
+
+    * the rolling baseline has enough history (``window`` rows), and
+    * a streak of ``min_consecutive`` candidates straddling a chunk
+      boundary is not severed (the extra ``min_consecutive - 1`` rows
+      preserve the tail of a streak started in the prior portion).
+
+    In incremental mode the configured ``COLD_RUN_STAT_ROLLING_WINDOW``
+    is always used as-is (no short-file scaling) and positions are
+    masked by **global** row index (rows with global index < window
+    can never fire), matching the reference single-chunk computation.
+
+    Hits already reported for a ``(timestamp, column)`` pair are dropped
+    via ``stat_carry.seen`` as a safety-net dedup.
     """
     if not raw_rows:
         return []
     detector = ColdRunStatisticalDetector()
     if stat_carry.columns is None:
         stat_carry.columns = detector._discover_columns(raw_rows)
-    rows = stat_carry.rows + raw_rows
-    hits = detector.detect_rolling(rows, columns=stat_carry.columns)
+
+    carry_rows = stat_carry.rows
+    rows = carry_rows + raw_rows
+
+    # Global row index of carry_rows[0] (or raw_rows[0] when no carry).
+    n_prior = max(0, stat_carry.total_rows - len(carry_rows))
+    scored_prefix = len(carry_rows)
+
+    hits = detector.detect_rolling(
+        rows,
+        columns=stat_carry.columns,
+        n_prior_rows=n_prior,
+        scored_prefix=scored_prefix,
+    )
 
     fresh: list[StatisticalAnomalyDetail] = []
     for hit in hits:
@@ -188,7 +234,10 @@ def _detect_stats_incremental(
     if hit_timestamps:
         _extract_psychro_context(rows, hit_timestamps, stat_carry)
 
-    stat_carry.rows = rows[-COLD_RUN_STAT_ROLLING_WINDOW:]
+    # Carry length: window (for rolling baseline) + min_consecutive - 1
+    # (for streak continuity across chunk boundaries).
+    carry_len = COLD_RUN_STAT_ROLLING_WINDOW + COLD_RUN_STAT_MIN_CONSECUTIVE - 1
+    stat_carry.rows = rows[-carry_len:]
     stat_carry.total_rows += len(raw_rows)
     return fresh
 
@@ -222,14 +271,30 @@ def _extract_psychro_context(
             stat_carry.psychro_context[ts] = (t_f, rh_f, hd_f)
 
 
-def _is_temp_stat_column(col: str) -> bool:
-    """True for temperature-family columns in statistical alerts."""
-    return "temp" in col.lower()
+def _is_air_temp_stat_column(col: str) -> bool:
+    """True when *col* is the exact canonical air-temperature column.
+
+    Only the ``"temperature"`` column — the greenhouse/compartment
+    air-temperature sensor as canonicalised by
+    ``csv_adapter.parse_raw_rows`` — is a psychrometric partner.
+
+    Other temperature-like columns (``measured_plant_temp``,
+    ``outdoor_temp``, pipe temps, ``calculated_heating_temp``) are
+    NOT air-temperature partners and return ``False``.
+    """
+    return col == AIR_TEMPERATURE_COLUMN
 
 
 def _is_humidity_stat_column(col: str) -> bool:
-    """True for relative-humidity columns (not humidity deficit / measured_hd)."""
-    return "humid" in col.lower()
+    """True when *col* is the exact canonical relative-humidity column.
+
+    Only the ``"humidity"`` column — the RH sensor as canonicalised by
+    ``csv_adapter.parse_raw_rows`` — is a psychrometric partner.
+
+    Humidity deficit (``measured_hd``) is a derived quantity and returns
+    ``False``.
+    """
+    return col == RELATIVE_HUMIDITY_COLUMN
 
 
 def _suppress_psychrometric_pairs(
@@ -260,7 +325,7 @@ def _suppress_psychrometric_pairs(
     inconsistent_extras: list[StatisticalAnomalyDetail] = []
 
     for ts, details in by_ts.items():
-        has_temp = any(_is_temp_stat_column(d.column) for d in details)
+        has_temp = any(_is_air_temp_stat_column(d.column) for d in details)
         has_humid = any(_is_humidity_stat_column(d.column) for d in details)
         if not (has_temp and has_humid):
             continue
@@ -299,31 +364,191 @@ def _suppress_psychrometric_pairs(
         d for d in stat_details
         if not (
             d.timestamp in suppressed_ts
-            and (_is_temp_stat_column(d.column) or _is_humidity_stat_column(d.column))
+            and (_is_air_temp_stat_column(d.column) or _is_humidity_stat_column(d.column))
         )
     ]
     result.extend(inconsistent_extras)
     return result
 
 
-def _purge_fault_from_stat_carry(
-    stat_carry: StatCarry,
-    channel: str,
-    onset_ts: str,
-    end_ts: str,
-) -> None:
-    """NaN-out a channel's values in stat_carry.rows for the fault period.
+def _parse_iso_utc(ts: str) -> datetime:
+    """Parse an ISO timestamp to a timezone-aware UTC datetime.
 
-    This prevents the rolling baseline from being contaminated by the
-    frozen values.  After purge, the rolling detector builds its
-    baseline from pre-fault data and the z-scores after recovery are
-    computed against a clean baseline (Task 3 — address the baseline,
-    not only the emission).
+    Handles both tz-aware strings ("2026-12-14T00:00:00+00:00") and
+    naive strings ("2026-12-14T00:00:00") — the latter is treated as UTC.
     """
-    for row in stat_carry.rows:
-        row_ts = row.get("timestamp", "")
-        if onset_ts <= row_ts <= end_ts and channel in row:
-            row[channel] = float("nan")
+    from datetime import datetime as _dt, timezone as _tz
+    dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_tz.utc)
+    return dt.astimezone(_tz.utc)
+
+
+def _suppress_fault_window_hits(
+    stat_details: list[StatisticalAnomalyDetail],
+    stuck_carry: StuckCarry | None,
+) -> list[StatisticalAnomalyDetail]:
+    """Suppress statistical hits on faulted channels within suppression windows.
+
+    Two rules, side by side:
+
+    **Alert suppression** (this function):
+        Window ``[onset_ts, release_ts + N]`` where
+        ``N = COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS`` (6 h).
+        Statistical hits on the FAULTED CHANNEL ONLY are dropped.
+        For an open freeze that crossed the gate (no release yet),
+        the window is ``[onset_ts, +inf)``.
+        Applied BEFORE pair suppression.
+
+    **Baseline exclusion** (separate, applied per-portion in score_portion):
+        Window ``[onset_ts, last_frozen_ts]``.
+        Frozen values on the faulted channel are NaN-ed before rolling
+        statistics are computed.  The release sample is a genuine reading
+        and stays in the baseline.
+
+    Channel matching is by **exact column name** — a hit is suppressed
+    only when ``hit.column`` equals the stuck-detector's channel name
+    (e.g. ``"humidity"``).  Other columns that map to the same sensor
+    *slot* in the dashboard enricher (e.g. ``measured_plant_temp`` for
+    ``"temperature"``) are NOT suppressed.
+    """
+    if stuck_carry is None:
+        return stat_details
+    from datetime import timedelta
+
+    suppress_hours = COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS
+
+    # Build suppression windows from completed faults + open emitted faults.
+    # Each window: (canonical_channel, onset_dt, end_dt)
+    windows: list[tuple[str, datetime, datetime | None]] = []
+
+    # Completed faults: [onset_dt, release_dt + N]
+    for fw in stuck_carry.completed_faults:
+        suppress_end = fw.release_dt + timedelta(hours=suppress_hours)
+        windows.append((fw.channel, fw.onset_dt, suppress_end))
+
+    # Open emitted faults: [onset_dt, +inf)
+    for ch, state in stuck_carry.channels.items():
+        key = (ch, state.onset_ts)
+        if key in stuck_carry.emitted_onsets:
+            # Check this isn't already in completed_faults
+            already_completed = any(
+                fw.channel == ch and fw.onset_ts == state.onset_ts
+                for fw in stuck_carry.completed_faults
+            )
+            if not already_completed:
+                windows.append((ch, state.onset_dt, None))  # None = +inf
+
+    if not windows:
+        return stat_details
+
+    result: list[StatisticalAnomalyDetail] = []
+    for hit in stat_details:
+        # Parse hit timestamp (stat rows carry naive ISO strings)
+        try:
+            hit_dt = _parse_iso_utc(hit.timestamp)
+        except (ValueError, AttributeError):
+            result.append(hit)
+            continue
+
+        suppressed = False
+        for fault_ch, onset_dt, end_dt in windows:
+            # Exact column match — only the specific faulted channel
+            # is suppressed, not other columns in the same sensor slot.
+            if hit.column != fault_ch:
+                continue
+            if hit_dt < onset_dt:
+                continue
+            if end_dt is None or hit_dt <= end_dt:
+                suppressed = True
+                break
+
+        if not suppressed:
+            result.append(hit)
+
+    return result
+
+
+def _exclude_faults_from_baseline(
+    raw_rows: list[dict[str, Any]],
+    stat_carry: StatCarry,
+    stuck_carry: StuckCarry,
+) -> list[dict[str, Any]]:
+    """NaN-out faulted-channel values in the baseline window for statistical detection.
+
+    **Baseline exclusion rule** (timestamp-driven, per Addendum 2):
+        For any freeze that CROSSED THE GATE (its ``(channel, onset_ts)``
+        is in ``stuck_carry.emitted_onsets``), set the faulted channel's
+        values to NaN inside ``[onset_ts, last_frozen_ts]``.
+
+        For a still-open freeze that crossed the gate:
+        ``[onset_ts, +inf)``.
+
+        A freeze that never crossed the gate creates NO exclusion.
+
+    Both the current portion's rows AND the carried rows
+    (``stat_carry.rows``) are cleaned.  The stat carry is cleaned
+    in-place (internal state), but raw_rows are COPIED so persisted
+    raw readings are never corrupted.
+
+    Channel matching is by **exact column name** — only the specific
+    column flagged by the stuck detector is NaN-ed, not other columns
+    in the same sensor slot.
+
+    Returns cleaned copies of raw_rows.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    # Build exclusion windows: (exact_column_name, onset_dt, end_dt_or_None)
+    windows: list[tuple[str, datetime, datetime | None]] = []
+
+    # Completed faults that crossed the gate
+    for fw in stuck_carry.completed_faults:
+        windows.append((fw.channel, fw.onset_dt, fw.last_frozen_dt))
+
+    # Open emitted faults that crossed the gate
+    for ch, state in stuck_carry.channels.items():
+        key = (ch, state.onset_ts)
+        if key in stuck_carry.emitted_onsets:
+            already_completed = any(
+                fw.channel == ch and fw.onset_ts == state.onset_ts
+                for fw in stuck_carry.completed_faults
+            )
+            if not already_completed:
+                windows.append((ch, state.onset_dt, None))  # +inf
+
+    if not windows:
+        return raw_rows
+
+    def _clean_rows(rows: list[dict[str, Any]], *, copy: bool) -> list[dict[str, Any]]:
+        """Apply exclusion windows to a list of rows.
+
+        Each row's timestamp is parsed ONCE.  For each window, the
+        exact faulted column is checked directly (no slot lookup).
+        """
+        out = [dict(r) for r in rows] if copy else rows
+        for row in out:
+            ts_str = row.get("timestamp", "")
+            try:
+                row_dt = _parse_iso_utc(ts_str)
+            except (ValueError, AttributeError):
+                continue
+            for fault_ch, onset_dt, end_dt in windows:
+                # Exact column match — only the specific faulted column
+                if fault_ch not in row:
+                    continue
+                if row_dt < onset_dt:
+                    continue
+                if end_dt is None or row_dt <= end_dt:
+                    row[fault_ch] = float("nan")
+        return out
+
+    # Clean stat_carry.rows IN PLACE (internal state, not persisted)
+    if stat_carry.rows:
+        _clean_rows(stat_carry.rows, copy=False)
+
+    # Clean raw_rows as COPIES (persisted after scoring in async path)
+    return _clean_rows(raw_rows, copy=True)
 
 
 def score_portion(
@@ -349,21 +574,21 @@ def score_portion(
     """
     result = PortionScores(rows_processed=len(raw_rows))
 
-    # Run stuck detection FIRST so we know which channels just
-    # exited a fault before the statistical detector runs.
+    # Run stuck detection FIRST (load-bearing order: stuck windows must
+    # be known before baseline exclusion and statistical detection).
     if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
         raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
         result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
 
-        # Task 3 baseline cleanup: purge fault-period values from
-        # stat_carry so the rolling z-score baseline is not contaminated
-        # by frozen readings.
-        for ch, fw in stuck_carry.recovery_channels.items():
-            _purge_fault_from_stat_carry(
-                stat_carry, ch, fw.onset_ts, fw.end_ts,
-            )
+    # Baseline exclusion: NaN-out faulted-channel values in [onset, last_frozen]
+    # (or [onset, +inf) for open emitted faults) so the rolling baseline is
+    # not contaminated by frozen readings.  Applied to both stat_carry.rows
+    # (internal) and raw_rows (copied, not in-place).
+    stat_raw_rows = raw_rows
+    if stuck_carry is not None:
+        stat_raw_rows = _exclude_faults_from_baseline(raw_rows, stat_carry, stuck_carry)
 
-    result.stat_hits = _detect_stats_incremental(raw_rows, stat_carry)
+    result.stat_hits = _detect_stats_incremental(stat_raw_rows, stat_carry)
 
     if normalized_df is None or normalized_df.empty:
         return result, prev_overlap_df
@@ -439,9 +664,17 @@ def finalize_scores(
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
 
-    # Psychrometric suppression: suppress paired temperature + humidity
-    # statistical alerts when measured HD confirms the pairing is expected
-    # physics (cooling air → rising RH).  Inconsistent HD is flagged.
+    # Fault-window suppression: suppress statistical hits on faulted
+    # channels inside [onset, release + N].  Applied BEFORE pair
+    # suppression so that a suppressed humidity hit does not prevent
+    # a paired temperature hit from being cancelled.
+    stat_details = _suppress_fault_window_hits(stat_details, stuck_carry)
+
+    # Psychrometric suppression: suppress paired air-temperature +
+    # humidity statistical alerts when measured HD confirms the pairing
+    # is expected physics (cooling air → rising RH).  Inconsistent HD
+    # is flagged.  Restricted to the canonical "temperature" slot
+    # (air temperature only; pipe/heating temps are excluded).
     stat_details = _suppress_psychrometric_pairs(
         stat_details, stat_carry.psychro_context,
     )

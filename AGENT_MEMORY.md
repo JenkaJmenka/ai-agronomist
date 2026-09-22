@@ -2,6 +2,161 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Deploy-Compatibility Tests (schema_version) — DONE (2026-09-22)
+
+**Goal:** Pin the schema_version deploy-compatibility behaviour as permanent tests (Step 2 item 4 of the merge gate). Evidence from `tasks/task1f_backend_report.md` sections C/D was measured ad-hoc; these tests make it permanent.
+
+**File created:** `tests/workers/test_upload_schema_version_compat.py` (23 tests, all pass)
+
+**What the tests pin:**
+1. **Message gate (7 tests):** `handle_upload_portion` raises `ValueError` for `schema_version=1` and missing field (defaults to 1). Error text verified against documented patterns. Gate fires BEFORE `try_transition` (job stays `"pending"`).
+2. **Result gate (7 tests):** `_finalize` raises `ValueError` for stored results with `schema_version=1` or `None`. Job stays in `"finalizing"` (pinned from section D measurement).
+3. **Old worker v2 tolerance (5 tests):** `UploadPortionMessage` does NOT set `extra="forbid"` (old code tolerates new fields). `score_portion(stuck_carry=None)` produces zero stuck alerts even on freeze data (silent degradation pinned as checkable fact, not narrative claim).
+4. **Constants (4 tests):** `UPLOAD_PORTION_SCHEMA_VERSION == 2`, supported sets `== frozenset({2})`, Pydantic default `== 1`.
+
+**Regression:** 266 passed, 2 xfailed (was 243 passed, 2 xfailed — +23, zero regressions).
+
+**Report:** `tasks/task_deploy_compat_qa_report.md`
+
+## Task 1f — Schema-version gating + psychro_context merge (producer + _finalize) — DONE (2026-09-22)
+
+**Goal (continuation of partially-completed task):** Close the gap between the already-implemented version-gate machinery and the running system. Three changes were missing:
+1. Producer did not stamp `schema_version=UPLOAD_PORTION_SCHEMA_VERSION` on published messages (every new message defaulted to v1, immediately failing the worker's gate).
+2. `_finalize()` had no result schema-version gate (could silently process results from an incompatible worker version).
+3. `_finalize()` never restored and merged `psychro_context` from portion results into `stat_carry.psychro_context`, so `_suppress_psychrometric_pairs` always received an empty context on the async path.
+
+**Files modified:**
+- `src/api/services/upload_producer.py`: Added `UPLOAD_PORTION_SCHEMA_VERSION` to import; added `schema_version=UPLOAD_PORTION_SCHEMA_VERSION` to the one `UploadPortionMessage(...)` construction.
+- `src/workers/upload_consumer.py` (`_finalize` only): Added `psychro_portions` accumulator; per-portion result schema-version gate (raises `ValueError` for missing/unsupported version — same mechanism as the message gate); `_merge_psychro_contexts` call + assignment to `stat_carry.psychro_context` before `finalize_scores`.
+
+**Files NOT modified:** `src/api/services/upload_portions.py`, `src/config.py`, `src/models/*` (ml-engineer domain). No new tests written.
+
+**Results:**
+- Parity demo (T=15/RH=95 psychro-consistent spike pair): T/RH hits suppressed on sync AND async paths (normal, shuffled, reversed portion order) — identical results across all orderings.
+- Fixture A (50-row and 500-row portions): sync/async stat hit sets identical (102 hits each); stuck alert sets identical (4 onsets each).
+- Version gate (message): v1 or no-version → `ValueError: UploadPortionMessage schema_version=1 is not supported by this worker (supported: [2]). Drain the upload-portions queue and redeploy...`
+- Version gate (result): v1 or no-version → same pattern, job stays in `"finalizing"` until operator drain+redeploy.
+- Old worker + v2 message: `model_config.extra="ignore"` → parses silently, discards `schema_version`/`stuck_carry_state` — operates with reduced functionality (no stuck fault carry, no psychro context).
+- All 106 existing tests pass (1 xfailed expected). Zero regressions.
+
+**Report:** `tasks/task1f_backend_report.md`  
+**Evidence JSON:** `tasks/task1f_evidence.json`
+
+## Task 1d-3 — Exact-column matching everywhere — DONE (2026-09-21)
+
+**Goal:** Replace canonical-slot-based matching (`canonical_slot_for_column()`) in the statistical/fault path with exact column-name matching. Only the exact `"temperature"` column partners with RH; `measured_plant_temp`, `outdoor_temp` etc. are no longer partners. Fault window suppression and baseline exclusion act only on the exact faulted column, not on slot-mapped aliases.
+
+**Files modified:**
+- `src/api/services/upload_portions.py`: Removed `canonical_slot_for_column` import; added `AIR_TEMPERATURE_COLUMN`/`RELATIVE_HUMIDITY_COLUMN` constants; changed `_is_air_temp_stat_column`/`_is_humidity_stat_column` to exact match; changed `_suppress_fault_window_hits` to exact `hit.column != fault_ch`; changed `_exclude_faults_from_baseline` to `fault_ch not in row` (single dict lookup, no inner loop over keys).
+
+**No test edits required.** All 162 tests pass unchanged (1 skipped, 1 xfailed).
+
+**Results:** Statistical hit sets IDENTICAL at all 5 chunk sizes (50/288/500/5000/single). Baseline unchanged: 102 non-humidity, 0 humidity, 4 stuck faults. Clearsky: 0. Hot-path speed-up: 5.4× on 100k synthetic rows. Remaining `canonical_slot_for_column` users are in dashboard code only (correct for display purposes).
+
+**Report:** `tasks/task1d3_ml_report.md`
+
+## Task 1f-ops — Repo hygiene and deploy runbook — DONE (2026-09-21)
+
+**Goal:** Create `.gitattributes` to stop LF/CRLF churn on Windows, and write a mixed-version deploy runbook for Railway.
+
+**Files created/modified:**
+- `.gitattributes` (repo root): `* text=auto` default; `*.sh`, `Dockerfile*`, `*.py` forced `text eol=lf`; `.pt/.png/.jpg/.ico/.woff*/.db` declared binary.
+- `docs/runbooks/deploy.md`: New runbook — WHY (mixed-version window), PRE-DEPLOY (drain queues, SQL job check), DEPLOY ORDER (worker first, reasoning), POST-DEPLOY (health + smoke), ROLLBACK.
+- `docs/runbooks/README.md`: One index line added for `deploy.md`.
+
+**Checks:**
+- (a) `git status --short` after creation: only `?? .gitattributes` — no mass modifications.
+- (b) `git add --renormalize --dry-run .` lists 861 files — **but 0 have CRLF in index** (all `i/lf`). No content would change. Mass renormalize NOT recommended.
+- (c) `scripts/agent-watcher.sh`: `i/lf` in index (correct), `w/crlf` in working tree (Windows checkout). Will be fixed by `*.sh text eol=lf` on next checkout. Proposed follow-up command in report.
+
+**Unverified:** `schema_version` constant name and `psychro_context` field (backend-engineer PR in flight). Runbook describes them generically.
+
+**Report:** `tasks/task1f_devops_report.md`
+
+## Task 1d-2 — Chunk-size invariant suppression window + baseline exclusion — DONE (2026-09-21)
+
+**Goal:** Replace NaN-the-carry purge with timestamp-driven alert suppression window and baseline exclusion; restrict psychrometric pair suppression to canonical air-temperature channel.
+
+**Files modified:**
+- `src/config.py`: Added `COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS = 6.0`
+- `src/models/stuck_fault_detector.py`: Renamed `FaultWindow.end_ts` → `release_ts`, `end_dt` → `release_dt`; made `last_frozen_ts`/`last_frozen_dt` required (non-Optional)
+- `src/api/services/upload_portions.py`: Added `_suppress_fault_window_hits()` (alert suppression [onset, release+6h]) and `_exclude_faults_from_baseline()` (baseline exclusion [onset, last_frozen]); removed `_purge_fault_from_stat_carry()`; restricted pair suppression to canonical "temperature" slot via `canonical_slot_for_column()`
+- `src/models/episode_grouper.py`: Updated FaultWindow field references, removed `end_dt` fallback
+
+**Test edits:** `tests/models/test_stuck_carry_serialization.py` — FaultWindow constructions updated to `release_ts`/`release_dt`; null test → required-field test. No assertions weakened.
+
+**Results:** Statistical hit sets IDENTICAL at all 5 chunk sizes (50, 288, 500, 5000, single). New baseline: 102 non-humidity, 0 humidity. Stuck faults: 4 identical onsets. Clearsky: 0. Async parity: stat+stuck identical. Tests: 150 passed, 1 skipped (expected), 1 xfailed.
+
+**Report:** `tasks/task1d2_ml_report.md`
+
+## Task 1d — Chunk-size invariant statistical detection — DONE (2026-09-20)
+
+**Goal:** Make rolling z-score statistical detection produce identical non-humidity hit sets regardless of chunk size. Implemented Fix 1 (configured window when carry exists) and Fix 3 (carry window + MIN_CONSECUTIVE - 1 rows; mask only already-scored rows).
+
+**Files modified:**
+- `src/models/cold_run_detector.py`: Added `n_prior_rows` and `scored_prefix` params to `detect_rolling()`. Incremental mode uses configured window (no short-file scaling); `scored_prefix` rows participate in streaks but aren't reported.
+- `src/api/services/upload_portions.py`: `_detect_stats_incremental()` passes incremental-mode params; carry length changed from 288 to 290 (window + min_consecutive - 1).
+- `src/api/services/upload_producer.py`: Tracks `total_raw_rows_seen`; embeds `stat_carry_prior_rows` in messages; carry uses 290-row tail.
+- `src/mq/schemas.py`: Added `stat_carry_prior_rows: int = Field(default=0, ge=0)` to `UploadPortionMessage`.
+- `src/workers/upload_consumer.py`: Passes `total_rows=msg.stat_carry_prior_rows` to `StatCarry`.
+
+**Test edits (4 tests in `tests/workers/test_upload_consumer.py`):** Changed `_csv_content(fault_at=70)` to `_csv_content(rows=600, fault_at=350)` in `test_statistical_anomalies_survive_portioning`, `test_async_finalize_persists_trigger_channel`, `test_finalize_retries_after_a_failed_write`, `test_stored_scores_are_canonical_not_double_transformed`. No assertions weakened.
+
+**Results:** Non-humidity hits MATCH at all chunk sizes (102) when psychrometric suppression is disabled. With suppression, chunk 50 has 6 extra hits (102 vs 96) due to the purge (out of scope) NaN-blanking humidity, preventing psychrometric pairing. Clearsky: 0 at all sizes. Stuck faults: 4 identical onsets. Severed hit at row 3050 recovered.
+
+**Tests:** 121 passed, 1 xfailed. Report: `tasks/task1d_ml_report.md`.
+
+## Task 1c — Stuck-fault async/sync parity pinning tests — DONE (2026-09-20)
+
+**QA engineer** wrote 33 tests in `tests/workers/test_stuck_async_parity.py` + 1 new test in `tests/models/test_stuck_carry_serialization.py`. All pass (32 passed, 1 strict xfail). Runtime: 113s.
+
+**What the tests pin:**
+1. PARITY: Sync and async paths produce byte-identical stuck alerts (4 humidity, onsets/detected_ts/severity/durations match exactly).
+2. SHUFFLED ORDER: Out-of-order consumption at 4 portion sizes (50, 500, 37, 288) and reverse order produce byte-identical result. Redelivery is idempotent.
+3. CONCURRENT: ThreadPoolExecutor(4 workers) on score_portion produces identical per-portion stuck_hits.
+4. skip_channels: CO2 imputed -> 0 co2 alerts; skip disabled -> 1 co2 alert (onset 12-14, 6.0h). Producer carry has skip_channels={"co2"}.
+5. FINAL-PORTION FLUSH: Ongoing freeze with gate crossing in last portion. Post-scoring carry verified (last_ts == file's final timestamp). xfail on episode end_ts (equals onset; Task 3/4 scope).
+6. NO PHANTOM EPISODES: 2-sample trailing freeze (Dec 25-26) at all portion sizes -> no alert/episode.
+7. CONFIG PARITY: 1 WallclockStuckDetector construction total. producer._WALLCLOCK_DETECTOR is portions._WALLCLOCK_DETECTOR. Parameters match.
+8. SERIALISATION: Post-release carry with 4 completed faults (non-None last_frozen_dt) round-trips exactly.
+9. REGRESSION: Clearsky fixture -> 0 stuck alerts (both paths, persisted). Fixture A persisted -> exactly 4 stuck_fault/urgent rows.
+
+**Known bug (xfailed):** Episode end_ts equals onset for stuck_fault episodes (one alert per freeze -> start_ts == end_ts). Task 3/4 scope.
+
+**No other bugs found.** The producer-embedded StuckCarry design is order-invariant and concurrent-safe.
+
+## Task 1b — Single WallclockStuckDetector construction path — DONE (2026-09-20)
+
+**Change:** Removed `_WALLCLOCK_DETECTOR_PRODUCER = WallclockStuckDetector()` from `upload_producer.py`. Now imports and re-exports `_WALLCLOCK_DETECTOR` from `upload_portions.py`. One construction, one object, used by producer + worker + sync path. QA assertion `upload_producer._WALLCLOCK_DETECTOR is upload_portions._WALLCLOCK_DETECTOR` satisfiable.
+
+**Other WallclockStuckDetector( occurrences outside tests:** `src/models/stuck_fault_detector.py:354` — docstring usage example only, not executed. No live upload-path construction outside `upload_portions.py`.
+
+**3(a) imputed_channels:** comes from `_calibrate_ranges_from_head` in `produce_upload_portions`; persisted immediately to `job.payload["imputed_channels"]`; `_finalize` reads identical value from `job.payload`. No drift.
+
+**3(b) flush carry:** `_finalize` uses the POST-scoring carry (stored result `stuck_carry_state` from `updated_stuck_carry` after `score_portion` mutates it via `detect_chunk`). Not the pre-portion state embedded in the message. Correct — no bug.
+
+**Tests:** 73/73 passed (workers, models, api, unit stuck suites).
+
+## Task 1 — Async upload worker parity for wall-clock stuck-fault detection — DONE (2026-09-20)
+
+**Problem:** `upload_consumer.py` called `score_portion` and `finalize_scores` with no `stuck_carry`, so the async upload worker path ran NO wall-clock stuck-fault detection. The sync path (`run_cold_run_upload`) threaded `StuckCarry` through each chunk.
+
+**Step A finding:** Portions are produced sequentially but consumed concurrently/out-of-order (RabbitMQ queue, multiple workers). A sequentially-threaded carry via the result store (portion N result → portion N+1 carry) is NOT SAFE. Safe approach: serialize carry at publish time in the producer (same pattern as `stat_carry_rows`), embed in each message.
+
+**Implementation (Step B):**
+- Added `StuckCarry.to_dict()` / `StuckCarry.from_dict()` to `src/models/stuck_fault_detector.py` with exact round-trip for all fields: timezone-aware datetimes, `emitted_onsets` (set of tuples), `skip_channels` (frozenset), `ChannelFreezeState`, `FaultWindow` (including `last_frozen_dt=None`).
+- Added `stuck_carry_state: Optional[dict[str, Any]] = None` to `UploadPortionMessage` in `src/mq/schemas.py`.
+- Updated `src/api/services/upload_producer.py`: threads `StuckCarry` through the sequential produce loop; serializes carry BEFORE advancing for each portion; embeds in message.
+- Updated `src/workers/upload_consumer.py`: deserializes carry from message; passes to `score_portion(stuck_carry=...)`; stores `stuck_hits` + `stuck_carry_state` in result; `_finalize` collects `stuck_hits` from stored results and reconstructs last carry for `flush()`.
+- New `tests/models/test_stuck_carry_serialization.py`: 8 round-trip unit tests.
+
+**Acceptance evidence (`tasks/task1_parity_evidence.md`):**
+- Fixture `native_dec_stuck_fault.csv` (50-row portions → ~70 portions, main freeze spans ~39).
+- Both paths: 4 alerts (humidity), onsets 12-14 00:00, 12-15 11:05, 12-16 11:20, 12-18 13:00; detected_ts +6h each, severity urgent. Episode duration_seconds identical.
+- All 6 parity checks: ✅ PASS.
+
+**Tests:** 100/100 smoke tests passed (workers, unit, api stuck_fault, episode_grouping, models).
+
 ## Anomaly episode grouping collapse — FIXED (2026-09-15)
 
 Task from team-lead: episodes were collapsing to (channel,) whenever both
@@ -3068,6 +3223,30 @@ Gate: **1226 passed, 2 pre-existing failures, 12 skipped, 1 xfailed. Zero new fa
 **BE-A4 — `alembic/versions/012_add_polling_dropout_fault_type.py`** (new): `revision="012"`, `down_revision="011"`. Drops `ck_incidents_fault_type` and recreates with `polling_dropout` added. Uses `op.batch_alter_table` (required for SQLite constraint changes). Also fixed migration `011` which had the same batch-mode bug — was using `op.create_check_constraint` directly without batch context, failing on SQLite with `NotImplementedError`. Fixed to use `batch_alter_table`. DB now at `012 (head)`.
 
 **BE-A5 — `src/api/schemas/incidents.py`**: Extended `_VALID_FAULT_TYPES` from `frozenset(ft.value for ft in _FaultType)` to `frozenset(...) | {"polling_dropout"}` so the schema accepts `polling_dropout` immediately (before ml-engineer adds `POLLING_DROPOUT` to the `FaultType` enum).
+
+### Task 1d-4 — QA: Chunk-size invariance, baseline exclusion, pair suppression (2026-09-22)
+
+**Status: COMPLETE.** 229 passed, 2 xfailed, 0 failures.
+
+New test files:
+- `tests/workers/test_stat_chunk_invariance.py` — 46 tests: chunk-size invariance (5 sizes), pinned counts (102/0/102), stuck control, clearsky zero-alert, async parity, real checkpoint
+- `tests/workers/test_baseline_exclusion.py` — 21 tests: exclusion on/off proof, suppression window, exact-column isolation, pair suppression (sync/async/shuffled/reversed/redelivered)
+
+New fixtures:
+- `tests/fixtures/synthetic_humidity_freeze_recovery.csv` — deterministic synthetic fixture with humidity freeze, deviations, temperature freeze, psychrometric pair
+- `tests/fixtures/make_synthetic_humidity_freeze.py` — generator script (numpy seed 42, binary search for deviation values)
+- `tests/fixtures/SYNTHETIC_FIXTURES.md` — provenance record with measured z-scores and design rationale
+
+Edited files:
+- `tests/api/test_episode_grouping.py` — converted `test_stuck_fault_outranks_recovery` from `pytest.skip` to `@pytest.mark.xfail(strict=True)`
+- `tests/models/test_stuck_carry_serialization.py` — added `test_post_release_carry_with_recovery_and_faults`
+
+Key findings:
+- On/off proof confirmed: exclusion ON = 0 humidity hits, exclusion OFF = 3 humidity hits (z 6.35, 5.93, 5.58)
+- Pair-suppression parity is a real passing assertion — sync/async/shuffled/reversed/redelivered all byte-identical
+- No bugs found in src/
+- Report: `tasks/task1d3_qa_report.md`
+- Done signal: `tasks/done/qa-engineer.json`
 
 **New stub files**:
 - `src/models/dropout_detector.py` was already written by ml-engineer (fully implemented, accepts `list[dict[str, Any]]`).
