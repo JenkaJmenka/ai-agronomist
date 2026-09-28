@@ -3,6 +3,11 @@
  * separate from the Auth.js/Next.js wiring so the fail-closed rule ("every
  * app page and every /api/bff/* route needs a session") is unit-testable
  * without a request/response object.
+ *
+ * `/api/health` is here for the same reason `/login` and `/api/auth/` are:
+ * Railway's healthcheck probe has no session, and a probe that gets
+ * redirected instead of a 200 fails the deploy (`web/railway.json`'s
+ * `healthcheckPath`).
  */
 
 export type AuthDecision =
@@ -10,7 +15,7 @@ export type AuthDecision =
   | { readonly kind: "deny-unauthenticated-api" }
   | { readonly kind: "redirect-to-login" };
 
-const PUBLIC_PATH_PREFIXES = ["/login", "/api/auth/"] as const;
+const PUBLIC_PATH_PREFIXES = ["/login", "/api/auth/", "/api/health"] as const;
 const BFF_PATH_PREFIX = "/api/bff/";
 
 function isPublicPath(pathname: string): boolean {

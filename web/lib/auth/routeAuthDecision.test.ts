@@ -11,6 +11,17 @@ describe("decideAuthAction", () => {
     expect(decideAuthAction("/api/auth/callback/resend", false)).toEqual({ kind: "allow" });
   });
 
+  it("allows /api/health for an anonymous caller (Railway's healthcheck probe has no session)", () => {
+    expect(decideAuthAction("/api/health", false)).toEqual({ kind: "allow" });
+  });
+
+  it("still redirects the app's own root — a lesson learned from a real outage: '/' is not public", () => {
+    // Railway's healthcheckPath was "/" before this fix; an anonymous probe
+    // got redirected (307) instead of 200 and the deploy failed. Guards
+    // against re-pointing the healthcheck back at "/" by accident.
+    expect(decideAuthAction("/", false)).toEqual({ kind: "redirect-to-login" });
+  });
+
   it("401s an anonymous /api/bff/* request instead of redirecting", () => {
     expect(decideAuthAction("/api/bff/readings/window", false)).toEqual({
       kind: "deny-unauthenticated-api",
@@ -28,7 +39,6 @@ describe("decideAuthAction", () => {
 
   it("redirects an anonymous request to any other app page", () => {
     expect(decideAuthAction("/monitoring", false)).toEqual({ kind: "redirect-to-login" });
-    expect(decideAuthAction("/", false)).toEqual({ kind: "redirect-to-login" });
   });
 
   it("allows every route once logged in", () => {
