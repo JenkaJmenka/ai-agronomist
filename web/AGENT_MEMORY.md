@@ -389,10 +389,9 @@ emitter on `:9999`, real `next-auth/jwt` `encode()` cookie):
   `GET /api/auth/validate` is uncommitted in the shared working tree and `web/openapi.json`
   itself hasn't been refreshed from a running instance yet, so regenerating now would be a
   no-op against the stale snapshot — left alone per the task's explicit instruction.
-- `TenantSelector.tsx` still lets a user pick `tenant_1/2/3` in the URL; the BFF now silently
-  overrides this server-side, so picking a different tenant while a session is bound to
-  another one is a confusing no-op, not a security hole. Flagged to team-lead as a UX
-  follow-up, not fixed here (out of the phase 2 ask).
+- `TenantSelector.tsx` was removed in a later round of this phase: tenant is derived
+  from the signed-in session, so the control could not change anything and was replaced
+  by `GreenhouseSelector.tsx` (greenhouse only, still client-driven).
 - Two files outside `web/` still call the API's **public** Railway domain directly, bypassing
   the BFF entirely: `.claude/skills/perf-investigation/SKILL.md` and `scripts/perf-probe.sh`
   (also `scripts/perf_flows.py`, but only for the `web` domain). Reported to team-lead per the

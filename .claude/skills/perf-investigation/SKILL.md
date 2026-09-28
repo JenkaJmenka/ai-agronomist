@@ -8,7 +8,10 @@ description: Diagnose performance degradation in AI Agronomist (BE latency, FE r
 The deployed app, not localhost, is the subject. Production URLs:
 
 - **Web** — https://web-production-cd280.up.railway.app
-- **API** — https://ai-agronomist-api-production.up.railway.app
+- **API** — no public domain. Reachable only from inside Railway, over the
+  private network. See `PERF_PROBE_API_URL` / `PERF_PROBE_API_KEY` in
+  `scripts/perf-probe.sh` for how to point at it (private domain, e.g.
+  `http://ai-agronomist-api.railway.internal:8000`, plus an API key header).
 - Railway services: `web`, `ai-agronomist-api`, `RabbitMQ` (project `ai-agronomist`, env `production`)
 
 ## The one rule that matters
@@ -40,6 +43,10 @@ Do **not** open a browser first. Both P0s found on 2026-07-27 were pure
 backend-contract facts, findable with curl in 90 seconds.
 
 ### Layer 1+2 — `scripts/perf-probe.sh` (start here, always)
+
+The API has no public domain — this script must run from inside Railway,
+against the private network, with `PERF_PROBE_API_URL` / `PERF_PROBE_API_KEY`
+set (see the script's header comment). Never point it at the web BFF.
 
 ```bash
 scripts/perf-probe.sh [tenant_id] [greenhouse_id]   # default tenant_1 gh_A
