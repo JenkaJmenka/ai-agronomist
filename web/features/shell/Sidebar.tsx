@@ -4,8 +4,8 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
+import { GreenhouseSelector } from "@/features/shell/GreenhouseSelector";
 import { NAV_SECTIONS } from "@/features/shell/nav";
-import { TenantSelector } from "@/features/shell/TenantSelector";
 import { ThemeToggle } from "@/features/shell/ThemeToggle";
 import { withDashboardQuery } from "@/lib/dashboardQuery";
 import { measureInteraction } from "@/lib/profiling";
@@ -57,7 +57,7 @@ export function Sidebar() {
       </div>
       <Suspense>
         <NavLinks />
-        <TenantSelector />
+        <GreenhouseSelector />
       </Suspense>
     </aside>
   );

@@ -82,19 +82,24 @@ jobs:
           # while exercising nothing.
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
-          pytest -m postgres -v \
-            tests/db/test_incident_memory_postgres.py \
-            tests/db/test_023_nonfinite_postgres.py
+          # Collect by marker across the whole tree, not a hardcoded file
+          # list: a new tests/db/test_*_postgres.py (or any other
+          # pytest.mark.postgres file, wherever it lives) is picked up
+          # automatically instead of silently never running here. A
+          # hardcoded list is exactly how tests/db/test_alembic_auth_schema_guard.py
+          # and tests/integration/test_pgvector_incident_memory.py both went
+          # uncollected in this job despite carrying the marker.
+          pytest -m postgres -v tests/
 
       - name: Fail if any PostgreSQL-only test was skipped
         env:
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
           # A skip here means the suite silently stopped covering Postgres —
-          # the failure mode this job was added to prevent.
-          pytest -m postgres -q --override-ini="addopts=" \
-            tests/db/test_incident_memory_postgres.py \
-            tests/db/test_023_nonfinite_postgres.py 2>&1 | tee /tmp/pg-tests.log
+          # the failure mode this job was added to prevent. Marker-based
+          # collection (not a file list) so this check can't itself develop
+          # the same blind spot the step above just closed.
+          pytest -m postgres -q --override-ini="addopts=" tests/ 2>&1 | tee /tmp/pg-tests.log
           if grep -qE "[0-9]+ skipped" /tmp/pg-tests.log; then
             echo "PostgreSQL-only tests were skipped — they are not actually running"
             exit 1

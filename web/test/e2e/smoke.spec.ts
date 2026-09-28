@@ -180,10 +180,12 @@ test("sidebar preserves period, live, refresh, and threshold across pages", asyn
   await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
 });
 
-test("tenant selector updates the URL", async ({ page }) => {
+test("greenhouse selector updates the URL", async ({ page }) => {
+  // Tenant is no longer client-selectable — the BFF derives it from the
+  // session (security phase 2), so `TenantSelector` was removed and only
+  // the greenhouse picker (`GreenhouseSelector`) remains.
   await page.goto("/");
-  await page.getByTestId("tenant-select").selectOption("tenant_2");
-  await expect(page).toHaveURL(/tenant=tenant_2/);
+  await expect(page.getByTestId("tenant-select")).toHaveCount(0);
   await page.getByTestId("greenhouse-select").selectOption("gh_B");
   await expect(page).toHaveURL(/gh=gh_B/);
 });

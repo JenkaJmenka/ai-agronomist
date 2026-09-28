@@ -66,3 +66,18 @@ create table if not exists auth.user_tenants (
   tenant_id text not null,
   created_at timestamptz not null default now()
 );
+
+-- Durable sign-in rate limiting (security phase 2, magic-link hardening).
+-- One row per sign-in request attempt, scoped by "email" or "ip"; a sliding
+-- 1-hour window is enforced in `lib/auth/rateLimit.ts` by pruning rows older
+-- than the window and counting what remains. Postgres (not in-process
+-- memory) so the limit holds across Railway restarts and multiple instances.
+create table if not exists auth.signin_attempts (
+  id bigserial primary key,
+  scope text not null,
+  key text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists signin_attempts_scope_key_idx
+  on auth.signin_attempts (scope, key, created_at);

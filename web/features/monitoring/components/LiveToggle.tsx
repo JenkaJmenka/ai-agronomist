@@ -53,9 +53,10 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
 
   // The not_configured verdict is per-scope — it must not outlive the scope
   // it was about. LiveToggle does not remount when tenant/gh change (the URL
-  // update is shallow, via TenantSelector's own useQueryStates), so without
-  // this the message would keep pointing at a greenhouse the operator has
-  // already navigated away from.
+  // update is shallow, via GreenhouseSelector's own useQueryState for gh — tenant
+  // is session-derived and no longer client-selectable), so without this the
+  // message would keep pointing at a greenhouse the operator has already
+  // navigated away from.
   useEffect(() => {
     setNotConfigured(false);
   }, [tenant, gh]);
