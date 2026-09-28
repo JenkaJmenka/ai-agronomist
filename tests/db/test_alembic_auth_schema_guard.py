@@ -22,12 +22,26 @@ reflect that schema, see its tables as unknown-to-metadata, and propose
 store the next time someone runs autogenerate against the real database.
 
 Per this project's own migration hazard notes (never commit inside a
-migration; never validate one against an empty database), this test does
-not validate against an empty database: it asserts the `auth` schema
-fixture actually created real tables before asserting anything about the
-diff, and it asserts the diff contains *some* unrelated app-table op too
-(proving the comparison ran a real, non-trivial reflection rather than
-vacuously seeing nothing at all).
+migration; never validate one against an empty database), the DB-backed test
+below does not trust an empty database: its precondition test asserts that
+Postgres itself reports all five real tables inside the ``auth`` schema, so
+"no operations proposed against `auth`" cannot pass vacuously just because
+there was nothing there to propose anything about. That the filter is scoped
+to ``auth`` alone (rather than a blanket exclusion that would also hide real
+app-table drift) is proved separately by the pure unit tests in
+``TestAlembicSchemaFiltersAreScopedNotBlanket``.
+
+Why the async engine
+--------------------
+Production migrations run over **asyncpg**: ``alembic/env.py`` branches on
+``"+asyncpg" in url`` and drives them through ``create_async_engine(...)`` plus
+``await conn.run_sync(...)``, because asyncpg is an async-only driver. This
+test uses the same async engine and the same ``run_sync`` bridge for alembic's
+synchronous comparison API, so the guard covers the configuration production
+actually runs. It deliberately does *not* rewrite the URL to a sync driver:
+psycopg2 is optional in ``requirements.txt`` (a comment, not a dependency — it
+is not installed in CI), and a sync engine would exercise a configuration that
+does not exist in production.
 
 Local:
     POSTGRES_TEST_URL=postgresql+asyncpg://postgres@localhost:5432/test_db \\
@@ -39,18 +53,24 @@ CI: see .github/workflows/postgres-tests.yml
 
 from __future__ import annotations
 
+import ast
 import os
+from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+import pytest_asyncio
+from sqlalchemy import pool, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 
 from src.db.alembic_schema_filters import include_name, include_object
 from src.db.models import Base
+from src.db.session import _normalize_database_url
 
 pytestmark = pytest.mark.postgres
 
@@ -106,44 +126,54 @@ _AUTH_TABLE_NAMES = frozenset(
 )
 
 
-def _database_url() -> str | None:
-    """Resolve a sync-driver PostgreSQL URL, or None when unconfigured.
+def _async_database_url() -> str | None:
+    """Resolve the async PostgreSQL URL, or None when unconfigured.
 
     POSTGRES_TEST_URL first: tests/conftest.py overwrites DATABASE_URL with
-    the SQLite test database before any test module is imported.  alembic's
-    comparison API is synchronous, so this normalises the asyncpg-style URL
-    other postgres tests use to a psycopg2 one (both are in requirements.txt).
+    the SQLite test database before any test module is imported.  The URL is
+    left on its async driver and normalised through the same
+    ``_normalize_database_url`` ``alembic/env.py`` calls, so this test connects
+    the way production migrations do.
     """
     url = os.environ.get("POSTGRES_TEST_URL") or os.environ.get("DATABASE_URL", "")
     if not url.startswith("postgresql"):
         return None
-    return url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    return url
 
 
-@pytest.fixture()
-def pg_engine_with_auth_schema() -> Engine:
-    """A sync engine bound to a database that has the real `auth` schema."""
-    url = _database_url()
+@pytest_asyncio.fixture
+async def pg_engine_with_auth_schema() -> AsyncIterator[AsyncEngine]:
+    """An async engine bound to a database that has the real `auth` schema.
+
+    Mirrors ``alembic/env.py``'s ``_run_async_migrations``: async engine,
+    ``NullPool``, and every synchronous step bridged through ``run_sync``.
+    """
+    url = _async_database_url()
     if url is None:
         pytest.skip("No PostgreSQL URL configured")
-    engine = create_engine(url)
+    clean_url, connect_args = _normalize_database_url(url)
+    engine = create_async_engine(
+        clean_url, connect_args=connect_args, poolclass=pool.NullPool
+    )
     try:
-        with engine.begin() as conn:
+        async with engine.begin() as conn:
+            # One statement per execute: asyncpg sends statements through the
+            # prepared-statement protocol, which rejects multi-command strings.
             for statement in _AUTH_SCHEMA_DDL.strip().split(";\n\n"):
                 statement = statement.strip()
                 if statement:
-                    conn.execute(text(statement))
+                    await conn.execute(text(statement))
         yield engine
     finally:
-        with engine.begin() as conn:
-            conn.execute(text(f"DROP SCHEMA IF EXISTS {AUTH_SCHEMA} CASCADE"))
-        engine.dispose()
+        async with engine.begin() as conn:
+            await conn.execute(text(f"DROP SCHEMA IF EXISTS {AUTH_SCHEMA} CASCADE"))
+        await engine.dispose()
 
 
-def _reflected_auth_tables(engine: Engine) -> set[str]:
+async def _reflected_auth_tables(engine: AsyncEngine) -> set[str]:
     """Table names Postgres itself reports inside the `auth` schema."""
-    with engine.connect() as conn:
-        result = conn.execute(
+    async with engine.connect() as conn:
+        result = await conn.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = :schema"
@@ -153,20 +183,29 @@ def _reflected_auth_tables(engine: Engine) -> set[str]:
         return {row[0] for row in result}
 
 
-def _autogenerate_diff(engine: Engine) -> list:
+def _compare_with_env_filters(connection: Connection) -> list:
     """Run the same comparison alembic's `revision --autogenerate` would,
-    with the exact filters wired into alembic/env.py."""
-    with engine.connect() as conn:
-        migration_context = MigrationContext.configure(
-            connection=conn,
-            opts={
-                "target_metadata": Base.metadata,
-                "include_schemas": True,
-                "include_name": include_name,
-                "include_object": include_object,
-            },
-        )
-        return compare_metadata(migration_context, Base.metadata)
+    with the exact filters wired into alembic/env.py.
+
+    Synchronous by necessity — alembic's autogenerate API has no async form,
+    which is precisely why ``alembic/env.py`` hands a sync connection to
+    ``context.configure`` via ``run_sync`` when the driver is asyncpg.
+    """
+    migration_context = MigrationContext.configure(
+        connection=connection,
+        opts={
+            "target_metadata": Base.metadata,
+            "include_schemas": True,
+            "include_name": include_name,
+            "include_object": include_object,
+        },
+    )
+    return compare_metadata(migration_context, Base.metadata)
+
+
+async def _autogenerate_diff(engine: AsyncEngine) -> list:
+    async with engine.connect() as conn:
+        return await conn.run_sync(_compare_with_env_filters)
 
 
 def _schema_of(op: tuple) -> str | None:
@@ -183,23 +222,23 @@ def _schema_of(op: tuple) -> str | None:
 
 
 class TestAlembicNeverTouchesAuthSchema:
-    def test_fixture_actually_created_the_auth_tables(
-        self, pg_engine_with_auth_schema: Engine
+    async def test_fixture_actually_created_the_auth_tables(
+        self, pg_engine_with_auth_schema: AsyncEngine
     ) -> None:
         """Precondition guard (this project's own hazard note): if this
         fails, every assertion below would pass vacuously against an empty
         schema, which is exactly the false-green this test exists to avoid.
         """
-        found = _reflected_auth_tables(pg_engine_with_auth_schema)
+        found = await _reflected_auth_tables(pg_engine_with_auth_schema)
         assert found == _AUTH_TABLE_NAMES, (
             f"auth schema fixture did not create the expected tables: "
             f"found {found}, expected {_AUTH_TABLE_NAMES}"
         )
 
-    def test_autogenerate_proposes_no_change_to_auth_schema(
-        self, pg_engine_with_auth_schema: Engine
+    async def test_autogenerate_proposes_no_change_to_auth_schema(
+        self, pg_engine_with_auth_schema: AsyncEngine
     ) -> None:
-        diff = _autogenerate_diff(pg_engine_with_auth_schema)
+        diff = await _autogenerate_diff(pg_engine_with_auth_schema)
 
         auth_touching_ops = [op for op in diff if _schema_of(op) == AUTH_SCHEMA]
         assert auth_touching_ops == [], (
@@ -244,3 +283,66 @@ class TestAlembicSchemaFiltersAreScopedNotBlanket:
         # "schema" object reaching include_object) must not be excluded —
         # only include_name makes the schema-level call.
         assert include_object(SimpleNamespace(), "auth", "schema", False, None) is True
+
+
+_ALEMBIC_ENV_PY = Path(__file__).resolve().parents[2] / "alembic" / "env.py"
+
+_REQUIRED_CONFIGURE_KEYWORDS = frozenset(
+    {"include_schemas", "include_name", "include_object"}
+)
+
+
+def _context_configure_keywords() -> list[dict[str, ast.expr]]:
+    """Keyword arguments of every ``context.configure(...)`` call in
+    ``alembic/env.py``, one dict per call site.
+
+    Parsed statically with ``ast`` rather than imported: ``alembic/env.py``
+    runs a real migration as a side effect of being imported, so no test may
+    import it (the module says so itself).
+    """
+    tree = ast.parse(_ALEMBIC_ENV_PY.read_text())
+    calls = []
+    for node in ast.walk(tree):
+        is_context_configure = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "configure"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "context"
+        )
+        if is_context_configure:
+            calls.append({kw.arg: kw.value for kw in node.keywords if kw.arg})
+    return calls
+
+
+class TestAlembicEnvWiresTheFiltersItself:
+    """The DB-backed guard above configures the two hooks itself, because
+    ``alembic/env.py`` cannot be imported from a test — which means deleting
+    ``include_name``/``include_object`` from ``env.py`` would leave that guard
+    green while the real ``alembic revision --autogenerate`` drops the Auth.js
+    tables. This class closes that gap statically: it fails if the production
+    migration entrypoint stops passing the filters (verified by deliberate
+    break).
+    """
+
+    def test_every_context_configure_passes_the_filters(self) -> None:
+        configure_calls = _context_configure_keywords()
+        assert configure_calls, (
+            f"no context.configure(...) call found in {_ALEMBIC_ENV_PY} — "
+            "the parser below can no longer see how migrations are configured"
+        )
+        for keywords in configure_calls:
+            missing = _REQUIRED_CONFIGURE_KEYWORDS - keywords.keys()
+            assert not missing, (
+                f"alembic/env.py has a context.configure(...) call missing "
+                f"{sorted(missing)} — autogenerate there would reflect the "
+                f"`{AUTH_SCHEMA}` schema and propose dropping the Auth.js store"
+            )
+
+    def test_filters_are_the_shared_hooks_and_schemas_are_included(self) -> None:
+        for keywords in _context_configure_keywords():
+            assert keywords["include_schemas"].value is True
+            # The same callables this test imports from
+            # src/db/alembic_schema_filters.py, not a local re-implementation.
+            assert keywords["include_name"].id == include_name.__name__
+            assert keywords["include_object"].id == include_object.__name__
