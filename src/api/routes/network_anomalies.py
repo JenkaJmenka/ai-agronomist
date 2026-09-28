@@ -8,6 +8,15 @@ RTT/jitter, service-response, and threat scoring keep per-tenant state
 (previous RTT, rolling P99 window, fitted forest) via
 ``network_detector_registry`` — a fresh detector per request would reset
 those mechanisms.
+
+Auth: every route requires a valid API key. ``rtt-jitter``, ``service-
+response``, and ``threat/fit``/``threat/score`` additionally bind the
+caller's authenticated tenant to their ``tenant_id`` body field, since
+those hold per-tenant state that another tenant could otherwise read or
+corrupt. ``tcp-handshake``, ``dhcp-fingerprint``, and ``iat`` are pure,
+stateless calculations over caller-supplied values with no tenant
+dimension at all (no ``tenant_id`` field, nothing persisted) — a valid
+credential is still required, but there is no tenant to bind.
 """
 
 from __future__ import annotations
@@ -16,9 +25,10 @@ import logging
 from typing import List, Optional
 
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.services.network_detector_registry import (
     get_rtt_detector,
     get_service_detector,
@@ -104,12 +114,15 @@ class AnomalyFlagResponse(BaseModel):
 
 
 @router.post("/rtt-jitter", response_model=RTTCheckResponse)
-def check_rtt_jitter(req: RTTCheckRequest) -> RTTCheckResponse:
+def check_rtt_jitter(
+    req: RTTCheckRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> RTTCheckResponse:
     """Check a single RTT measurement for latency and jitter anomalies.
 
     The per-tenant detector remembers the previous RTT, so jitter works
     across consecutive requests; ``previous_rtt_ms`` overrides it.
     """
+    enforce_tenant_access(auth_tenant, req.tenant_id)
     detector = get_rtt_detector(req.tenant_id)
     result = detector.detect(req.rtt_ms, req.previous_rtt_ms)
     return RTTCheckResponse(
@@ -122,15 +135,25 @@ def check_rtt_jitter(req: RTTCheckRequest) -> RTTCheckResponse:
 
 
 @router.post("/iat", response_model=IATCheckResponse)
-def check_iat(req: IATCheckRequest) -> IATCheckResponse:
-    """Check an inter-packet interval series for CV / spacing anomalies."""
+def check_iat(
+    req: IATCheckRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> IATCheckResponse:
+    """Check an inter-packet interval series for CV / spacing anomalies.
+
+    Stateless and tenant-agnostic — see module docstring.
+    """
     flags = IATCVDetector().detect(np.asarray(req.iat_series, dtype=float))
     return IATCheckResponse(is_anomaly=any(flags), flags=flags)
 
 
 @router.post("/tcp-handshake", response_model=AnomalyFlagResponse)
-def check_tcp_handshake(req: TCPCheckRequest) -> AnomalyFlagResponse:
-    """Check a TCP handshake latency."""
+def check_tcp_handshake(
+    req: TCPCheckRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> AnomalyFlagResponse:
+    """Check a TCP handshake latency.
+
+    Stateless and tenant-agnostic — see module docstring.
+    """
     detector = TCPHandshakeDetector()
     flagged = detector.detect(req.handshake_ms)
     return AnomalyFlagResponse(
@@ -142,8 +165,13 @@ def check_tcp_handshake(req: TCPCheckRequest) -> AnomalyFlagResponse:
 
 
 @router.post("/dhcp-fingerprint", response_model=AnomalyFlagResponse)
-def check_dhcp_fingerprint(req: DHCPCheckRequest) -> AnomalyFlagResponse:
-    """Validate DHCP configuration fingerprint against baseline."""
+def check_dhcp_fingerprint(
+    req: DHCPCheckRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> AnomalyFlagResponse:
+    """Validate DHCP configuration fingerprint against baseline.
+
+    Stateless and tenant-agnostic — see module docstring.
+    """
     current_hash = DHCPFingerprintDetector.compute_hash(*req.params)
     flagged = DHCPFingerprintDetector.detect(current_hash, req.baseline_hash)
     return AnomalyFlagResponse(
@@ -155,13 +183,16 @@ def check_dhcp_fingerprint(req: DHCPCheckRequest) -> AnomalyFlagResponse:
 
 
 @router.post("/service-response", response_model=AnomalyFlagResponse)
-def check_service_response(req: ServiceCheckRequest) -> AnomalyFlagResponse:
+def check_service_response(
+    req: ServiceCheckRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> AnomalyFlagResponse:
     """Check a service response duration against the dynamic P99 threshold.
 
     Every observed duration feeds the per-tenant rolling window (after
     detection, so a sample never softens its own check); the threshold is
     P99 of that window with the static baseline as a floor.
     """
+    enforce_tenant_access(auth_tenant, req.tenant_id)
     detector = get_service_detector(req.tenant_id)
     flagged = detector.detect(req.duration_ms, req.baseline_threshold_ms)
     detector.update_baseline(req.duration_ms)
@@ -177,8 +208,11 @@ def check_service_response(req: ServiceCheckRequest) -> AnomalyFlagResponse:
 
 
 @router.post("/threat/fit", response_model=ThreatFitResponse)
-def fit_threat_detector(req: ThreatFitRequest) -> ThreatFitResponse:
+def fit_threat_detector(
+    req: ThreatFitRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> ThreatFitResponse:
     """Fit the per-tenant Isolation Forest on normal-traffic vectors."""
+    enforce_tenant_access(auth_tenant, req.tenant_id)
     vectors = np.asarray(req.vectors, dtype=float)
     if vectors.ndim != 2:
         raise HTTPException(
@@ -194,8 +228,11 @@ def fit_threat_detector(req: ThreatFitRequest) -> ThreatFitResponse:
 
 
 @router.post("/threat/score", response_model=ThreatScoreResponse)
-def score_threat(req: ThreatScoreRequest) -> ThreatScoreResponse:
+def score_threat(
+    req: ThreatScoreRequest, auth_tenant: str | None = Depends(require_api_key)
+) -> ThreatScoreResponse:
     """Score a feature vector against the tenant's fitted Isolation Forest."""
+    enforce_tenant_access(auth_tenant, req.tenant_id)
     detector = get_threat_detector(req.tenant_id)
     if detector is None:
         raise HTTPException(

@@ -2,6 +2,12 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Security audit Phase 1 — DONE (2026-09-28)
+
+Security audit Phase 1 complete (auth/tenant isolation). Findings are
+local-only in docs/security/auth-audit-phase1.md and not committed until
+Phase 2 ships. Do not copy findings into tracked files.
+
 ## Task 1f Phase 3 — Async/sync parity + psychro_context merge-warning coverage — DONE (2026-09-23)
 
 **Goal:** Close two real coverage gaps: (1) full CHUNK_SIZES async-vs-sync statistical hit SET parity on both fixtures, (2) unit + integration tests for `_merge_psychro_contexts` duplicate-timestamp handling (warning on differing values, silence on identical values).
@@ -3896,3 +3902,125 @@ Open across roadmap: dashboard widgets, cross-gap wiring, staging/production dep
 - **Risk flagged, behaviour pinned — "remove all synthetic" keys off *any* non-null `anomaly_type`**: `sensor_where` uses `SensorReading.anomaly_type.is_not(None)`, not a synthetic marker. `src/api/services/fault_classification.py:73-76` documents two further writers of that column (`setpoint_scada_detector`, `band_breach_detector`, UPPER_CASE labels). No DB write path for those was found today (their labels live on findings/responses), so this is latent — but if either ever persists, "All synthetic" silently deletes detector-labelled real rows, contradicting the module docstring's "Real sensor data is never deleted."
 - **Dead code**: `_daily_cycle` (lines 92-95) and `_anomaly_value` (lines 115-118) in `synthetic_anomalies.py` have no callers anywhere in `src/` or `tests/` — injection only uses `_anomaly_value_directed`, and `_daily_cycle` is a verbatim duplicate of `src/db/seeds.py:18`. They are the entire coverage gap on the module.
 - **Gate**: new files -> 39 passed + 1 xfailed. `tests/ -k "synthetic or inject or upload"` -> **218 passed, 1 xfailed** (was 193 before these files). Full `tests/api` -> **741 passed, 3 xfailed**. `git diff --stat -- src/` unchanged throughout (the applied fix only: 43 insertions, 4 deletions).
+
+
+## Security audit Phase 2 — API auth hardening (Backend, 2026-09-28)
+
+Implemented the approved fix for `docs/security/auth-audit-phase1.md`'s 58
+unauthenticated tenant-scoped routes. Fail-closed at every layer (network is
+phase-separate, not touched here).
+
+- **`src/config.py`**: added `ENVIRONMENT` (default `development`). Replaced
+  the flat `TENANT_API_KEYS=tenant:key,...` map with `API_CREDENTIALS_JSON`
+  (`key_id -> {key_hash, caller_type: web|integration, name, tenant_ids: [...] | "*", scopes}`).
+  `"*"` only permitted for `caller_type=web`; integration credentials must
+  resolve to exactly one tenant. Malformed JSON/entries raise `ValueError` at
+  import time (fail fast, not silently drop a credential).
+- **`src/api/auth.py`**: `require_api_key` now resolves the caller's tenant
+  via SHA-256 hash lookup (`secrets.compare_digest`, never the raw key at
+  rest) and — for `caller_type=web` — the `X-Tenant-Id` header (session-
+  derived at the BFF); `caller_type=integration` rejects `X-Tenant-Id`
+  outright (400) rather than silently ignoring it. `enforce_tenant_access`
+  now raises 401 on `auth_tenant is None` while `AUTH_ENABLED` is true
+  instead of returning — this, combined with `AUTH_ENABLED` defaulting off
+  only in non-production, is what made the 18 previously-"protected" routes
+  inert. Added `assert_auth_configured()`: refuses to start when
+  `ENVIRONMENT=production` and `AUTH_ENABLED` is false — called first thing
+  in `main.py`'s `lifespan`, before DB init. `register_test_api_key` keeps
+  its old 2-arg call shape (now issues a single-tenant `integration`
+  credential) — every pre-existing test using it needed no changes. Added
+  `register_test_web_api_key` for the new header-based flow.
+- **Removed `GET /api/auth/validate`**: deleted `src/api/routes/auth.py`,
+  its router registration, `tests/api/test_auth_validate.py`, and updated
+  `RAILWAY_HOSTING.md` / `MIGRATION_PLAN.md` (G7) references. It fell open
+  when `AUTH_ENABLED=false` and had no rate limit — approved for removal
+  since it had no runtime caller.
+- **`src/api/main.py`**: `docs_url`/`redoc_url`/`openapi_url` set to `None`
+  when `ENVIRONMENT=production`; unchanged everywhere else (web/openapi.json
+  generation depends on them staying on in dev/CI).
+- **Route-level fix, all 58**: enumerated from `app.routes` + each route's
+  `dependant.dependencies` (not grep — a grep miss on `incidents.py` is what
+  under-counted phase 1's first pass), reconciled to exactly 58. Added
+  `require_api_key` + `enforce_tenant_access` to every one across
+  `incidents.py` (6), `models.py` (8), `learning.py` (8), `readings.py` (10),
+  `jobs.py` (4), `bootstrap.py` (1), `backfill.py` (1), `anomalies.py` (3),
+  `gas_anomalies.py` (2), `network_anomalies.py` (7), `upload.py` (5),
+  `inference.py` (3). `jobs.py`'s three `{job_id}` routes have no tenant
+  parameter to bind — added `_enforce_job_ownership()` (DB lookup of
+  `job.tenant_id` vs. the caller) returning **404** on mismatch, not 403, so
+  existence isn't leaked. `incidents.py` store/resolve take `tenant_id` from
+  the body — bound to the credential; resolve's cross-tenant check was
+  already enforced one layer down in `IncidentMemory._get_incident`.
+  `network_anomalies.py`'s `tcp-handshake`/`dhcp-fingerprint`/`iat` have no
+  `tenant_id` field at all (pure stateless calculators, no persisted state)
+  — gated with `require_api_key` only, no `enforce_tenant_access` call
+  (documented in the module docstring; flagged, not silently left open).
+- **Verification**: `app.routes` enumeration script (dependency-graph based,
+  not grep) confirms 76/76 tenant-scoped routes now carry `require_api_key`
+  (18 pre-existing + 58 fixed), 0 remaining. Full suite:
+  **3184 passed, 16 skipped, 6 xfailed, 0 failed** (was 3171 passed before
+  this phase — added 13 new auth tests: web-credential `X-Tenant-Id` flow,
+  integration-credential header rejection, job-ownership 404s, the
+  production startup refusal, and docs-gating by `ENVIRONMENT`, the last two
+  via subprocess since they're import-time/startup-time behavior).
+- **Generation utility**: `src/api/scripts/generate_api_key.py` — prints a
+  random raw key + its `API_CREDENTIALS_JSON` entry (hash only) to stdout
+  for the operator to hand off outside the repo; writes nothing to disk.
+- **Not touched (explicitly out of scope for this phase)**: Railway domains,
+  env vars, deploys; `docker/serve.py`'s dual-stack IPv6 socket (already
+  correct); the `jobs` table/`tenant_id` column (already indexed and
+  filtered — no migration needed); anything `grovsen`-specific or a public
+  ingest route (`caller_type=integration` exists in the credential model,
+  nothing consumes it yet — deliberately generalized to at most one tenant
+  per integration credential since nothing needs more today).
+- **HEAD unchanged** throughout: `c48523505635c1a5e23ef6b79d77a5e045790ba3`
+  before and after (verified per `project_agent_branch_drift`). Changes are
+  uncommitted in the working tree per instructions.
+
+Done signal: not applicable (direct teammate task, not orchestrator dispatch).
+
+
+## Security audit Phase 2 — startup guard fail-open fix (Backend, 2026-09-28)
+
+Team lead caught a real bug in the Phase 2 fix above: `ENVIRONMENT` defaulted
+to `"development"`, and the live API has `ENVIRONMENT` unset — so
+`assert_auth_configured()` never fired in production and the whole fix was
+a no-op there. Root cause was in the original spec, not the implementation.
+Corrected:
+
+- **`src/config.py`**: `ENVIRONMENT` now defaults to `"production"`, not
+  `"development"` — a deployment that forgets to set it fails closed
+  instead of silently running with auth disabled. Added
+  `RAILWAY_ENVIRONMENT_NAME` (Railway sets this on every deployed service
+  regardless of whether the app's own `ENVIRONMENT` was configured for it).
+- **`src/api/auth.py`**: `assert_auth_configured()` now requires
+  `AUTH_ENABLED=true` when *either* `ENVIRONMENT == "production"` *or*
+  `RAILWAY_ENVIRONMENT_NAME` is non-empty — two independent signals, so one
+  forgotten variable can't fail open on its own.
+- **Files touched to keep the suite (and local dev) running with the new
+  fail-closed default** — every one that needed `ENVIRONMENT` declared
+  non-production explicitly:
+  - `tests/conftest.py` — `os.environ.setdefault("ENVIRONMENT", "test")` at
+    the top, before any `src.config`/`src.api.main` import. This is
+    pytest's first-loaded conftest for the whole `tests/` tree (rootdir,
+    `testpaths = tests`), so both CI workflows (`backend-tests.yml`,
+    `postgres-tests.yml`) pick it up automatically — neither invokes
+    `ENVIRONMENT` itself, so neither needed editing.
+  - `docker-compose.yml` — added `ENVIRONMENT: development` to the `api`
+    service (the only service whose lifespan calls
+    `assert_auth_configured()`; `worker`/`dashboard` don't).
+  - `.env.example` / `.env.development` — **not edited**: both are outside
+    this session's file-read/write permissions (sandbox denies the whole
+    `.env*` glob). Flagging for whoever has access to add
+    `ENVIRONMENT=development` there for anyone running the API outside
+    docker-compose/pytest (e.g. `uvicorn` directly from a shell).
+  - `tests/api/test_auth.py` — updated `TestAssertAuthConfigured`'s
+    RuntimeError regex (message text changed) and added 3 tests: the
+    `RAILWAY_ENVIRONMENT_NAME`-alone-is-sufficient path, and a clean-
+    subprocess check that `ENVIRONMENT` actually resolves to `"production"`
+    with nothing set (guards the default itself, not just the branch logic).
+- **Verified default via subprocess** (no env vars set at all):
+  `src.config.ENVIRONMENT == "production"`, `RAILWAY_ENVIRONMENT_NAME == ""`.
+- **Gate**: `tests/api/test_auth.py` — 21 passed. Full suite —
+  **3186 passed, 16 skipped, 6 xfailed, 0 failed** (was 3184 before this
+  correction). HEAD unchanged: `c48523505635c1a5e23ef6b79d77a5e045790ba3`.

@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.sensor_data import UploadResponse
 from src.api.services.cache_invalidation import invalidate_response_cache
 from src.api.services.synthetic_anomalies import (
@@ -31,12 +32,14 @@ async def upload_csv(
     tenant_id: str = Form(...),
     greenhouse_id: str = Form("default"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ):
     """
     Upload CSV file with sensor readings. Uses a memory-safe chunking
     approach with CSVAdapter to validate and process data before database insertion.
     Also stores raw readings (all columns) for full-fidelity dashboard display.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
 
@@ -223,8 +226,10 @@ async def clear_tenant_data(
     tenant_id: str,
     greenhouse_id: str = "default",
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ):
     """Delete all greenhouse-scoped data (cascade rules in services.tenant_data_wipe)."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     return await wipe_tenant_data(
         db,
         getattr(request.app.state, "live_runtime", None),
@@ -239,8 +244,10 @@ async def remove_live_demo_data(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query("default"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ) -> dict:
     """Delete Go Live / mock SCADA rows only (filter rules in services.tenant_data_wipe)."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     return await wipe_live_demo_data(
         db,
         getattr(request.app.state, "live_runtime", None),
@@ -259,8 +266,10 @@ async def inject_test_anomalies(
     window_start: Optional[str] = Form(None),
     window_end: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ):
     """Insert synthetic readings (generation rules in services.synthetic_anomalies)."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     return await inject_synthetic_anomalies(
         db,
         tenant_id=tenant_id,
@@ -282,8 +291,10 @@ async def remove_synthetic_anomalies(
         description="Specific type to remove; omit to remove all synthetic anomalies",
     ),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ) -> dict:
     """Remove synthetically injected test anomalies. Real sensor data is never touched."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     return await delete_synthetic_anomalies(
         db,
         tenant_id=tenant_id,

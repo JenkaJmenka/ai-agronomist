@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.services.detector_cache import NoActiveModelError, resolve_tenant_detector
 from src.api.services.score_backfill import BackfillResult, backfill_scores
 from src.db.session import get_db
@@ -127,8 +128,10 @@ class BackfillScoresResponse(BaseModel):
 async def post_backfill_scores(
     request: BackfillScoresRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> BackfillScoresResponse:
     """Backfill anomaly scores for a tenant/greenhouse/window."""
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     try:
         resolved = await resolve_tenant_detector(
             db, request.tenant_id, request.checkpoint_path

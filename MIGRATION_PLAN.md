@@ -243,7 +243,7 @@ The backend already exposes a clean read surface (`/api/readings/*`, `/api/jobs/
 | G4 | Enriched top anomalies | `GET /api/anomalies/enriched?tenant_id&greenhouse_id&start&end&limit` → rows with `fault_type`, `root_cause`, attribution | backend | Replaces `load_enriched_top_anomalies` (incident join + fault classify). |
 | G5 | Job progress SSE | `GET /api/jobs/{job_id}/events` → `text/event-stream` emitting `{status, progress_pct, completed_portions, total_portions}` until terminal | backend | Replaces the 5 s poll fragment; big UX win on long uploads. |
 | G6 | Jobs list already lightens result | (exists — `_lighten_result` in `jobs.py`) | — | Confirm the FE never requests heavy arrays from the list endpoint. |
-| G7 | Auth/me + key validation | `GET /api/auth/validate` (X-API-Key) → `{ok, tenant_scope?}` | backend | Lets the BFF verify the key server-side once. |
+| G7 | ~~Auth/me + key validation~~ Removed | ~~`GET /api/auth/validate` (X-API-Key) → `{ok, tenant_scope?}`~~ | backend | Superseded in the Phase 2 auth hardening: the pre-validation oracle was itself a finding (fails open on `AUTH_ENABLED=false`, no rate limit). The BFF now sends `X-API-Key` + `X-Tenant-Id` directly on every request and handles the resulting 401/403 like any other API error. |
 | G8 | CORS / same-origin | ensure FastAPI CORS allows the Next origin **or** all FE traffic proxied via Next Route Handlers (preferred — no CORS, key hidden) | backend/devops | Prefer BFF proxy. |
 | G9 | Consistent camelCase or documented snake_case | publish an OpenAPI schema the FE generates types from (`openapi-typescript`) | backend | Avoids hand-drift between `tenant_id`/`customer_id` (COR-1 in prior review). |
 

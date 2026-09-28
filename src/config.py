@@ -679,26 +679,137 @@ ACTIVE_LEARNING_FEEDBACK_WINDOW_DAYS: int = 30
 ACTIVE_LEARNING_DEFAULT_OPERATOR_CONFIDENCE: float = 0.8
 
 # =============================================================================
-# API Authentication (Phase D — production hardening)
+# API Authentication (Phase D — production hardening; Phase 2 credential model)
 # =============================================================================
-import os
-from typing import Dict
+import dataclasses
+import json
+from typing import FrozenSet, Union
+
+# Deployment environment name. "production" gates behavior that must never
+# run with auth disabled — see assert_auth_configured() in src/api/auth.py,
+# called at FastAPI startup (not per-request).
+#
+# Defaults to "production", not "development": a deployment that forgets to
+# set this must refuse to start (loud, safe) rather than silently serving
+# every tenant-scoped route to anyone. Non-production is the state that must
+# be declared explicitly (local dev / CI / tests set ENVIRONMENT=development
+# or =test) — see tests/conftest.py and docker-compose.yml for where that
+# happens in this repo.
+ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "production").strip().lower()
+
+# Railway always sets this (any deployed environment, not just the one named
+# "production") even though the app's own ENVIRONMENT var is not guaranteed
+# to be configured on every service. Used as a second, independent signal in
+# assert_auth_configured() so a deployment can't fail open just because one
+# of the two variables was forgotten.
+RAILWAY_ENVIRONMENT_NAME: str = os.environ.get("RAILWAY_ENVIRONMENT_NAME", "").strip().lower()
+
+# A credential may be scoped to every tenant ("*") only when caller_type is
+# "web": the BFF holds exactly one such credential and resolves the actual
+# tenant per-request from the caller's session via the X-Tenant-Id header
+# (see src/api/auth.py:require_api_key). An "integration" credential is
+# scoped to its own fixed tenant and never accepts a caller-supplied
+# tenant override.
+_CALLER_TYPES = ("web", "integration")
 
 
-def _parse_tenant_api_keys() -> Dict[str, str]:
-    """Parse ``TENANT_API_KEYS=tenant_a:secret1,tenant_b:secret2`` from env."""
-    raw = os.environ.get("TENANT_API_KEYS", "")
-    keys: Dict[str, str] = {}
-    for part in raw.split(","):
-        part = part.strip()
-        if not part or ":" not in part:
-            continue
-        tenant_id, api_key = part.split(":", 1)
-        tenant_id = tenant_id.strip()
-        api_key = api_key.strip()
-        if tenant_id and api_key:
-            keys[tenant_id] = api_key
-    return keys
+@dataclasses.dataclass(frozen=True)
+class ApiCredential:
+    """One issued API credential. Never holds the raw key — only its hash."""
+
+    key_hash: str
+    caller_type: str
+    name: str
+    tenant_ids: Union[FrozenSet[str], str]  # FrozenSet[str], or "*" (web only)
+    scopes: FrozenSet[str] = dataclasses.field(default_factory=frozenset)
+
+
+def _build_credential(key_id: str, raw: dict) -> ApiCredential:
+    """Validate and construct one credential entry.
+
+    Raises ``ValueError`` on any malformed field so a bad
+    ``API_CREDENTIALS_JSON`` fails the whole startup instead of silently
+    dropping or under-scoping a credential.
+    """
+    missing = [f for f in ("key_hash", "caller_type", "name", "tenant_ids") if f not in raw]
+    if missing:
+        raise ValueError(f"API credential {key_id!r} missing field(s): {missing}")
+
+    caller_type = raw["caller_type"]
+    if caller_type not in _CALLER_TYPES:
+        raise ValueError(
+            f"API credential {key_id!r} has invalid caller_type {caller_type!r}; "
+            f"expected one of {_CALLER_TYPES}"
+        )
+
+    tenant_ids_raw = raw["tenant_ids"]
+    tenant_ids: Union[FrozenSet[str], str]
+    if tenant_ids_raw == "*":
+        if caller_type != "web":
+            raise ValueError(
+                f"API credential {key_id!r}: tenant_ids='*' is only permitted "
+                "for caller_type='web'"
+            )
+        tenant_ids = "*"
+    else:
+        if not isinstance(tenant_ids_raw, list) or not tenant_ids_raw:
+            raise ValueError(
+                f"API credential {key_id!r}: tenant_ids must be a non-empty "
+                "list of tenant ids, or '*' for caller_type='web'"
+            )
+        tenant_ids = frozenset(tenant_ids_raw)
+        if caller_type == "integration" and len(tenant_ids) != 1:
+            raise ValueError(
+                f"API credential {key_id!r}: integration credentials must be "
+                "scoped to exactly one tenant"
+            )
+
+    key_hash = raw["key_hash"]
+    if not isinstance(key_hash, str) or len(key_hash) != 64:
+        raise ValueError(
+            f"API credential {key_id!r}: key_hash must be a 64-char SHA-256 hex digest"
+        )
+
+    return ApiCredential(
+        key_hash=key_hash.lower(),
+        caller_type=caller_type,
+        name=raw["name"],
+        tenant_ids=tenant_ids,
+        scopes=frozenset(raw.get("scopes", [])),
+    )
+
+
+def _parse_api_credentials() -> Dict[str, ApiCredential]:
+    """Parse ``API_CREDENTIALS_JSON`` — a JSON object of ``key_id -> credential``.
+
+    Replaces the flat ``TENANT_API_KEYS=tenant:key,...`` map, which had no
+    caller-type or scope concept and stored raw keys rather than hashes.
+    Nothing is deployed against the old format, so this is a breaking change.
+
+    Credential shape::
+
+        {
+          "<key_id>": {
+            "key_hash": "<sha256 hex digest of the raw key>",
+            "caller_type": "web" | "integration",
+            "name": "<human label>",
+            "tenant_ids": ["tenant_a", ...] | "*",   # "*" only for caller_type=web
+            "scopes": ["..."]                         # optional, defaults to []
+          }
+        }
+
+    Raises ``ValueError`` (crashing startup) on any malformed entry.
+    """
+    raw_env = os.environ.get("API_CREDENTIALS_JSON", "").strip()
+    if not raw_env:
+        return {}
+    try:
+        parsed = json.loads(raw_env)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"API_CREDENTIALS_JSON is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("API_CREDENTIALS_JSON must be a JSON object of key_id -> credential")
+    return {key_id: _build_credential(key_id, entry) for key_id, entry in parsed.items()}
 
 
 # =============================================================================
@@ -1158,7 +1269,7 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
     "true",
     "yes",
 )
-TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
+API_CREDENTIALS: Dict[str, ApiCredential] = _parse_api_credentials()
 
 # Single source of truth for the Redis connection default — previously
 # duplicated as a literal in both src/api/main.py (FastAPICache init) and

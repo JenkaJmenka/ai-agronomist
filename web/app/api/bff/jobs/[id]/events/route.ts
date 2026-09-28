@@ -17,12 +17,20 @@ interface RouteContext {
 }
 
 export async function GET(req: NextRequest, ctx: RouteContext): Promise<Response> {
+  // proxy.ts stamps this from the session — attached per the phase 2
+  // contract even though this route has no tenant query param of its own
+  // (ownership of `id` is the API's job, tracked separately).
+  const tenantId = req.headers.get("x-tenant-id");
+  if (!tenantId) {
+    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+  }
   const { id } = await ctx.params;
   const target = new URL(`/api/jobs/${encodeURIComponent(id)}/events`, API_URL);
   const start = performance.now();
 
   const headers = new Headers({ accept: "text/event-stream" });
   if (API_KEY) headers.set("X-API-Key", API_KEY);
+  headers.set("X-Tenant-Id", tenantId);
 
   let status = 502;
   let ok = true;

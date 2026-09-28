@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.gas import GasReadingsResponse, GasSummaryResponse
 from src.db.models import RawReading
 from src.db.session import get_db
@@ -75,6 +76,7 @@ async def gas_summary(
     greenhouse_id: str = Query(..., min_length=1),
     hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Return per-column gas anomaly baselines and time-series for the window.
@@ -82,6 +84,7 @@ async def gas_summary(
     The baseline is fitted from all readings in the window, then each reading
     is scored against it.  Synthetic readings are excluded.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     rows = await _fetch_real_readings(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, hours=hours
     )
@@ -158,6 +161,7 @@ async def gas_readings(
     greenhouse_id: str = Query(..., min_length=1),
     hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Return raw gas sensor time-series without anomaly scoring.
@@ -165,6 +169,7 @@ async def gas_readings(
     Useful for charting tools that want unprocessed data.  Synthetic
     readings are excluded.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     rows = await _fetch_real_readings(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, hours=hours
     )

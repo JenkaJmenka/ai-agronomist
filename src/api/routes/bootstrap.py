@@ -21,8 +21,9 @@ import os
 import tempfile
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.models.bootstrap import (
     BootstrapRowResult as EngineBootstrapRowResult,
     ColdStartBootstrap,
@@ -54,6 +55,7 @@ def _ts_to_iso(ts: object) -> str:
 async def run_bootstrap(
     file: UploadFile = File(...),
     tenant_id: str = Form(...),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> BootstrapRunResponse:
     """Run the two-pass cold-start bootstrap pipeline on a raw SCADA CSV.
 
@@ -73,6 +75,7 @@ async def run_bootstrap(
         HTTPException 400: Fewer than 100 clean rows after Pass 1.
         HTTPException 500: Unexpected pipeline or training failure.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     # Write upload to disk with delete=False — the file must persist across
     # the subsequent asyncio.to_thread call after the with-block closes.
     try:

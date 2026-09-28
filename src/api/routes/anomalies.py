@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi_cache.decorator import cache
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.query_params import parse_iso_param
 from src.api.schemas.anomaly_episodes import AnomalyEpisodesResponse
 from src.api.services import readings_service
@@ -59,6 +60,7 @@ async def get_anomaly_groups(
     threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     group_by: Literal["date", "type", "sensor"] = Query(...),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Aggregated anomaly groups (G3) — powers the FE Table view grouping.
 
@@ -82,6 +84,7 @@ async def get_anomaly_groups(
     A stale ``?threshold=0.15`` entry from before the migration will age out
     within REDIS_CACHE_EXPIRE_SECONDS.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
@@ -122,6 +125,7 @@ async def get_anomaly_episodes(
     end: str = Query(...),
     threshold: Optional[float] = Query(default=None, ge=0.0, le=1.0),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Query-time anomaly episode merging — one row per continuous event.
 
@@ -142,6 +146,7 @@ async def get_anomaly_episodes(
     server defaults to ``CANONICAL_ANOMALY_THRESHOLD`` and echoes the
     effective value in the response.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}
@@ -184,6 +189,7 @@ async def get_enriched_anomalies(
         default=None, ge=1, le=ANOMALY_ENRICHED_MAX_LIMIT
     ),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Enriched top anomalies (G4) — replaces ``load_enriched_top_anomalies``.
 
@@ -222,6 +228,7 @@ async def get_enriched_anomalies(
     ADR-005 §2 — threshold is now optional.  Echoes the effective threshold and
     score_scale_version so clients can confirm which scale is in use.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     effective_threshold = threshold if threshold is not None else CANONICAL_ANOMALY_THRESHOLD
     scope = {"tenant_id": tenant_id, "greenhouse_id": greenhouse_id}
     window = {"start": _parse_iso(start, "start"), "end": _parse_iso(end, "end")}

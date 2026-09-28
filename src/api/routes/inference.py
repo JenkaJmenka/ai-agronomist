@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.sensor_data import (
     InferenceRequest,
     InferenceResponse,
@@ -49,8 +50,10 @@ router = APIRouter()
 @router.post("/inference", response_model=InferenceResponse)
 async def run_inference(
     request: InferenceRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     seqs = request.sequences
     if not seqs:
         raise HTTPException(status_code=400, detail="Empty sequences")
@@ -172,6 +175,7 @@ async def run_inference_from_csv(
     include_embeddings: bool = Form(default=False),
     train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """
     Run cold-run inference on an uploaded CSV.
@@ -183,6 +187,7 @@ async def run_inference_from_csv(
     When persist_data is true, also loads rows into the database with
     anomaly scores attached so Monitoring and Anomaly pages work immediately.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 
@@ -278,6 +283,7 @@ async def run_inference_from_csv_async(
     persist_data: bool = Form(default=False),
     train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
 
@@ -289,6 +295,7 @@ async def run_inference_from_csv_async(
     Railway containers share no filesystem. The local temp file is transient
     scratch on the API side only, deleted before the request returns.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 
