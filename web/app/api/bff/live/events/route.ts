@@ -14,16 +14,23 @@ const API_URL = process.env.API_URL ?? "http://localhost:8000";
 const API_KEY = process.env.API_KEY;
 
 export async function GET(req: NextRequest): Promise<Response> {
-  const tenant = req.nextUrl.searchParams.get("tenant") ?? "";
+  // proxy.ts stamps this from the session — the client's own `tenant` query
+  // param (still read by the app for display) is never used for scoping,
+  // so a caller can no longer pick another tenant's stream.
+  const tenantId = req.headers.get("x-tenant-id");
+  if (!tenantId) {
+    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+  }
   const gh = req.nextUrl.searchParams.get("gh") ?? "";
   const start = performance.now();
 
   const target = new URL("/api/live/events", API_URL);
-  if (tenant) target.searchParams.set("tenant_id", tenant);
+  target.searchParams.set("tenant_id", tenantId);
   if (gh) target.searchParams.set("greenhouse_id", gh);
 
   const headers = new Headers({ accept: "text/event-stream" });
   if (API_KEY) headers.set("X-API-Key", API_KEY);
+  headers.set("X-Tenant-Id", tenantId);
 
   // Forward Last-Event-ID so Redis XREAD resumes from the right offset.
   const lastEventId = req.headers.get("last-event-id");
@@ -62,7 +69,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     return NextResponse.json({ detail: "Upstream API unreachable" }, { status: 502 });
   } finally {
     emitProfileLog("bff.sse.live", ok, performance.now() - start, {
-      tenant: tenant || "-",
+      tenant: tenantId,
       gh: gh || "-",
       status,
     });

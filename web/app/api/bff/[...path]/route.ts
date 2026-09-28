@@ -12,6 +12,14 @@ const API_KEY = process.env.API_KEY;
 const PASSTHROUGH_HEADERS = ["content-type", "accept"] as const;
 
 async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
+  // proxy.ts stamps this from the session before any request reaches here;
+  // a request that arrives without it slipped past auth somehow — 401
+  // rather than ever forwarding it upstream unscoped.
+  const tenantId = req.headers.get("x-tenant-id");
+  if (!tenantId) {
+    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+  }
+
   const target = new URL(`/api/${path.join("/")}`, API_URL);
   target.search = req.nextUrl.search;
   const pathJoined = path.join("/");
@@ -23,6 +31,7 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
     if (value) headers.set(name, value);
   }
   if (API_KEY) headers.set("X-API-Key", API_KEY);
+  headers.set("X-Tenant-Id", tenantId);
 
   let status = 502;
   let ok = true;

@@ -197,8 +197,8 @@ describe("LiveToggle — reacts to resume's scope_status", () => {
 
     expect(await screen.findByTestId("live-not-configured")).toBeInTheDocument();
 
-    // Operator switches to a different, configured greenhouse — TenantSelector
-    // writes the URL via its own useQueryStates, LiveToggle re-renders with a
+    // Operator switches to a different, configured greenhouse — GreenhouseSelector
+    // writes the URL via its own useQueryState, LiveToggle re-renders with a
     // new scope but does not remount, so its local state would otherwise
     // survive the switch.
     useScopeMock.mockReturnValue({ tenant: "tenant_1", gh: "gh_B" });

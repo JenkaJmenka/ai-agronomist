@@ -9,12 +9,22 @@
 #            builds against the real API. Catches FE/BE parameter-range drift,
 #            which the hermetic Playwright suite cannot see by design.
 #
+# The API is no longer reachable on a public domain — it is private-network
+# only. Run this FROM INSIDE RAILWAY, against the API's private domain:
+#   railway ssh -s ai-agronomist-api -- scripts/perf-probe.sh
+#   railway run --service ai-agronomist-api -- scripts/perf-probe.sh
+# with PERF_PROBE_API_URL pointed at e.g.
+#   http://ai-agronomist-api.railway.internal:8000
+# Never the public domain, and never routed through the web BFF.
+#
 # Usage:  scripts/perf-probe.sh [tenant_id] [greenhouse_id]
 # Exit:   0 all within budget · 1 budget breach · 2 contract violation
 set -uo pipefail
 
-API_URL="${PERF_PROBE_API_URL:-https://ai-agronomist-api-production.up.railway.app}"
-WEB_URL="${PERF_PROBE_WEB_URL:-https://web-production-cd280.up.railway.app}"
+API_URL="${PERF_PROBE_API_URL:?PERF_PROBE_API_URL is required (private Railway domain, e.g. http://ai-agronomist-api.railway.internal:8000)}"
+# Never print $API_KEY, and never add `set -x` or `curl -v` to this file — both echo headers to stdout/log.
+API_KEY="${PERF_PROBE_API_KEY:?PERF_PROBE_API_KEY is required}"
+AUTH_HEADER=(-H "X-API-Key: $API_KEY")
 
 TENANT="${1:-tenant_1}"
 GREENHOUSE="${2:-gh_A}"
@@ -38,11 +48,10 @@ hr() { printf '%.0s─' {1..96}; echo; }
 # ---------------------------------------------------------------- discovery
 echo "Performance probe — $(date -u +%FT%TZ)"
 echo "API: $API_URL"
-echo "WEB: $WEB_URL"
 echo "Scope: $TENANT/$GREENHOUSE"
 hr
 
-BOUNDS=$(curl -s --max-time 30 "$API_URL/api/readings/bounds?tenant_id=$TENANT&greenhouse_id=$GREENHOUSE")
+BOUNDS=$(curl -s "${AUTH_HEADER[@]}" --max-time 30 "$API_URL/api/readings/bounds?tenant_id=$TENANT&greenhouse_id=$GREENHOUSE")
 MIN_TS=$(echo "$BOUNDS" | python3 -c "import sys,json;print(json.load(sys.stdin).get('min_timestamp') or '')" 2>/dev/null)
 MAX_TS=$(echo "$BOUNDS" | python3 -c "import sys,json;print(json.load(sys.stdin).get('max_timestamp') or '')" 2>/dev/null)
 
@@ -50,7 +59,7 @@ if [[ -z "$MIN_TS" || -z "$MAX_TS" ]]; then
   echo "!! No data for $TENANT/$GREENHOUSE — bounds are null."
   echo "   This is the empty-tenant state. Verify live monitoring reports a"
   echo "   DISTINGUISHABLE status here rather than an empty 200 (silent hang)."
-  curl -s --max-time 30 "$API_URL/api/live/status?tenant_id=$TENANT&greenhouse_id=$GREENHOUSE"; echo
+  curl -s "${AUTH_HEADER[@]}" --max-time 30 "$API_URL/api/live/status?tenant_id=$TENANT&greenhouse_id=$GREENHOUSE"; echo
   exit 0
 fi
 echo "Data range: $MIN_TS -> $MAX_TS"
@@ -85,7 +94,7 @@ enc() { python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]
 probe() {
   local label="$1" url="$2" budget="${3:-$SLOW_BUDGET}"
   local out http total bytes
-  out=$(curl -s -o /dev/null -w "%{http_code} %{time_total} %{size_download}" --max-time 120 "$url")
+  out=$(curl -s "${AUTH_HEADER[@]}" -o /dev/null -w "%{http_code} %{time_total} %{size_download}" --max-time 120 "$url")
   http=$(echo "$out" | cut -d' ' -f1)
   total=$(echo "$out" | cut -d' ' -f2)
   bytes=$(echo "$out" | cut -d' ' -f3)
@@ -135,7 +144,7 @@ QS="tenant_id=$TENANT&greenhouse_id=$GREENHOUSE&start=$(enc "$START")&end=$(enc 
 contract() {
   local label="$1" url="$2" want="$3"
   local got
-  got=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$url")
+  got=$(curl -s "${AUTH_HEADER[@]}" -o /dev/null -w "%{http_code}" --max-time 60 "$url")
   if [[ "$got" == "$want" ]]; then
     printf "  ok    %-52s http=%s\n" "$label" "$got"
   else
@@ -171,9 +180,9 @@ if [[ -z "$FE_FLOOR" ]]; then
   CONTRACT_FAILED=1
 else
   # Authoritative: the deployed API accepts FE_FLOOR and rejects FE_FLOOR-1.
-  at_floor=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+  at_floor=$(curl -s "${AUTH_HEADER[@]}" -o /dev/null -w "%{http_code}" --max-time 60 \
     "$API_URL/api/readings/anomalies-in-window?$QS&max_points=$FE_FLOOR")
-  below=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+  below=$(curl -s "${AUTH_HEADER[@]}" -o /dev/null -w "%{http_code}" --max-time 60 \
     "$API_URL/api/readings/anomalies-in-window?$QS&max_points=$((FE_FLOOR-1))")
   if [[ "$at_floor" == "200" && "$below" == "422" ]]; then
     echo "    ok    deployed API floor is exactly $FE_FLOOR — FE constant is correct"

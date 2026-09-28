@@ -9,7 +9,22 @@ Last updated: 2026-07-11 · Delivery status lives in `MIGRATION_PLAN.md` §0 (sa
 
 ## 1. What runs where
 
-Everything is one Railway project (**ai-agronomist**, environment **production**):
+Everything is one Railway project (**ai-agronomist**, environment **production**).
+
+> **`ENVIRONMENT` on `ai-agronomist-api` (security phase 2, 2026-09-28):**
+> the app's own `ENVIRONMENT` var defaults to `"production"` — unset is
+> treated as production, not development. This is deliberate: a deployment
+> that forgets to set it must fail closed (refuse to start unless
+> `AUTH_ENABLED=true`), not silently serve every tenant-scoped route to
+> anyone the way an opt-in default would. Railway's own
+> `RAILWAY_ENVIRONMENT_NAME` (always present on a deployed service) backs
+> this up as a second, independent signal — either one alone is enough to
+> require `AUTH_ENABLED=true`. **Set `ENVIRONMENT=production` explicitly on
+> `ai-agronomist-api`** rather than relying on the default, and set
+> `ENVIRONMENT=development` (or `=test`) on any non-production deployment of
+> this service (a preview/staging environment, a personal Railway fork,
+> etc.) — leaving it unset there now means production semantics, including
+> the startup refusal.
 
 | Service | What it is | Source |
 |---|---|---|
@@ -62,10 +77,12 @@ Not done (deliberately — each is a human decision): connecting the repo
 
 1. **Redeploy the API from `main` first.** The web app needs endpoints that
    shipped on `main` on 2026-07-11 (`anomalies-in-window`, `anomalies/groups`,
-   `anomalies/enriched`, `jobs/{id}/events` SSE, `auth/validate`). In the
-   Railway dashboard: `ai-agronomist-api` → Deployments → Redeploy (or push to
-   `main` if auto-deploy is on). Verify:
-   `curl https://<api-domain>/api/auth/validate` → `{"ok":true,...}`.
+   `anomalies/enriched`, `jobs/{id}/events` SSE). In the Railway dashboard:
+   `ai-agronomist-api` → Deployments → Redeploy (or push to `main` if
+   auto-deploy is on). Verify: `curl https://<api-domain>/health` →
+   `{"status":"ok"}`. (`GET /api/auth/validate` was removed in the Phase 2
+   auth hardening — the BFF now sends `X-API-Key` / `X-Tenant-Id` directly on
+   every request and reads the resulting 401/403 instead of pre-validating.)
 2. **Connect the repo to `web`.** Dashboard: `web` service → **Settings →
    Source → Connect Repo** → `JenkaJmenka/ai-agronomist`, branch
    **`fe/nextjs-migration`**. (Root directory is already set to `web`; leave
@@ -103,8 +120,12 @@ Not done (deliberately — each is a human decision): connecting the repo
 | Var | Value | Notes |
 |---|---|---|
 | `API_URL` | `http://${{ai-agronomist-api.RAILWAY_PRIVATE_DOMAIN}}:8000` | Private IPv6 host; port 8000 is `start-api.sh`'s default. If the API service defines `PORT` explicitly, change to `:${{ai-agronomist-api.PORT}}`. |
-| `API_KEY` | placeholder until auth is on | When `AUTH_ENABLED=true` on the API, set to a tenant key from its `TENANT_API_KEYS`. Server-side only — **never** `NEXT_PUBLIC_*`. |
+| `API_KEY` | placeholder until auth is on | When `AUTH_ENABLED=true` on the API, set to the raw key for a `caller_type=web` entry in its `API_CREDENTIALS_JSON` (see `src/api/scripts/generate_api_key.py`). Server-side only — **never** `NEXT_PUBLIC_*`. |
 | `PORT` | injected by Railway | Bound explicitly by the start command. |
+| `AUTH_SECRET` | **not yet set** | New (security phase 2) — Auth.js session/cookie signing key. Generate with `npx auth secret`. Server-side only. |
+| `AUTH_DATABASE_URL` | **not yet set** | New (security phase 2) — points at the **existing** `ai-agronomist-db` Postgres (same instance as the API's `DATABASE_URL`, not a second plugin). Auth.js's users/sessions/verification-token tables plus `user_tenants` live in a dedicated **`auth` schema** (not `public`), applied by hand from `web/lib/auth/schema.sql` — `public` stays exclusively the FastAPI app's alembic-managed schema so `alembic revision --autogenerate` never sees these tables. `web`'s pool sets `search_path=auth` (`web/lib/auth/db.ts`); `src/` never reads this schema. |
+| `AUTH_RESEND_KEY` | **not yet set** | New (security phase 2) — Resend API key for magic-link email (name matches Auth.js's own `AUTH_{PROVIDER}_KEY` convention, not a made-up name). Outside production, `web/lib/auth/emailProvider.ts` mocks the sender (logs the link) instead of calling Resend, so this can stay unset until cutover. **Never** `NEXT_PUBLIC_*`. |
+| `AUTH_RESEND_FROM` | optional, defaults to `AI Agronomist <no-reply@ai-agronomist.app>` | New (security phase 2) — the from-address for magic-link email. Resend requires the sending domain in this address to be verified in the Resend account (add the SPF/DKIM DNS records Resend provides for that domain) before it can deliver to arbitrary recipients — until that's done, Resend only allows sending to the account owner's own verified address via its shared `onboarding@resend.dev` sender, which is not usable for real operator logins. No Auth.js convention exists for this var name; chosen to mirror `AUTH_RESEND_KEY`. |
 
 ## 7. CI
 

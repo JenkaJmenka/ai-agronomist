@@ -8,7 +8,8 @@
       "lib/**",
       "test/**",
       "!**/*.css",
-      "!lib/api-types.gen.ts"
+      "!lib/api-types.gen.ts",
+      "!test/e2e/.auth"
     ]
   },
   "formatter": {

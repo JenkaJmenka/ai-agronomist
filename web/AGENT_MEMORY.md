@@ -295,3 +295,111 @@ Shipped in `27bbab9` after PROFILE metrics showed BFF `readings/window` at ~2.7�
 4. `LiveToggle` + `DateRangeControls`: optimistic URL updates before bounds I/O
 
 Metrics write-up: `docs/refactor/performance-2026-07-23.md`.
+
+---
+
+## Security phase 2 — login + BFF lockdown (2026-09-28)
+
+### What was done
+No login or session mechanism existed anywhere in `web/` — the BFF catch-all and both SSE
+routes proxied any anonymous request and attached the API key unconditionally. Closed per
+`docs/security/auth-audit-phase1.md` §7 and the team-lead's phase 2 contract.
+
+**Login — Auth.js v5 (`next-auth@5.0.0-beta.32`) + Resend magic link:**
+- `auth.ts` (root) — `NextAuth()` config. `session: { strategy: "jwt" }` even though a
+  Postgres adapter is configured: Next 16's `proxy.ts` defaults to the **Node.js runtime**
+  (renamed from `middleware.ts` — see `node_modules/next/dist/docs/.../file-conventions/proxy.md`),
+  so the classic edge-safe split-config pattern isn't needed, but jwt sessions still avoid a
+  DB round trip on every request. Adapter is required regardless of session strategy — the
+  Email provider persists verification tokens/users through it.
+- `lib/auth/emailProvider.ts` — wraps the **built-in** `next-auth/providers/resend` (plain
+  `fetch` to Resend's HTTP API, no nodemailer needed — it's an optional peer dep). Chose
+  Resend over SES/Postmark: ships built into next-auth, one HTTP API key, no
+  SMTP/AWS-IAM/SES-sandbox setup. `sendVerificationRequest` is overridden to log the link
+  instead of calling Resend whenever `NODE_ENV !== "production"` — dev/test never hit the
+  real API.
+- `lib/auth/db.ts` + `lib/auth/schema.sql` — a **dedicated** Postgres (`AUTH_DATABASE_URL`,
+  new env var, not yet provisioned) holds `@auth/pg-adapter`'s exact schema
+  (`users`/`accounts`/`sessions`/`verification_token` — table/column names it hard-codes,
+  don't rename) plus a `user_tenants(email, tenant_id)` mapping this app adds. No self-serve
+  sign-up: `signIn` callback in `auth.ts` denies (before sending any mail) any email with no
+  `user_tenants` row — fail closed, never a default tenant. `getPool()` must NOT throw when
+  `AUTH_DATABASE_URL` is unset (`next build` imports `auth.ts` while collecting route
+  metadata, executing `PostgresAdapter(getAuthPool())` at module-eval time) — only fail at
+  first query.
+- `features/auth/LoginView.tsx` + `app/login/page.tsx` + `app/api/auth/[...nextauth]/route.ts`
+  — email-only form, single confirmation message regardless of whether `signIn` denied or
+  actually sent mail (prevents user enumeration).
+
+**Middleware -> Proxy, tenant binding:**
+- `proxy.ts` (root, replaces the deprecated `middleware.ts` convention) wraps `auth()`.
+  Pure routing decision extracted to `lib/auth/routeAuthDecision.ts` (unit tested) so the
+  fail-closed matrix doesn't need a request object to verify: anonymous page -> redirect
+  `/login`; anonymous `/api/bff/*` (including both SSE routes) -> 401; `/login` and
+  `/api/auth/*` always allowed (or the sign-in flow can't run at all).
+  Matcher excludes `_next/static`, `_next/image`, and common static file extensions.
+- Once logged in, `proxy.ts` deletes any client-sent `x-tenant-id` header and re-sets it from
+  `req.auth.user.tenantId` before calling `NextResponse.next({ request: { headers } })` — the
+  **one** place "logged in" becomes "which tenant." The 3 BFF route handlers
+  (`app/api/bff/[...path]/route.ts`, `.../live/events/route.ts`, `.../jobs/[id]/events/route.ts`)
+  read that header, 401 defensively if it's somehow missing (defense in depth — proxy should
+  have already blocked it), and forward it upstream as `X-Tenant-Id` per the agreed contract
+  with `sec-p2-api` (BFF holds one `caller_type=web` credential; API honours `X-Tenant-Id`
+  for that caller type, ignoring any query/body `tenant_id` it still receives from the FE's
+  existing `useScope()`-driven calls — that ignoring happens API-side, not scrubbed here).
+- `Session["user"].tenantId` is added via `declare module "next-auth"` in `lib/auth/types.d.ts`
+  (works because `next-auth`'s `Session` is a **named** re-export of `@auth/core`'s). The JWT
+  payload's `tenantId` is **not** type-augmented the same way — `next-auth/jwt` is a bare
+  `export * from "@auth/core/jwt"`, and TypeScript only merges `declare module` into the
+  module that originally declares the interface (`@auth/core/jwt`, which pnpm doesn't hoist
+  to a resolvable path since it's not a direct dependency here). `auth.ts` reads/writes
+  `token.tenantId` through a local `TokenWithTenant` type assertion instead — avoids a fragile
+  augmentation entirely; got bitten by this once (a `Type '{}' is not assignable to type
+  'string'` error) before finding the root cause.
+
+**Key management:** `API_KEY`/`AUTH_RESEND_KEY`/`AUTH_DATABASE_URL` all read server-side only
+(`process.env.*`, no `NEXT_PUBLIC_*`). Verified via build-output grep (see report to
+team-lead for the exact commands) with distinctive fake secret markers injected through env
+vars at build time — zero hits anywhere in `.next`, confirming Next never inlines a
+non-`NEXT_PUBLIC_*` value into any bundle.
+
+**E2E regression fixed:** gating every page behind login broke all 66 existing e2e specs
+(redirect to `/login` on `page.goto`). Fixed with `test/e2e/global-setup.ts`, which mints a
+valid Auth.js session cookie directly via `next-auth/jwt`'s `encode()` (`salt` must equal the
+session cookie name, `"authjs.session-token"` unprefixed since e2e runs over plain
+`http://localhost` — Auth.js only uses the `__Secure-` prefix over https) and saves it as
+Playwright `storageState`. `playwright.config.ts` passes the same fixed `AUTH_SECRET`
+(`test/e2e/authSecret.ts`) into the `webServer.env` so the running server can decode it. This
+only works because session strategy is `jwt` — no DB round trip needed to validate an
+existing session, so e2e never touches Postgres.
+
+**Manual verification beyond the automated suite** (built server + a fake upstream SSE
+emitter on `:9999`, real `next-auth/jwt` `encode()` cookie):
+- Anonymous `/api/bff/live/events` and `/api/bff/jobs/:id/events` -> `401` (not just the
+  catch-all).
+- Anonymous `/monitoring` -> `307` to `/login?callbackUrl=%2Fmonitoring`.
+- Authenticated SSE: heartbeat events arrived ~500 ms apart end-to-end through
+  `proxy.ts` + the route handler — confirms the auth check does not buffer the stream.
+
+### Known follow-ups left for the coordinator (not done here — out of scope/ownership)
+- `AUTH_DATABASE_URL` Postgres plugin, `AUTH_SECRET`/`AUTH_RESEND_KEY` real values, and running
+  `lib/auth/schema.sql` once — all deploy decisions, documented in `RAILWAY_HOSTING.md` §6 but
+  not provisioned.
+- `web/lib/api-types.gen.ts` / `web/openapi.json` NOT regenerated: `sec-p2-api`'s removal of
+  `GET /api/auth/validate` is uncommitted in the shared working tree and `web/openapi.json`
+  itself hasn't been refreshed from a running instance yet, so regenerating now would be a
+  no-op against the stale snapshot — left alone per the task's explicit instruction.
+- `TenantSelector.tsx` was removed in a later round of this phase: tenant is derived
+  from the signed-in session, so the control could not change anything and was replaced
+  by `GreenhouseSelector.tsx` (greenhouse only, still client-driven).
+- Two files outside `web/` still call the API's **public** Railway domain directly, bypassing
+  the BFF entirely: `.claude/skills/perf-investigation/SKILL.md` and `scripts/perf-probe.sh`
+  (also `scripts/perf_flows.py`, but only for the `web` domain). Reported to team-lead per the
+  "report every reference" instruction; not edited (outside file ownership).
+
+### Gates status (2026-09-28)
+- `pnpm typecheck`: clean
+- `pnpm lint`: 0 errors (pre-existing biome.json `recommended`-field deprecation info only)
+- `pnpm test`: 337/337 (38 test files — 1 new: `lib/auth/routeAuthDecision.test.ts`)
+- `pnpm build`: clean
+- `pnpm exec playwright test`: 66/66
