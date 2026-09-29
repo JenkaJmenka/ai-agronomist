@@ -1,8 +1,9 @@
 import type { ProxyMatcher } from "next/dist/build/analysis/get-page-static-info";
 import * as nextPageStaticInfo from "next/dist/build/analysis/get-page-static-info";
+import type { NextResponse } from "next/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { config } from "@/proxy";
+import proxyHandler, { config } from "@/proxy";
 
 /**
  * Regression coverage for the >10MB CSV upload corruption: Next 16's proxy
@@ -18,8 +19,11 @@ import { config } from "@/proxy";
  */
 
 // proxy.ts imports `@/auth`, which builds a Postgres pool at module scope.
-// Only `config.matcher` is under test, so the Auth.js wrapper is stubbed to
-// keep this a pure matching test with no DB or session wiring.
+// Only the matcher and the handler's own logic are under test, so the
+// Auth.js wrapper is stubbed to keep this a pure test with no DB wiring.
+// Because `auth` is mocked to the identity function, `proxy.ts`'s default
+// export below is literally its own inner `(req) => {...}` callback — real
+// enough to call directly with a hand-built request.
 vi.mock("@/auth", () => ({
   auth: (handler: unknown) => handler,
 }));
@@ -111,5 +115,125 @@ describe("proxy matcher — pre-existing matches are unchanged", () => {
     for (const pathname of ["/logo.svg", "/hero.png", "/photo.jpeg", "/anim.webp"]) {
       expect(isMatchedByProxy(pathname), `${pathname} should be excluded`).toBe(false);
     }
+  });
+});
+
+/**
+ * Regression coverage for the production "tenant undefined" bug: a session
+ * missing `tenantId` (self-heal in `lib/auth/tenantClaim.ts` couldn't fill it
+ * in) must never reach the point where `Headers.set` coerces it to the
+ * literal string `"undefined"` and forwards it upstream. See `proxy.ts`'s
+ * file header for the full incident writeup.
+ *
+ * `NextResponse.next({ request: { headers } })` doesn't expose the rewritten
+ * *request* headers on the returned response object directly — Next encodes
+ * them as `x-middleware-request-<key>` response headers instead (see
+ * `next/dist/server/web/spec-extension/response.js`), so that's what these
+ * assertions read to prove whether `x-tenant-id` was actually forwarded.
+ */
+const FORWARDED_TENANT_HEADER = "x-middleware-request-x-tenant-id";
+
+interface FakeSession {
+  user: { tenantId?: string; email?: string | null };
+}
+
+interface FakeCookie {
+  readonly name: string;
+  readonly value: string;
+}
+
+/** Just enough of `NextRequest` for `proxy.ts`'s handler to run against. */
+function createFakeRequest(options: {
+  pathname: string;
+  auth?: FakeSession | null;
+  cookies?: readonly FakeCookie[];
+}): Parameters<typeof proxyHandler>[0] {
+  const nextUrl = new URL(`https://example.com${options.pathname}`);
+  const fakeRequest = {
+    nextUrl,
+    auth: options.auth ?? null,
+    headers: new Headers(),
+    cookies: { getAll: () => options.cookies ?? [] },
+  };
+  return fakeRequest as unknown as Parameters<typeof proxyHandler>[0];
+}
+
+function callProxy(options: Parameters<typeof createFakeRequest>[0]) {
+  const request = createFakeRequest(options);
+  // `proxy.ts`'s handler is synchronous; the `NextMiddleware` type it's
+  // declared as also allows a `Promise`, hence the cast down to what it
+  // actually returns here.
+  return proxyHandler(request, {} as never) as NextResponse | undefined;
+}
+
+describe("proxy handler — fail-closed on a missing tenant", () => {
+  it("never stamps x-tenant-id — let alone the literal string 'undefined' — for an authenticated session with no tenant", () => {
+    const response = callProxy({
+      pathname: "/api/bff/models/tenant_1/versions",
+      auth: { user: { tenantId: undefined, email: "grower@example.com" } },
+    });
+
+    expect(response?.status).toBe(401);
+    expect(response?.headers.get(FORWARDED_TENANT_HEADER)).toBeNull();
+  });
+
+  it("401s a /api/bff/* request when the session has no tenant, and clears the session cookie", () => {
+    const response = callProxy({
+      pathname: "/api/bff/anomalies",
+      auth: { user: { tenantId: undefined, email: "grower@example.com" } },
+      cookies: [{ name: "authjs.session-token", value: "opaque" }],
+    });
+
+    expect(response?.status).toBe(401);
+    expect(response?.headers.get(FORWARDED_TENANT_HEADER)).toBeNull();
+    const setCookie = response?.cookies.get("authjs.session-token");
+    expect(setCookie?.value).toBe("");
+  });
+
+  it("redirects a page request to /login when the session has no tenant, and clears the session cookie", () => {
+    const response = callProxy({
+      pathname: "/monitoring",
+      auth: { user: { tenantId: undefined, email: "grower@example.com" } },
+      cookies: [{ name: "__Secure-authjs.session-token", value: "opaque" }],
+    });
+
+    expect(response?.status).toBe(307);
+    expect(response?.headers.get("location")).toBe("https://example.com/login");
+    const setCookie = response?.cookies.get("__Secure-authjs.session-token");
+    expect(setCookie?.value).toBe("");
+  });
+
+  it("cannot loop: the redirect target is /login, which this same handler always allows regardless of session state", () => {
+    const stillAuthenticatedNoTenant = callProxy({
+      pathname: "/login",
+      auth: { user: { tenantId: undefined, email: "grower@example.com" } },
+    });
+    expect(stillAuthenticatedNoTenant?.status ?? 200).not.toBe(307);
+
+    const anonymous = callProxy({ pathname: "/login", auth: null });
+    expect(anonymous?.status ?? 200).not.toBe(307);
+  });
+
+  it('never stamps x-tenant-id on a PUBLIC path either, for an authenticated session with no tenant (regression: decideAuthAction returns "allow" unconditionally for /login, /api/auth/*, /api/health, so the switch never early-returns here — only the final tenantId guard in proxy.ts stops the stamp)', () => {
+    const noTenantSession = { user: { tenantId: undefined, email: "grower@example.com" } };
+
+    for (const pathname of ["/login", "/api/auth/callback/resend", "/api/health"]) {
+      const response = callProxy({ pathname, auth: noTenantSession });
+      expect(
+        response?.headers.get(FORWARDED_TENANT_HEADER),
+        `${pathname} must not forward a tenant`,
+      ).toBeNull();
+    }
+  });
+
+  it("stamps the real tenant and leaves cookies untouched for a normal authenticated session", () => {
+    const response = callProxy({
+      pathname: "/api/bff/anomalies",
+      auth: { user: { tenantId: "tenant_1", email: "grower@example.com" } },
+      cookies: [{ name: "authjs.session-token", value: "opaque" }],
+    });
+
+    expect(response?.headers.get(FORWARDED_TENANT_HEADER)).toBe("tenant_1");
+    expect(response?.headers.get("x-middleware-set-cookie")).toBeNull();
   });
 });
