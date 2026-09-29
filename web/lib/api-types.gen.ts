@@ -1619,31 +1619,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/auth/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Validate Api Key
-         * @description Report whether the presented X-API-Key is valid and its tenant scope.
-         *
-         *     Always answers 200 so the BFF can branch on the body instead of
-         *     exception-handling a 401: `{ok: false}` for unknown/missing keys,
-         *     `{ok: true, tenant_scope: <tenant>}` for valid ones. With auth
-         *     disabled every key is acceptable and there is no tenant scope.
-         */
-        get: operations["validate_api_key_api_auth_validate_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/config/operational": {
         parameters: {
             query?: never;
@@ -6235,39 +6210,6 @@ export interface operations {
                 limit?: number | null;
             };
             header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    validate_api_key_api_auth_validate_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-API-Key"?: string | null;
-            };
             path?: never;
             cookie?: never;
         };
