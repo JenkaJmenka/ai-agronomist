@@ -191,3 +191,106 @@ expected effective values (`healthcheckPath: /api/health`,
 `healthcheckTimeout: 120`, `restartPolicyType: ON_FAILURE`,
 `restartPolicyMaxRetries: 3`) and that `build` still shows
 `builder: NIXPACKS` with the same `buildCommand`.
+
+---
+
+## Follow-ups: security audit Phase 3
+
+**Item 1 — `/metrics` is unauthenticated and tenant-labelled (highest severity).**
+
+- **What:** `GET /metrics` has no auth dependency; the docstring says "No auth
+  required." Three Prometheus series carry the raw `tenant_id` as a label —
+  `anomaly_detections_total` (labels `tenant_id`, `pattern_type`),
+  `anomaly_confidence` (label `tenant_id`), `false_positive_rate` (label
+  `tenant_id`). `record_prometheus_detection` passes `tenant_id` straight to
+  `.labels()`. One unauthenticated scrape enumerates every tenant id that has
+  had a detection, plus per-tenant detection counts by fault pattern,
+  confidence distribution, and false-positive rate.
+- **Where:** `src/api/main.py:361` (route registration,
+  `include_in_schema=False`); `src/monitoring/prometheus_metrics.py:14-32`
+  (series definitions), `~line 42` (`record_prometheus_detection`).
+- **Why it matters:** reachability today is private-network only — the API
+  has no public domain (`RAILWAY_PUBLIC_DOMAIN` is absent on
+  `ai-agronomist-api`, verified). Severity rises to an internet-facing
+  cross-tenant data leak the moment a public domain is attached. **This must
+  be fixed before any public domain is ever added to that service.**
+- **Done:** either add `require_api_key` to the route, or drop the
+  `tenant_id` label so the series are aggregate-only.
+
+**Item 2 — BFF proxy path traversal escapes its `/api/` prefix.**
+
+- **What:** `web/app/api/bff/[...path]/route.ts` builds the upstream URL as
+  `new URL("/api/" + path.join("/"), API_URL)`. WHATWG URL normalises `..`,
+  so a `..` segment escapes the prefix. Verified in node:
+  `["metrics"] → /api/metrics`, `["..","metrics"] → /metrics`,
+  `["..","health","db"] → /health/db`, `["..","docs"] → /docs`. The handler
+  then injects a valid `X-API-Key`, so anything reached this way is called
+  with the BFF's credential.
+- **Where:** `web/app/api/bff/[...path]/route.ts`.
+- **Why it matters:** the URL-construction sink is confirmed; what is *not*
+  verified is whether Next's `[...path]` catch-all can actually deliver a
+  `..` segment — a literal `/api/bff/../metrics` is normalised before
+  routing, but percent-encoded `%2e%2e` may survive into `params.path`.
+  **Sink confirmed, reachability unverified — needs a live authenticated
+  test.** Requires an authenticated session, so exposure is one operator
+  reading another tenant's data, not anonymous access.
+- **Done:** reject any path segment that is `..` or decodes to it before
+  building the URL, plus a test covering it.
+
+**Item 3 — sign-in timing oracle defeats the anti-enumeration guarantee.**
+
+- **What:** `MIN_RESPONSE_MS = 400` is enforced as a floor, not a fixed
+  duration — it pads only when `elapsed < MIN_RESPONSE_MS` and never caps a
+  slower path. Rejected paths (unprovisioned email, rate limited) do two
+  quick DB reads and pad to ~400ms. The accepted path additionally performs
+  an outbound HTTPS call to Resend, routinely over 400ms, so it is never
+  padded. Body, status, and redirect are identical by design; duration is
+  not — an attacker can distinguish "accepted and sent" from "rejected," the
+  exact enumeration the fixed `CONFIRMATION_MESSAGE` exists to prevent.
+- **Where:** `web/lib/auth/magicLinkRequest.ts` (padding logic);
+  `web/features/auth/actions.ts` (`CONFIRMATION_MESSAGE`).
+- **Why it matters:** reasoned from code, not measured — no timings were
+  taken against the deployed app. Pre-existing: introduced in `bc96071`, not
+  `d76ca19`.
+- **Done:** pad to a fixed total exceeding the slowest path, or move the
+  send off the request path so every outcome returns in constant time.
+
+**Item 4 — `web/openapi.json` drift.**
+
+- **What:** the snapshot is stale against the live app (live 76 paths / 86
+  schemas; snapshot 74 / 84 after the `d76ca19` cleanup). Two routes were
+  never captured — `POST /api/backfill/scores`, `POST /api/live/pause` —
+  plus schemas `BackfillScoresRequest` / `BackfillScoresResponse`. For 54
+  method entries the only difference is two missing optional header params,
+  `X-API-Key` and `X-Tenant-Id`; 20 more differ only in parameter ordering
+  (no query/path/body parameter drift). Five stale descriptions, notably
+  `/api/live/status`, where the live contract documents a fourth
+  `greenhouse_status` value `"paused"` that the snapshot omits.
+- **Where:** `web/openapi.json`; consumed by `web/lib/api-types.gen.ts`.
+- **Why it matters:** `web/lib/api-types.gen.ts`, the typed surface the
+  frontend codes against, does not know the API requires authentication
+  headers.
+- **Done:** regenerate the snapshot from the app and review the resulting
+  diff.
+
+**Item 5 — missing credential on `/api/monitoring/metrics`.**
+
+- **What:** the route has no auth dependency and no tenant parameter. It
+  returns deployment-wide aggregate anomaly counts, false-positive rate,
+  mean confidence, and `pattern_distribution`.
+- **Where:** `src/api/routes/monitoring.py:11`.
+- **Why it matters:** unlike Item 1, this carries no tenant attribution —
+  fleet-level operational telemetry, not tenant data. Lower severity, still
+  unauthenticated.
+- **Done:** add `require_api_key`.
+
+**Item 6 — `railway.api.json` / `railway.worker.json` removal, IaC migration
+before 2026-12-01.**
+
+- **What:** see "[Follow-up: Config as Code sunset](#follow-up-config-as-code-sunset-2026-12-01)"
+  above rather than duplicating it here.
+- **Where:** `railway.api.json`, `railway.worker.json`, `web/railway.json`.
+- **Why it matters:** `railway.api.json` and `railway.worker.json` can be
+  deleted now — both are already inert. `web/railway.json` is the one
+  needing real migration.
+- **Done:** as specified in the Config as Code sunset section above.
