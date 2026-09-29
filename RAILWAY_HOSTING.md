@@ -68,7 +68,9 @@ Already done (2026-07-11, via CLI/GraphQL — no deploy has run yet):
   `AUTH_ENABLED` is off on the API; see §6)
 - Build/start config is **code**, not dashboard state: `web/railway.json`
   (Nixpacks, `corepack enable && pnpm install --frozen-lockfile && pnpm build`,
-  start `pnpm start --port ${PORT:-3000}`, healthcheck `/`)
+  start `pnpm start --port ${PORT:-3000}`, healthcheck `/api/health`) — true
+  only until Railway retires Config as Code on 2026-12-01; see the sunset
+  follow-up in `docs/runbooks/deploy.md`.
 
 Not done (deliberately — each is a human decision): connecting the repo
 (triggers the first deploy), and the production hostname switch.
@@ -91,7 +93,7 @@ Not done (deliberately — each is a human decision): connecting the repo
      `serviceConnect` mutation with the service id above.
 3. **Watch the first build.** Expect Nixpacks to detect Node via
    `web/package.json` (`packageManager: pnpm@9.15.9`), run the build command
-   from `railway.json`, then healthcheck `/`. Build ≈ 2–4 min.
+   from `railway.json`, then healthcheck `/api/health`. Build ≈ 2–4 min.
 4. **Generate a domain.** `web` → Settings → Networking → **Generate Domain**.
    This is the service's own URL for the parallel run — the production
    hostname is untouched.
@@ -125,7 +127,7 @@ Not done (deliberately — each is a human decision): connecting the repo
 | `AUTH_SECRET` | **not yet set** | New (security phase 2) — Auth.js session/cookie signing key. Generate with `npx auth secret`. Server-side only. |
 | `AUTH_DATABASE_URL` | **not yet set** | New (security phase 2) — points at the **existing** `ai-agronomist-db` Postgres (same instance as the API's `DATABASE_URL`, not a second plugin). Auth.js's users/sessions/verification-token tables plus `user_tenants` live in a dedicated **`auth` schema** (not `public`), applied by hand from `web/lib/auth/schema.sql` — `public` stays exclusively the FastAPI app's alembic-managed schema so `alembic revision --autogenerate` never sees these tables. `web`'s pool sets `search_path=auth` (`web/lib/auth/db.ts`); `src/` never reads this schema. |
 | `AUTH_RESEND_KEY` | **not yet set** | New (security phase 2) — Resend API key for magic-link email (name matches Auth.js's own `AUTH_{PROVIDER}_KEY` convention, not a made-up name). Outside production, `web/lib/auth/emailProvider.ts` mocks the sender (logs the link) instead of calling Resend, so this can stay unset until cutover. **Never** `NEXT_PUBLIC_*`. |
-| `AUTH_RESEND_FROM` | optional, defaults to `AI Agronomist <no-reply@ai-agronomist.app>` | New (security phase 2) — the from-address for magic-link email. Resend requires the sending domain in this address to be verified in the Resend account (add the SPF/DKIM DNS records Resend provides for that domain) before it can deliver to arbitrary recipients — until that's done, Resend only allows sending to the account owner's own verified address via its shared `onboarding@resend.dev` sender, which is not usable for real operator logins. No Auth.js convention exists for this var name; chosen to mirror `AUTH_RESEND_KEY`. |
+| `AUTH_RESEND_FROM` | **required**, no default | New (security phase 2) — the from-address for magic-link email. There is no fallback: `web/lib/auth/emailProvider.ts` throws rather than send from an address this project does not own, so magic-link login fails once `AUTH_RESEND_KEY` is set but this is not. Resend requires the sending domain in this address to be verified in the Resend account (add the SPF/DKIM DNS records Resend provides for that domain) before it can deliver to arbitrary recipients — until that's done, Resend only allows sending to the account owner's own verified address via its shared `onboarding@resend.dev` sender, which is not usable for real operator logins. No Auth.js convention exists for this var name; chosen to mirror `AUTH_RESEND_KEY`. |
 
 ## 7. CI
 

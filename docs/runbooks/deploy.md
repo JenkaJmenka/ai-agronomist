@@ -156,3 +156,38 @@ If a job fails with a schema-version error after deploy:
 > **Note:** Jobs that failed with a version error have `status = 'failed'` and
 > `error` containing the version mismatch message. They will not be retried
 > automatically. The grower must start a new upload.
+
+---
+
+## Follow-up: Config as Code sunset (2026-12-01)
+
+**Deadline:** 2026-12-01 — Railway stops reading Config as Code (repo
+`railway*.json` files) for every service in this project.
+
+**Why it matters for `web`.** Of the three per-service config files, only
+`web/railway.json` is still live — its `fileServiceManifest` really maps six
+settings to the Railway dashboard: `build.builder`, `build.buildCommand`,
+`deploy.healthcheckPath`, `deploy.healthcheckTimeout`,
+`deploy.restartPolicyType`, `deploy.restartPolicyMaxRetries`. Losing
+`builder: NIXPACKS` and `buildCommand: corepack enable && pnpm install
+--frozen-lockfile && pnpm build` can **break web deploys outright** — that is
+a bigger risk than losing the healthcheck. Losing `healthcheckPath:
+/api/health` would silently revert commit `4e95205` (the fix for the 307
+redirect loop that broke the probe on `/`).
+
+**Action required.** Before 2026-12-01, migrate those six `web/railway.json`
+settings to dashboard settings or Railway IaC, then delete the file.
+
+**Safe to delete now, no operational change.** `railway.api.json` and
+`railway.worker.json` are already inert (`configPath: None` on both
+services — Railway reads nothing from them). `railway.dashboard.json` is
+orphaned: it targets a `dashboard` service that no longer exists in the
+project (live services are `api`, `web`, `worker`, RabbitMQ, RabbitMQ Web
+UI, Redis, `ai-agronomist-db`).
+
+**Verification.** After migrating, run `railway status --json` and confirm
+`web`'s `latestDeployment.meta.serviceManifest.deploy` still shows the
+expected effective values (`healthcheckPath: /api/health`,
+`healthcheckTimeout: 120`, `restartPolicyType: ON_FAILURE`,
+`restartPolicyMaxRetries: 3`) and that `build` still shows
+`builder: NIXPACKS` with the same `buildCommand`.

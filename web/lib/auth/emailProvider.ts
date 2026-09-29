@@ -41,13 +41,23 @@
  * string standing in for a missing key that could make a broken config look
  * configured. When the key genuinely is absent, `sendVerificationRequest`
  * logs at `warn` (not `info`) and says plainly that nothing was sent.
+ *
+ * --- From-address (second production incident) ---
+ * This file used to fall back to a default sender address on a domain this
+ * app never registered (confirmed NXDOMAIN) whenever `AUTH_RESEND_FROM` was
+ * unset. A missing env var therefore silently produced mail from a domain
+ * nobody controls — the same failure shape as the mock/real bug above.
+ * `from` gets the same fix: no fallback, and — for the same staleness
+ * reason `apiKey` is read fresh rather than cached — `from` is a getter, not
+ * a plain field, so a value set (or changed, e.g. in tests via
+ * `vi.stubEnv`) after this module first loads is still picked up. Auth.js
+ * reads `provider.from` directly off this object when it builds the
+ * outgoing email, so the getter has to live here rather than only inside
+ * `sendVerificationRequest`.
  */
 
 import type { EmailConfig } from "next-auth/providers/email";
 import Resend from "next-auth/providers/resend";
-
-const AUTH_RESEND_FROM =
-  process.env.AUTH_RESEND_FROM ?? "AI Agronomist <no-reply@ai-agronomist.app>";
 
 /** 15 minutes, in seconds — `EmailConfig.maxAge` is seconds, not ms. */
 export const MAGIC_LINK_MAX_AGE_SECONDS = 15 * 60;
@@ -56,7 +66,9 @@ export const magicLinkProvider: EmailConfig = {
   id: "resend",
   type: "email",
   name: "Resend",
-  from: AUTH_RESEND_FROM,
+  get from() {
+    return process.env.AUTH_RESEND_FROM;
+  },
   maxAge: MAGIC_LINK_MAX_AGE_SECONDS,
   async sendVerificationRequest(params) {
     const apiKey = process.env.AUTH_RESEND_KEY;
@@ -68,6 +80,20 @@ export const magicLinkProvider: EmailConfig = {
       );
       return;
     }
-    await Resend({ apiKey, from: AUTH_RESEND_FROM }).sendVerificationRequest(params);
+    const from = process.env.AUTH_RESEND_FROM;
+    if (!from) {
+      throw new Error(
+        "AUTH_RESEND_FROM is not set — refusing to send a magic-link email without a " +
+          "configured, owned sender address.",
+      );
+    }
+    try {
+      await Resend({ apiKey, from }).sendVerificationRequest(params);
+    } catch (error) {
+      console.error(
+        `[auth:send-failed] Resend rejected the magic-link email to ${params.identifier}: ${error}`,
+      );
+      throw error;
+    }
   },
 };

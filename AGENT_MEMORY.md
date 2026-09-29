@@ -2,6 +2,52 @@
 
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
+## Task — Fix stale Railway healthcheck docs, add Config as Code sunset tracker — DONE (2026-09-29)
+
+**Agent:** devops-lead. Documentation-only task from team-lead, using ground
+truth from `railway status --json` (web is the only service still reading a
+config file: `web/railway.json`; `railway.api.json`/`railway.worker.json` are
+inert, `railway.dashboard.json` is orphaned; Config as Code retires
+2026-12-01).
+
+**Files modified:**
+- `RAILWAY_HOSTING.md`: two stale `healthcheck \`/\`` claims corrected to
+  `/api/health` (fixed by commit 4e95205, a 307 redirect loop on `/`); added
+  inline caveat that the "config is code, not dashboard state" claim expires
+  2026-12-01, pointing at the new tracker entry below.
+- `docs/runbooks/deploy.md`: appended "Follow-up: Config as Code sunset
+  (2026-12-01)" section — what `web/railway.json` maps (6 settings), why
+  losing `builder`/`buildCommand` is the bigger risk (deploys can break
+  outright) vs. losing the healthcheck (silently reverts 4e95205), which
+  three files are already inert/orphaned and safe to delete, and the
+  `railway status --json` post-migration verification method.
+- `docs/security/deploy-runbook-phase2.md` (gitignored, not committed — file
+  is mid-execution): fixed three stale claims that the API has no healthcheck
+  configured. Corrected the Option-A justification (healthcheck IS active and
+  ON_FAILURE restart is set everywhere, so merge-first now risks an exposure
+  window, not an outage — conclusion/steps unchanged), rewrote the "Note on
+  the healthcheck" paragraph (already dashboard-sourced and active;
+  `railway.api.json` is inert, not "pending a dashboard config-file path"),
+  and fixed Step 4's Check-row reasoning (site loading still isn't proof of
+  the *new* deploy — check dashboard status/logs — but not because "no
+  healthcheck is active").
+
+**Scope note:** these paths fall outside my stated `docker/`, `infra/`,
+`.github/workflows/` file ownership, but match established precedent
+(Task 1f-ops below wrote `docs/runbooks/deploy.md` and `docs/runbooks/README.md`;
+frontend-engineer's 2026-07-11 delivery wrote `RAILWAY_HOSTING.md`) — deploy
+runbooks and Railway hosting docs are devops-lead's de facto domain.
+
+**Not touched:** `.env.example`, `.env.development` (explicit deny — another
+agent blocked on them); no commits, branches, or pushes (per task
+instructions).
+
+**Verify:** `git diff --stat` shows only `RAILWAY_HOSTING.md` and
+`docs/runbooks/deploy.md` as tracked changes (`.mcp.json` also shows modified
+but predates this session). `git check-ignore
+docs/security/deploy-runbook-phase2.md` still matches. `git grep -nI
+'healthcheck \`/\`' -- .` returns nothing.
+
 ## Security audit Phase 1 — DONE (2026-09-28)
 
 Security audit Phase 1 complete (auth/tenant isolation). Findings are

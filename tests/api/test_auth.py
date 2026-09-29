@@ -279,6 +279,30 @@ class TestJobOwnership:
         )
         assert response.status_code == status.HTTP_404_NOT_FOUND
 
+    @pytest.mark.asyncio
+    async def test_stream_job_events_wrong_tenant_is_404(
+        self, client: TestClient, db_session: AsyncSession, auth_enabled: None
+    ) -> None:
+        # Ownership is enforced before the first SSE byte, so the caller sees a
+        # plain 404 response rather than a stream that opens and then aborts.
+        from src.db.jobs import create_job
+
+        job = await create_job(
+            db_session, tenant_id="tenant_b", job_type="upload_csv", payload={}
+        )
+        response = client.get(
+            f"/api/jobs/{job.id}/events", headers={"X-API-Key": "secret-a"}
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_stream_job_events_unknown_job_is_404(
+        self, client: TestClient, auth_enabled: None
+    ) -> None:
+        response = client.get(
+            "/api/jobs/does-not-exist/events", headers={"X-API-Key": "secret-a"}
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
 
 class TestAssertAuthConfigured:
     """A deployed environment must never start with auth disabled.
