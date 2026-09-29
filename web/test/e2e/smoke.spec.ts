@@ -64,6 +64,34 @@ async function setupBffMocks(page: Page): Promise<void> {
 }
 
 /**
+ * Readings mock for the two `/anomalies` page tests below.
+ *
+ * `**\/api/bff/readings/**` covers both `readings/window` (feeds `useReadings`
+ * — its `isError` is what throws to the page's error boundary, see the
+ * incident note on the tests below) and `readings/anomalies-in-window`
+ * (feeds `useAnomalyCount` / `useEnrichedAnomalies`'s G2 count query) with
+ * the same glob, so the one payload includes both response shapes'
+ * required fields — `count`/`min_timestamp`/`max_timestamp` for the former,
+ * `anomaly_count`/`total_count` for the latter's zod schema
+ * (`flaggedResponseSchema` in `features/anomalies/api/flaggedWindow.ts`) —
+ * rather than leaving the count query to fail zod parsing on every run.
+ */
+async function mockAnomaliesReadings(page: Page): Promise<void> {
+  await page.route("**/api/bff/readings/**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [{ timestamp: "2026-07-18T12:00:00.000Z", temperature: 22, anomaly_score: 0.01 }],
+        count: 1,
+        min_timestamp: "2026-07-18T12:00:00.000Z",
+        max_timestamp: "2026-07-18T12:00:00.000Z",
+        anomaly_count: 0,
+        total_count: 1,
+      },
+    }),
+  );
+}
+
+/**
  * NAV_TARGETS drives the sidebar navigation smoke test.
  *
  * `heading` is the exact h1 text expected on the destination page — it may
@@ -254,6 +282,12 @@ test("custom range year segment caps at 4 digits and advances to hours", async (
 });
 
 test("anomalies page: threshold control and view toggle render", async ({ page }) => {
+  // Regression: this test navigated to /anomalies with no readings mock.
+  // playwright.config.ts points API_URL at a dead port on purpose, so the
+  // unmocked fetch 502s, useReadings().isError throws, and the page renders
+  // the error boundary instead of the threshold control this test asserts on.
+  // See web/AGENTS.md:57 — e2e mocks all /api/bff/** routes.
+  await mockAnomaliesReadings(page);
   await page.goto("/anomalies");
   await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
   await expect(page.getByTestId("threshold-control")).toBeVisible();
@@ -265,7 +299,16 @@ test("anomalies page: threshold control and view toggle render", async ({ page }
 });
 
 test("anomalies threshold writes to the URL", async ({ page }) => {
+  // Regression: without this mock, the unmocked readings fetch 502s (dead-port
+  // API_URL in playwright.config.ts) and useReadings().isError throws to the
+  // page's error boundary. The slider fill still lands, but the error
+  // boundary unmounts the component before nuqs flushes the URL write, so
+  // `threshold=0.25` never appears — flaky on slower CI, not deterministic
+  // locally, because it's a race between the write and the unmount rather
+  // than a straightforward failure. See web/AGENTS.md:57.
+  await mockAnomaliesReadings(page);
   await page.goto("/anomalies");
+  await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
   const slider = page.getByTestId("threshold-control").locator("input[type=range]");
   await slider.fill("0.25");
   await expect(page).toHaveURL(/threshold=0.25/);
