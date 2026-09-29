@@ -42,6 +42,13 @@ docs/architecture/*
 # points at a file missing from a fresh clone is a broken runbook.
 !docs/architecture/upload_detector_convergence.md
 !docs/architecture/episode_grouping.md
+# docs/security/auth-audit-phase1.md and docs/security/deploy-runbook-phase2.md
+# are the phase-1 audit and phase-2 runbook, committed as the audit trail for
+# d76ca19. Other working notes under docs/security/ stay local.
+!docs/security/
+docs/security/*
+!docs/security/auth-audit-phase1.md
+!docs/security/deploy-runbook-phase2.md
 implementation plan/
 tasks/
 
