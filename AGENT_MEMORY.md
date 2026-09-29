@@ -4070,3 +4070,27 @@ Corrected:
 - **Gate**: `tests/api/test_auth.py` — 21 passed. Full suite —
   **3186 passed, 16 skipped, 6 xfailed, 0 failed** (was 3184 before this
   correction). HEAD unchanged: `c48523505635c1a5e23ef6b79d77a5e045790ba3`.
+
+## Regression tests for the >10MB upload truncation + tenant-default 403 (QA, 2026-09-29)
+
+- **`web/proxy.test.ts`** — compiles the exported `config.matcher` with Next's
+  own `getMiddlewareMatchers` (from `next/dist/build/analysis/get-page-static-info`,
+  exported at runtime but absent from Next's `.d.ts`, hence a narrowing cast)
+  instead of re-implementing path-to-regexp. Verified out-of-band that the
+  pre-fix matcher (no exclusions) and an unanchored variant (exclusions without
+  `$`) each fail a different test, so the suite is a real guard, not a
+  tautology.
+- **`web/app/api/bff/_lib/uploadRouteHandler.test.ts`** — one `describe.each`
+  over both real route modules (`inference/upload`, `inference/upload-async`);
+  11 tests x 2. Pins fail-closed 401 (nothing forwarded), body never read
+  (`formData`/`text`/`json`/`arrayBuffer`/`blob` spied, none called),
+  `init.body === req.body` with `duplex: "half"`, an 11MB body arriving byte
+  for byte, and `X-Tenant-Id` from the session never from a client header.
+- **`web/lib/useScope.test.tsx`** — `NuqsTestingAdapter` + `SessionTenantProvider`;
+  session tenant is the default, `"tenant_1"` only without a provider/with null,
+  `?tenant=` overrides both.
+- **Gates**: `corepack pnpm test` 406 passed / 45 files (was 368 / 42),
+  typecheck and lint exit 0. No implementation file touched.
+- **Config gap found, not fixed**: `web/biome.json`'s `files.includes` lists
+  only `app/** components/** features/** lib/** test/**`, so repo-root
+  `web/proxy.ts` — the auth gate — and `web/proxy.test.ts` are never linted.

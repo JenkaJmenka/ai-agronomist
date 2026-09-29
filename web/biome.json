@@ -7,6 +7,8 @@
       "features/**",
       "lib/**",
       "test/**",
+      "proxy.ts",
+      "proxy.test.ts",
       "!**/*.css",
       "!lib/api-types.gen.ts",
       "!test/e2e/.auth"
