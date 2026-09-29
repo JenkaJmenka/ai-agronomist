@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { overwriteTenantIdInJsonBody } from "@/lib/auth/tenantBodyRewrite";
 import { emitProfileLog } from "@/lib/profileLog";
 
 /**
@@ -22,6 +23,17 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
 
   const target = new URL(`/api/${path.join("/")}`, API_URL);
   target.search = req.nextUrl.search;
+  // The client has no business choosing a tenant — overwrite the session's
+  // tenant in, never trust what it sent, and never reject a mismatch (the
+  // API does that; the FE's own `useScope()` still defaults to a fixed
+  // tenant, so a mismatch here is routine, not an attack). Only touch the
+  // param on routes that already carry one — adding it to a route that
+  // never expected it risks an "unknown query param" rejection upstream
+  // that this route never used to produce.
+  if (target.searchParams.has("tenant_id")) {
+    target.searchParams.set("tenant_id", tenantId);
+  }
+
   const pathJoined = path.join("/");
   const start = performance.now();
 
@@ -33,15 +45,33 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
   if (API_KEY) headers.set("X-API-Key", API_KEY);
   headers.set("X-Tenant-Id", tenantId);
 
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  const isJsonBody =
+    hasBody && (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
+
+  let body: BodyInit | undefined;
+  let duplex: { duplex: "half" } | Record<string, never> = {};
+  if (isJsonBody) {
+    // JSON bodies are small enough to buffer, and buffering is the only way
+    // to rewrite a `tenant_id` field the client may have sent — the same
+    // overwrite-don't-reject rule as the query param above. Every other
+    // content type (multipart uploads, binary, none) is left as a streamed
+    // pass-through exactly as before; this branch never touches those.
+    body = overwriteTenantIdInJsonBody(await req.text(), tenantId);
+  } else if (hasBody) {
+    body = req.body ?? undefined;
+    // Streamed request bodies require duplex on Node fetch.
+    if (req.body) duplex = { duplex: "half" as const };
+  }
+
   let status = 502;
   let ok = true;
   try {
     const upstream = await fetch(target, {
       method: req.method,
       headers,
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
-      // Streamed request bodies require duplex on Node fetch.
-      ...(req.body ? { duplex: "half" as const } : {}),
+      body,
+      ...duplex,
       cache: "no-store",
     });
     status = upstream.status;
