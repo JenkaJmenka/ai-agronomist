@@ -18,11 +18,7 @@ import PostgresAdapter from "@auth/pg-adapter";
 
 import { getAuthPool, getTenantIdForEmail } from "@/lib/auth/db";
 import { magicLinkProvider } from "@/lib/auth/emailProvider";
-
-/** See the note in `lib/auth/types.d.ts` on why this isn't a type augmentation. */
-interface TokenWithTenant {
-  tenantId?: string;
-}
+import { resolveTenantClaim, type TokenWithTenant } from "@/lib/auth/tenantClaim";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PostgresAdapter(getAuthPool()),
@@ -40,12 +36,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // magic link, and never completes sign-in if it somehow had one.
       return tenantId !== null;
     },
+    // Self-heal for a token that was ever minted without `tenantId` — see
+    // `lib/auth/tenantClaim.ts` for why a plain `trigger === "signIn"` check
+    // alone leaves a token broken forever once it has been through one
+    // refresh. `getTenantIdForEmail` is the only DB dependency; everything
+    // else here is pure and covered by `tenantClaim.test.ts`.
     async jwt({ token, user, trigger }) {
-      if (trigger === "signIn" && user?.email) {
-        const tenantId = await getTenantIdForEmail(user.email);
-        if (tenantId) return { ...token, tenantId } satisfies TokenWithTenant;
-      }
-      return token;
+      return resolveTenantClaim(
+        { token: token as TokenWithTenant, signInEmail: user?.email, isSignIn: trigger === "signIn" },
+        { lookupTenantId: getTenantIdForEmail },
+      );
     },
     async session({ session, token }) {
       const tenantId = (token as TokenWithTenant).tenantId;
