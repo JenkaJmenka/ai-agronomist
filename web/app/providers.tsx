@@ -6,8 +6,15 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { isProfileEnabled } from "@/lib/profiling";
 import { createQueryClient } from "@/lib/query";
+import { SessionTenantProvider } from "@/lib/SessionTenantContext";
 
-export function Providers({ children }: { readonly children: ReactNode }) {
+export function Providers({
+  tenantId,
+  children,
+}: {
+  readonly tenantId: string | null;
+  readonly children: ReactNode;
+}) {
   const [queryClient] = useState(createQueryClient);
   // Warm PROFILE_LOGGING_ENABLED cache off the interaction path.
   useEffect(() => {
@@ -15,7 +22,9 @@ export function Providers({ children }: { readonly children: ReactNode }) {
   }, []);
   return (
     <NuqsAdapter>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <SessionTenantProvider tenantId={tenantId}>{children}</SessionTenantProvider>
+      </QueryClientProvider>
     </NuqsAdapter>
   );
 }

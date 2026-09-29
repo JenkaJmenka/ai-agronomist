@@ -12,6 +12,13 @@
  * The session's tenant is stamped onto the request as `x-tenant-id` here —
  * the one place in the app that turns "logged in" into "which tenant" — so
  * the BFF routes never have to trust a client-supplied tenant again.
+ *
+ * `/api/bff/inference/upload` and `/api/bff/inference/upload-async` are
+ * excluded from the matcher below: Next 16's proxy buffers every matched
+ * request body in memory with a hard 10MB cap and silently truncates
+ * anything larger (`proxyClientMaxBodySize` docs), which corrupts CSV
+ * uploads over that size. Those two routes resolve the session and stamp
+ * the tenant themselves — see `app/api/bff/_lib/uploadRouteHandler.ts`.
  */
 
 import { NextResponse } from "next/server";
@@ -48,6 +55,6 @@ export default auth((req) => {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/bff/inference/upload$|api/bff/inference/upload-async$|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };
