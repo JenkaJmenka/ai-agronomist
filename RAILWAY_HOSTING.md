@@ -68,7 +68,9 @@ Already done (2026-07-11, via CLI/GraphQL — no deploy has run yet):
   `AUTH_ENABLED` is off on the API; see §6)
 - Build/start config is **code**, not dashboard state: `web/railway.json`
   (Nixpacks, `corepack enable && pnpm install --frozen-lockfile && pnpm build`,
-  start `pnpm start --port ${PORT:-3000}`, healthcheck `/`)
+  start `pnpm start --port ${PORT:-3000}`, healthcheck `/api/health`) — true
+  only until Railway retires Config as Code on 2026-12-01; see the sunset
+  follow-up in `docs/runbooks/deploy.md`.
 
 Not done (deliberately — each is a human decision): connecting the repo
 (triggers the first deploy), and the production hostname switch.
@@ -91,7 +93,7 @@ Not done (deliberately — each is a human decision): connecting the repo
      `serviceConnect` mutation with the service id above.
 3. **Watch the first build.** Expect Nixpacks to detect Node via
    `web/package.json` (`packageManager: pnpm@9.15.9`), run the build command
-   from `railway.json`, then healthcheck `/`. Build ≈ 2–4 min.
+   from `railway.json`, then healthcheck `/api/health`. Build ≈ 2–4 min.
 4. **Generate a domain.** `web` → Settings → Networking → **Generate Domain**.
    This is the service's own URL for the parallel run — the production
    hostname is untouched.
