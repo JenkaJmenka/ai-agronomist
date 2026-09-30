@@ -9,8 +9,9 @@ event is one alert with a duration instead of N rows.
 2. Episodes are keyed by **(channel, detector)** — a ``stuck_fault`` alert
    is never absorbed into a ``statistical`` episode on the same channel.
 3. Stuck-fault episodes derive their ``duration_seconds`` from the actual
-   frozen span (via ``completed_faults`` / ``z_score``), not from the
-   span of alert rows (which would be 0 for a single-row emission).
+   frozen span (via ``completed_faults`` / ``frozen_hours_at_detection``),
+   not from the span of alert rows (which would be 0 for a single-row
+   emission).
 4. An ``is_ongoing`` flag marks episodes whose freeze had not yet ended
    at detection time; their ``duration_seconds`` is a lower bound.
 """
@@ -197,8 +198,12 @@ def _stuck_fault_duration(
     - If a completed FaultWindow matches (same channel + onset_ts),
       use the full fault duration: onset → fault end. is_ongoing=False.
     - Otherwise, the freeze was still open at detection time. Use the
-      alert's z_score (= duration_hours at gate crossing) as a lower
-      bound. is_ongoing=True.
+      alert's ``frozen_hours_at_detection`` (hours frozen at the gate
+      crossing) as a lower bound. is_ongoing=True.
+
+    The sole caller invokes this only under ``detector == "stuck_fault"``,
+    so the detector discrimination is structurally guaranteed — do not add
+    a redundant guard here, and do not move the call out of that branch.
     """
     onset_ts = first_alert.timestamp
     fw_key = (actual_channel, onset_ts)
@@ -211,12 +216,20 @@ def _stuck_fault_duration(
         full_duration = (boundary_dt - fw.onset_dt).total_seconds()
         return full_duration, False
 
-    # Fallback: duration_hours stored in z_score field.
-    duration_hours = getattr(first_alert, "z_score", None)
+    # Fallback: the freeze was still open, so use elapsed-so-far as a lower
+    # bound.  Stuck hits carry that in frozen_hours_at_detection; rows
+    # persisted before that field existed still carry it in z_score, and there
+    # is no backfill migration.  The legacy read is safe only because the
+    # caller has already established detector == "stuck_fault": a statistical
+    # row also has a numeric z_score, so discriminating on z_score's presence
+    # instead of on the detector would misread it as a duration.
+    duration_hours = getattr(first_alert, "frozen_hours_at_detection", None)
+    if duration_hours is None:
+        duration_hours = getattr(first_alert, "z_score", None)
     if duration_hours is not None and duration_hours > 0:
         return float(duration_hours) * _SECONDS_PER_HOUR, True
 
-    # Last resort: non-zero minimum so the assertion holds.
+    # Last resort: no duration is recoverable from the alert.
     return 0.0, True
 
 
