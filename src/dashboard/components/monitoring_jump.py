@@ -273,6 +273,7 @@ _DISPLAY_COLUMN_ORDER = (
     "column",
     "severity",
     "z_score",
+    "frozen_hours_at_detection",
     "method",
     "value",
     "agreement",
@@ -285,6 +286,7 @@ _DISPLAY_COLUMN_LABELS = {
     "column": "Column",
     "severity": "Severity",
     "z_score": "Z-score",
+    "frozen_hours_at_detection": "Frozen (h)",
     "method": "Method",
     "value": "Value",
     "agreement": "Agreement",
@@ -311,6 +313,11 @@ def format_anomaly_cell(column: str, value: Any) -> str:
     if column == "z_score":
         try:
             return f"{float(value):.1f}"
+        except (TypeError, ValueError):
+            return "—"
+    if column == "frozen_hours_at_detection":
+        try:
+            return f"{float(value):.1f} h"
         except (TypeError, ValueError):
             return "—"
     if column == "agreement":

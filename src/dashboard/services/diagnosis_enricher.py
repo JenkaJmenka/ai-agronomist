@@ -325,15 +325,23 @@ def _build_reasoning(
 
     if row is not None:
         try:
-            z_val = row.get("z_score")
-            if z_val is not None and not pd.isna(z_val):
-                z = float(z_val)
-                method = str(row.get("method", "rolling")).replace("_", " ")
-                col_name = row.get("column")
+            detector = str(row.get("detector") or "")
+            frozen_hours = row.get("frozen_hours_at_detection")
+            col_name = row.get("column")
+            if detector == "stuck_fault" and frozen_hours is not None:
                 if col_name:
                     slot = canonical_slot_for_column(str(col_name)) or str(col_name)
                     label = format_sensor_label(slot)
-                    parts.append(f"{method.title()} z-score {z:.1f}σ on {label}")
+                    parts.append(f"Frozen {float(frozen_hours):.1f}h on {label}")
+            else:
+                z_val = row.get("z_score")
+                if z_val is not None and not pd.isna(z_val):
+                    z = float(z_val)
+                    method = str(row.get("method", "rolling")).replace("_", " ")
+                    if col_name:
+                        slot = canonical_slot_for_column(str(col_name)) or str(col_name)
+                        label = format_sensor_label(slot)
+                        parts.append(f"{method.title()} z-score {z:.1f}σ on {label}")
         except (TypeError, ValueError):
             pass
 
@@ -606,7 +614,7 @@ def cold_run_row_to_series(row: dict[str, Any]) -> pd.Series:
         data["anomaly_detectors"] = detectors
     if column:
         data["anomaly_columns"] = [column]
-    for key in ("z_score", "method", "severity"):
+    for key in ("z_score", "frozen_hours_at_detection", "method", "severity"):
         if row.get(key) is not None:
             data[key] = row[key]
     return pd.Series(data)

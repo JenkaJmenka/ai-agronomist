@@ -251,7 +251,14 @@ def stat_rows_to_jump_rows(stat_anomalies: list[dict]) -> list[dict]:
     for item in stat_anomalies:
         row = dict(item)
         row.setdefault("detector", "statistical")
-        row.setdefault("score", min(1.0, float(row.get("z_score", 0)) / 5.0))
+        # None-safe: z_score is present-but-null for stuck_fault rows (they
+        # carry frozen_hours_at_detection instead), and `.get(key, 0)` only
+        # applies its default when the key is absent, not when its value is
+        # None — `float(None)` would otherwise raise. This function isn't
+        # reachable for stuck rows today (see anomalies_page_data callers),
+        # but defend the formula anyway rather than assume that stays true.
+        z = row.get("z_score")
+        row.setdefault("score", min(1.0, float(z) / 5.0) if z is not None else 0.0)
         rows.append(row)
     return rows
 

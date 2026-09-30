@@ -100,6 +100,7 @@ def _add_anomaly_markers(
         is_agreement = bool(h.get("agreement", False))
         score = float(h.get("score", 0))
         z_score = h.get("z_score")
+        frozen_hours = h.get("frozen_hours_at_detection")
         has_lstm = "lstm" in detector
 
         if is_agreement:
@@ -157,7 +158,14 @@ def _add_anomaly_markers(
                 continue
 
             y_norm = _normalized_y(df, column, float(raw_val))
-            hover_z = f" · z={z_score:.1f}" if z_score is not None else ""
+            # Stuck-fault hits carry no z_score (see UploadHighAnomalyDetail);
+            # render their hours-frozen-at-detection instead of a z-score.
+            if detector == "stuck_fault" and frozen_hours is not None:
+                hover_z = f" · frozen {frozen_hours:.1f}h"
+            elif z_score is not None:
+                hover_z = f" · z={z_score:.1f}"
+            else:
+                hover_z = ""
             _add_marker_dot(
                 fig,
                 timestamp=match_row["timestamp"],

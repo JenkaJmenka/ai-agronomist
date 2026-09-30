@@ -13,6 +13,7 @@ from src.dashboard.constants import (
     DEFAULT_ANOMALY_THRESHOLD,
 )
 
+from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.dashboard.components.charts import (
     apply_datetime_filter,
     merge_anomaly_scores_into_readings,
@@ -386,18 +387,18 @@ def rows_in_window(
 
 
 def trim_cold_run_rows(rows: list[dict], *, limit: int = _COLD_RUN_TABLE_LIMIT) -> list[dict]:
+    """Cap the display table, keeping the most severe rows.
+
+    Ranked by ``anomaly_rank_key`` (severity, then detector tier, then
+    |z_score|) rather than the raw canonical score, so an urgent stuck-fault
+    freeze survives the cap ahead of a merely-high-scoring statistical
+    warning. Works on dict rows sourced from a stored Job.result/
+    JobPortion.result blob, including rows with no "detector" key at all
+    (StatisticalAnomalyDetail dicts from statistical_summary.anomalies) —
+    anomaly_rank_key degrades gracefully to (severity_rank, |z|) for those.
+    """
     if len(rows) <= limit:
         return rows
 
-    def _sort_key(row: dict) -> float:
-        for key in ("score", "z_score", "anomaly_score"):
-            val = row.get(key)
-            if val is not None:
-                try:
-                    return float(val)
-                except (TypeError, ValueError):
-                    continue
-        return 0.0
-
-    ranked = sorted(rows, key=_sort_key, reverse=True)
+    ranked = sorted(rows, key=anomaly_rank_key, reverse=True)
     return ranked[:limit]

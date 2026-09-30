@@ -64,11 +64,18 @@ def anomaly_rank_key(hit: Any) -> tuple[int, int, float]:
     2. Detector tier — stuck_fault > statistical (includes the compound
        "lstm+statistical") > lstm.  Matched by membership in the
        (possibly ``"+"``-joined) detector label, never exact equality.
-    3. ``|z_score|`` — only statistical-tier hits carry a real z_score, so
-       this only ever discriminates between two statistical-tier hits. It
-       is 0.0 for stuck_fault (which uses ``frozen_hours_at_detection``,
-       not z_score) and for lstm (which has no native z at all), so it
-       never reorders hits across tiers.
+    3. ``|z_score|`` — current-shape stuck_fault hits carry no z_score at
+       all (they use ``frozen_hours_at_detection`` instead) and solo lstm
+       hits have no native z either, so both are 0.0 here and this normally
+       only discriminates between two statistical-tier hits. The one
+       exception: a *legacy* stuck_fault row read back from a stored
+       ``Job.result``/``JobPortion.result`` blob (persisted before
+       ``frozen_hours_at_detection`` existed) still carries its duration in
+       the numeric ``z_score`` field, so two tied legacy stuck rows compare
+       by duration here — harmless for ordering (both sides are durations,
+       larger still means "worse"), but this field is not exclusively a
+       statistical z-score in that one case. It never reorders hits across
+       tiers regardless — detector_tier already separated them by then.
 
     Ties beyond all three fields keep the first-encountered hit when this
     key is used with ``max()`` (which only replaces the running winner on a

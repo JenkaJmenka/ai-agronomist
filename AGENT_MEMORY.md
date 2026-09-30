@@ -4201,3 +4201,81 @@ no-op regeneration, STOP and report — do not hand-edit either file, and do
 not commit a reformatted schema"), reported this and stopped rather than
 bundling ~2400 lines of unrelated auth-header schema drift into a
 labelling/severity refactor commit.
+
+## Step 2 — dashboard display patches, user-widened scope (Backend, 2026-09-30)
+
+Team lead relayed a user decision widening this agent's file-ownership scope
+to `src/dashboard/` for Task 2 only (not `tests/`, `src/models/`, or `web/`,
+and not beyond this task) — CLAUDE.md's ownership table has no entry for
+`src/dashboard/`, so the user assigned it to backend-engineer explicitly.
+Applied the five patches drafted in the prior report, at HEAD `f7b5ac2`
+(after ml-engineer's step-1 `episode_grouper.py` fix, verified independently
+by team lead: legacy `z_score=6.0` → 21600.0s, new
+`frozen_hours_at_detection=6.0` → 21600.0s, new field wins).
+
+- **`src/dashboard/views/1_Active_Monitoring/1_Monitoring.py`** — stuck-fault
+  hits render `frozen_hours_at_detection` ("· frozen Xh") instead of a blank
+  hover label; statistical/lstm hits unchanged.
+- **`src/dashboard/components/monitoring_jump.py`** — added
+  `"frozen_hours_at_detection"` to the display column order/labels
+  (`"Frozen (h)"`) and a format branch.
+- **`src/dashboard/services/diagnosis_enricher.py`** — `:328` now branches on
+  `detector == "stuck_fault"` first (renders "Frozen Xh on <sensor>" instead
+  of a z-score sentence); `:609` passthrough now also carries
+  `frozen_hours_at_detection`.
+- **`src/dashboard/components/inference_results.py:254`** — defensive
+  None-safety (`float(z) if z is not None else 0.0`) — confirmed in the
+  prior report this call site is structurally unreachable for stuck rows
+  today, so this is insurance, not a live-bug fix.
+- **`src/dashboard/services/anomalies_page_data.py::trim_cold_run_rows`** —
+  switched from the raw `("score","z_score","anomaly_score")` sort key to
+  `anomaly_rank_key` (imported from `src.api.services.anomaly_ranking`).
+  Cross-layer import confirmed sanctioned by team lead: precedent already
+  exists at `charts.py:18` (`src.api.services.readings_service`).
+- **`src/api/services/anomaly_ranking.py`** — corrected the `anomaly_rank_key`
+  docstring: the `|z_score|` tiebreak is not exclusively a statistical-tier
+  comparison — a *legacy* stuck_fault row read back from a stored
+  `Job.result`/`JobPortion.result` blob (pre-`frozen_hours_at_detection`)
+  still carries its duration in the numeric `z_score` field, so two tied
+  legacy stuck rows would compare by duration there. Harmless for ordering,
+  wrong as originally documented.
+- **`charts.py:657` — confirmed NOT a `UploadHighAnomalyDetail` reader, but
+  for a different reason than I first gave.** Not "GasAnomaly-fed" as I
+  guessed — team lead traced it further: `anomaly_points` (the list this
+  line reads) is initialised empty at `3_Gas_Monitoring.py:103` and never
+  populated; the loop that would fill it is a bare `pass` with the comment
+  "We no longer populate dummy points here". So the line is unreachable dead
+  code on the caller side, not "reachable but reading an unrelated type" —
+  correcting my own prior Step-0/report reasoning here, since if anyone
+  repopulates that list later, that decides whether this line needs the
+  same patch the other display sites got.
+
+**New test failure found, not fixed (tests/ is qa-engineer's per this
+step's explicit instruction)**: `tests/dashboard/test_anomalies_page_data.
+py::test_trim_cold_run_rows_limits_and_keeps_highest_scores` now fails.
+It builds 100 dict rows with ONLY a `"score"` key (no `detector`/
+`severity`/`z_score` at all) and asserts `trim_cold_run_rows` keeps the
+10 highest by `score`. Under `anomaly_rank_key`, rows with no
+`detector`/`severity`/`z_score` all collapse to the identical rank key
+`(0, 0, 0.0)`, so the sort is stable-no-op and simply returns the first
+10 rows in original list order — `score` no longer drives the cap at all
+for this fixture shape. This is the direct, intended consequence of item 4
+("switch to the ranking function... so the cap keeps the most severe
+rows"), not a bug in the patch — `tests/api/` + `tests/models/` stayed at
+the 1863/5 baseline (re-verified), confirming this is isolated to the one
+dashboard test. Needs a fixture update to include `detector`/`severity`
+(or an explicit assertion that ranking is now severity-first) — a FOURTH
+file for item 7's list, beyond the three originally named and the one
+(`test_stuck_fault_upload.py`) found in the prior report.
+
+**No automated coverage for the five display patches themselves** — they
+render Streamlit hover text/table cells with no existing test harness
+touching that code (confirmed: `tests/dashboard/` failures are limited to
+the one ranking-function test above; nothing exercises the new stuck-fault
+branches in `1_Monitoring.py`, `monitoring_jump.py`, or
+`diagnosis_enricher.py`). Verified only by reading the diff and reasoning
+through the branch conditions, not by a passing test.
+
+**Gate**: `tests/api/ tests/models/ tests/dashboard/ tests/unit/` — 2321
+passed, 1 failed (above), 5 xfailed. `tests/api/`+`tests/models/` alone:
+1863 passed / 5 xfailed, unchanged from team lead's baseline.
