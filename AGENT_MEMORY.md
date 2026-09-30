@@ -4346,3 +4346,77 @@ NOT an item-7 fixture — it was correctly written all along; the code was
 wrong, not the test.
 
 HEAD: `b65be20` before this round, verify after commit below.
+
+## Step 2b, part A+B — identity tiebreak added; fixture A re-measured (Backend, 2026-09-30)
+
+### A. Final identity tiebreak
+`anomaly_rank_key` now returns a 6-tuple:
+`(severity_rank, detector_tier, |z|, score, timestamp, column)`. Score alone
+still ties (e.g. two solo-lstm hits with equal score, or the 4 stuck_fault
+alerts, which always share `score=1.0`), so the last two fields are derived
+from the row's own identity, not iteration order: `str(timestamp or "")`
+then `str(column or "")`, both required per the user's coercion spec to
+avoid `None`-vs-`str` `TypeError` mid-sort (solo-lstm hits have
+`column=None`). Direction: larger string wins under the same reverse=True
+convention as the rest of the tuple — a later ISO-8601 timestamp beats an
+earlier one; alphabetically-later column beats alphabetically-earlier, when
+even timestamps tie. Documented as arbitrary-but-fixed, per instruction, so
+nobody "fixes" it in the opposite direction later.
+
+Known quirk documented, not special-cased: the LSTM path's placeholder for
+an out-of-range sequence index is the literal string `"unknown"`
+(`upload_portions.py`'s `lstm_high` comprehension), which sorts *after*
+every real timestamp (`'u' > any digit`) and would win the timestamp level
+outright. Verified this cannot matter at the trigger-attribution call site:
+`normalize_timestamp_key("unknown")` returns `None`
+(`csv_persist.py:83`: `if not text or text == "unknown": return None`), and
+the caller `continue`s past `None` keys — such hits never reach the
+ranking comparison there. Only the display-cap site could theoretically see
+it, and only as a last-resort tiebreak after five other fields.
+
+Two call sites lean on different halves of the identity tiebreak, documented
+explicitly: at `build_trigger_data_by_timestamp`, every candidate in a group
+already shares one timestamp by construction (verified — see below), so
+`column` does the real work; at the display-cap site, rows span the whole
+file, so `timestamp` does the real work there.
+
+### B. Fixture A re-measured against main (83e6830), not carried forward
+
+Team lead was right that this needed re-measuring, not re-asserting — the
+3-tuple version's "zero changed" result doesn't automatically survive adding
+two more tiebreak levels. Used a throwaway `git worktree add` at `83e6830`
+(removed after) for the main side, current branch (`1dcda00`) for the other,
+both driving the same `_run_fixture_through_upload` harness.
+
+**1. Trigger data**: still zero rows changed — but this time with a
+quantified reason, not just a re-assertion. Fixture A has 89 distinct
+trigger timestamps; 17 of them have 2 candidate hits (all statistical-vs-
+statistical, e.g. `measured_hd` vs `measured_pipe_1_temp` both firing at
+the same 5-minute sample). Checked all 17: in every one, `|z_score|`
+already differs between the two candidates (verified — 0 out of 17 groups
+tie at the `|z|` level), so level 3 resolves every real multi-candidate
+group before score/timestamp/column are ever consulted. There are zero
+stuck-vs-other or stuck-vs-stuck timestamp collisions in this fixture
+(confirmed before, still true), and no two lstm hits share a timestamp
+(each maps to a distinct `sequence_index`). So the added levels are
+structurally inert on this fixture, not coincidentally unused.
+
+**2. Display-cap survivors**: still zero rows entered/left the cap for
+both `high_anomalies` (106→40) and `statistical_summary.anomalies`
+(102→40). Checked the actual boundary: rank 39 (last kept) vs rank 40
+(first dropped) differ in `|z|`/`score` in both lists — the cap boundary
+itself was never tied at the 4-tuple level, so adding two more tiebreak
+levels couldn't move it regardless. There ARE 3 duplicate
+`(severity, detector, |z|, score)` 4-tuples in the 106-row `high_anomalies`
+list — but they're the 4 stuck_fault alerts themselves (all
+`(urgent, stuck_fault_tier, 0.0, 1.0)`), sitting at ranks 0-3, nowhere near
+the rank-40 boundary. The timestamp tiebreak DOES do real, visible work
+here (it reorders those 4 among themselves by onset timestamp), it's just
+invisible to a survivor-diff measurement since all 4 are safely inside the
+top-40 regardless of their internal order.
+
+**Gate, re-run after the A+B change**: `tests/api/ tests/models/
+tests/dashboard/ tests/unit/` — **2322 passed, 0 failed, 5 xfailed**,
+unchanged. `tests/` not touched.
+
+HEAD: `1dcda00` before this round.
