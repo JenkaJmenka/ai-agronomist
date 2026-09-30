@@ -43,6 +43,14 @@ FIXTURE_B = FIXTURES / "native_july_clearsky.csv"
 FAULT_ONSET = datetime(2026, 12, 18, 13, 0, 0, tzinfo=timezone.utc)
 FAULT_DURATION_HOURS = 163.83
 
+# Fixture A ground truth (tests/fixtures/NATIVE_FIXTURES.md:31 onward): five
+# humidity freeze runs at 100.0, of which exactly FOUR cross the 6 h gate.
+# Run #4 (1.00 h) is the only discriminating case here — "four alerts" and
+# "6.00 h frozen at detection" are one fact stated twice, not two independent
+# checks, because the gate stamps detected_ts = onset + STUCK_WALLCLOCK_MIN_HOURS
+# and therefore fixes the count and the duration together.
+EXPECTED_HUMIDITY_ALERT_COUNT = 4
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -83,7 +91,16 @@ def _build_constant_df(
 
 
 def _dict_to_detail(alert: dict) -> UploadHighAnomalyDetail:
-    """Convert a WallclockStuckDetector alert dict to UploadHighAnomalyDetail."""
+    """Convert a WallclockStuckDetector alert dict to UploadHighAnomalyDetail.
+
+    Mirrors production ``upload_portions.py::_stuck_dict_to_high_detail``: the
+    gate-crossing duration goes into ``frozen_hours_at_detection`` and
+    ``z_score`` stays ``None``, because a stuck hit has no z-score at all.
+    This helper used to pass ``z_score=alert["duration_hours"]``, duplicating
+    the pre-split production conversion — the one deliberately retained
+    legacy-shape fixture now lives in
+    ``tests/models/test_episode_duration_fallback.py``.
+    """
     return UploadHighAnomalyDetail(
         score=1.0,
         timestamp=alert["timestamp"],
@@ -91,7 +108,8 @@ def _dict_to_detail(alert: dict) -> UploadHighAnomalyDetail:
         column=alert["channel"],
         severity=alert["severity"],
         method=alert["method"],
-        z_score=alert["duration_hours"],
+        z_score=None,
+        frozen_hours_at_detection=alert["duration_hours"],
         value=alert["value"],
     )
 
@@ -208,20 +226,50 @@ class TestFixtureAStuckFault:
         )
 
     def test_alert_reports_duration_at_gate_crossing(self):
-        """Alerts fire at gate crossing (~6 h), not at freeze end.
+        """Every humidity alert reports elapsed-at-gate, not the full freeze.
 
-        Task 2b: z_score carries the elapsed-so-far duration (≈ gate
-        threshold) at detection time, not the full fault duration.
+        The gate-crossing duration now lives in
+        ``frozen_hours_at_detection``; ``z_score`` is ``None`` for stuck
+        hits. This test used to read ``[a.z_score for a in humidity_alerts
+        if a.z_score is not None]`` and assert ``all(...)`` over it — after
+        the split that comprehension is unconditionally empty and
+        ``all([])`` is ``True``, so it reported green while asserting
+        nothing. The count is pinned first so an empty or short list fails
+        loudly instead of passing vacuously.
         """
         humidity_alerts = [
             a for a in self.stuck_alerts if a.column == "humidity"
         ]
-        durations = [a.z_score for a in humidity_alerts if a.z_score is not None]
+        assert len(humidity_alerts) == EXPECTED_HUMIDITY_ALERT_COUNT, (
+            f"Expected {EXPECTED_HUMIDITY_ALERT_COUNT} humidity stuck alerts, "
+            f"got {len(humidity_alerts)}: "
+            f"{[(a.timestamp, a.frozen_hours_at_detection) for a in humidity_alerts]}"
+        )
+        frozen_hours = [a.frozen_hours_at_detection for a in humidity_alerts]
+        assert None not in frozen_hours, (
+            f"Every stuck alert must carry frozen_hours_at_detection; got "
+            f"{frozen_hours}"
+        )
         assert all(
-            abs(d - STUCK_WALLCLOCK_MIN_HOURS) < 1.0 for d in durations
+            abs(h - STUCK_WALLCLOCK_MIN_HOURS) < 1.0 for h in frozen_hours
         ), (
-            f"Expected duration ≈ {STUCK_WALLCLOCK_MIN_HOURS} h at gate; "
-            f"got durations: {durations}"
+            f"Expected ≈ {STUCK_WALLCLOCK_MIN_HOURS} h frozen at the gate; "
+            f"got {frozen_hours}"
+        )
+
+    def test_stuck_alert_carries_no_z_score(self):
+        """``z_score`` is ``None`` on stuck hits — it no longer carries hours.
+
+        Guards the overload from coming back: a numeric ``z_score`` on a
+        stuck_fault row would be read as a z-score by every statistical
+        display path, and by ``anomaly_rank_key``'s level-3 tiebreak.
+        """
+        humidity_alerts = [
+            a for a in self.stuck_alerts if a.column == "humidity"
+        ]
+        assert len(humidity_alerts) == EXPECTED_HUMIDITY_ALERT_COUNT
+        assert [a.z_score for a in humidity_alerts] == [None] * len(
+            humidity_alerts
         )
 
     def test_main_fault_alert_onset_at_expected_timestamp(self):
@@ -283,7 +331,7 @@ class TestFixtureBNoStuckFault:
         """Clean July data must not trigger stuck-fault detection."""
         assert len(self.stuck_alerts) == 0, (
             f"Expected 0 stuck_fault alerts on clean fixture, got {len(self.stuck_alerts)}: "
-            f"{[(a.column, a.z_score) for a in self.stuck_alerts]}"
+            f"{[(a.column, a.frozen_hours_at_detection) for a in self.stuck_alerts]}"
         )
 
 
@@ -532,6 +580,111 @@ def test_report_measured_latency():
     print(f"Detected at:      {detected_dt.isoformat()}")
     print(f"Latency:          {latency_hours:.2f} h")
     print(f"Gate threshold:   {STUCK_WALLCLOCK_MIN_HOURS} h")
-    print(f"Reported elapsed: {main_alert.z_score} h")
+    print(f"Reported elapsed: {main_alert.frozen_hours_at_detection} h")
     print(f"Frozen value:     {main_alert.value}")
     print(f"=================================\n")
+
+
+# ---------------------------------------------------------------------------
+# Routing pin — stuck rows never reach the statistical display path
+# ---------------------------------------------------------------------------
+
+class TestStuckRowsNeverReachStatJumpRows:
+    """Stuck hits must never be fed to ``stat_rows_to_jump_rows``.
+
+    That function applies the statistical ``min(1.0, z / 5.0)`` score formula
+    to whatever it is handed. A stuck row has no z-score, so if the two paths
+    ever merged, its real ``score=1.0`` would be replaced by the ``0.0``
+    None-safe fallback and an urgent freeze would silently sink to the bottom
+    of the display cap.
+
+    Three independent mechanisms keep them apart today, and this class pins
+    the composition of all three against fixture A's real pipeline output
+    rather than just the outcome, so a future merge of the paths fails loudly:
+
+    1. ``stat_rows_to_jump_rows`` is only ever called with the statistical
+       list (``inference_results.py`` ``render_cold_run_anomaly_tables``).
+    2. ``_statistical_anomalies_from_results`` prefers
+       ``statistical_summary.anomalies``, whose rows are
+       ``StatisticalAnomalyDetail`` dicts with no ``detector`` key at all.
+    3. Its ``high_anomalies`` fallback admits only rows whose detector is
+       statistical (plain or compound) *and* which have a truthy ``column``.
+
+    This lives here, next to the harness that produces a real fixture A
+    response, rather than in ``tests/dashboard/`` — the pure-mechanism pins
+    for items 2 and 3 above are in
+    ``tests/dashboard/test_stuck_row_routing.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load_fixture(self):
+        assert FIXTURE_A.is_file(), f"Fixture A not found: {FIXTURE_A}"
+        response, _ = _run_fixture_through_upload(FIXTURE_A)
+        self.results = response.model_dump(mode="json")
+
+    @staticmethod
+    def _is_stuck(row: dict) -> bool:
+        """Detector membership, never exact string equality.
+
+        ``"lstm+statistical"`` is a real compound label, so exact-match
+        filtering on detector has undercounted here before.
+        """
+        return "stuck_fault" in str(row.get("detector") or "").split("+")
+
+    def test_fixture_a_actually_contains_stuck_rows(self):
+        """Non-vacuity guard for the two pins below.
+
+        If fixture A ever stopped producing stuck rows, the "no stuck rows
+        in the statistical list" assertions would pass for the wrong reason.
+        """
+        stuck = [r for r in self.results["high_anomalies"] if self._is_stuck(r)]
+        assert len(stuck) == EXPECTED_HUMIDITY_ALERT_COUNT, (
+            f"Expected {EXPECTED_HUMIDITY_ALERT_COUNT} stuck rows in "
+            f"high_anomalies, got {len(stuck)}"
+        )
+
+    def test_statistical_list_admits_no_stuck_rows(self):
+        """The list handed to ``stat_rows_to_jump_rows`` holds no stuck rows."""
+        from src.dashboard.components.inference_results import (
+            scoped_upload_anomalies,
+        )
+
+        stat_rows, high_rows, used_fallback = scoped_upload_anomalies(
+            self.results, None, None
+        )
+        assert not used_fallback
+        assert stat_rows, "Statistical list is empty — pin would be vacuous"
+        assert [r for r in stat_rows if self._is_stuck(r)] == []
+        # The stuck rows do survive the *merged* list's cap, so their absence
+        # from stat_rows is routing, not the display cap dropping them.
+        assert len([r for r in high_rows if self._is_stuck(r)]) == (
+            EXPECTED_HUMIDITY_ALERT_COUNT
+        )
+
+    def test_every_row_reaching_jump_rows_has_a_usable_z_score(self):
+        """The precondition of the ``min(1.0, z / 5.0)`` score formula holds.
+
+        Asserting on the resulting score is not enough to catch a path
+        merge: a real stuck row already carries ``score=1.0``, and
+        ``stat_rows_to_jump_rows`` uses ``setdefault``, so the leaked row
+        would keep its score and the 0.0 fallback would never show.
+        Verified by simulation — a merge that leaks stuck rows here is
+        caught by ``test_statistical_list_admits_no_stuck_rows`` and by this
+        test's ``z_score is not None``, but not by a score assertion.
+        """
+        from src.dashboard.components.inference_results import (
+            scoped_upload_anomalies,
+            stat_rows_to_jump_rows,
+        )
+
+        stat_rows, _, _ = scoped_upload_anomalies(self.results, None, None)
+        jump_rows = stat_rows_to_jump_rows(stat_rows)
+        assert len(jump_rows) == len(stat_rows)
+        assert jump_rows, "Jump rows are empty — pin would be vacuous"
+        unusable = [r for r in jump_rows if not isinstance(r.get("z_score"), float)]
+        assert unusable == [], (
+            "A row reached stat_rows_to_jump_rows with no numeric z_score, so "
+            "the statistical score formula cannot apply to it — most likely a "
+            f"stuck row leaked into the statistical path: {unusable[:3]}"
+        )
+        assert [r for r in jump_rows if r["score"] == 0.0] == []
