@@ -310,6 +310,29 @@ def _infer_fault_type(
     return "unknown"
 
 
+def resolve_stuck_duration_hours(row: Any) -> Optional[float]:
+    """Hours frozen at detection for a stuck_fault row, else ``None``.
+
+    Shared by every dashboard display site that needs a stuck hit's
+    duration: this function, ``monitoring_jump.py``, and ``1_Monitoring.py``
+    all made the same decision independently before being consolidated
+    here. Prefers ``frozen_hours_at_detection``; falls back to the legacy
+    ``z_score`` overload ONLY when ``detector == "stuck_fault"`` (never
+    based on whether ``z_score`` is merely present, since a legacy
+    STATISTICAL row also has a numeric ``z_score``, and that is exactly the
+    misread this fallback must not cause). Returns ``None`` for non-stuck
+    rows, or when neither field carries a value. Mirrors
+    ``episode_grouper.py::_stuck_fault_duration``'s fallback, and ``row``
+    may be a ``dict`` or a ``pd.Series`` -- both support ``.get()``.
+    """
+    if row.get("detector") != "stuck_fault":
+        return None
+    frozen_hours = row.get("frozen_hours_at_detection")
+    if frozen_hours is None:
+        frozen_hours = row.get("z_score")
+    return frozen_hours
+
+
 def _build_reasoning(
     *,
     incident: Optional[Dict[str, Any]],
@@ -326,13 +349,14 @@ def _build_reasoning(
     if row is not None:
         try:
             detector = str(row.get("detector") or "")
-            frozen_hours = row.get("frozen_hours_at_detection")
             col_name = row.get("column")
-            if detector == "stuck_fault" and frozen_hours is not None:
-                if col_name:
-                    slot = canonical_slot_for_column(str(col_name)) or str(col_name)
-                    label = format_sensor_label(slot)
-                    parts.append(f"Frozen {float(frozen_hours):.1f}h on {label}")
+            if detector == "stuck_fault":
+                frozen_hours = resolve_stuck_duration_hours(row)
+                if frozen_hours is not None:
+                    if col_name:
+                        slot = canonical_slot_for_column(str(col_name)) or str(col_name)
+                        label = format_sensor_label(slot)
+                        parts.append(f"Frozen {float(frozen_hours):.1f}h on {label}")
             else:
                 z_val = row.get("z_score")
                 if z_val is not None and not pd.isna(z_val):

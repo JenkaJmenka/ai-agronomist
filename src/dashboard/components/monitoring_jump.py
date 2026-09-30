@@ -10,7 +10,10 @@ import streamlit as st
 
 from src.dashboard.components.charts import apply_datetime_filter
 from src.dashboard.components.global_sidebar import queue_sidebar_selection
-from src.dashboard.services.diagnosis_enricher import canonical_slot_for_column
+from src.dashboard.services.diagnosis_enricher import (
+    canonical_slot_for_column,
+    resolve_stuck_duration_hours,
+)
 from src.dashboard.services.tz_normalize import strip_tz
 from src.utils.profiling import timed
 
@@ -325,13 +328,34 @@ def format_anomaly_cell(column: str, value: Any) -> str:
     return str(value)
 
 
+def _normalize_stuck_display_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Move a stuck hit's duration into frozen_hours_at_detection for display.
+
+    The fallback decision itself (prefer the new field, fall back to the
+    legacy z_score overload only for stuck_fault) is shared with
+    diagnosis_enricher.py and 1_Monitoring.py via
+    ``resolve_stuck_duration_hours`` -- this function only does the part
+    specific to a table row: writing the resolved value back and clearing
+    z_score on the copy, so a legacy row's duration never also renders
+    under the Z-score column.
+    """
+    frozen_hours = resolve_stuck_duration_hours(row)
+    if frozen_hours is None:
+        return row
+    normalized = dict(row)
+    normalized["frozen_hours_at_detection"] = frozen_hours
+    normalized["z_score"] = None
+    return normalized
+
+
 def anomalies_to_display_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Normalize anomaly dicts for a consistent dataframe table."""
     if not rows:
         return pd.DataFrame()
-    columns = anomaly_display_columns(rows)
+    normalized_rows = [_normalize_stuck_display_row(row) for row in rows]
+    columns = anomaly_display_columns(normalized_rows)
     records = [
         {col: format_anomaly_cell(col, row.get(col)) for col in columns}
-        for row in rows
+        for row in normalized_rows
     ]
     return pd.DataFrame(records, columns=columns)

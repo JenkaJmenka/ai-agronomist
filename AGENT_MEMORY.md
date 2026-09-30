@@ -4554,3 +4554,84 @@ run `integration/`, `live/`, `load/`, `db/`, `services/`, `monitoring/`,
 `vendors/`, `utils/` or `data/`, having first grepped them for `z_score`,
 `frozen_hours`, `stat_rows_to_jump_rows`, `anomaly_rank_key` and
 `_dict_to_detail` and found no references.
+
+## Step 6 — closed item 3's legacy display arm, consolidated (Backend, 2026-09-30)
+
+Step 5 found two unmigrated sites in item 3's own list: the step-2 display
+patches had no legacy arm (branch on `frozen_hours_at_detection is not
+None` only), so a pre-branch stuck row (numeric `z_score` carrying hours,
+no new field) fell straight to the z-score branch in three places; and
+`charts.py:657` had the same present-but-null `TypeError` risk already
+fixed at `inference_results.py:254` in step 2.
+
+**Defect 1 fix — one shared normaliser, not three independent arms.**
+Landed as a shared `resolve_stuck_duration_hours(row) -> Optional[float]`
+in `src/dashboard/services/diagnosis_enricher.py` (already the module
+that owns "z-score fallback" semantics per its own docstring, and already
+imported by `monitoring_jump.py`, so this follows the existing import
+direction rather than adding a new one). All three sites call it instead
+of each carrying its own `if frozen_hours is None: frozen_hours = z_score`
+decision:
+- `diagnosis_enricher.py::_build_reasoning` — `resolve_stuck_duration_hours(row)`
+  replaces the inline fallback directly.
+- `monitoring_jump.py::_normalize_stuck_display_row` — still does the
+  table-specific part (write the resolved value into
+  `frozen_hours_at_detection`, clear `z_score` on the copy so a legacy
+  row's duration never also renders under the Z-score column), but the
+  fallback decision itself is delegated.
+- `1_Monitoring.py::_add_anomaly_markers` — imports
+  `resolve_stuck_duration_hours` directly from
+  `src.dashboard.services.diagnosis_enricher` (views importing services
+  directly has precedent: `anomalies_page_data.py` already imports from
+  `src/api/services/`). The import was added to the existing top-level
+  import block, well above `st.set_page_config(` at line 190 — confirmed
+  `_add_anomaly_markers` (line 83) is still far above it, so
+  `tests/dashboard/test_monitoring_page_anomaly_hover.py`'s source-split
+  fixture still finds both the marker and the split point.
+
+This was a genuine consolidation, not the "three independent arms" shape
+team lead's read of the mid-edit tree inferred — chose it because the
+guardrails flag duplicated decision logic as a WARN, the three sites'
+`+21`/`+10`/near-zero diffs were exactly the signature of three separate
+implementations of one rule, and the shared helper turned out to be a
+small, cheap extraction (one pure function, `row.get()` works identically
+for the dict rows two sites use and the `pd.Series` the third uses) rather
+than a costly rework.
+
+**Defect 2 fix**: `charts.py:657` — `ap.get('z_score', 0)` (default only
+applies when the key is absent, not when present-and-null) replaced with
+an explicit `is not None` check, mirroring the `inference_results.py:254`
+pattern from step 2. Per team lead's explicit instruction, did NOT attempt
+to make the line reachable and did NOT touch `3_Gas_Monitoring.py` (its
+`anomaly_points` list is still always `[]`, confirmed unchanged).
+
+**Test outcome — six failures, not three, and this is the correct,
+unavoidable result.** Step 5 pinned each of the three xfail(strict=True)
+tests with a "positive companion pin" that asserts the CURRENT (buggy)
+z-score-labeled output for the exact same input/function call. A fix that
+satisfies the xfail (legacy row renders "frozen Xh") necessarily falsifies
+its companion (which asserts the same call renders "z=6.0"/"...σ..." for
+that same input) — the two are logical negations of each other, not
+independent checks. Verified empirically before committing: ran
+`tests/dashboard/test_stuck_display_contract.py` +
+`tests/dashboard/test_monitoring_page_anomaly_hover.py` and got exactly
+6 failures (3 XPASS-strict + the 3 companions), reported it rather than
+silently proceeding, and team lead independently reran the full suite
+twice against this tree and confirmed the same 6-failure result, retracting
+their own earlier "expect 3" prediction as the error (the companion pins
+were the piece not accounted for). Did not touch `tests/` at any point.
+
+**Full suite**: two runs by team lead — `6 failed, 3345 passed, 18
+skipped, 6 xfailed` (clean) and `6 failed, 3344 passed, 18 skipped, 6
+xfailed, 1 error` (one order-dependent flake in
+`tests/api/test_readings_api.py`, confirmed unrelated to this change,
+did not recur). One run by me — `6 failed, 3343 passed, 18 skipped, 6
+xfailed, 2 errors`; the two errors
+(`test_inference_upload_cold_run_greenhouse_fixture`,
+`test_route_stores_resolvable_blob_and_records_ref`) both passed cleanly
+in isolation, confirming the same order-dependent-pollution pattern team
+lead already found elsewhere in the suite — not caused by this change,
+not chased, consistent with team lead's own "do not chase it" call on
+their flake.
+
+HEAD: `c1cb029` before this round.
