@@ -159,7 +159,10 @@ def _stuck_dict_to_high_detail(
         column=alert["channel"],
         severity=alert["severity"],
         method=alert["method"],
-        z_score=alert["duration_hours"],
+        # Stuck hits carry hours-at-detection in frozen_hours_at_detection, not
+        # z_score (there is no statistical z for a frozen channel).
+        z_score=None,
+        frozen_hours_at_detection=alert["duration_hours"],
         value=alert["value"],
     )
 

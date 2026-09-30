@@ -25,6 +25,7 @@ from src.api.services.csv_persist import (
     normalize_timestamp_key,
     persist_readings_chunk,
 )
+from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
     PortionScores,
@@ -125,27 +126,31 @@ def build_anomaly_metadata_by_timestamp(
 def build_trigger_data_by_timestamp(
     high_anomalies: list[UploadHighAnomalyDetail],
 ) -> dict[str, dict[str, object]]:
-    """Per-timestamp primary trigger: channel with highest |z|, its detector/severity/value.
+    """Per-timestamp primary trigger: most-severe hit's detector/severity/value.
 
-    For rows where multiple columns fire at the same timestamp the highest-|z|
-    column wins.  LSTM-only hits (column=None, z_score=None) are included so
+    For rows where multiple columns fire at the same timestamp, the winner
+    is chosen by ``anomaly_rank_key`` (severity, then detector tier, then
+    |z_score| — see that function for why this ranks an urgent stuck-fault
+    freeze above a statistical warning, unlike the old |z|-only tiebreak,
+    which never even saw stuck hits since they carry no z_score).
+    LSTM-only hits (column=None, z_score=None) are included so
     trigger_detector is always populated; trigger_channel stays None for them.
     """
-    # {ts_key: {"channel", "detector", "severity", "value", "_z"}}
+    # {ts_key: {"channel", "detector", "severity", "value", "_rank"}}
     best: dict[str, dict[str, object]] = {}
     for hit in high_anomalies:
         key = normalize_timestamp_key(hit.timestamp)
         if key is None:
             continue
-        z = abs(hit.z_score) if hit.z_score is not None else 0.0
+        rank = anomaly_rank_key(hit)
         existing = best.get(key)
-        if existing is None or z > abs(existing.get("_z") or 0.0):
+        if existing is None or rank > existing["_rank"]:
             best[key] = {
                 "channel": hit.column,
                 "detector": hit.detector or "lstm",
                 "severity": hit.severity,
                 "value": hit.value,
-                "_z": hit.z_score,
+                "_rank": rank,
             }
     # Strip the internal sort key before returning.
     return {
