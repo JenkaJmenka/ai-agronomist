@@ -55,7 +55,7 @@ def _detector_tier(detector: str | None) -> int:
     return _UNKNOWN_TIER
 
 
-def anomaly_rank_key(hit: Any) -> tuple[int, int, float]:
+def anomaly_rank_key(hit: Any) -> tuple[int, int, float, float]:
     """Rank an anomaly hit for trigger attribution and display-cap survival.
 
     Order, highest first:
@@ -76,17 +76,35 @@ def anomaly_rank_key(hit: Any) -> tuple[int, int, float]:
        larger still means "worse"), but this field is not exclusively a
        statistical z-score in that one case. It never reorders hits across
        tiers regardless — detector_tier already separated them by then.
+    4. Canonical ``score`` — the tiebreak. Every same-tier group that isn't
+       discriminated by ``|z|`` (e.g. two solo-lstm hits, which always share
+       severity=None/detector="lstm"/z_score=None) would otherwise collapse
+       to one identical key, turning `sorted()`/`max()` into a no-op that
+       returns whatever order the hits happened to arrive in. ``score`` is
+       a property of the row itself, not of iteration order, so unlike a
+       first-encountered tiebreak it cannot vary with where a chunk
+       boundary falls — a strictly stronger determinism guarantee.
+       ``StatisticalAnomalyDetail`` dicts (from
+       ``statistical_summary.anomalies``) have no ``score`` field at all;
+       the 0.0 default for those is load-bearing, not decorative — it just
+       means such rows fall through to the fifth tiebreak below rather than
+       claiming a false 0.0-vs-0.0 win over each other.
 
-    Ties beyond all three fields keep the first-encountered hit when this
+    Ties beyond all four fields keep the first-encountered hit when this
     key is used with ``max()`` (which only replaces the running winner on a
-    strict ``>``) or any stable sort. That is deterministic across upload
-    chunk sizes: portions are always merged in ascending ``portion_idx``
-    order regardless of how many rows each portion holds, and within a
-    portion the detectors emit hits in the sensor column's fixed iteration
-    order — neither depends on where a chunk boundary happened to fall.
+    strict ``>``) or any stable sort — deterministic across upload chunk
+    sizes for the same reason ``score`` is: portions are always merged in
+    ascending ``portion_idx`` order regardless of how many rows each portion
+    holds, and within a portion the detectors emit hits in the sensor
+    column's fixed iteration order, neither of which depends on where a
+    chunk boundary happened to fall. In practice this only matters for a
+    genuine four-way tie (same severity, same detector tier, same |z| or
+    both 0.0, same score or both missing it).
     """
     severity = _field(hit, "severity")
     detector = _field(hit, "detector")
     z_score = _field(hit, "z_score")
+    score = _field(hit, "score")
     z_rank = abs(z_score) if isinstance(z_score, (int, float)) else 0.0
-    return (_SEVERITY_RANK.get(severity, 0), _detector_tier(detector), z_rank)
+    score_rank = float(score) if isinstance(score, (int, float)) else 0.0
+    return (_SEVERITY_RANK.get(severity, 0), _detector_tier(detector), z_rank, score_rank)

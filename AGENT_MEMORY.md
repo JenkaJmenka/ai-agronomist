@@ -4250,8 +4250,22 @@ by team lead: legacy `z_score=6.0` → 21600.0s, new
   repopulates that list later, that decides whether this line needs the
   same patch the other display sites got.
 
-**New test failure found, not fixed (tests/ is qa-engineer's per this
-step's explicit instruction)**: `tests/dashboard/test_anomalies_page_data.
+**CORRECTED (step 2b, same day)**: the paragraph below, as originally
+written here, was wrong. `tests/dashboard/test_anomalies_page_data.py::
+test_trim_cold_run_rows_limits_and_keeps_highest_scores` failing was NOT
+"the intended effect of severity-first ranking" — it was `anomaly_rank_key`
+being genuinely incomplete. The test is correct; item 7's file list does
+NOT gain a fourth entry; `test_anomalies_page_data.py` is not an item-7
+fixture. See the step-2b entry below for the real cause and fix
+(`anomaly_rank_key` needed `score` as a fourth tiebreak field — every
+solo-lstm hit ties on severity/detector/z, so without `score` the cap
+degenerated to arrival order for any lstm-heavy upload, a real regression
+that just happened to be caught by this one test rather than being
+confined to it). Original (wrong) reasoning kept below for the record,
+struck through in spirit if not in markdown:
+
+~~New test failure found, not fixed (tests/ is qa-engineer's per this
+step's explicit instruction): `tests/dashboard/test_anomalies_page_data.
 py::test_trim_cold_run_rows_limits_and_keeps_highest_scores` now fails.
 It builds 100 dict rows with ONLY a `"score"` key (no `detector`/
 `severity`/`z_score` at all) and asserts `trim_cold_run_rows` keeps the
@@ -4266,7 +4280,7 @@ the 1863/5 baseline (re-verified), confirming this is isolated to the one
 dashboard test. Needs a fixture update to include `detector`/`severity`
 (or an explicit assertion that ranking is now severity-first) — a FOURTH
 file for item 7's list, beyond the three originally named and the one
-(`test_stuck_fault_upload.py`) found in the prior report.
+(`test_stuck_fault_upload.py`) found in the prior report.~~
 
 **No automated coverage for the five display patches themselves** — they
 render Streamlit hover text/table cells with no existing test harness
@@ -4279,3 +4293,56 @@ through the branch conditions, not by a passing test.
 **Gate**: `tests/api/ tests/models/ tests/dashboard/ tests/unit/` — 2321
 passed, 1 failed (above), 5 xfailed. `tests/api/`+`tests/models/` alone:
 1863 passed / 5 xfailed, unchanged from team lead's baseline.
+
+## Step 2b — anomaly_rank_key was missing score as a tiebreak (Backend, 2026-09-30)
+
+Team lead pushed back on the step-2 entry above and was right: the dashboard
+test failure wasn't a stale fixture, it was `anomaly_rank_key` itself being
+incomplete. Reproduced their evidence independently before touching anything:
+
+    score-only rows (no detector/severity/z_score), key=anomaly_rank_key:
+      kept (WRONG, before fix): [0.0, 0.01, ..., 0.09]  <- the worst 10, not the best
+    solo-lstm rows (severity=None, detector="lstm", z_score=None always):
+      keys (before fix): [(0,1,0.0), (0,1,0.0), (0,1,0.0)] — all identical
+      kept top-2 (WRONG, before fix): [0.55, 0.12] <- not actually the top 2 by score
+
+Root cause: every same-tier group not discriminated by `|z|` (which is only
+ever non-zero for statistical-tier hits) collapsed to one identical 3-tuple
+key, so `sorted()`/`max()` degenerated to a stable no-op returning arrival
+order. Solo-lstm hits ALWAYS hit this — `severity=None`, `detector="lstm"`,
+`z_score=None` on every one of them — so this wasn't confined to the test's
+synthetic fixture; any lstm-heavy real upload would have the same display-cap
+degradation the test caught by accident.
+
+**Fix**: `anomaly_rank_key` now returns a 4-tuple
+`(severity_rank, detector_tier, |z|, score)`. `score` read via the existing
+`_field` helper, coerced `float(score) if isinstance(score, (int, float))
+else 0.0` (mirrors the z-score coercion). The 0.0 fallback is load-bearing
+for `StatisticalAnomalyDetail` dicts (no `score` field at all) — noted
+explicitly in the docstring so it isn't mistaken for a default worth
+"fixing" later.
+
+Verified all three of team lead's cases match exactly post-fix:
+- score-only rows → kept `[0.99, 0.98, ..., 0.90]` (top 10, correctly).
+- lstm-only rows → kept `[0.98, 0.55]` (top 2 by score, correctly).
+- urgent(0.2) vs critical(0.99) → urgent still wins (severity still the
+  primary key; score only breaks ties within a tier).
+
+`tests/dashboard/test_anomalies_page_data.py::
+test_trim_cold_run_rows_limits_and_keeps_highest_scores` — required to pass
+**unmodified**, and does: `1 passed`. Did not touch the test.
+
+**Gate**: `tests/api/ tests/models/ tests/dashboard/ tests/unit/` —
+**2322 passed, 0 failed, 5 xfailed** (was 2321/1/5 before this fix; the
+prior single failure is now green, nothing else moved).
+
+**Item 7's file list is back to three files examined, one needing changes**:
+`test_label_integrity.py`, `test_cold_run_merge.py`, `test_episode_grouping.
+py` have zero stuck-hit `z_score=` constructors (confirmed twice now);
+`test_stuck_fault_upload.py` is the one that actually needs the
+`_dict_to_detail` helper and `test_alert_reports_duration_at_gate_crossing`
+fixed, per the original step-1 report. `test_anomalies_page_data.py` is
+NOT an item-7 fixture — it was correctly written all along; the code was
+wrong, not the test.
+
+HEAD: `b65be20` before this round, verify after commit below.
