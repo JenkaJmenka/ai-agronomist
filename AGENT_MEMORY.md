@@ -4094,3 +4094,110 @@ Corrected:
 - **Config gap found, not fixed**: `web/biome.json`'s `files.includes` lists
   only `app/** components/** features/** lib/** test/**`, so repo-root
   `web/proxy.ts` — the auth gate — and `web/proxy.test.ts` are never linted.
+
+## z_score/severity refactor — src/api/ portion only (Backend, 2026-09-30)
+
+Branch `refactor/upload-anomaly-score-severity`, commit `7cb1bb1` (base `83e6830`).
+Full 7-item spec from team lead touched `src/api/`, `src/models/episode_grouper.py`,
+five `src/dashboard/` files, `tests/`, and `web/lib/api-types.gen.ts`. Only the
+`src/api/` items are committed here — file-ownership boundary ("Write to src/api/
+and src/db/ only"), consistent with the `web/lib/severity.ts` precedent above
+(line ~963). Exact patches for every out-of-scope file were handed to team lead
+in chat, not applied.
+
+- **`src/api/schemas/sensor_data.py`**: added `UploadHighAnomalyDetail.
+  frozen_hours_at_detection: Optional[float]`. Stuck hits now carry their
+  gate-crossing duration there; `z_score` is `None` for them (was overloaded
+  to carry `duration_hours` before — see `[[project_detector_label_compound]]`-
+  adjacent history in Step-0 inventory for this branch).
+- **`src/api/services/upload_portions.py::_stuck_dict_to_high_detail`**:
+  `z_score=None, frozen_hours_at_detection=alert["duration_hours"]`.
+- **`src/api/services/anomaly_ranking.py`** (new): `anomaly_rank_key(hit)` —
+  `(severity_rank, detector_tier, |z|)`, works on both pydantic instances and
+  dicts. Detector tier matched by *membership* in a possibly-`"+"`-joined
+  label (`"lstm+statistical"` ranks with `"statistical"`), never exact
+  equality — the compound label has undercounted before via exact-match
+  filters (see `project_detector_label_compound` memory).
+- **`src/api/services/cold_run_upload.py::build_trigger_data_by_timestamp`**:
+  replaced `|z|`-only tiebreak with `anomaly_rank_key`.
+- **Fixture A (native_dec_stuck_fault.csv) measured, reproduced via
+  `./venv/bin/python`**: zero `trigger_channel`/`trigger_detector` rows
+  changed (no timestamp where a stuck_fault hit competes with another
+  detector's hit in this fixture) and zero display-cap survivor diff
+  (stuck rows already score 1.0, always topped the old ranking too). The
+  new ranking function is real but this fixture doesn't exercise the
+  collision case — needs a synthetic same-timestamp multi-detector fixture
+  to actually observe a diff.
+- **`inference_results.py:254` stuck-row score**: N/A both before and after —
+  traced and confirmed empirically that `stat_rows_to_jump_rows` structurally
+  never receives a `detector="stuck_fault"` row (neither `statistical_summary.
+  anomalies` nor the `{"statistical","lstm+statistical"}` membership fallback
+  can produce one). No live crash/score-drop risk exists today either way.
+- **Blob readers (item 5)**: exactly one typed-deserialization site in the
+  whole repo — `src/workers/upload_consumer.py:465` reconstructing
+  `UploadHighAnomalyDetail(**h)` from `JobPortion.result["stuck_hits"]`.
+  Needs no change itself (Pydantic's `**h` already round-trips both shapes);
+  the discrimination has to live in the *readers* (`episode_grouper.py:215`
+  primarily). `Job.result` is never reconstructed into typed models anywhere
+  — `JobStatusResponse.result: Optional[dict[str, Any]]` is a raw passthrough.
+- **Two corrections made to the spec as given**, both reproduced before
+  reporting: (1) the three test files named for item 7
+  (`test_label_integrity.py`, `test_cold_run_merge.py`,
+  `test_episode_grouping.py`) have **no** stuck-hit `z_score=` constructors
+  at all — grepped, confirmed. The actual fixture needing an update is
+  `tests/api/test_stuck_fault_upload.py`'s test-local `_dict_to_detail`
+  helper (~line 82-94, duplicates the pre-fix production function) and
+  `test_alert_reports_duration_at_gate_crossing` (~line 210-224), which now
+  **passes vacuously** — it filters `a.z_score is not None` on stuck alerts,
+  which is now always `None`, so the list is always empty and `all(...)` on
+  an empty list is trivially `True`. (2) `charts.py:657`'s `z_score` read
+  is NOT a `UploadHighAnomalyDetail` reader — traced the caller chain and
+  it's `plot_gas_sensor_stack`, used only by `3_Gas_Monitoring.py`, fed by
+  the unrelated `gas_anomaly_detector.py::GasAnomaly.z_score` (always a
+  required float, never `None`). This corrects my own Step-0 inventory,
+  which cited it without checking what `anomaly_points` was sourced from.
+- **Must-fix-before-merge flagged to team lead**: `episode_grouper.py:215`'s
+  still-open-freeze fallback (`getattr(first_alert, "z_score", None)`) is now
+  silently broken — always `None` post-fix, so it falls through to
+  `duration_seconds=0.0` for any freeze still open at upload end. Not caught
+  by the suite because fixture A's 4 alerts all matched a completed
+  `FaultWindow` (the fallback path isn't exercised by any fixture in the
+  repo today). Exact one-line-reasoning patch given in chat; this function
+  is only ever called from the `detector == "stuck_fault"` branch of its
+  caller, so no extra detector guard is needed inside it.
+- **Gate**: full `tests/api/`, `tests/unit/`, `tests/dashboard/`,
+  `tests/models/` green — 1043 + 1279 passed, 5 xfailed (pre-existing) —
+  but see the vacuous-test note above; green here does not mean the
+  gate-crossing duration is actually being checked anymore until
+  `test_stuck_fault_upload.py` is patched.
+- **HEAD verified**: `83e6830` before, `7cb1bb1` after, both checked
+  immediately before/after the commit per `project_agent_branch_drift`.
+
+## Item 6 STOP — web/openapi.json is stale independent of this branch (Backend, 2026-09-30)
+
+Verified team lead's required precondition before touching `web/openapi.json`/
+`web/lib/api-types.gen.ts`: regenerate via `app.openapi()` (2-space indent, no
+trailing newline, matching the committed file's format) and diff against the
+committed file on a clean tree — must be byte-identical before any schema
+change is layered on top.
+
+**It is not, even at this branch's exact base commit `83e6830`.** Verified via
+a throwaway `git worktree add` at `83e6830` (removed after): a fresh
+`app.openapi()` dump there is 11368 lines vs. the committed file's 8949 —
+every route is missing `X-API-Key`/`X-Tenant-Id` header parameters that the
+live `require_api_key`/tenant-auth dependencies (`src/api/auth.py:86-87`)
+actually declare. `web/openapi.json` was last touched by `ec8b2dd` ("chore:
+close phase-2 audit follow-ups on docs, generated types and tests",
+2026-09-29) — confirmed an ancestor of `83e6830` with no further commits to
+the file in between, so this is real, pre-existing drift from before this
+branch was cut, not something introduced on this branch or by my environment.
+Root cause not investigated further (out of scope for this task) — plausibly
+the phase-2 regeneration didn't actually run `app.openapi()` against the auth
+middleware as currently wired, but that's a guess, not verified.
+
+**Did not touch `web/openapi.json` or `web/lib/api-types.gen.ts`.** Per team
+lead's own explicit instruction ("If you cannot achieve a byte-identical
+no-op regeneration, STOP and report — do not hand-edit either file, and do
+not commit a reformatted schema"), reported this and stopped rather than
+bundling ~2400 lines of unrelated auth-header schema drift into a
+labelling/severity refactor commit.
