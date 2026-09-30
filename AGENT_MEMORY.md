@@ -4420,3 +4420,115 @@ tests/dashboard/ tests/unit/` — **2322 passed, 0 failed, 5 xfailed**,
 unchanged. `tests/` not touched.
 
 HEAD: `1dcda00` before this round.
+
+## Step 3 — test fixes, routing pin, edge pins (QA, 2026-09-30)
+
+Branch `refactor/upload-anomaly-score-severity`, HEAD `cffbbae` before,
+`73a477b` after (parent verified as `cffbbae`, commit is `tests/`-only).
+Spec: `tasks/prompts/task2-step3-qa-tests.md`, all 8 items done.
+
+**Item 1 — the vacuous test was real and is fixed.**
+`test_stuck_fault_upload.py::test_alert_reports_duration_at_gate_crossing`
+built `[a.z_score for a in humidity_alerts if a.z_score is not None]`, which
+is unconditionally `[]` post-split, and `all([])` is `True`. Reproduced: all
+4 alerts have `z_score=None`, `frozen_hours_at_detection=6.0`. Now pins the
+count first, then the new field. **Proved it can fail** by mutation, not by
+inspection: empty list → `assert 0 == 4`; 3-of-4 list → `assert 3 == 4`;
+reverted both.
+
+**Item 2 sweep — one more genuinely broken site, outside the gate set.**
+`tests/workers/test_stuck_async_parity.py:606` asserted
+`co2_alerts[0]["z_score"] == 6.0` on a stuck hit and was **failing**
+(`assert None == 6.0`). It is invisible to the
+`tests/api tests/models tests/dashboard tests/unit` gate — `tests/workers/`
+is not in it. Measured directly, not inferred: `tests/workers/` was
+**191 passed / 1 failed / 1 xfailed** at `cffbbae` (re-ran with the original
+file restored from git to confirm) and is **192 passed / 1 xfailed** after.
+Also `_canonical_stuck_json` (:131) carried only `z_score` in the
+sync-vs-async parity payload, so the duration side of that comparison had
+degenerated to `None == None`; it now carries both fields.
+Swept clean, no change needed: the four `all(...)` sites over stuck alerts in
+`test_stat_chunk_invariance.py:312-313` and `test_stuck_async_parity.py:
+267-268/293-294` all assert `len(alerts) == 4` first, so none is vacuous.
+
+**Item 3 — the spec's file list was wrong, as team lead had flagged.**
+Verified independently: `test_label_integrity.py`, `test_cold_run_merge.py`
+and `test_episode_grouping.py` have zero stuck-hit `z_score=` constructors
+(every one is `detector="statistical"`; `test_label_integrity.py:143`'s
+`z_score=None` is an lstm row). The real site is
+`test_stuck_fault_upload.py::_dict_to_detail` (~:85), which duplicated the
+pre-split production conversion; realigned with
+`upload_portions._stuck_dict_to_high_detail`. Legacy shape retained
+deliberately in `tests/models/test_episode_duration_fallback.py`.
+
+**Items 4-6 — new file `tests/models/test_episode_duration_fallback.py`.**
+Tested through the public `group_alerts_into_episodes` with
+`completed_faults=None` rather than the private `_stuck_fault_duration`, so
+the pins survive a refactor of that helper. All four reference values
+reproduced independently before writing: legacy `z_score=6.0` → 21600.0 s;
+`frozen_hours_at_detection=6.0` → 21600.0 s; both (`z=99.0`, `frozen=6.0`)
+→ 21600.0 s (new field wins); neither → 0.0. All four `is_ongoing=True`.
+Item 5's still-open freeze is driven by the real detector over a
+never-released constant channel (`completed_faults == []` asserted, so the
+fallback is the only duration source) → 21600.0 s, i.e. hours **at the gate**,
+not the ~16.6 h input span. Item 6's `0.0` edge documented in-docstring as
+inherited (the `> 0` guard predates the split), currently unreachable
+because the gate is 6 h, and ambiguous by design; a negative-hours pin
+alongside it shows the guard is `> 0` and not `is not None`, which is what
+creates the ambiguity.
+
+**Item 7 — routing pin asserts the mechanism, and was verified by
+simulating the merge.** `tests/dashboard/test_stuck_row_routing.py` pins
+each barrier in isolation (statistical_summary preferred; the
+`high_anomalies` fallback excludes stuck, legacy-stuck and solo-lstm rows
+while admitting the compound `lstm+statistical` label; a truthy `column`
+also required). The end-to-end pin over fixture A lives in
+`test_stuck_fault_upload.py::TestStuckRowsNeverReachStatJumpRows` — placed
+there to reuse the existing `_run_fixture_through_upload` rather than add a
+7th copy of that harness to `tests/`.
+**A score-based assertion does NOT catch the merge** — found by simulation,
+not reasoning: a real stuck row already carries `score=1.0` and
+`stat_rows_to_jump_rows` uses `setdefault`, so the `0.0` fallback never
+fires for it. Rewrote that pin to assert every admitted row has a **numeric
+`z_score`**, the actual precondition of the `min(1.0, z / 5.0)` formula;
+re-ran the simulation and it now fails with "4 rows with no numeric
+z_score". Both fixture-A pins fail under a simulated merge.
+
+**Item 8 — `tests/api/test_anomaly_ranking.py`.** Score-breaks-ties pinned
+with scores ascending in arrival order so a rank that degenerated to list
+order keeps the *worst* rows and cannot pass by accident (plus an explicit
+non-vacuity test that rank order ≠ arrival order, and one pinning that all
+20 lstm rows share the key prefix `(0, 1, 0.0)`). Urgent-vs-critical pinned
+both ways: urgent ranks first, and it loses key levels 3 and 4 outright
+while doing so.
+**The spec's third case is ill-posed under the 6-tuple** and was written
+before step 2b part A added `timestamp`/`column`: two rows "equal on every
+key including score" are now equal on all six, so their *keys* are identical
+and the sort cannot order them from anything on the row — the remaining
+order is `sorted`'s stability over input order, which shuffling does change.
+Pinned what is actually true and useful instead: rows tied through `score`
+but with distinct timestamps (or distinct columns at equal timestamps) are
+shuffle-invariant over 20 seeded shuffles, and rows identical on all six
+levels yield one identical key with the stable-sort remnant stated
+explicitly rather than asserted as invariance.
+
+**Gate**: `tests/api tests/models tests/dashboard tests/unit` — **2322 →
+2361 passed, 0 failed, 5 xfailed** (+39 tests). `tests/dashboard/
+test_anomalies_page_data.py` untouched: `git diff main` on it is 0 lines.
+Coverage on the two modules these pins target, from the five relevant test
+files alone: `anomaly_ranking.py` **100%**, `episode_grouper.py` **88.82%**,
+combined **91.05%**.
+
+**Not corroborated, reported as unchanged only**: the "102 statistical hits"
+figure. It still reads 102 on fixture A, but per `docs/runbooks/
+native-dec-fixture-baseline.md:61-79` that is self-referentially
+reproducible and already superseded a pinned 111 — re-running the code is
+what the doc predicts regardless of correctness. Untouched at
+`test_stat_chunk_invariance.py:70-72`.
+
+**Gap left open, outside this step's 8 items**: step 2's five Streamlit
+display patches still have no test touching them — in particular
+`monitoring_jump.py`'s new `frozen_hours_at_detection` column/label/format
+branch (:276, :289, :318) and `diagnosis_enricher.py:329`'s stuck branch.
+`tests/dashboard/test_monitoring_jump.py` builds only statistical rows.
+Not added here: the spec scopes this step to items 1-8.
