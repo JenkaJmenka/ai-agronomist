@@ -4532,3 +4532,25 @@ display patches still have no test touching them — in particular
 branch (:276, :289, :318) and `diagnosis_enricher.py:329`'s stuck branch.
 `tests/dashboard/test_monitoring_jump.py` builds only statistical rows.
 Not added here: the spec scopes this step to items 1-8.
+
+### Process note — the step 1-2b gate set had a hole in it
+
+The gate used through steps 1, 2 and 2b —
+`tests/api/ tests/models/ tests/dashboard/ tests/unit/` — does **not**
+include `tests/workers/`. A genuinely red test lived there the whole time:
+`test_stuck_async_parity.py::TestSkipChannels::
+test_co2_alert_appears_when_skip_disabled` broke in `7cb1bb1` (the commit
+that made `z_score` `None` for stuck hits) and was still red at `cffbbae`.
+Five commits landed on top of it while it was red — `cdd1f65`, `f7b5ac2`,
+`b65be20`, `1dcda00`, `cffbbae` — each reporting a green gate, because the
+gate never looked at that directory. Team lead reproduced this independently
+and attributed it to the gate definition, not to the agents who ran it.
+
+**The next agent on this branch should run the full `tests/` suite, not that
+four-directory subset.** Team lead's measurement of full `tests/` after step
+3: 3233 passed, 18 skipped, 6 xfailed, 0 failed. My own step-3 numbers cover
+gate + `tests/workers/` only (2553 passed, 6 xfailed, 0 failed) — I did not
+run `integration/`, `live/`, `load/`, `db/`, `services/`, `monitoring/`,
+`vendors/`, `utils/` or `data/`, having first grepped them for `z_score`,
+`frozen_hours`, `stat_rows_to_jump_rows`, `anomaly_rank_key` and
+`_dict_to_detail` and found no references.
