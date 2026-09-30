@@ -4635,3 +4635,127 @@ not chased, consistent with team lead's own "do not chase it" call on
 their flake.
 
 HEAD: `c1cb029` before this round.
+
+## Step 5 + 7 — independent verification, then xfail cleanup (QA, 2026-09-30)
+
+Step 5 was a fresh qa-engineer instance verifying the branch against the spec
+rather than inheriting step 3's conclusions. Step 7 is the cleanup of the six
+tests step 6 flipped. The six findings below are the things a future session
+would otherwise have to re-derive; the pass/fail detail is reproducible from
+the committed tests.
+
+**1. Two places that are correct today and silently lossy if their
+surrounding assumption changes.** Grouped deliberately — the useful thing is
+the named assumption, not the risk:
+
+- `src/dashboard/components/inference_results.py:239` filters with
+  `detector in {"statistical", "lstm+statistical"}` — exact set membership
+  that happens to enumerate the compound label. Correct today *because
+  `"lstm+statistical"` is the only compound label in the codebase* (a literal
+  at `cold_run_upload.py:412`, not a join). Add a second compound label and
+  this undercounts silently. It sits directly upstream of the trim path
+  (`:810`, `:813`). Contrast `anomaly_ranking.py:48`, which splits on `"+"`
+  and is immune.
+- `monitoring_jump.anomaly_display_columns` on a *raw* legacy stuck row still
+  lacks the `frozen_hours_at_detection` column — only
+  `anomalies_to_display_frame` normalises first. Deliberately NOT pinned by a
+  test. Correct today *because that helper has exactly one caller
+  (`monitoring_jump.py:360`), inside the frame builder, on already-normalised
+  rows*, so its behaviour on raw input is not a contract. A second, external
+  caller pairing it with the frame would get a column set the frame does not
+  have — the frozen column built, then dropped at render. Re-check this if
+  one appears. The frame's contract IS pinned, via
+  `test_legacy_stuck_row_shows_hours_and_no_z_score` asserting the frozen
+  cell (which cannot hold a value the frame has no column for).
+
+**2. `1_Monitoring.py` is tested by source-splitting, not import.** That page
+cannot be imported: the module name starts with a digit and the page body
+executes at import (`st.set_page_config`). `tests/dashboard/
+test_monitoring_page_anomaly_hover.py` reads the source, splits at the first
+top-level `st.set_page_config(`, and execs the prefix to get the real
+`_add_anomaly_markers` body. The split marker is asserted, so moving
+`_add_anomaly_markers` below the page body fails that file with an explicit
+message rather than silently skipping the coverage. Unusual, accepted
+knowingly by team lead; the alternative was leaving the hover branch
+untested.
+
+**3. Spec test 11's premise does not hold on fixture A.** It asks whether the
+stuck episode duration *lower bound* is unchanged. There is no lower bound
+there: all five freeze runs end inside the fixture window, so every stuck
+episode matches a completed `FaultWindow` and reports an exact span with
+`is_ongoing=False`. `_stuck_fault_duration`'s fallback — the only part step 1
+changed — is **unreachable on fixture A**, so "unchanged vs main" is expected
+rather than reassuring. The fallback's real coverage is synthetic:
+`tests/models/test_episode_duration_fallback.py` (four field combinations,
+0.0 and negative edges) and `test_stuck_episode_duration_sources.py` (open
+freeze, gate value vs full elapsed span). Pinned as what it is in
+`TestFixtureAUsesCompletedFaultWindows`.
+
+**4. On fixture A, the episode durations are evidence; the 102 is a pin.**
+Keep these apart — they look alike and are not. The four stuck episode
+durations (34.83 / 22.08 / 47.92 / 163.83 h) match
+`tests/fixtures/NATIVE_FIXTURES.md:52` and `:75-78`, which were measured from
+the CSV itself rather than emitted by this code, so agreement is real
+corroboration and is pinned in `test_stuck_episode_duration_sources.py`. The
+102 statistical-hit figure is the opposite: self-referential, already
+superseded an earlier 111, and reproducing it is what
+`docs/runbooks/native-dec-fixture-baseline.md:61-79` predicts regardless of
+correctness. Step 5 measured 102 on both this branch and `83e6830` at all
+five chunk sizes and reported it only as "unchanged vs main", and
+deliberately did **not** re-pin it — a second copy would read as corroboration
+to the next person. It lives in exactly one place,
+`tests/workers/test_stat_chunk_invariance.py:70-72`. Keep it there.
+
+**5. The suite has pre-existing order-dependent pollution. Do not attribute
+it to your own change.** Three different tests errored across three full-suite
+runs by two agents during step 6 —
+`tests/api/test_readings_api.py::TestWindowEndpoint::test_window_rejects_bad_timestamp`,
+`test_inference_upload_cold_run_greenhouse_fixture`,
+`test_route_stores_resolvable_blob_and_records_ref` — a different one each
+run, none in `tests/dashboard/`, none recurring, all passing in isolation.
+How to tell it apart from a real regression: re-run the failing test in
+isolation, then in a narrower path set. If it passes both, it is this, not
+you. Unrelated to Task 2; not chased.
+
+**6. The display cap's row ORDER changed vs main, though its row SET did
+not.** On fixture A capped to 40, the four urgent stuck rows hold ranks 0-3
+on both sides but in opposite order: descending timestamp on this branch
+(newest freeze first) vs ascending arrival order on main, because main's
+score-only key returned one identical 1.0 for all four and the stable sort
+kept input order. Ranks 4-39 are identical row for row. This is user-visible
+and nothing in the spec asked for it — it falls out of the level-5 tiebreak's
+sort direction, which step 2b documented as "arbitrary but fixed". Reproduced
+independently by team lead and raised with the user as a consequence to
+accept or invert, not as a defect. "Set-unchanged, order-changed" is the
+accurate framing; "zero rows entered or left the cap" is true but does not
+convey it.
+
+**Step 7 cleanup, this commit.** Step 6 flipped six tests, not three: each
+`xfail(strict=True)` had a positive companion asserting the exact opposite
+output for the same input, so a correct fix necessarily falsified both halves
+of each pair. Removed the three markers, strengthened
+`test_legacy_stuck_row_shows_hours_and_no_z_score` to assert BOTH cells as it
+inverted (frozen reads hours AND `z_score` reads `—`, since surfacing the
+duration while leaving it under the Z-score header too would print one number
+under two units — worse than the defect), and rewrote the three companions as
+convergence pins (`test_legacy_and_current_shapes_render_one_identical_row`,
+`..._read_identically`, `..._hover_identically`). Convergence rather than a
+restatement of the sibling: it is the assertion that fails first if a display
+site reintroduces its own private copy of the fallback rule instead of
+delegating to `resolve_stuck_duration_hours`. Left
+`test_the_frozen_column_is_absent_for_a_statistical_row` and
+`_legacy_statistical_row`'s docstring untouched — that test is about a
+*statistical* row and was never part of the defect (team lead initially read
+the fixture name "legacy" as the legacy *stuck* case and withdrew the
+judgement call that rested on it).
+
+**Mutation-checked, both directions.** Reverting step 6's legacy arm in memory
+fails exactly these six and nothing else — the same six, symmetric with the
+pre-fix state. Reverting `anomaly_rank_key` to the old |z|-only key fails 14
+of 27 ranking/cap tests. Reverting `_stuck_dict_to_high_detail` to the
+pre-branch shape fails exactly the 3 field-split assertions while count,
+onset and `detected_ts` survive — direct evidence that the "4 alerts" and the
+"6.00 h" are one fact about detection, and only the field assertions
+discriminate the split.
+
+HEAD: `cb6fdf4` before this round.

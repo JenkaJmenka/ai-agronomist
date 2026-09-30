@@ -6,12 +6,16 @@ before ``frozen_hours_at_detection`` existed still hold stuck rows in the old
 shape (numeric ``z_score`` carrying the duration, no new field) and there is
 no backfill migration, so both shapes reach every reader here.
 
-Two tests are ``xfail(strict=True)``: the legacy shape still renders its
-duration under a z-score label in both Streamlit display paths. That is a
-real defect, not a passing case dressed up — strict xfail means they flip to
-failures the moment the display sites learn the legacy fallback that
-``episode_grouper`` already has, so the pins do not have to be rewritten
-then.
+Both shapes now converge on one rendering. Step 6 consolidated the fallback
+decision into ``diagnosis_enricher.resolve_stuck_duration_hours`` and every
+display site delegates to it, so a legacy row renders exactly as a
+current-shape one does. The pairs below assert that convergence from both
+sides: one test per site pins the absolute rendering, its sibling pins that
+the two shapes are indistinguishable — which is the property that would break
+first if one site grew its own private copy of the rule again.
+
+These four tests were ``xfail(strict=True)`` plus positive pins of the defect
+until step 6 (``cb6fdf4``) fixed it.
 """
 
 from __future__ import annotations
@@ -175,22 +179,32 @@ class TestJumpTableRendersHoursNotASigma:
         """Non-vacuity: the hours suffix must be specific to the new column."""
         assert format_anomaly_cell("z_score", GATE_HOURS) == "6.0"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Legacy stuck rows have no frozen_hours_at_detection, so the "
-        "jump table renders their duration under the Z-score label. "
-        "episode_grouper learned the legacy fallback; this display site "
-        "did not.",
-    )
     def test_legacy_stuck_row_shows_hours_and_no_z_score(self) -> None:
-        cells = anomalies_to_display_frame([_legacy_stuck_row()]).to_dict("records")[0]
-        assert cells.get("z_score") == "—"
+        """Both cells, not just one: the duration must move, not be duplicated.
 
-    def test_legacy_stuck_row_currently_renders_its_duration_as_a_z_score(self) -> None:
-        """The defect above, pinned positively so the report can cite it."""
+        Asserting only that the frozen cell reads hours would pass a fix that
+        surfaced the duration while leaving it under the Z-score header too —
+        the same number under two different units, which is worse than the
+        defect this replaced. Asserting the frozen cell also covers the
+        column set implicitly: it cannot hold a value the frame has no column
+        for.
+        """
         cells = anomalies_to_display_frame([_legacy_stuck_row()]).to_dict("records")[0]
-        assert cells["z_score"] == "6.0"
-        assert "frozen_hours_at_detection" not in cells
+        assert cells["frozen_hours_at_detection"] == f"{GATE_HOURS:.1f} h"
+        assert cells["z_score"] == "—"
+
+    def test_legacy_and_current_shapes_render_one_identical_row(self) -> None:
+        """Convergence: the stored shape must not be visible in the table.
+
+        The complement to the pin above. That one would still pass if the two
+        shapes rendered differently but both plausibly; this fails unless the
+        legacy row is genuinely indistinguishable from a current-shape one,
+        which is what breaks first if a display site reintroduces its own
+        copy of the fallback rule.
+        """
+        legacy = anomalies_to_display_frame([_legacy_stuck_row()]).to_dict("records")[0]
+        current = anomalies_to_display_frame([_current_stuck_row()]).to_dict("records")[0]
+        assert legacy == current
 
 
 # ---------------------------------------------------------------------------
@@ -225,18 +239,18 @@ class TestDiagnosisReasoningForStuckRows:
         assert "z-score 6.0σ" in reasoning
         assert "Frozen" not in reasoning
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Same defect as the jump table: a legacy stuck row has no "
-        "frozen_hours_at_detection, so _build_reasoning falls to the "
-        "z-score branch and renders '6.0σ' for six hours frozen.",
-    )
     def test_legacy_stuck_row_reads_as_frozen_hours(self) -> None:
-        assert "Frozen" in self._reasoning(_legacy_stuck_row())
+        """No sigma on a duration — the unit is the whole point of this pin."""
+        reasoning = self._reasoning(_legacy_stuck_row())
+        assert "Frozen 6.0h" in reasoning
+        assert "z-score" not in reasoning
+        assert "σ" not in reasoning
 
-    def test_legacy_stuck_row_currently_reads_as_a_sigma(self) -> None:
-        """The defect above, pinned positively so the report can cite it."""
-        assert "z-score 6.0σ" in self._reasoning(_legacy_stuck_row())
+    def test_legacy_and_current_shapes_read_identically(self) -> None:
+        """Convergence: prose a user reads must not depend on the stored shape."""
+        assert self._reasoning(_legacy_stuck_row()) == self._reasoning(
+            _current_stuck_row()
+        )
 
     def test_a_row_with_neither_field_produces_no_magnitude_clause(self) -> None:
         row = _current_stuck_row()

@@ -12,10 +12,12 @@ so a restructure of the page fails this file loudly instead of silently
 skipping the behaviour it covers. Everything exercised below is the real
 production function body, unmodified.
 
-The legacy-payload case is ``xfail(strict=True)`` for the same reason as in
-``test_stuck_display_contract.py``: a stuck row persisted before
-``frozen_hours_at_detection`` existed still hovers "z=6.0" for six hours
-frozen.
+Both stored shapes now hover identically. Step 6 consolidated the fallback
+into ``diagnosis_enricher.resolve_stuck_duration_hours``, which this page
+imports, so a legacy row (duration in ``z_score``, no new field) hovers the
+same hours as a current-shape one. The legacy pair below was
+``xfail(strict=True)`` plus a positive pin of the defect until step 6
+(``cb6fdf4``).
 """
 
 from __future__ import annotations
@@ -129,26 +131,32 @@ class TestStuckHoverShowsHours:
         labels = _marker_labels(monitoring_page, window_frame, _current_stuck_highlight())
         assert all("z=" not in label for label in labels)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="A legacy stuck row has no frozen_hours_at_detection, so the "
-        "hover falls through to the z-score branch and reads 'z=6.0' for "
-        "six hours frozen. episode_grouper learned the legacy fallback; "
-        "this display site did not.",
-    )
     def test_a_legacy_stuck_row_hovers_frozen_hours(
         self, monitoring_page, window_frame
     ) -> None:
+        """Hours with a unit, and no z-score anywhere on the marker."""
         labels = _marker_labels(monitoring_page, window_frame, _legacy_stuck_highlight())
-        assert all("frozen" in label for label in labels)
+        assert labels, "no marker rendered"
+        assert all(f"frozen {GATE_HOURS:.1f}h" in label for label in labels)
+        assert all("z=" not in label for label in labels)
 
-    def test_a_legacy_stuck_row_currently_hovers_a_z_score(
+    def test_legacy_and_current_shapes_hover_identically(
         self, monitoring_page, window_frame
     ) -> None:
-        """The defect above, pinned positively so the report can cite it."""
-        labels = _marker_labels(monitoring_page, window_frame, _legacy_stuck_highlight())
-        assert labels
-        assert all("z=6.0" in label for label in labels)
+        """Convergence: the stored shape must not be visible in the hover.
+
+        The complement to the pin above — that one would still pass if the two
+        shapes hovered different but individually plausible text. This is the
+        assertion that fails first if this page reintroduces its own copy of
+        the fallback rule instead of delegating.
+        """
+        legacy = _marker_labels(
+            monitoring_page, window_frame, _legacy_stuck_highlight()
+        )
+        current = _marker_labels(
+            monitoring_page, window_frame, _current_stuck_highlight()
+        )
+        assert legacy == current
 
 
 class TestOtherDetectorsKeepTheirOwnHover:
