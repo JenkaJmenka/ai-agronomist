@@ -4816,3 +4816,73 @@ passing cleanly in isolation (3 passed, 1.45s) before reporting, not
 chased either.
 
 HEAD: `fb856f0` before this round.
+
+## Step 1 — the stuck-duration fallback read a field that is now always None (ML, 2026-10-01)
+
+Recorded late: this is step 1's work, deferred at the time because the step's
+commit was scoped to one file and step 2 was about to start on a clean tree.
+
+**The regression.** `_stuck_fault_duration` in `src/models/episode_grouper.py`
+has two paths: a completed `FaultWindow` gives the exact frozen span, and a
+still-open freeze falls back to the hours elapsed at the gate crossing as a
+lower bound. That fallback read `getattr(first_alert, "z_score", None)`. Once
+`7cb1bb1` moved a stuck hit's hours out of `z_score` into the new
+`frozen_hours_at_detection` — leaving `z_score` permanently `None` for stuck
+rows — the fallback could no longer ever find a value, fell through to
+`return 0.0, True`, and every still-open freeze reported
+`duration_seconds=0.0` instead of its lower bound. Silent: no exception, no
+log, a plausible-looking number. Fixed at `f7b5ac2` — prefer the new field,
+fall back to `z_score` only for rows persisted before it existed (there is no
+backfill migration).
+
+**Why the discrimination is by detector and not by `z_score`'s presence.**
+A legacy *statistical* row also carries a numeric `z_score`, so a presence
+test would read a z-score as a duration in hours. The guard that makes the
+legacy read safe is the caller: `_flush_group` invokes this only under
+`if detector == "stuck_fault":`, so the discrimination is structural rather
+than re-derived inside the function. The docstring now says so, and says not
+to add a redundant guard or move the call out of that branch — the shape is
+load-bearing and looks removable.
+
+**Why no fixture caught it.** All four of fixture A's stuck alerts match a
+completed `FaultWindow`, so the fallback is unreachable from any fixture in
+the repo and `tests/api/` was fully green (753 passed / 4 xfailed) with the
+bug present. QA later pinned this as what it is in
+`TestFixtureAUsesCompletedFaultWindows`, and covered the fallback
+synthetically in `tests/models/test_episode_duration_fallback.py`.
+
+**The three verifications, with their numbers.** (1) Fixture A's four
+stuck_fault episode durations are byte-identical between this branch and main
+at `83e6830` — same fixture file through both checkouts via a throwaway
+worktree, dumps diffed clean. That proves only that the working path was not
+perturbed; per the point above it is *expected* rather than reassuring, since
+fixture A never reaches the changed code. (2) A legacy-shape row
+(`z_score=6.0`, field absent, no `FaultWindow`) yields 21600.0 s before and
+after — already-persisted `JobPortion.result` blobs keep working. (3) The
+new shape (`frozen_hours_at_detection=6.0`, `z_score=None`) yields **0.0
+before the fix and 21600.0 after**, which is the regression reproduced and
+closed rather than argued.
+
+**Pre-existing, not introduced here: the guard is `duration_hours > 0`.**
+A genuine `frozen_hours_at_detection=0.0` is therefore indistinguishable from
+"no duration recoverable" — both return `0.0, True`. Carried over verbatim
+from the `z_score` version; left alone because changing the `0.0` return was
+out of step 1's scope. QA pinned it as documented ambiguity
+(`test_zero_frozen_hours_is_indistinguishable_from_no_duration`) and added
+`test_negative_frozen_hours_also_falls_through_to_zero`, which is the test
+that actually discriminates `> 0` from `is not None`.
+
+**Downstream, learned after the fact.** Step 6 extracted
+`resolve_stuck_duration_hours` into
+`src/dashboard/services/diagnosis_enricher.py:313`, mirroring this fallback
+deliberately — same field preference, same detector-not-presence rule — and
+three display sites now share it. One difference matters for Task 2c: the
+derived helper is annotated `-> Optional[float]` but returns `row.get(...)`
+uncoerced, so a non-numeric `z_score` would reach `1_Monitoring`'s format spec
+and raise `ValueError`. Unreachable today because every blob is Pydantic
+`model_dump` output. The `episode_grouper` original coerces with
+`float(duration_hours)` and does not have this problem, so **the original is
+the safe reference of the two** — propagate the coercion to the copy, not the
+other way around.
+
+HEAD: `a9d0cfb` before this round.
