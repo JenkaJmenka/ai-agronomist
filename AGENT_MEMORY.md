@@ -4759,3 +4759,60 @@ onset and `detected_ts` survive — direct evidence that the "4 alerts" and the
 discriminate the split.
 
 HEAD: `cb6fdf4` before this round.
+
+## Newest-first ordering made deliberate, not incidental (Backend, 2026-10-01)
+
+User ruling: the 2b identity tiebreak's newest-first display order for tied
+rows (e.g. fixture A's 4 urgent stuck alerts: 12-18, 12-16, 12-15, 12-14,
+vs. main's oldest-first) is the *right* behaviour, not an arbitrary pick
+that happened to be stable — make that explicit.
+
+- **`src/api/services/anomaly_ranking.py`**: rewrote level 5 (`timestamp`)
+  of `anomaly_rank_key`'s docstring to state the newest-first direction is
+  deliberate (operator reading an alert list wants the current fault at
+  the top) and removed the "arbitrary but fixed" framing from it
+  specifically. Level 6 (`column`) keeps that framing, correctly — nothing
+  about channel ordering carries deliberate meaning, it is still an
+  arbitrary-but-fixed pick (alphabetically later wins, e.g. "temperature"
+  outranks "humidity"), and the docstring says so explicitly, paired with
+  the fact that this is the level which actually decides ties at the
+  trigger-attribution site (verified below) — the pairing team lead asked
+  for, so nobody flips the direction in isolation without knowing it's
+  live at that call site.
+- **`tests/dashboard/test_display_cap_survivors.py`**: added
+  `test_the_four_urgent_rows_display_newest_onset_first` (`:90`, in
+  `TestUrgentRowsSurviveTheCapOnFixtureA`) pinning the exact order
+  `12-18, 12-16, 12-15, 12-14` on real fixture A data, with a docstring
+  stating explicitly that this deliberately differs from main's
+  oldest-first ordering for the same four rows, so a future reader diffing
+  against main does not misread it as a regression. Written to `tests/`
+  under the same single-item user directive as the `src/dashboard/`
+  widening — scoped to this one test, not a general lift of the
+  `src/api/`+`src/db/` boundary.
+
+**Per-timestamp trigger ranking confirmed unaffected** (this round changed
+only docstrings/comments and added one test — no tuple-comparison logic
+touched): re-ran the fixture-A `build_trigger_data_by_timestamp` probe from
+step 2b and diffed its 89-row output against the pre-this-round capture —
+**zero rows changed** (`channel`/`detector`/`severity`/`value` identical
+for all 89 keys). Also ran the existing `tests/api/test_anomaly_rank_contract.py`
+(which already pins "descending timestamp then descending column" as the
+tiebreak order at the trigger-attribution call site specifically) plus
+`tests/api/test_anomaly_ranking.py` and `tests/dashboard/test_display_cap_survivors.py`
+together: 41 passed, confirming the existing ordering contract holds
+unchanged.
+
+**Gate**: team lead ran the full suite and got `3351 passed, 18 skipped, 6
+xfailed, 1 error` against a predicted `3352 passed` — reconciled: the one
+error (not counted as passed) accounts for the difference exactly
+(3351 + 1 = 3352). The error, `tests/api/test_operational_config.py::
+TestGetEndpoint::test_get_fresh_tenant_sources_all_default`, is the SAME
+order-dependent pollution pattern as before — a third distinct test
+affected, confirmed passing in isolation by team lead, already specced as
+Task 2c item 5, not chased. My own run hit a different pair
+(`test_upload_async_route.py`'s two tests failed, `test_upload.py::
+test_upload_response_ranges` errored) — same pattern, all three confirmed
+passing cleanly in isolation (3 passed, 1.45s) before reporting, not
+chased either.
+
+HEAD: `fb856f0` before this round.

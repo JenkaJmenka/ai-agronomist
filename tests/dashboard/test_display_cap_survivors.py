@@ -87,6 +87,27 @@ class TestUrgentRowsSurviveTheCapOnFixtureA:
         urgent = [row for row in fixture_a_rows if row.get("severity") == "urgent"]
         assert [row["z_score"] for row in urgent] == [None] * len(urgent)
 
+    def test_the_four_urgent_rows_display_newest_onset_first(
+        self, fixture_a_rows
+    ) -> None:
+        """The four urgent rows tie through score (all 1.0, no z_score), so
+        the identity tiebreak decides their order among themselves: newest
+        onset first. This is deliberate, not incidental -- an operator
+        reading an alert list wants the current fault at the top, not
+        whichever one happened to onset first in the file. It is also a
+        DELIBERATE DIFFERENCE from main's ordering for the same four rows,
+        which is oldest-first (list-arrival order, since main's ranking had
+        no identity tiebreak at all). A future reader diffing this test's
+        expected order against main must not read this as a regression.
+        """
+        survivors = trim_cold_run_rows(fixture_a_rows, limit=EXPECTED_STUCK_ONSET_COUNT)
+        assert [row["timestamp"] for row in survivors] == [
+            "2026-12-18T13:00:00+00:00",
+            "2026-12-16T11:20:00+00:00",
+            "2026-12-15T11:05:00+00:00",
+            "2026-12-14T00:00:00+00:00",
+        ]
+
     def test_survivors_are_stable_across_shuffled_input(self, fixture_a_rows) -> None:
         """Chunk-size invariance, stated as the property it actually is.
 

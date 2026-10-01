@@ -95,10 +95,19 @@ def anomaly_rank_key(hit: Any) -> tuple[int, int, float, float, str, str]:
     5. ``timestamp`` (as its raw string, coerced ``str(timestamp or "")`` —
        never ``None``, since comparing ``None`` against ``str`` raises
        ``TypeError`` mid-sort, and a crash here would surface as a sort
-       failure deep in a display path). Larger string wins, i.e. a later
-       ISO-8601 timestamp beats an earlier one under lexicographic
-       comparison. One known quirk: the LSTM scoring path's placeholder for
-       an out-of-range sequence index is the literal string ``"unknown"``
+       failure deep in a display path). A later ISO-8601 timestamp beats an
+       earlier one under lexicographic comparison — newest first. This is a
+       deliberate choice, not an arbitrary pick that happens to be stable:
+       an operator reading an alert list wants the current fault at the
+       top, not whichever one happened to onset first in the file. (This
+       is what orders fixture A's four tied urgent stuck-fault alerts
+       12-18, 12-16, 12-15, 12-14 — see
+       ``tests/dashboard/test_display_cap_survivors.py::
+       test_the_four_urgent_rows_display_newest_onset_first``, which also
+       records that this is a deliberate difference from main's
+       oldest-first ordering for the same four rows, not a regression.)
+       One known quirk: the LSTM scoring path's placeholder for an
+       out-of-range sequence index is the literal string ``"unknown"``
        (see ``upload_portions.py``'s ``lstm_high`` comprehension), which
        sorts *after* every real timestamp ('u' > any digit) — so such a row
        would win this level outright. Not special-cased: it is already
@@ -106,20 +115,27 @@ def anomaly_rank_key(hit: Any) -> tuple[int, int, float, float, str, str]:
        returns `None` for the literal "unknown" and the caller `continue`s),
        so this only matters, rarely, at the display-cap site.
     6. ``column`` (raw string, same ``str(column or "")`` coercion — solo
-       lstm hits have ``column=None``). Larger string wins here too, for
-       the same "pick one, document it" reason as level 5 — this is the
-       true last-resort key, since a tie surviving this deep means every
-       preceding field, including the row's own timestamp, was identical.
+       lstm hits have ``column=None``). Alphabetically later wins (e.g.
+       "temperature" outranks "humidity") — unlike level 5, this direction
+       is an arbitrary-but-fixed pick, not a deliberate one; it is
+       documented explicitly so nobody flips it later without realising it
+       is the level that actually decides ties at the trigger-attribution
+       site (see below). True last-resort key: a tie surviving this deep
+       means every preceding field, including the row's own timestamp, was
+       identical.
 
     These two are a genuine identity tiebreak (derived from the row, not
     from where it landed in a list), but the two call sites lean on
-    different halves of it. At the trigger-attribution site
+    different halves of it, and only one of them carries the newest-first
+    intent. At the trigger-attribution site
     (`build_trigger_data_by_timestamp`), every candidate in a group already
     shares one timestamp by construction — the group key IS derived from
-    it — so level 5 never discriminates there and `column` (level 6) does
-    the real work. At the display-cap site (`anomalies_page_data.py`), rows
-    span the whole file, so level 5 (`timestamp`) is the one doing real
-    work, with `column` as backup.
+    it — so level 5 never discriminates there and `column` (level 6, the
+    arbitrary-but-fixed alphabetically-later-wins pick) is what actually
+    decides ties at that site. At the display-cap site
+    (`anomalies_page_data.py`), rows span the whole file, so level 5
+    (`timestamp`, newest-first, deliberately) is the one doing real work,
+    with `column` as backup.
 
     Ties beyond all six fields (same severity, same detector tier, same |z|
     or both 0.0, same score or both missing it, same timestamp, same
