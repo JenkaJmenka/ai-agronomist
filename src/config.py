@@ -843,6 +843,12 @@ GAS_SENSOR_COLUMNS: List[str] = [
     "co",
 ]
 
+# Z-score thresholds for gas anomaly severity classification. Shared with
+# cold_run_detector.py, which imports these (not local copies) so the two
+# statistical detectors agree on where "warning" becomes "critical".
+GAS_Z_WARNING: float = 2.0
+GAS_Z_CRITICAL: float = 3.0
+
 # =============================================================================
 # SCADA Spike / CUSUM / Dropout Detection (Phase A)
 # =============================================================================
