@@ -1070,20 +1070,22 @@ export interface paths {
          *     ::
          *
          *         {
-         *           "greenhouse_status": "not_registered" | "no_source" | "live",
+         *           "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
          *           "sources": [...]
          *         }
          *
-         *     The ``greenhouse_status`` discriminator lets callers tell apart three
+         *     The ``greenhouse_status`` discriminator lets callers tell apart the
          *     empty-source states that previously all returned ``{"sources": []}``
-         *     and were indistinguishable:
+         *     and were indistinguishable, plus a configured-but-idle state:
          *
          *     * ``not_registered`` — no greenhouse record in the registry or any
          *       readings table; the tenant needs to be provisioned.
          *     * ``no_source``      — greenhouse exists but the live runtime is not
          *       watching it; use POST /api/readings/greenhouses to register and
          *       configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.
-         *     * ``live``           — the runtime has an active scope for this
+         *     * ``paused``         — the scope is configured but its connectors are
+         *       not running (idle pending Go Live, or explicitly paused).
+         *     * ``live``            — the runtime has an active scope for this
          *       greenhouse (sources may still have ``last_seen: null`` while the
          *       first ticks arrive).
          *
@@ -1110,12 +1112,60 @@ export interface paths {
         put?: never;
         /**
          * Resume Live Scope Endpoint
-         * @description Explicitly re-enable live publish/persistence after Clear all data.
+         * @description Explicitly start the scope's connectors and re-enable persistence.
          *
          *     Called when the operator turns Go Live on — not on every SSE reconnect,
-         *     which would immediately re-seed the wiped database.
+         *     which would immediately re-seed the wiped database. Spawns the merger
+         *     and connector tasks for this scope (idempotent) so idle scopes don't
+         *     stream until this is called.
+         *
+         *     ``resumed`` means exactly one thing: live data will flow for this scope
+         *     from now on. ``scope_status`` explains why:
+         *
+         *     * ``started``         — the scope was idle; its tasks were just spawned.
+         *     * ``already_running`` — the scope was already streaming (idempotent
+         *       no-op call) — a success, not a failure.
+         *     * ``not_configured``  — this tenant/greenhouse has no source wired up in
+         *       ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever
+         *       flow; ``resumed`` is False here so a green Go Live toggle doesn't lie
+         *       to the operator.
          */
         post: operations["resume_live_scope_endpoint_api_live_resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/live/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause Live Scope Endpoint
+         * @description Explicitly stop the scope's connectors when the operator turns Go Live off.
+         *
+         *     Mutes persistence and cancels the merger + connector tasks for this
+         *     scope so historical windows show only uploaded data and no mock/SCADA
+         *     reading is generated at all — mirrors /resume for the opposite
+         *     transition.
+         *
+         *     Unlike /resume, ``paused`` is always True: nothing streams for this
+         *     scope once the call returns, whether it was running, already idle, or
+         *     never configured — there's no "wrong" outcome to flag. ``scope_status``
+         *     records which case it was, for diagnostics only:
+         *
+         *     * ``stopped``        — the scope was running; its tasks were cancelled.
+         *     * ``not_running``    — the scope was already idle (idempotent no-op).
+         *     * ``not_configured`` — this tenant/greenhouse has no source wired up;
+         *       there was nothing to stop.
+         */
+        post: operations["pause_live_scope_endpoint_api_live_pause_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1375,6 +1425,8 @@ export interface paths {
         /**
          * Check Iat
          * @description Check an inter-packet interval series for CV / spacing anomalies.
+         *
+         *     Stateless and tenant-agnostic — see module docstring.
          */
         post: operations["check_iat_api_network_iat_post"];
         delete?: never;
@@ -1395,6 +1447,8 @@ export interface paths {
         /**
          * Check Tcp Handshake
          * @description Check a TCP handshake latency.
+         *
+         *     Stateless and tenant-agnostic — see module docstring.
          */
         post: operations["check_tcp_handshake_api_network_tcp_handshake_post"];
         delete?: never;
@@ -1415,6 +1469,8 @@ export interface paths {
         /**
          * Check Dhcp Fingerprint
          * @description Validate DHCP configuration fingerprint against baseline.
+         *
+         *     Stateless and tenant-agnostic — see module docstring.
          */
         post: operations["check_dhcp_fingerprint_api_network_dhcp_fingerprint_post"];
         delete?: never;
@@ -1683,6 +1739,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/backfill/scores": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Backfill anomaly scores for persisted readings
+         * @description Re-scores already-persisted SensorReading rows using the LSTM-VAE model.  Rows with source='live' are excluded.  Safe to re-run — scores are overwritten on each call, and normal (below-threshold) rows remain NULL.
+         *
+         *     The window is NOT clamped to wall-clock now() — use the full dataset date range even when it exceeds the current date.
+         */
+        post: operations["post_backfill_scores_api_backfill_scores_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1867,6 +1945,96 @@ export interface components {
             is_anomaly: boolean;
             /** Detail */
             detail?: string | null;
+        };
+        /**
+         * BackfillScoresRequest
+         * @description Parameters for a score backfill run.
+         */
+        BackfillScoresRequest: {
+            /**
+             * Tenant Id
+             * @description Tenant identifier.
+             */
+            tenant_id: string;
+            /**
+             * Greenhouse Id
+             * @description Greenhouse identifier.
+             * @default default
+             */
+            greenhouse_id: string;
+            /**
+             * Start
+             * Format: date-time
+             * @description Start of the window (inclusive, ISO 8601). Timezone-naïve values are treated as UTC.
+             */
+            start: string;
+            /**
+             * End
+             * Format: date-time
+             * @description End of the window (inclusive, ISO 8601). NOT clamped to wall-clock now() — the historical CSV is future-dated relative to the browser clock.
+             */
+            end: string;
+            /**
+             * Batch Size
+             * @description DB rows fetched per page (controls peak memory).
+             * @default 5000
+             */
+            batch_size: number;
+            /**
+             * Checkpoint Path
+             * @description Optional path to a specific model checkpoint (local path or a db://model_artifacts/... artifact reference). Defaults to the tenant's active ModelRegistry deployment.
+             */
+            checkpoint_path?: string | null;
+        };
+        /**
+         * BackfillScoresResponse
+         * @description Summary of a completed backfill run.
+         */
+        BackfillScoresResponse: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id: string;
+            /**
+             * Rows Examined
+             * @description Non-live SensorReading rows in the window.
+             */
+            rows_examined: number;
+            /**
+             * Sequences Scored
+             * @description LSTM sequences formed and scored.
+             */
+            sequences_scored: number;
+            /**
+             * Rows Scored
+             * @description Rows whose anomaly_score was updated (above threshold).
+             */
+            rows_scored: number;
+            /**
+             * Threshold Used
+             * @description File-level calibration threshold (on the scaled score).
+             */
+            threshold_used: number;
+            /**
+             * Threshold Method
+             * @description Calibration method: 'percentile' or 'pot'.
+             */
+            threshold_method: string;
+            /**
+             * Live Rows Skipped
+             * @description Rows excluded because source='live'.
+             */
+            live_rows_skipped: number;
+            /**
+             * Batches Processed
+             * @description Number of DB pages processed.
+             */
+            batches_processed: number;
+            /**
+             * Warnings
+             * @description Non-fatal issues encountered (e.g. non-finite scores).
+             */
+            warnings?: string[];
         };
         /**
          * BatchInferenceRequest
@@ -3506,6 +3674,11 @@ export interface components {
             column?: string | null;
             /** Z Score */
             z_score?: number | null;
+            /**
+             * Frozen Hours At Detection
+             * @description stuck_fault only: hours the channel had been frozen when the wallclock gate fired (elapsed-so-far at detection, not the final freeze duration — that is computed per-episode). Stuck hits carry this instead of z_score, which is None for them. Legacy rows persisted before this field existed still carry the duration in z_score; readers must fall back to z_score only when detector == stuck_fault and this field is absent.
+             */
+            frozen_hours_at_detection?: number | null;
             /** Severity */
             severity?: string | null;
             /** Method */
@@ -3788,7 +3961,10 @@ export interface operations {
     run_bootstrap_api_v1_bootstrap_run_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3821,7 +3997,10 @@ export interface operations {
     upload_csv_api_upload_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3857,7 +4036,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id?: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3889,7 +4071,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id?: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3920,7 +4105,10 @@ export interface operations {
     inject_test_anomalies_api_upload_inject_test_anomalies_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3958,7 +4146,10 @@ export interface operations {
                 /** @description Specific type to remove; omit to remove all synthetic anomalies */
                 anomaly_type?: string | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3989,7 +4180,10 @@ export interface operations {
     run_inference_api_inference_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4022,7 +4216,10 @@ export interface operations {
     run_inference_from_csv_api_inference_upload_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4055,7 +4252,10 @@ export interface operations {
     run_inference_from_csv_async_api_inference_upload_async_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4090,6 +4290,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4125,6 +4326,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4158,7 +4360,10 @@ export interface operations {
     get_active_model_api_models__tenant_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4191,7 +4396,10 @@ export interface operations {
     list_model_versions_api_models__tenant_id__versions_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4224,7 +4432,10 @@ export interface operations {
     delete_all_model_versions_api_models__tenant_id__versions_delete: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4255,7 +4466,10 @@ export interface operations {
     train_customer_model_api_models__tenant_id__train_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4286,7 +4500,10 @@ export interface operations {
     get_training_status_api_models__tenant_id__training_status_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4319,7 +4536,10 @@ export interface operations {
     rollback_model_api_models__tenant_id__rollback_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4354,7 +4574,10 @@ export interface operations {
     activate_model_api_models__tenant_id__activate_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -4391,7 +4614,10 @@ export interface operations {
             query?: {
                 force?: boolean;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
                 model_id: string;
@@ -4423,7 +4649,10 @@ export interface operations {
     store_incident_api_incidents_store_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4464,7 +4693,10 @@ export interface operations {
                 max_age_days?: number | null;
                 resolved_only?: boolean;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4500,7 +4732,10 @@ export interface operations {
                 k?: number;
                 min_confidence?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4529,7 +4764,10 @@ export interface operations {
     resolve_incident_api_incidents_resolve__incident_id__post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 incident_id: string;
             };
@@ -4569,7 +4807,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id?: string | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4602,7 +4843,10 @@ export interface operations {
                 greenhouse_id?: string | null;
                 min_occurrences?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4637,6 +4881,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4674,6 +4919,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4708,6 +4954,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4743,6 +4990,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path: {
                 incident_id: string;
@@ -4774,7 +5022,10 @@ export interface operations {
     observe_sequences_api_learning_observe_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4807,7 +5058,10 @@ export interface operations {
     observe_sequences_async_api_learning_jobs_observe_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4840,7 +5094,10 @@ export interface operations {
     predict_sequence_api_learning_predict_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4875,7 +5132,10 @@ export interface operations {
             query: {
                 tenant_id: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4909,7 +5169,10 @@ export interface operations {
                 event_type?: string | null;
                 limit?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4941,7 +5204,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id?: string | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4970,7 +5236,10 @@ export interface operations {
     get_active_model_version_api_learning_models__tenant_id__active_version_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 tenant_id: string;
             };
@@ -5003,7 +5272,10 @@ export interface operations {
             query: {
                 tenant_id: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5034,6 +5306,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5069,6 +5342,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path: {
                 tenant_id: string;
@@ -5102,6 +5376,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path: {
                 tenant_id: string;
@@ -5135,6 +5410,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5170,6 +5446,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5240,7 +5517,10 @@ export interface operations {
                 /** @description Lookback window in hours */
                 hours?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5274,7 +5554,10 @@ export interface operations {
                 /** @description Lookback window in hours */
                 hours?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5303,7 +5586,10 @@ export interface operations {
     get_job_status_api_jobs__job_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 job_id: string;
             };
@@ -5334,7 +5620,10 @@ export interface operations {
     stream_job_events_api_jobs__job_id__events_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 job_id: string;
             };
@@ -5365,7 +5654,10 @@ export interface operations {
     cancel_job_api_jobs__job_id__cancel_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path: {
                 job_id: string;
             };
@@ -5402,7 +5694,10 @@ export interface operations {
                 status?: string | null;
                 limit?: number;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5436,6 +5731,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5470,6 +5766,44 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pause_live_scope_endpoint_api_live_pause_post: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5507,6 +5841,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -5545,7 +5880,10 @@ export interface operations {
                 include_scores?: boolean;
                 anomaly_threshold?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5584,7 +5922,10 @@ export interface operations {
                 include_scores?: boolean;
                 anomaly_threshold?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5622,7 +5963,10 @@ export interface operations {
                 threshold: number;
                 max_points?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5656,7 +6000,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id?: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5692,7 +6039,10 @@ export interface operations {
                 hours_back: number;
                 limit?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5728,7 +6078,10 @@ export interface operations {
                 hours_back: number;
                 limit?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5763,7 +6116,10 @@ export interface operations {
                 greenhouse_id?: string;
                 hours_back?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5796,7 +6152,10 @@ export interface operations {
             query: {
                 tenant_id: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5830,7 +6189,10 @@ export interface operations {
                 tenant_id: string;
                 greenhouse_id: string;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5867,7 +6229,10 @@ export interface operations {
                 end?: string | null;
                 limit?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5898,7 +6263,10 @@ export interface operations {
     check_rtt_jitter_api_network_rtt_jitter_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5931,7 +6299,10 @@ export interface operations {
     check_iat_api_network_iat_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5964,7 +6335,10 @@ export interface operations {
     check_tcp_handshake_api_network_tcp_handshake_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5997,7 +6371,10 @@ export interface operations {
     check_dhcp_fingerprint_api_network_dhcp_fingerprint_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6030,7 +6407,10 @@ export interface operations {
     check_service_response_api_network_service_response_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6063,7 +6443,10 @@ export interface operations {
     fit_threat_detector_api_network_threat_fit_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6096,7 +6479,10 @@ export interface operations {
     score_threat_api_network_threat_score_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6136,7 +6522,10 @@ export interface operations {
                 threshold?: number | null;
                 group_by: "date" | "type" | "sensor";
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6173,7 +6562,10 @@ export interface operations {
                 end: string;
                 threshold?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6209,7 +6601,10 @@ export interface operations {
                 threshold?: number | null;
                 limit?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6245,6 +6640,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -6279,6 +6675,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -6339,6 +6736,7 @@ export interface operations {
             };
             header?: {
                 "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -6354,6 +6752,42 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_backfill_scores_api_backfill_scores_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackfillScoresRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillScoresResponse"];
                 };
             };
             /** @description Validation Error */
