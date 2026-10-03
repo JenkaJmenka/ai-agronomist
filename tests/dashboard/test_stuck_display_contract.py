@@ -35,6 +35,7 @@ from src.dashboard.components.monitoring_jump import (
 from src.dashboard.services.diagnosis_enricher import (
     _build_reasoning,
     cold_run_row_to_series,
+    resolve_stuck_duration_hours,
 )
 from src.models.episode_grouper import group_alerts_into_episodes
 from src.api.schemas.sensor_data import UploadHighAnomalyDetail
@@ -259,3 +260,58 @@ class TestDiagnosisReasoningForStuckRows:
         reasoning = self._reasoning(row)
         assert "Frozen" not in reasoning
         assert "z-score" not in reasoning
+
+
+# ---------------------------------------------------------------------------
+# Task 2c item 1 — resolve_stuck_duration_hours coerces to float or None
+# ---------------------------------------------------------------------------
+
+class TestResolveStuckDurationHoursCoercesItsReturnType:
+    """The annotation is ``-> Optional[float]``; the body must honour it.
+
+    Before this fix, a non-numeric stored value (e.g. a stray ``str``) was
+    returned untouched, which let it reach ``1_Monitoring``'s
+    ``f"{v:.1f}"`` hover format and raise ``ValueError`` at render time.
+    """
+
+    def test_a_numeric_value_returns_a_float(self) -> None:
+        row = dict(_current_stuck_row(), frozen_hours_at_detection=6)
+        result = resolve_stuck_duration_hours(row)
+        assert result == 6.0
+        assert isinstance(result, float)
+
+    def test_a_non_numeric_string_returns_none_not_a_str(self) -> None:
+        row = dict(_current_stuck_row(), frozen_hours_at_detection="unknown")
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_no_recoverable_value_returns_none(self) -> None:
+        row = _current_stuck_row()
+        del row["frozen_hours_at_detection"]
+        row["z_score"] = None
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_a_non_numeric_legacy_z_score_also_returns_none_not_a_str(self) -> None:
+        """The legacy fallback arm needs the same coercion as the new field."""
+        row = _current_stuck_row()
+        del row["frozen_hours_at_detection"]
+        row["z_score"] = "bad-data"
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_a_non_numeric_value_does_not_raise_in_the_monitoring_render_path(
+        self,
+    ) -> None:
+        """Reproduces the real failure mode: a format spec on a non-float.
+
+        This does not import the Streamlit page (see
+        test_monitoring_page_anomaly_hover.py for that); it pins the
+        contract the page's ``f"{duration_hours:.1f}h"`` depends on --
+        that ``resolve_stuck_duration_hours`` never hands it something a
+        float format spec chokes on.
+        """
+        row = dict(_current_stuck_row(), frozen_hours_at_detection="unknown")
+        duration_hours = resolve_stuck_duration_hours(row)
+        rendered = f" · frozen {duration_hours:.1f}h" if duration_hours is not None else ""
+        assert rendered == ""

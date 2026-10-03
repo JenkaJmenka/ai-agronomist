@@ -324,13 +324,23 @@ def resolve_stuck_duration_hours(row: Any) -> Optional[float]:
     rows, or when neither field carries a value. Mirrors
     ``episode_grouper.py::_stuck_fault_duration``'s fallback, and ``row``
     may be a ``dict`` or a ``pd.Series`` -- both support ``.get()``.
+
+    Coerces to ``float`` or ``None`` to match the return annotation --
+    a non-numeric value (e.g. a stray ``str``) returns ``None`` rather than
+    being passed through untyped, which previously let a ``str`` reach
+    ``1_Monitoring``'s ``f"{v:.1f}"`` format spec and raise ``ValueError``.
     """
     if row.get("detector") != "stuck_fault":
         return None
     frozen_hours = row.get("frozen_hours_at_detection")
     if frozen_hours is None:
         frozen_hours = row.get("z_score")
-    return frozen_hours
+    if frozen_hours is None:
+        return None
+    try:
+        return float(frozen_hours)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_reasoning(
