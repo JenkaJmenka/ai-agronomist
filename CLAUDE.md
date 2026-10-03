@@ -48,6 +48,11 @@ This has already cost two sessions: migration tests were twice written off as
 pass. Before reporting any test failure as pre-existing, re-run it with
 `./venv/bin/python`.
 
+The only acceptable test gate is the **full** suite — `./venv/bin/python -m pytest tests/ -q`.
+Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently excludes
+`tests/workers/`, where a real failing assertion once hid for four commits while three
+separate reports called the branch green.
+
 ## Agent model assignment
 
 | Agent | Model | Reason |
