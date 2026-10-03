@@ -53,7 +53,8 @@ API key and never talks to FastAPI directly.
 - **Tooling:** pnpm **9.15.9 via corepack** (never pnpm 11 — incompatible with
   Node 20), Biome, Vitest, Playwright (e2e + CI-enforced perf budgets)
 - **Types:** generated from the committed `web/openapi.json` snapshot
-  (`pnpm gen:api`; refresh with `gen:api:live` against a running API)
+  (`pnpm gen:api`; refresh with `gen:api:refresh`, which rebuilds the
+  schema in-process from `src/api/main.py` — no running API needed)
 
 ## 3. Current state of the `web` service
 
