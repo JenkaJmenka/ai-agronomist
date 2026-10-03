@@ -198,3 +198,18 @@ class TestOtherDetectorsKeepTheirOwnHover:
         labels = _marker_labels(monitoring_page, window_frame, highlight)
         assert labels
         assert all("frozen" not in label for label in labels)
+
+
+    def test_a_stuck_row_with_a_non_numeric_frozen_value_does_not_raise(
+        self, monitoring_page, window_frame
+    ) -> None:
+        """Task 2c item 1: a non-numeric stored value must not reach the
+        ``f"{v:.1f}"`` hover format. Before the fix, this raised ValueError
+        at render time instead of degrading to no magnitude clause.
+        """
+        highlight = dict(
+            _current_stuck_highlight(), frozen_hours_at_detection="unknown"
+        )
+        labels = _marker_labels(monitoring_page, window_frame, highlight)
+        assert labels
+        assert all("frozen" not in label for label in labels)

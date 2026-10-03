@@ -4886,3 +4886,45 @@ the safe reference of the two** — propagate the coercion to the copy, not the
 other way around.
 
 HEAD: `a9d0cfb` before this round.
+
+## z_score initiative — CLOSED (Orchestrator, 2026-10-03)
+
+Three PRs. **#74** (merged `dd483d1`) split the `z_score` overload: stuck-fault hits carry their
+gate-crossing duration in `frozen_hours_at_detection` and leave `z_score` `None`, and both the
+trigger-attribution site and the display cap rank by `anomaly_rank_key` (severity > detector tier >
+`|z|` > score > timestamp > column) instead of `|z|` alone. **#75** (merged `4c2226a`) made
+`web/openapi.json` reproducible via `scripts/dump_openapi.py` plus a CI drift check. **#76** closed the
+carry-overs. Ledger: 14 Fixed, 5 Backlog, 1 Won't fix — see `tasks/orchestrator_state.json`
+`CLOSING_LEDGER`.
+
+Five things a future session should not have to rediscover:
+
+1. **Two gates silently didn't cover their changes.** The `tests/api tests/models tests/dashboard
+   tests/unit` subset excludes `tests/workers/`, where a real failing assertion (`None == 6.0` on a
+   stuck hit) hid for four commits while three reports called the branch green. And `web-ci` was
+   path-filtered to `web/**`, so Task 2 merged without the FE gates running at all. Both now fixed;
+   the full `tests/` suite is the only valid Python gate.
+
+2. **`anomaly_rank_key`'s added levels were inert on every existing fixture** until #76. Fixture A's
+   17 two-candidate timestamps are all statistical×statistical and already separate at `|z|`; the
+   other three fixtures have no stuck/statistical collision either — two by deliberate design, one by
+   being shorter than the 288-row rolling window. `tests/.../collision` in #76 is the first real
+   exercise of them.
+
+3. **The `/5.0` fallback is reachable**, contrary to the natural reading of #74's analysis.
+   `StatisticalAnomalyDetail` has no `score` field, so `setdefault` fires at
+   `inference_results.py:262` for every `statistical_summary` row. #74's claim was narrower — *stuck*
+   rows never reach that line — and still holds. Migration 024's documented saturation is live on the
+   common path. Backlog.
+
+4. **Suite pollution has a diagnosis.** One shared on-disk sqlite (`tests/conftest.py:19`) behind a
+   module-level pooled engine, five files running `create_all`/`drop_all` against it (several
+   `autouse`), plus a documented leaked-asyncio-task class. That explains a different test failing
+   each run, FAILED as well as ERROR, never in `tests/dashboard/`, and immunity to `-p no:randomly`.
+   Not a fixture-level fix. Backlog.
+
+5. **The `102` statistical-hit figure remains an unverified pin**, not ground truth
+   (`docs/runbooks/native-dec-fixture-baseline.md:61-79`). Re-running the code and getting 102 is what
+   the doc predicts regardless of correctness — one agent claimed independent corroboration and had to
+   retract. The four episode durations (34.83 / 22.08 / 47.92 / 163.83 h) *are* real evidence: they
+   were measured from the CSV, not emitted by this code.

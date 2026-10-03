@@ -15,6 +15,8 @@ from src.config import (
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_USE_IQR,
     COLD_RUN_STAT_Z_MIN,
+    GAS_Z_CRITICAL as _Z_CRITICAL,
+    GAS_Z_WARNING as _Z_WARNING,
 )
 from src.dashboard.components.sensor_columns import is_gas_column
 from src.models.gas_anomaly_detector import (
@@ -22,8 +24,6 @@ from src.models.gas_anomaly_detector import (
     GasBaseline,
     _IQR_FENCE,
     _MIN_BASELINE_SAMPLES,
-    _Z_CRITICAL,
-    _Z_WARNING,
 )
 
 _METADATA_KEYS = frozenset({"timestamp", "source"})

@@ -13,13 +13,11 @@ from typing import Optional
 import numpy as np
 
 from src.config import GAS_SENSOR_COLUMNS as GAS_COLUMNS
+from src.config import GAS_Z_CRITICAL as _Z_CRITICAL
+from src.config import GAS_Z_WARNING as _Z_WARNING
 
 # Minimum number of finite values required to compute a meaningful baseline.
 _MIN_BASELINE_SAMPLES: int = 5
-
-# Z-score thresholds for anomaly severity classification.
-_Z_WARNING: float = 2.0
-_Z_CRITICAL: float = 3.0
 
 # IQR fence multiplier (Tukey's rule).
 _IQR_FENCE: float = 1.5

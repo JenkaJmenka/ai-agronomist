@@ -10,6 +10,7 @@ from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from src.api.services.anomaly_ranking import is_statistical_detector
 from src.dashboard.components.anomaly_table import render as render_anomaly_table
 from src.dashboard.services.diagnosis_enricher import enrich_cold_run_rows
 
@@ -236,7 +237,7 @@ def _statistical_anomalies_from_results(results: dict) -> list[dict]:
     stat_rows: list[dict] = []
     for row in _as_dict_list(results.get("high_anomalies")):
         detector = str(row.get("detector", ""))
-        if detector in {"statistical", "lstm+statistical"} and row.get("column"):
+        if is_statistical_detector(detector) and row.get("column"):
             stat_rows.append(row)
     return stat_rows
 

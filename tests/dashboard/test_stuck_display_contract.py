@@ -35,6 +35,7 @@ from src.dashboard.components.monitoring_jump import (
 from src.dashboard.services.diagnosis_enricher import (
     _build_reasoning,
     cold_run_row_to_series,
+    resolve_stuck_duration_hours,
 )
 from src.models.episode_grouper import group_alerts_into_episodes
 from src.api.schemas.sensor_data import UploadHighAnomalyDetail
@@ -208,6 +209,67 @@ class TestJumpTableRendersHoursNotASigma:
 
 
 # ---------------------------------------------------------------------------
+# Task 2c item 4 — anomaly_display_columns' enabling assumption, pinned
+# ---------------------------------------------------------------------------
+
+class TestAnomalyDisplayColumnsEnablingAssumption:
+    """``anomaly_display_columns`` does not itself normalize a legacy stuck
+    row (duration in ``z_score``, no ``frozen_hours_at_detection`` key) --
+    called directly on raw input, the column is simply absent. That is
+    correct TODAY only because the function has exactly one production
+    caller, ``anomalies_to_display_frame``, which always normalizes via
+    ``_normalize_stuck_display_row`` first. Both halves of that assumption
+    are pinned here, not just the happy path, so a second caller added
+    later that skips normalization fails loudly instead of silently
+    dropping the frozen-hours column for legacy rows.
+    """
+
+    def test_a_raw_legacy_stuck_row_lacks_the_frozen_column(self) -> None:
+        """The gap: on un-normalized input, the duration is still under
+        ``z_score``, so the column set has no reason to include the new
+        field.
+        """
+        raw_legacy_row = _legacy_stuck_row()
+        assert "frozen_hours_at_detection" not in anomaly_display_columns(
+            [raw_legacy_row]
+        )
+
+    def test_anomaly_display_columns_has_exactly_one_production_call_site(
+        self,
+    ) -> None:
+        """The gap above is harmless only while this holds.
+
+        Reads monitoring_jump.py's own source rather than trusting a
+        comment, so a newly added second caller is caught even if nobody
+        updates a docstring.
+        """
+        import inspect
+
+        import src.dashboard.components.monitoring_jump as monitoring_jump_module
+
+        source = inspect.getsource(monitoring_jump_module)
+        occurrences = source.count("anomaly_display_columns(")
+        # Exactly two: the `def` line itself, plus the one call site inside
+        # anomalies_to_display_frame.
+        assert occurrences == 2, (
+            "anomaly_display_columns gained a new call site -- verify it "
+            "normalizes legacy stuck rows first (see "
+            "_normalize_stuck_display_row), or the frozen_hours_at_detection "
+            "column can silently go missing for legacy rows again"
+        )
+
+    def test_the_real_caller_normalizes_first_so_the_gap_never_fires(
+        self,
+    ) -> None:
+        """End-to-end, through the one real caller, the gap above must not
+        reproduce -- ``anomalies_to_display_frame`` normalizes before it
+        ever calls ``anomaly_display_columns``.
+        """
+        frame = anomalies_to_display_frame([_legacy_stuck_row()])
+        assert "frozen_hours_at_detection" in frame.columns
+
+
+# ---------------------------------------------------------------------------
 # diagnosis_enricher — the stuck branch of _build_reasoning
 # ---------------------------------------------------------------------------
 
@@ -259,3 +321,58 @@ class TestDiagnosisReasoningForStuckRows:
         reasoning = self._reasoning(row)
         assert "Frozen" not in reasoning
         assert "z-score" not in reasoning
+
+
+# ---------------------------------------------------------------------------
+# Task 2c item 1 — resolve_stuck_duration_hours coerces to float or None
+# ---------------------------------------------------------------------------
+
+class TestResolveStuckDurationHoursCoercesItsReturnType:
+    """The annotation is ``-> Optional[float]``; the body must honour it.
+
+    Before this fix, a non-numeric stored value (e.g. a stray ``str``) was
+    returned untouched, which let it reach ``1_Monitoring``'s
+    ``f"{v:.1f}"`` hover format and raise ``ValueError`` at render time.
+    """
+
+    def test_a_numeric_value_returns_a_float(self) -> None:
+        row = dict(_current_stuck_row(), frozen_hours_at_detection=6)
+        result = resolve_stuck_duration_hours(row)
+        assert result == 6.0
+        assert isinstance(result, float)
+
+    def test_a_non_numeric_string_returns_none_not_a_str(self) -> None:
+        row = dict(_current_stuck_row(), frozen_hours_at_detection="unknown")
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_no_recoverable_value_returns_none(self) -> None:
+        row = _current_stuck_row()
+        del row["frozen_hours_at_detection"]
+        row["z_score"] = None
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_a_non_numeric_legacy_z_score_also_returns_none_not_a_str(self) -> None:
+        """The legacy fallback arm needs the same coercion as the new field."""
+        row = _current_stuck_row()
+        del row["frozen_hours_at_detection"]
+        row["z_score"] = "bad-data"
+        result = resolve_stuck_duration_hours(row)
+        assert result is None
+
+    def test_a_non_numeric_value_does_not_raise_in_the_monitoring_render_path(
+        self,
+    ) -> None:
+        """Reproduces the real failure mode: a format spec on a non-float.
+
+        This does not import the Streamlit page (see
+        test_monitoring_page_anomaly_hover.py for that); it pins the
+        contract the page's ``f"{duration_hours:.1f}h"`` depends on --
+        that ``resolve_stuck_duration_hours`` never hands it something a
+        float format spec chokes on.
+        """
+        row = dict(_current_stuck_row(), frozen_hours_at_detection="unknown")
+        duration_hours = resolve_stuck_duration_hours(row)
+        rendered = f" · frozen {duration_hours:.1f}h" if duration_hours is not None else ""
+        assert rendered == ""

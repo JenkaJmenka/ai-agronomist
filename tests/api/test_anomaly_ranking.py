@@ -21,7 +21,7 @@ import random
 
 import pytest
 
-from src.api.services.anomaly_ranking import anomaly_rank_key
+from src.api.services.anomaly_ranking import anomaly_rank_key, is_statistical_detector
 
 DISPLAY_CAP = 5
 SHUFFLE_ROUNDS = 20
@@ -279,3 +279,40 @@ class TestKeyToleratesBothRowShapes:
             _lstm_row(score=0.5, index=2),
         ]
         assert len(_ranked(rows)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 2c item 3 — is_statistical_detector classifies by membership, not
+# exact equality, so a compound label never undercounts.
+# ---------------------------------------------------------------------------
+
+class TestIsStatisticalDetectorClassifiesByMembership:
+    """Every detector string the backend actually emits (grepped from
+    src/api/, src/models/, src/workers/): "lstm", "statistical",
+    "lstm+statistical", "stuck_fault", and the "unknown" degrade-path
+    default.
+    """
+
+    @pytest.mark.parametrize(
+        "detector,expected",
+        [
+            ("statistical", True),
+            ("lstm+statistical", True),
+            ("lstm", False),
+            ("stuck_fault", False),
+            ("unknown", False),
+            ("", False),
+            (None, False),
+        ],
+    )
+    def test_every_backend_detector_string_classified_correctly(
+        self, detector, expected
+    ):
+        assert is_statistical_detector(detector) is expected
+
+    def test_a_future_second_compound_label_is_not_undercounted(self):
+        """The exact-match bug this replaces only worked because
+        "lstm+statistical" is the sole compound label in the codebase today.
+        A membership check must not regress if a second one appears.
+        """
+        assert is_statistical_detector("statistical+stuck_fault") is True

@@ -17,6 +17,7 @@ from src.dashboard.constants import (
 )
 from src.api.services.readings_service import merge_anomaly_scores_into_readings
 from src.dashboard.services.api_client import DashboardApiClient
+from src.dashboard.services.diagnosis_enricher import resolve_stuck_duration_hours
 from src.dashboard.services.tz_normalize import (
     align_bound_to_series,
     normalize_series_tz,
@@ -639,6 +640,24 @@ def plot_gas_sensor_stack(
                 raw_val = float(ap["value"])
             except (TypeError, ValueError):
                 continue
+            # Stuck-fault hits carry no z_score (see UploadHighAnomalyDetail);
+            # render their frozen-hours-at-detection instead of a z-score,
+            # mirroring the other display sites that delegate to
+            # resolve_stuck_duration_hours (monitoring_jump.py,
+            # 1_Monitoring.py, diagnosis_enricher.py).
+            if ap.get("detector") == "stuck_fault":
+                frozen_hours = resolve_stuck_duration_hours(ap)
+                magnitude_line = (
+                    f"Frozen (h): {frozen_hours:.2f}<br>"
+                    if frozen_hours is not None
+                    else ""
+                )
+            else:
+                # None-safe: .get(key, 0) only applies its default when the
+                # key is ABSENT, not when present-but-null. float(None)
+                # would otherwise raise mid-render.
+                z_score = ap.get("z_score")
+                magnitude_line = f"Z-score: {z_score if z_score is not None else 0:.2f}<br>"
             fig.add_trace(
                 go.Scatter(
                     x=[ap["timestamp"]],
@@ -654,11 +673,7 @@ def plot_gas_sensor_stack(
                     hovertemplate=(
                         f"<b>⚠ {label}</b><br>"
                         f"Value: {raw_val:.4f} {unit}<br>"
-                        # None-safe: .get(key, 0) only applies its default
-                        # when the key is ABSENT, not when present-but-null
-                        # (e.g. a stuck_fault row's z_score). float(None)
-                        # would otherwise raise mid-render.
-                        f"Z-score: {ap.get('z_score') if ap.get('z_score') is not None else 0:.2f}<br>"
+                        f"{magnitude_line}"
                         f"Severity: {ap.get('severity', 'normal')}<br>"
                         "Time: %{x}<extra></extra>"
                     ),
