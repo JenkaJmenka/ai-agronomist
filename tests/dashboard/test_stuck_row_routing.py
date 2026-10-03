@@ -143,6 +143,20 @@ class TestHighAnomaliesFallbackFilter:
         )
         assert rows == [COMPOUND_ROW]
 
+    def test_a_second_compound_label_is_also_admitted(self):
+        """Task 2c item 3: the filter now matches by membership
+        (``is_statistical_detector``), not the exact two-member set
+        ``{"statistical", "lstm+statistical"}`` that only worked because
+        "lstm+statistical" was the sole compound label in the codebase.
+        A second compound label containing "statistical" must not be
+        undercounted the way the old exact-match filter would have missed it.
+        """
+        second_compound_row = dict(COMPOUND_ROW, detector="statistical+stuck_fault")
+        rows = _statistical_anomalies_from_results(
+            _results([second_compound_row, STUCK_ROW], [])
+        )
+        assert rows == [second_compound_row]
+
     def test_solo_lstm_row_excluded_from_fallback(self):
         lstm_row = {
             "timestamp": "2026-12-18T13:15:00+00:00",

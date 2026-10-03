@@ -55,6 +55,18 @@ def _detector_tier(detector: str | None) -> int:
     return _UNKNOWN_TIER
 
 
+def is_statistical_detector(detector: str | None) -> bool:
+    """True when ``detector``'s label includes the statistical tier.
+
+    Checked by *membership* in the (possibly "+"-joined) label, never by
+    exact string equality — the same rule ``_detector_tier`` follows above,
+    pulled out standalone for call sites that only need a yes/no filter
+    (e.g. "is this row a statistical hit for display purposes") rather than
+    a full tier ranking. "lstm+statistical" counts as statistical here too.
+    """
+    return "statistical" in (detector or "").split("+")
+
+
 def anomaly_rank_key(hit: Any) -> tuple[int, int, float, float, str, str]:
     """Rank an anomaly hit for trigger attribution and display-cap survival.
 
