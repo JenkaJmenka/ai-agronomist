@@ -39,6 +39,7 @@ from src.api.services.upload_portions import (
     score_portion,
 )
 from src.api.services.upload_producer import produce_upload_portions
+from src.config import STUCK_WALLCLOCK_MIN_HOURS
 from src.db.jobs import get_job
 from src.db.models import Base, SensorReading
 from src.models.stuck_fault_detector import StuckCarry, WallclockStuckDetector
@@ -128,7 +129,11 @@ def _canonical_stuck_json(alerts: list[dict], episodes: list[dict]) -> str:
                 "detected_ts": a.get("detected_ts"),
                 "column": a.get("column"),
                 "severity": a.get("severity"),
+                # Both fields, not just one: z_score is None for every
+                # current-shape stuck hit, so comparing it alone made the
+                # duration side of this parity check compare None to None.
                 "z_score": a.get("z_score"),
+                "frozen_hours_at_detection": a.get("frozen_hours_at_detection"),
                 "value": a.get("value"),
             }
             for a in alerts
@@ -602,8 +607,10 @@ class TestSkipChannels:
         co2_alerts = [a for a in alerts if a["column"] == "co2"]
         assert len(co2_alerts) == 1, f"Expected 1 co2 alert, got {len(co2_alerts)}"
         assert co2_alerts[0]["timestamp"] == "2026-12-14T00:00:00+00:00"
-        # z_score carries duration_hours at gate crossing
-        assert co2_alerts[0]["z_score"] == 6.0
+        # Hours at the gate crossing live in frozen_hours_at_detection;
+        # z_score used to be overloaded to carry them and is now None.
+        assert co2_alerts[0]["frozen_hours_at_detection"] == STUCK_WALLCLOCK_MIN_HOURS
+        assert co2_alerts[0]["z_score"] is None
 
     @pytest.mark.asyncio
     async def test_producer_carry_has_skip_channels(self):

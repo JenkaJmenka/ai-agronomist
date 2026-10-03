@@ -654,7 +654,11 @@ def plot_gas_sensor_stack(
                     hovertemplate=(
                         f"<b>⚠ {label}</b><br>"
                         f"Value: {raw_val:.4f} {unit}<br>"
-                        f"Z-score: {ap.get('z_score', 0):.2f}<br>"
+                        # None-safe: .get(key, 0) only applies its default
+                        # when the key is ABSENT, not when present-but-null
+                        # (e.g. a stuck_fault row's z_score). float(None)
+                        # would otherwise raise mid-render.
+                        f"Z-score: {ap.get('z_score') if ap.get('z_score') is not None else 0:.2f}<br>"
                         f"Severity: {ap.get('severity', 'normal')}<br>"
                         "Time: %{x}<extra></extra>"
                     ),

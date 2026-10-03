@@ -4094,3 +4094,795 @@ Corrected:
 - **Config gap found, not fixed**: `web/biome.json`'s `files.includes` lists
   only `app/** components/** features/** lib/** test/**`, so repo-root
   `web/proxy.ts` — the auth gate — and `web/proxy.test.ts` are never linted.
+
+## z_score/severity refactor — src/api/ portion only (Backend, 2026-09-30)
+
+Branch `refactor/upload-anomaly-score-severity`, commit `7cb1bb1` (base `83e6830`).
+Full 7-item spec from team lead touched `src/api/`, `src/models/episode_grouper.py`,
+five `src/dashboard/` files, `tests/`, and `web/lib/api-types.gen.ts`. Only the
+`src/api/` items are committed here — file-ownership boundary ("Write to src/api/
+and src/db/ only"), consistent with the `web/lib/severity.ts` precedent above
+(line ~963). Exact patches for every out-of-scope file were handed to team lead
+in chat, not applied.
+
+- **`src/api/schemas/sensor_data.py`**: added `UploadHighAnomalyDetail.
+  frozen_hours_at_detection: Optional[float]`. Stuck hits now carry their
+  gate-crossing duration there; `z_score` is `None` for them (was overloaded
+  to carry `duration_hours` before — see `[[project_detector_label_compound]]`-
+  adjacent history in Step-0 inventory for this branch).
+- **`src/api/services/upload_portions.py::_stuck_dict_to_high_detail`**:
+  `z_score=None, frozen_hours_at_detection=alert["duration_hours"]`.
+- **`src/api/services/anomaly_ranking.py`** (new): `anomaly_rank_key(hit)` —
+  `(severity_rank, detector_tier, |z|)`, works on both pydantic instances and
+  dicts. Detector tier matched by *membership* in a possibly-`"+"`-joined
+  label (`"lstm+statistical"` ranks with `"statistical"`), never exact
+  equality — the compound label has undercounted before via exact-match
+  filters (see `project_detector_label_compound` memory).
+- **`src/api/services/cold_run_upload.py::build_trigger_data_by_timestamp`**:
+  replaced `|z|`-only tiebreak with `anomaly_rank_key`.
+- **Fixture A (native_dec_stuck_fault.csv) measured, reproduced via
+  `./venv/bin/python`**: zero `trigger_channel`/`trigger_detector` rows
+  changed (no timestamp where a stuck_fault hit competes with another
+  detector's hit in this fixture) and zero display-cap survivor diff
+  (stuck rows already score 1.0, always topped the old ranking too). The
+  new ranking function is real but this fixture doesn't exercise the
+  collision case — needs a synthetic same-timestamp multi-detector fixture
+  to actually observe a diff.
+- **`inference_results.py:254` stuck-row score**: N/A both before and after —
+  traced and confirmed empirically that `stat_rows_to_jump_rows` structurally
+  never receives a `detector="stuck_fault"` row (neither `statistical_summary.
+  anomalies` nor the `{"statistical","lstm+statistical"}` membership fallback
+  can produce one). No live crash/score-drop risk exists today either way.
+- **Blob readers (item 5)**: exactly one typed-deserialization site in the
+  whole repo — `src/workers/upload_consumer.py:465` reconstructing
+  `UploadHighAnomalyDetail(**h)` from `JobPortion.result["stuck_hits"]`.
+  Needs no change itself (Pydantic's `**h` already round-trips both shapes);
+  the discrimination has to live in the *readers* (`episode_grouper.py:215`
+  primarily). `Job.result` is never reconstructed into typed models anywhere
+  — `JobStatusResponse.result: Optional[dict[str, Any]]` is a raw passthrough.
+- **Two corrections made to the spec as given**, both reproduced before
+  reporting: (1) the three test files named for item 7
+  (`test_label_integrity.py`, `test_cold_run_merge.py`,
+  `test_episode_grouping.py`) have **no** stuck-hit `z_score=` constructors
+  at all — grepped, confirmed. The actual fixture needing an update is
+  `tests/api/test_stuck_fault_upload.py`'s test-local `_dict_to_detail`
+  helper (~line 82-94, duplicates the pre-fix production function) and
+  `test_alert_reports_duration_at_gate_crossing` (~line 210-224), which now
+  **passes vacuously** — it filters `a.z_score is not None` on stuck alerts,
+  which is now always `None`, so the list is always empty and `all(...)` on
+  an empty list is trivially `True`. (2) `charts.py:657`'s `z_score` read
+  is NOT a `UploadHighAnomalyDetail` reader — traced the caller chain and
+  it's `plot_gas_sensor_stack`, used only by `3_Gas_Monitoring.py`, fed by
+  the unrelated `gas_anomaly_detector.py::GasAnomaly.z_score` (always a
+  required float, never `None`). This corrects my own Step-0 inventory,
+  which cited it without checking what `anomaly_points` was sourced from.
+- **Must-fix-before-merge flagged to team lead**: `episode_grouper.py:215`'s
+  still-open-freeze fallback (`getattr(first_alert, "z_score", None)`) is now
+  silently broken — always `None` post-fix, so it falls through to
+  `duration_seconds=0.0` for any freeze still open at upload end. Not caught
+  by the suite because fixture A's 4 alerts all matched a completed
+  `FaultWindow` (the fallback path isn't exercised by any fixture in the
+  repo today). Exact one-line-reasoning patch given in chat; this function
+  is only ever called from the `detector == "stuck_fault"` branch of its
+  caller, so no extra detector guard is needed inside it.
+- **Gate**: full `tests/api/`, `tests/unit/`, `tests/dashboard/`,
+  `tests/models/` green — 1043 + 1279 passed, 5 xfailed (pre-existing) —
+  but see the vacuous-test note above; green here does not mean the
+  gate-crossing duration is actually being checked anymore until
+  `test_stuck_fault_upload.py` is patched.
+- **HEAD verified**: `83e6830` before, `7cb1bb1` after, both checked
+  immediately before/after the commit per `project_agent_branch_drift`.
+
+## Item 6 STOP — web/openapi.json is stale independent of this branch (Backend, 2026-09-30)
+
+Verified team lead's required precondition before touching `web/openapi.json`/
+`web/lib/api-types.gen.ts`: regenerate via `app.openapi()` (2-space indent, no
+trailing newline, matching the committed file's format) and diff against the
+committed file on a clean tree — must be byte-identical before any schema
+change is layered on top.
+
+**It is not, even at this branch's exact base commit `83e6830`.** Verified via
+a throwaway `git worktree add` at `83e6830` (removed after): a fresh
+`app.openapi()` dump there is 11368 lines vs. the committed file's 8949 —
+every route is missing `X-API-Key`/`X-Tenant-Id` header parameters that the
+live `require_api_key`/tenant-auth dependencies (`src/api/auth.py:86-87`)
+actually declare. `web/openapi.json` was last touched by `ec8b2dd` ("chore:
+close phase-2 audit follow-ups on docs, generated types and tests",
+2026-09-29) — confirmed an ancestor of `83e6830` with no further commits to
+the file in between, so this is real, pre-existing drift from before this
+branch was cut, not something introduced on this branch or by my environment.
+Root cause not investigated further (out of scope for this task) — plausibly
+the phase-2 regeneration didn't actually run `app.openapi()` against the auth
+middleware as currently wired, but that's a guess, not verified.
+
+**Did not touch `web/openapi.json` or `web/lib/api-types.gen.ts`.** Per team
+lead's own explicit instruction ("If you cannot achieve a byte-identical
+no-op regeneration, STOP and report — do not hand-edit either file, and do
+not commit a reformatted schema"), reported this and stopped rather than
+bundling ~2400 lines of unrelated auth-header schema drift into a
+labelling/severity refactor commit.
+
+## Step 2 — dashboard display patches, user-widened scope (Backend, 2026-09-30)
+
+Team lead relayed a user decision widening this agent's file-ownership scope
+to `src/dashboard/` for Task 2 only (not `tests/`, `src/models/`, or `web/`,
+and not beyond this task) — CLAUDE.md's ownership table has no entry for
+`src/dashboard/`, so the user assigned it to backend-engineer explicitly.
+Applied the five patches drafted in the prior report, at HEAD `f7b5ac2`
+(after ml-engineer's step-1 `episode_grouper.py` fix, verified independently
+by team lead: legacy `z_score=6.0` → 21600.0s, new
+`frozen_hours_at_detection=6.0` → 21600.0s, new field wins).
+
+- **`src/dashboard/views/1_Active_Monitoring/1_Monitoring.py`** — stuck-fault
+  hits render `frozen_hours_at_detection` ("· frozen Xh") instead of a blank
+  hover label; statistical/lstm hits unchanged.
+- **`src/dashboard/components/monitoring_jump.py`** — added
+  `"frozen_hours_at_detection"` to the display column order/labels
+  (`"Frozen (h)"`) and a format branch.
+- **`src/dashboard/services/diagnosis_enricher.py`** — `:328` now branches on
+  `detector == "stuck_fault"` first (renders "Frozen Xh on <sensor>" instead
+  of a z-score sentence); `:609` passthrough now also carries
+  `frozen_hours_at_detection`.
+- **`src/dashboard/components/inference_results.py:254`** — defensive
+  None-safety (`float(z) if z is not None else 0.0`) — confirmed in the
+  prior report this call site is structurally unreachable for stuck rows
+  today, so this is insurance, not a live-bug fix.
+- **`src/dashboard/services/anomalies_page_data.py::trim_cold_run_rows`** —
+  switched from the raw `("score","z_score","anomaly_score")` sort key to
+  `anomaly_rank_key` (imported from `src.api.services.anomaly_ranking`).
+  Cross-layer import confirmed sanctioned by team lead: precedent already
+  exists at `charts.py:18` (`src.api.services.readings_service`).
+- **`src/api/services/anomaly_ranking.py`** — corrected the `anomaly_rank_key`
+  docstring: the `|z_score|` tiebreak is not exclusively a statistical-tier
+  comparison — a *legacy* stuck_fault row read back from a stored
+  `Job.result`/`JobPortion.result` blob (pre-`frozen_hours_at_detection`)
+  still carries its duration in the numeric `z_score` field, so two tied
+  legacy stuck rows would compare by duration there. Harmless for ordering,
+  wrong as originally documented.
+- **`charts.py:657` — confirmed NOT a `UploadHighAnomalyDetail` reader, but
+  for a different reason than I first gave.** Not "GasAnomaly-fed" as I
+  guessed — team lead traced it further: `anomaly_points` (the list this
+  line reads) is initialised empty at `3_Gas_Monitoring.py:103` and never
+  populated; the loop that would fill it is a bare `pass` with the comment
+  "We no longer populate dummy points here". So the line is unreachable dead
+  code on the caller side, not "reachable but reading an unrelated type" —
+  correcting my own prior Step-0/report reasoning here, since if anyone
+  repopulates that list later, that decides whether this line needs the
+  same patch the other display sites got.
+
+**CORRECTED (step 2b, same day)**: the paragraph below, as originally
+written here, was wrong. `tests/dashboard/test_anomalies_page_data.py::
+test_trim_cold_run_rows_limits_and_keeps_highest_scores` failing was NOT
+"the intended effect of severity-first ranking" — it was `anomaly_rank_key`
+being genuinely incomplete. The test is correct; item 7's file list does
+NOT gain a fourth entry; `test_anomalies_page_data.py` is not an item-7
+fixture. See the step-2b entry below for the real cause and fix
+(`anomaly_rank_key` needed `score` as a fourth tiebreak field — every
+solo-lstm hit ties on severity/detector/z, so without `score` the cap
+degenerated to arrival order for any lstm-heavy upload, a real regression
+that just happened to be caught by this one test rather than being
+confined to it). Original (wrong) reasoning kept below for the record,
+struck through in spirit if not in markdown:
+
+~~New test failure found, not fixed (tests/ is qa-engineer's per this
+step's explicit instruction): `tests/dashboard/test_anomalies_page_data.
+py::test_trim_cold_run_rows_limits_and_keeps_highest_scores` now fails.
+It builds 100 dict rows with ONLY a `"score"` key (no `detector`/
+`severity`/`z_score` at all) and asserts `trim_cold_run_rows` keeps the
+10 highest by `score`. Under `anomaly_rank_key`, rows with no
+`detector`/`severity`/`z_score` all collapse to the identical rank key
+`(0, 0, 0.0)`, so the sort is stable-no-op and simply returns the first
+10 rows in original list order — `score` no longer drives the cap at all
+for this fixture shape. This is the direct, intended consequence of item 4
+("switch to the ranking function... so the cap keeps the most severe
+rows"), not a bug in the patch — `tests/api/` + `tests/models/` stayed at
+the 1863/5 baseline (re-verified), confirming this is isolated to the one
+dashboard test. Needs a fixture update to include `detector`/`severity`
+(or an explicit assertion that ranking is now severity-first) — a FOURTH
+file for item 7's list, beyond the three originally named and the one
+(`test_stuck_fault_upload.py`) found in the prior report.~~
+
+**No automated coverage for the five display patches themselves** — they
+render Streamlit hover text/table cells with no existing test harness
+touching that code (confirmed: `tests/dashboard/` failures are limited to
+the one ranking-function test above; nothing exercises the new stuck-fault
+branches in `1_Monitoring.py`, `monitoring_jump.py`, or
+`diagnosis_enricher.py`). Verified only by reading the diff and reasoning
+through the branch conditions, not by a passing test.
+
+**Gate**: `tests/api/ tests/models/ tests/dashboard/ tests/unit/` — 2321
+passed, 1 failed (above), 5 xfailed. `tests/api/`+`tests/models/` alone:
+1863 passed / 5 xfailed, unchanged from team lead's baseline.
+
+## Step 2b — anomaly_rank_key was missing score as a tiebreak (Backend, 2026-09-30)
+
+Team lead pushed back on the step-2 entry above and was right: the dashboard
+test failure wasn't a stale fixture, it was `anomaly_rank_key` itself being
+incomplete. Reproduced their evidence independently before touching anything:
+
+    score-only rows (no detector/severity/z_score), key=anomaly_rank_key:
+      kept (WRONG, before fix): [0.0, 0.01, ..., 0.09]  <- the worst 10, not the best
+    solo-lstm rows (severity=None, detector="lstm", z_score=None always):
+      keys (before fix): [(0,1,0.0), (0,1,0.0), (0,1,0.0)] — all identical
+      kept top-2 (WRONG, before fix): [0.55, 0.12] <- not actually the top 2 by score
+
+Root cause: every same-tier group not discriminated by `|z|` (which is only
+ever non-zero for statistical-tier hits) collapsed to one identical 3-tuple
+key, so `sorted()`/`max()` degenerated to a stable no-op returning arrival
+order. Solo-lstm hits ALWAYS hit this — `severity=None`, `detector="lstm"`,
+`z_score=None` on every one of them — so this wasn't confined to the test's
+synthetic fixture; any lstm-heavy real upload would have the same display-cap
+degradation the test caught by accident.
+
+**Fix**: `anomaly_rank_key` now returns a 4-tuple
+`(severity_rank, detector_tier, |z|, score)`. `score` read via the existing
+`_field` helper, coerced `float(score) if isinstance(score, (int, float))
+else 0.0` (mirrors the z-score coercion). The 0.0 fallback is load-bearing
+for `StatisticalAnomalyDetail` dicts (no `score` field at all) — noted
+explicitly in the docstring so it isn't mistaken for a default worth
+"fixing" later.
+
+Verified all three of team lead's cases match exactly post-fix:
+- score-only rows → kept `[0.99, 0.98, ..., 0.90]` (top 10, correctly).
+- lstm-only rows → kept `[0.98, 0.55]` (top 2 by score, correctly).
+- urgent(0.2) vs critical(0.99) → urgent still wins (severity still the
+  primary key; score only breaks ties within a tier).
+
+`tests/dashboard/test_anomalies_page_data.py::
+test_trim_cold_run_rows_limits_and_keeps_highest_scores` — required to pass
+**unmodified**, and does: `1 passed`. Did not touch the test.
+
+**Gate**: `tests/api/ tests/models/ tests/dashboard/ tests/unit/` —
+**2322 passed, 0 failed, 5 xfailed** (was 2321/1/5 before this fix; the
+prior single failure is now green, nothing else moved).
+
+**Item 7's file list is back to three files examined, one needing changes**:
+`test_label_integrity.py`, `test_cold_run_merge.py`, `test_episode_grouping.
+py` have zero stuck-hit `z_score=` constructors (confirmed twice now);
+`test_stuck_fault_upload.py` is the one that actually needs the
+`_dict_to_detail` helper and `test_alert_reports_duration_at_gate_crossing`
+fixed, per the original step-1 report. `test_anomalies_page_data.py` is
+NOT an item-7 fixture — it was correctly written all along; the code was
+wrong, not the test.
+
+HEAD: `b65be20` before this round, verify after commit below.
+
+## Step 2b, part A+B — identity tiebreak added; fixture A re-measured (Backend, 2026-09-30)
+
+### A. Final identity tiebreak
+`anomaly_rank_key` now returns a 6-tuple:
+`(severity_rank, detector_tier, |z|, score, timestamp, column)`. Score alone
+still ties (e.g. two solo-lstm hits with equal score, or the 4 stuck_fault
+alerts, which always share `score=1.0`), so the last two fields are derived
+from the row's own identity, not iteration order: `str(timestamp or "")`
+then `str(column or "")`, both required per the user's coercion spec to
+avoid `None`-vs-`str` `TypeError` mid-sort (solo-lstm hits have
+`column=None`). Direction: larger string wins under the same reverse=True
+convention as the rest of the tuple — a later ISO-8601 timestamp beats an
+earlier one; alphabetically-later column beats alphabetically-earlier, when
+even timestamps tie. Documented as arbitrary-but-fixed, per instruction, so
+nobody "fixes" it in the opposite direction later.
+
+Known quirk documented, not special-cased: the LSTM path's placeholder for
+an out-of-range sequence index is the literal string `"unknown"`
+(`upload_portions.py`'s `lstm_high` comprehension), which sorts *after*
+every real timestamp (`'u' > any digit`) and would win the timestamp level
+outright. Verified this cannot matter at the trigger-attribution call site:
+`normalize_timestamp_key("unknown")` returns `None`
+(`csv_persist.py:83`: `if not text or text == "unknown": return None`), and
+the caller `continue`s past `None` keys — such hits never reach the
+ranking comparison there. Only the display-cap site could theoretically see
+it, and only as a last-resort tiebreak after five other fields.
+
+Two call sites lean on different halves of the identity tiebreak, documented
+explicitly: at `build_trigger_data_by_timestamp`, every candidate in a group
+already shares one timestamp by construction (verified — see below), so
+`column` does the real work; at the display-cap site, rows span the whole
+file, so `timestamp` does the real work there.
+
+### B. Fixture A re-measured against main (83e6830), not carried forward
+
+Team lead was right that this needed re-measuring, not re-asserting — the
+3-tuple version's "zero changed" result doesn't automatically survive adding
+two more tiebreak levels. Used a throwaway `git worktree add` at `83e6830`
+(removed after) for the main side, current branch (`1dcda00`) for the other,
+both driving the same `_run_fixture_through_upload` harness.
+
+**1. Trigger data**: still zero rows changed — but this time with a
+quantified reason, not just a re-assertion. Fixture A has 89 distinct
+trigger timestamps; 17 of them have 2 candidate hits (all statistical-vs-
+statistical, e.g. `measured_hd` vs `measured_pipe_1_temp` both firing at
+the same 5-minute sample). Checked all 17: in every one, `|z_score|`
+already differs between the two candidates (verified — 0 out of 17 groups
+tie at the `|z|` level), so level 3 resolves every real multi-candidate
+group before score/timestamp/column are ever consulted. There are zero
+stuck-vs-other or stuck-vs-stuck timestamp collisions in this fixture
+(confirmed before, still true), and no two lstm hits share a timestamp
+(each maps to a distinct `sequence_index`). So the added levels are
+structurally inert on this fixture, not coincidentally unused.
+
+**2. Display-cap survivors**: still zero rows entered/left the cap for
+both `high_anomalies` (106→40) and `statistical_summary.anomalies`
+(102→40). Checked the actual boundary: rank 39 (last kept) vs rank 40
+(first dropped) differ in `|z|`/`score` in both lists — the cap boundary
+itself was never tied at the 4-tuple level, so adding two more tiebreak
+levels couldn't move it regardless. There ARE 3 duplicate
+`(severity, detector, |z|, score)` 4-tuples in the 106-row `high_anomalies`
+list — but they're the 4 stuck_fault alerts themselves (all
+`(urgent, stuck_fault_tier, 0.0, 1.0)`), sitting at ranks 0-3, nowhere near
+the rank-40 boundary. The timestamp tiebreak DOES do real, visible work
+here (it reorders those 4 among themselves by onset timestamp), it's just
+invisible to a survivor-diff measurement since all 4 are safely inside the
+top-40 regardless of their internal order.
+
+**Gate, re-run after the A+B change**: `tests/api/ tests/models/
+tests/dashboard/ tests/unit/` — **2322 passed, 0 failed, 5 xfailed**,
+unchanged. `tests/` not touched.
+
+HEAD: `1dcda00` before this round.
+
+## Step 3 — test fixes, routing pin, edge pins (QA, 2026-09-30)
+
+Branch `refactor/upload-anomaly-score-severity`, HEAD `cffbbae` before,
+`73a477b` after (parent verified as `cffbbae`, commit is `tests/`-only).
+Spec: `tasks/prompts/task2-step3-qa-tests.md`, all 8 items done.
+
+**Item 1 — the vacuous test was real and is fixed.**
+`test_stuck_fault_upload.py::test_alert_reports_duration_at_gate_crossing`
+built `[a.z_score for a in humidity_alerts if a.z_score is not None]`, which
+is unconditionally `[]` post-split, and `all([])` is `True`. Reproduced: all
+4 alerts have `z_score=None`, `frozen_hours_at_detection=6.0`. Now pins the
+count first, then the new field. **Proved it can fail** by mutation, not by
+inspection: empty list → `assert 0 == 4`; 3-of-4 list → `assert 3 == 4`;
+reverted both.
+
+**Item 2 sweep — one more genuinely broken site, outside the gate set.**
+`tests/workers/test_stuck_async_parity.py:606` asserted
+`co2_alerts[0]["z_score"] == 6.0` on a stuck hit and was **failing**
+(`assert None == 6.0`). It is invisible to the
+`tests/api tests/models tests/dashboard tests/unit` gate — `tests/workers/`
+is not in it. Measured directly, not inferred: `tests/workers/` was
+**191 passed / 1 failed / 1 xfailed** at `cffbbae` (re-ran with the original
+file restored from git to confirm) and is **192 passed / 1 xfailed** after.
+Also `_canonical_stuck_json` (:131) carried only `z_score` in the
+sync-vs-async parity payload, so the duration side of that comparison had
+degenerated to `None == None`; it now carries both fields.
+Swept clean, no change needed: the four `all(...)` sites over stuck alerts in
+`test_stat_chunk_invariance.py:312-313` and `test_stuck_async_parity.py:
+267-268/293-294` all assert `len(alerts) == 4` first, so none is vacuous.
+
+**Item 3 — the spec's file list was wrong, as team lead had flagged.**
+Verified independently: `test_label_integrity.py`, `test_cold_run_merge.py`
+and `test_episode_grouping.py` have zero stuck-hit `z_score=` constructors
+(every one is `detector="statistical"`; `test_label_integrity.py:143`'s
+`z_score=None` is an lstm row). The real site is
+`test_stuck_fault_upload.py::_dict_to_detail` (~:85), which duplicated the
+pre-split production conversion; realigned with
+`upload_portions._stuck_dict_to_high_detail`. Legacy shape retained
+deliberately in `tests/models/test_episode_duration_fallback.py`.
+
+**Items 4-6 — new file `tests/models/test_episode_duration_fallback.py`.**
+Tested through the public `group_alerts_into_episodes` with
+`completed_faults=None` rather than the private `_stuck_fault_duration`, so
+the pins survive a refactor of that helper. All four reference values
+reproduced independently before writing: legacy `z_score=6.0` → 21600.0 s;
+`frozen_hours_at_detection=6.0` → 21600.0 s; both (`z=99.0`, `frozen=6.0`)
+→ 21600.0 s (new field wins); neither → 0.0. All four `is_ongoing=True`.
+Item 5's still-open freeze is driven by the real detector over a
+never-released constant channel (`completed_faults == []` asserted, so the
+fallback is the only duration source) → 21600.0 s, i.e. hours **at the gate**,
+not the ~16.6 h input span. Item 6's `0.0` edge documented in-docstring as
+inherited (the `> 0` guard predates the split), currently unreachable
+because the gate is 6 h, and ambiguous by design; a negative-hours pin
+alongside it shows the guard is `> 0` and not `is not None`, which is what
+creates the ambiguity.
+
+**Item 7 — routing pin asserts the mechanism, and was verified by
+simulating the merge.** `tests/dashboard/test_stuck_row_routing.py` pins
+each barrier in isolation (statistical_summary preferred; the
+`high_anomalies` fallback excludes stuck, legacy-stuck and solo-lstm rows
+while admitting the compound `lstm+statistical` label; a truthy `column`
+also required). The end-to-end pin over fixture A lives in
+`test_stuck_fault_upload.py::TestStuckRowsNeverReachStatJumpRows` — placed
+there to reuse the existing `_run_fixture_through_upload` rather than add a
+7th copy of that harness to `tests/`.
+**A score-based assertion does NOT catch the merge** — found by simulation,
+not reasoning: a real stuck row already carries `score=1.0` and
+`stat_rows_to_jump_rows` uses `setdefault`, so the `0.0` fallback never
+fires for it. Rewrote that pin to assert every admitted row has a **numeric
+`z_score`**, the actual precondition of the `min(1.0, z / 5.0)` formula;
+re-ran the simulation and it now fails with "4 rows with no numeric
+z_score". Both fixture-A pins fail under a simulated merge.
+
+**Item 8 — `tests/api/test_anomaly_ranking.py`.** Score-breaks-ties pinned
+with scores ascending in arrival order so a rank that degenerated to list
+order keeps the *worst* rows and cannot pass by accident (plus an explicit
+non-vacuity test that rank order ≠ arrival order, and one pinning that all
+20 lstm rows share the key prefix `(0, 1, 0.0)`). Urgent-vs-critical pinned
+both ways: urgent ranks first, and it loses key levels 3 and 4 outright
+while doing so.
+**The spec's third case is ill-posed under the 6-tuple** and was written
+before step 2b part A added `timestamp`/`column`: two rows "equal on every
+key including score" are now equal on all six, so their *keys* are identical
+and the sort cannot order them from anything on the row — the remaining
+order is `sorted`'s stability over input order, which shuffling does change.
+Pinned what is actually true and useful instead: rows tied through `score`
+but with distinct timestamps (or distinct columns at equal timestamps) are
+shuffle-invariant over 20 seeded shuffles, and rows identical on all six
+levels yield one identical key with the stable-sort remnant stated
+explicitly rather than asserted as invariance.
+
+**Gate**: `tests/api tests/models tests/dashboard tests/unit` — **2322 →
+2361 passed, 0 failed, 5 xfailed** (+39 tests). `tests/dashboard/
+test_anomalies_page_data.py` untouched: `git diff main` on it is 0 lines.
+Coverage on the two modules these pins target, from the five relevant test
+files alone: `anomaly_ranking.py` **100%**, `episode_grouper.py` **88.82%**,
+combined **91.05%**.
+
+**Not corroborated, reported as unchanged only**: the "102 statistical hits"
+figure. It still reads 102 on fixture A, but per `docs/runbooks/
+native-dec-fixture-baseline.md:61-79` that is self-referentially
+reproducible and already superseded a pinned 111 — re-running the code is
+what the doc predicts regardless of correctness. Untouched at
+`test_stat_chunk_invariance.py:70-72`.
+
+**Gap left open, outside this step's 8 items**: step 2's five Streamlit
+display patches still have no test touching them — in particular
+`monitoring_jump.py`'s new `frozen_hours_at_detection` column/label/format
+branch (:276, :289, :318) and `diagnosis_enricher.py:329`'s stuck branch.
+`tests/dashboard/test_monitoring_jump.py` builds only statistical rows.
+Not added here: the spec scopes this step to items 1-8.
+
+### Process note — the step 1-2b gate set had a hole in it
+
+The gate used through steps 1, 2 and 2b —
+`tests/api/ tests/models/ tests/dashboard/ tests/unit/` — does **not**
+include `tests/workers/`. A genuinely red test lived there the whole time:
+`test_stuck_async_parity.py::TestSkipChannels::
+test_co2_alert_appears_when_skip_disabled` broke in `7cb1bb1` (the commit
+that made `z_score` `None` for stuck hits) and was still red at `cffbbae`.
+Five commits landed on top of it while it was red — `cdd1f65`, `f7b5ac2`,
+`b65be20`, `1dcda00`, `cffbbae` — each reporting a green gate, because the
+gate never looked at that directory. Team lead reproduced this independently
+and attributed it to the gate definition, not to the agents who ran it.
+
+**The next agent on this branch should run the full `tests/` suite, not that
+four-directory subset.** Team lead's measurement of full `tests/` after step
+3: 3233 passed, 18 skipped, 6 xfailed, 0 failed. My own step-3 numbers cover
+gate + `tests/workers/` only (2553 passed, 6 xfailed, 0 failed) — I did not
+run `integration/`, `live/`, `load/`, `db/`, `services/`, `monitoring/`,
+`vendors/`, `utils/` or `data/`, having first grepped them for `z_score`,
+`frozen_hours`, `stat_rows_to_jump_rows`, `anomaly_rank_key` and
+`_dict_to_detail` and found no references.
+
+## Step 6 — closed item 3's legacy display arm, consolidated (Backend, 2026-09-30)
+
+Step 5 found two unmigrated sites in item 3's own list: the step-2 display
+patches had no legacy arm (branch on `frozen_hours_at_detection is not
+None` only), so a pre-branch stuck row (numeric `z_score` carrying hours,
+no new field) fell straight to the z-score branch in three places; and
+`charts.py:657` had the same present-but-null `TypeError` risk already
+fixed at `inference_results.py:254` in step 2.
+
+**Defect 1 fix — one shared normaliser, not three independent arms.**
+Landed as a shared `resolve_stuck_duration_hours(row) -> Optional[float]`
+in `src/dashboard/services/diagnosis_enricher.py` (already the module
+that owns "z-score fallback" semantics per its own docstring, and already
+imported by `monitoring_jump.py`, so this follows the existing import
+direction rather than adding a new one). All three sites call it instead
+of each carrying its own `if frozen_hours is None: frozen_hours = z_score`
+decision:
+- `diagnosis_enricher.py::_build_reasoning` — `resolve_stuck_duration_hours(row)`
+  replaces the inline fallback directly.
+- `monitoring_jump.py::_normalize_stuck_display_row` — still does the
+  table-specific part (write the resolved value into
+  `frozen_hours_at_detection`, clear `z_score` on the copy so a legacy
+  row's duration never also renders under the Z-score column), but the
+  fallback decision itself is delegated.
+- `1_Monitoring.py::_add_anomaly_markers` — imports
+  `resolve_stuck_duration_hours` directly from
+  `src.dashboard.services.diagnosis_enricher` (views importing services
+  directly has precedent: `anomalies_page_data.py` already imports from
+  `src/api/services/`). The import was added to the existing top-level
+  import block, well above `st.set_page_config(` at line 190 — confirmed
+  `_add_anomaly_markers` (line 83) is still far above it, so
+  `tests/dashboard/test_monitoring_page_anomaly_hover.py`'s source-split
+  fixture still finds both the marker and the split point.
+
+This was a genuine consolidation, not the "three independent arms" shape
+team lead's read of the mid-edit tree inferred — chose it because the
+guardrails flag duplicated decision logic as a WARN, the three sites'
+`+21`/`+10`/near-zero diffs were exactly the signature of three separate
+implementations of one rule, and the shared helper turned out to be a
+small, cheap extraction (one pure function, `row.get()` works identically
+for the dict rows two sites use and the `pd.Series` the third uses) rather
+than a costly rework.
+
+**Defect 2 fix**: `charts.py:657` — `ap.get('z_score', 0)` (default only
+applies when the key is absent, not when present-and-null) replaced with
+an explicit `is not None` check, mirroring the `inference_results.py:254`
+pattern from step 2. Per team lead's explicit instruction, did NOT attempt
+to make the line reachable and did NOT touch `3_Gas_Monitoring.py` (its
+`anomaly_points` list is still always `[]`, confirmed unchanged).
+
+**Test outcome — six failures, not three, and this is the correct,
+unavoidable result.** Step 5 pinned each of the three xfail(strict=True)
+tests with a "positive companion pin" that asserts the CURRENT (buggy)
+z-score-labeled output for the exact same input/function call. A fix that
+satisfies the xfail (legacy row renders "frozen Xh") necessarily falsifies
+its companion (which asserts the same call renders "z=6.0"/"...σ..." for
+that same input) — the two are logical negations of each other, not
+independent checks. Verified empirically before committing: ran
+`tests/dashboard/test_stuck_display_contract.py` +
+`tests/dashboard/test_monitoring_page_anomaly_hover.py` and got exactly
+6 failures (3 XPASS-strict + the 3 companions), reported it rather than
+silently proceeding, and team lead independently reran the full suite
+twice against this tree and confirmed the same 6-failure result, retracting
+their own earlier "expect 3" prediction as the error (the companion pins
+were the piece not accounted for). Did not touch `tests/` at any point.
+
+**Full suite**: two runs by team lead — `6 failed, 3345 passed, 18
+skipped, 6 xfailed` (clean) and `6 failed, 3344 passed, 18 skipped, 6
+xfailed, 1 error` (one order-dependent flake in
+`tests/api/test_readings_api.py`, confirmed unrelated to this change,
+did not recur). One run by me — `6 failed, 3343 passed, 18 skipped, 6
+xfailed, 2 errors`; the two errors
+(`test_inference_upload_cold_run_greenhouse_fixture`,
+`test_route_stores_resolvable_blob_and_records_ref`) both passed cleanly
+in isolation, confirming the same order-dependent-pollution pattern team
+lead already found elsewhere in the suite — not caused by this change,
+not chased, consistent with team lead's own "do not chase it" call on
+their flake.
+
+HEAD: `c1cb029` before this round.
+
+## Step 5 + 7 — independent verification, then xfail cleanup (QA, 2026-09-30)
+
+Step 5 was a fresh qa-engineer instance verifying the branch against the spec
+rather than inheriting step 3's conclusions. Step 7 is the cleanup of the six
+tests step 6 flipped. The six findings below are the things a future session
+would otherwise have to re-derive; the pass/fail detail is reproducible from
+the committed tests.
+
+**1. Two places that are correct today and silently lossy if their
+surrounding assumption changes.** Grouped deliberately — the useful thing is
+the named assumption, not the risk:
+
+- `src/dashboard/components/inference_results.py:239` filters with
+  `detector in {"statistical", "lstm+statistical"}` — exact set membership
+  that happens to enumerate the compound label. Correct today *because
+  `"lstm+statistical"` is the only compound label in the codebase* (a literal
+  at `cold_run_upload.py:412`, not a join). Add a second compound label and
+  this undercounts silently. It sits directly upstream of the trim path
+  (`:810`, `:813`). Contrast `anomaly_ranking.py:48`, which splits on `"+"`
+  and is immune.
+- `monitoring_jump.anomaly_display_columns` on a *raw* legacy stuck row still
+  lacks the `frozen_hours_at_detection` column — only
+  `anomalies_to_display_frame` normalises first. Deliberately NOT pinned by a
+  test. Correct today *because that helper has exactly one caller
+  (`monitoring_jump.py:360`), inside the frame builder, on already-normalised
+  rows*, so its behaviour on raw input is not a contract. A second, external
+  caller pairing it with the frame would get a column set the frame does not
+  have — the frozen column built, then dropped at render. Re-check this if
+  one appears. The frame's contract IS pinned, via
+  `test_legacy_stuck_row_shows_hours_and_no_z_score` asserting the frozen
+  cell (which cannot hold a value the frame has no column for).
+
+**2. `1_Monitoring.py` is tested by source-splitting, not import.** That page
+cannot be imported: the module name starts with a digit and the page body
+executes at import (`st.set_page_config`). `tests/dashboard/
+test_monitoring_page_anomaly_hover.py` reads the source, splits at the first
+top-level `st.set_page_config(`, and execs the prefix to get the real
+`_add_anomaly_markers` body. The split marker is asserted, so moving
+`_add_anomaly_markers` below the page body fails that file with an explicit
+message rather than silently skipping the coverage. Unusual, accepted
+knowingly by team lead; the alternative was leaving the hover branch
+untested.
+
+**3. Spec test 11's premise does not hold on fixture A.** It asks whether the
+stuck episode duration *lower bound* is unchanged. There is no lower bound
+there: all five freeze runs end inside the fixture window, so every stuck
+episode matches a completed `FaultWindow` and reports an exact span with
+`is_ongoing=False`. `_stuck_fault_duration`'s fallback — the only part step 1
+changed — is **unreachable on fixture A**, so "unchanged vs main" is expected
+rather than reassuring. The fallback's real coverage is synthetic:
+`tests/models/test_episode_duration_fallback.py` (four field combinations,
+0.0 and negative edges) and `test_stuck_episode_duration_sources.py` (open
+freeze, gate value vs full elapsed span). Pinned as what it is in
+`TestFixtureAUsesCompletedFaultWindows`.
+
+**4. On fixture A, the episode durations are evidence; the 102 is a pin.**
+Keep these apart — they look alike and are not. The four stuck episode
+durations (34.83 / 22.08 / 47.92 / 163.83 h) match
+`tests/fixtures/NATIVE_FIXTURES.md:52` and `:75-78`, which were measured from
+the CSV itself rather than emitted by this code, so agreement is real
+corroboration and is pinned in `test_stuck_episode_duration_sources.py`. The
+102 statistical-hit figure is the opposite: self-referential, already
+superseded an earlier 111, and reproducing it is what
+`docs/runbooks/native-dec-fixture-baseline.md:61-79` predicts regardless of
+correctness. Step 5 measured 102 on both this branch and `83e6830` at all
+five chunk sizes and reported it only as "unchanged vs main", and
+deliberately did **not** re-pin it — a second copy would read as corroboration
+to the next person. It lives in exactly one place,
+`tests/workers/test_stat_chunk_invariance.py:70-72`. Keep it there.
+
+**5. The suite has pre-existing order-dependent pollution. Do not attribute
+it to your own change.** Three different tests errored across three full-suite
+runs by two agents during step 6 —
+`tests/api/test_readings_api.py::TestWindowEndpoint::test_window_rejects_bad_timestamp`,
+`test_inference_upload_cold_run_greenhouse_fixture`,
+`test_route_stores_resolvable_blob_and_records_ref` — a different one each
+run, none in `tests/dashboard/`, none recurring, all passing in isolation.
+How to tell it apart from a real regression: re-run the failing test in
+isolation, then in a narrower path set. If it passes both, it is this, not
+you. Unrelated to Task 2; not chased.
+
+**6. The display cap's row ORDER changed vs main, though its row SET did
+not.** On fixture A capped to 40, the four urgent stuck rows hold ranks 0-3
+on both sides but in opposite order: descending timestamp on this branch
+(newest freeze first) vs ascending arrival order on main, because main's
+score-only key returned one identical 1.0 for all four and the stable sort
+kept input order. Ranks 4-39 are identical row for row. This is user-visible
+and nothing in the spec asked for it — it falls out of the level-5 tiebreak's
+sort direction, which step 2b documented as "arbitrary but fixed". Reproduced
+independently by team lead and raised with the user as a consequence to
+accept or invert, not as a defect. "Set-unchanged, order-changed" is the
+accurate framing; "zero rows entered or left the cap" is true but does not
+convey it.
+
+**Step 7 cleanup, this commit.** Step 6 flipped six tests, not three: each
+`xfail(strict=True)` had a positive companion asserting the exact opposite
+output for the same input, so a correct fix necessarily falsified both halves
+of each pair. Removed the three markers, strengthened
+`test_legacy_stuck_row_shows_hours_and_no_z_score` to assert BOTH cells as it
+inverted (frozen reads hours AND `z_score` reads `—`, since surfacing the
+duration while leaving it under the Z-score header too would print one number
+under two units — worse than the defect), and rewrote the three companions as
+convergence pins (`test_legacy_and_current_shapes_render_one_identical_row`,
+`..._read_identically`, `..._hover_identically`). Convergence rather than a
+restatement of the sibling: it is the assertion that fails first if a display
+site reintroduces its own private copy of the fallback rule instead of
+delegating to `resolve_stuck_duration_hours`. Left
+`test_the_frozen_column_is_absent_for_a_statistical_row` and
+`_legacy_statistical_row`'s docstring untouched — that test is about a
+*statistical* row and was never part of the defect (team lead initially read
+the fixture name "legacy" as the legacy *stuck* case and withdrew the
+judgement call that rested on it).
+
+**Mutation-checked, both directions.** Reverting step 6's legacy arm in memory
+fails exactly these six and nothing else — the same six, symmetric with the
+pre-fix state. Reverting `anomaly_rank_key` to the old |z|-only key fails 14
+of 27 ranking/cap tests. Reverting `_stuck_dict_to_high_detail` to the
+pre-branch shape fails exactly the 3 field-split assertions while count,
+onset and `detected_ts` survive — direct evidence that the "4 alerts" and the
+"6.00 h" are one fact about detection, and only the field assertions
+discriminate the split.
+
+HEAD: `cb6fdf4` before this round.
+
+## Newest-first ordering made deliberate, not incidental (Backend, 2026-10-01)
+
+User ruling: the 2b identity tiebreak's newest-first display order for tied
+rows (e.g. fixture A's 4 urgent stuck alerts: 12-18, 12-16, 12-15, 12-14,
+vs. main's oldest-first) is the *right* behaviour, not an arbitrary pick
+that happened to be stable — make that explicit.
+
+- **`src/api/services/anomaly_ranking.py`**: rewrote level 5 (`timestamp`)
+  of `anomaly_rank_key`'s docstring to state the newest-first direction is
+  deliberate (operator reading an alert list wants the current fault at
+  the top) and removed the "arbitrary but fixed" framing from it
+  specifically. Level 6 (`column`) keeps that framing, correctly — nothing
+  about channel ordering carries deliberate meaning, it is still an
+  arbitrary-but-fixed pick (alphabetically later wins, e.g. "temperature"
+  outranks "humidity"), and the docstring says so explicitly, paired with
+  the fact that this is the level which actually decides ties at the
+  trigger-attribution site (verified below) — the pairing team lead asked
+  for, so nobody flips the direction in isolation without knowing it's
+  live at that call site.
+- **`tests/dashboard/test_display_cap_survivors.py`**: added
+  `test_the_four_urgent_rows_display_newest_onset_first` (`:90`, in
+  `TestUrgentRowsSurviveTheCapOnFixtureA`) pinning the exact order
+  `12-18, 12-16, 12-15, 12-14` on real fixture A data, with a docstring
+  stating explicitly that this deliberately differs from main's
+  oldest-first ordering for the same four rows, so a future reader diffing
+  against main does not misread it as a regression. Written to `tests/`
+  under the same single-item user directive as the `src/dashboard/`
+  widening — scoped to this one test, not a general lift of the
+  `src/api/`+`src/db/` boundary.
+
+**Per-timestamp trigger ranking confirmed unaffected** (this round changed
+only docstrings/comments and added one test — no tuple-comparison logic
+touched): re-ran the fixture-A `build_trigger_data_by_timestamp` probe from
+step 2b and diffed its 89-row output against the pre-this-round capture —
+**zero rows changed** (`channel`/`detector`/`severity`/`value` identical
+for all 89 keys). Also ran the existing `tests/api/test_anomaly_rank_contract.py`
+(which already pins "descending timestamp then descending column" as the
+tiebreak order at the trigger-attribution call site specifically) plus
+`tests/api/test_anomaly_ranking.py` and `tests/dashboard/test_display_cap_survivors.py`
+together: 41 passed, confirming the existing ordering contract holds
+unchanged.
+
+**Gate**: team lead ran the full suite and got `3351 passed, 18 skipped, 6
+xfailed, 1 error` against a predicted `3352 passed` — reconciled: the one
+error (not counted as passed) accounts for the difference exactly
+(3351 + 1 = 3352). The error, `tests/api/test_operational_config.py::
+TestGetEndpoint::test_get_fresh_tenant_sources_all_default`, is the SAME
+order-dependent pollution pattern as before — a third distinct test
+affected, confirmed passing in isolation by team lead, already specced as
+Task 2c item 5, not chased. My own run hit a different pair
+(`test_upload_async_route.py`'s two tests failed, `test_upload.py::
+test_upload_response_ranges` errored) — same pattern, all three confirmed
+passing cleanly in isolation (3 passed, 1.45s) before reporting, not
+chased either.
+
+HEAD: `fb856f0` before this round.
+
+## Step 1 — the stuck-duration fallback read a field that is now always None (ML, 2026-10-01)
+
+Recorded late: this is step 1's work, deferred at the time because the step's
+commit was scoped to one file and step 2 was about to start on a clean tree.
+
+**The regression.** `_stuck_fault_duration` in `src/models/episode_grouper.py`
+has two paths: a completed `FaultWindow` gives the exact frozen span, and a
+still-open freeze falls back to the hours elapsed at the gate crossing as a
+lower bound. That fallback read `getattr(first_alert, "z_score", None)`. Once
+`7cb1bb1` moved a stuck hit's hours out of `z_score` into the new
+`frozen_hours_at_detection` — leaving `z_score` permanently `None` for stuck
+rows — the fallback could no longer ever find a value, fell through to
+`return 0.0, True`, and every still-open freeze reported
+`duration_seconds=0.0` instead of its lower bound. Silent: no exception, no
+log, a plausible-looking number. Fixed at `f7b5ac2` — prefer the new field,
+fall back to `z_score` only for rows persisted before it existed (there is no
+backfill migration).
+
+**Why the discrimination is by detector and not by `z_score`'s presence.**
+A legacy *statistical* row also carries a numeric `z_score`, so a presence
+test would read a z-score as a duration in hours. The guard that makes the
+legacy read safe is the caller: `_flush_group` invokes this only under
+`if detector == "stuck_fault":`, so the discrimination is structural rather
+than re-derived inside the function. The docstring now says so, and says not
+to add a redundant guard or move the call out of that branch — the shape is
+load-bearing and looks removable.
+
+**Why no fixture caught it.** All four of fixture A's stuck alerts match a
+completed `FaultWindow`, so the fallback is unreachable from any fixture in
+the repo and `tests/api/` was fully green (753 passed / 4 xfailed) with the
+bug present. QA later pinned this as what it is in
+`TestFixtureAUsesCompletedFaultWindows`, and covered the fallback
+synthetically in `tests/models/test_episode_duration_fallback.py`.
+
+**The three verifications, with their numbers.** (1) Fixture A's four
+stuck_fault episode durations are byte-identical between this branch and main
+at `83e6830` — same fixture file through both checkouts via a throwaway
+worktree, dumps diffed clean. That proves only that the working path was not
+perturbed; per the point above it is *expected* rather than reassuring, since
+fixture A never reaches the changed code. (2) A legacy-shape row
+(`z_score=6.0`, field absent, no `FaultWindow`) yields 21600.0 s before and
+after — already-persisted `JobPortion.result` blobs keep working. (3) The
+new shape (`frozen_hours_at_detection=6.0`, `z_score=None`) yields **0.0
+before the fix and 21600.0 after**, which is the regression reproduced and
+closed rather than argued.
+
+**Pre-existing, not introduced here: the guard is `duration_hours > 0`.**
+A genuine `frozen_hours_at_detection=0.0` is therefore indistinguishable from
+"no duration recoverable" — both return `0.0, True`. Carried over verbatim
+from the `z_score` version; left alone because changing the `0.0` return was
+out of step 1's scope. QA pinned it as documented ambiguity
+(`test_zero_frozen_hours_is_indistinguishable_from_no_duration`) and added
+`test_negative_frozen_hours_also_falls_through_to_zero`, which is the test
+that actually discriminates `> 0` from `is not None`.
+
+**Downstream, learned after the fact.** Step 6 extracted
+`resolve_stuck_duration_hours` into
+`src/dashboard/services/diagnosis_enricher.py:313`, mirroring this fallback
+deliberately — same field preference, same detector-not-presence rule — and
+three display sites now share it. One difference matters for Task 2c: the
+derived helper is annotated `-> Optional[float]` but returns `row.get(...)`
+uncoerced, so a non-numeric `z_score` would reach `1_Monitoring`'s format spec
+and raise `ValueError`. Unreachable today because every blob is Pydantic
+`model_dump` output. The `episode_grouper` original coerces with
+`float(duration_hours)` and does not have this problem, so **the original is
+the safe reference of the two** — propagate the coercion to the copy, not the
+other way around.
+
+HEAD: `a9d0cfb` before this round.

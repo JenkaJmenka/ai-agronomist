@@ -338,6 +338,16 @@ class UploadHighAnomalyDetail(BaseModel):
     sequence_index: Optional[int] = Field(default=None, ge=0)
     column: Optional[str] = None
     z_score: Optional[float] = None
+    frozen_hours_at_detection: Optional[float] = Field(
+        default=None,
+        description="stuck_fault only: hours the channel had been frozen when the "
+        "wallclock gate fired (elapsed-so-far at detection, not the final freeze "
+        "duration — that is computed per-episode). Stuck hits carry this instead "
+        "of z_score, which is None for them. Legacy rows persisted before this "
+        "field existed still carry the duration in z_score; readers must fall "
+        "back to z_score only when detector == stuck_fault and this field is "
+        "absent.",
+    )
     severity: Optional[str] = None
     method: Optional[str] = None
     value: Optional[float] = None
