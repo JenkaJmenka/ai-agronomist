@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "gen:api": "openapi-typescript openapi.json -o lib/api-types.gen.ts",
-    "gen:api:live": "curl -sf ${API_URL:-http://localhost:8000}/openapi.json -o openapi.json && pnpm gen:api"
+    "gen:api:live": "../venv/bin/python ../scripts/dump_openapi.py && pnpm gen:api"
   },
   "dependencies": {
     "@auth/pg-adapter": "1.11.3",
