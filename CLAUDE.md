@@ -243,11 +243,19 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/` |
+| backend-engineer | `src/api/`, `src/db/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/` |
 | tech-lead | `docs/refactor/` |
+| orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md` — never delegate these |
+
+Root-level config and docs had no owner until 2026-10-05, and the gap stalled
+two agents in one session: devops-lead declined `requirements-dev.txt` and
+`README.md` as outside `docker/`/`.github/`, then backend-engineer paused on
+`alembic.ini` and `RAILWAY_HOSTING.md` for the same reason. Both were right to
+ask. They now belong to backend-engineer, except `AGENT_MEMORY.md` and this
+file, which stay with the orchestrator.
 
 ---
 
