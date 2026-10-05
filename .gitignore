@@ -78,3 +78,6 @@ models/test_customer/
 
 # Root tooling (husky / lint-staged) — commit pnpm-lock.yaml for reproducible hooks
 /node_modules/
+
+# MCP server config — copy .mcp.example.json and tweak per machine
+.mcp.json

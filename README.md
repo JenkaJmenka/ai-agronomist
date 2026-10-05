@@ -49,6 +49,9 @@ API_URL=http://localhost:8000 corepack pnpm dev
 | RabbitMQ management | http://localhost:15672 |
 | Streamlit dashboard (legacy) | http://localhost:8501 |
 
+> Agent/editor MCP tooling: `cp .mcp.example.json .mcp.json` — the local copy is
+> gitignored so per-machine tweaks never land in a commit.
+
 ### Local development without Docker
 
 ```bash
