@@ -5118,3 +5118,7 @@ Technical Notes recovered with Sprint 3:
 
 - **Deterministic attribution (Sprint 3, 2026-06-16)**: `AnomalyAttributor._reconstruction_error()` must call `model.encode(x)` → `(mu, _)` → `model.decode(mu)` to bypass VAE reparameterization. Attribution scores from this deterministic path are numerically lower than scores from `model.forward()` (stochastic). Do NOT compare them to `anomaly_score` from `/api/inference/comprehensive`. See `docs/architecture/ADR-004-deterministic-attribution.md`.
 - **Load test (Sprint 3, 2026-06-16)**: locust 2.44.3 installed in venv. Run: `locust -f tests/load/locustfile.py --host http://localhost:8000`. The gevent `RuntimeError: greenlet is being finalized` on locust import teardown is a known artifact of running locust via `python -c`; it does not affect locust itself.
+
+## Follow-up — cold-start diagnostic dataset mismatch (Orchestrator, 2026-10-05)
+
+Follow-up (2026-10-05): `docs/diagnostics/cold_start_stuck_fault_diagnostic.md:5` cites `2026_1d_english_clean.csv`, which matches no file in the repo or in `~/Projects/ai-agronomist-data/`; the canonical CSV there is 199 timestamps short of a full 2026 year (104,921 unique of 105,120), origin of the drop unknown.
