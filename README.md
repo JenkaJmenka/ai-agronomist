@@ -57,6 +57,7 @@ API_URL=http://localhost:8000 corepack pnpm dev
 ```bash
 python3 -m venv venv && source venv/bin/activate   # Python 3.11
 pip install -r requirements.txt
+pip install -r requirements-dev.txt           # locust load tests in tests/load/
 
 export DATABASE_URL=sqlite+aiosqlite:///./greenhouse.db
 alembic upgrade head

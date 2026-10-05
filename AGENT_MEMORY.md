@@ -5071,3 +5071,50 @@ Five things a future session should not have to rediscover:
    the doc predicts regardless of correctness — one agent claimed independent corroboration and had to
    retract. The four episode durations (34.83 / 22.08 / 47.92 / 163.83 h) *are* real evidence: they
    were measured from the CSV, not emitted by this code.
+
+## Recovered June 2026 entries — from two stale agent worktrees (Orchestrator, 2026-10-05)
+
+`.claude/worktrees/agent-accf82617a3e927f8` and
+`.claude/worktrees/agent-a547f5d687abe6746` sat untouched since 2026-06-16, both
+detached at `a1e16af` ("Finish Gap 2 incident memory", 2026-06-11), each holding
+uncommitted `AGENT_MEMORY.md` edits that never reached main. The *code* did reach
+main — every R1/R3/R4/R5/R6 marker and all four Sprint 3 files are on main today
+— so only these notes were lost, plus `requirements-dev.txt` (`locust>=2.20`),
+which returns in this same commit. Recovered verbatim from `~/worktree-archive/`
+(diff patches + untracked-file tarballs) ahead of pruning both worktrees. The
+entries below are June 2026 records, not current state.
+
+### Refactor R1-R3-R4-R5-R6 — from worktree-agent-accf82617a3e927f8
+
+- **Refactor R1-R3-R4-R5-R6 -- Code quality + performance batch (Tech Lead, 2026-06-16)**:
+  - R1: Extracted `DIAGNOSIS_RULES`, `_INDICATOR_EVIDENCE`, `_HIGH_SEVERITY_PATTERNS`, `_MEDIUM_SEVERITY_PATTERNS` from `src/models/root_cause_analyzer.py` to new `src/models/diagnosis_rules.py` (128 lines). `root_cause_analyzer.py` reduced from 426 to ~261 lines (under 300-line cap). Class attribute `RootCauseAnalyzer.DIAGNOSIS_RULES` preserved via import + assignment.
+  - R3: Extracted duplicate z-score expression `np.abs(sequence - baseline.mean) / (baseline.std + NUMERICAL_EPSILON)` from `score_spike` and `score_cascade` into `_z_scores(sequence, baseline)` helper in `src/models/pattern_scores.py`.
+  - R4: Added `PATTERN_LAG_WINDOW_FRACTION: int = 4` to `src/config.py`. Replaced `len(x) // 4` with `len(x) // PATTERN_LAG_WINDOW_FRACTION` in `_is_pair_lagged`.
+  - R5: Added `run_batch()` method to `ComprehensiveInferencePipeline` that creates `AnomalyAttributor` and `PatternDetector` once per batch (was per-sequence). Extracted `_run_with_components()` shared by `run()` and `run_batch()`. Updated batch endpoint in `inference_integrated.py` to use `pipeline.run_batch()`.
+  - R6: Added `_freeze(array)` helper in `pattern_scores.py`; all numpy arrays in `compute_baseline()` set to `writeable=False` before constructing `PatternBaseline`. Prevents silent mutation of shared frozen-dataclass state.
+  - Files changed: `src/models/diagnosis_rules.py` (new), `src/models/root_cause_analyzer.py`, `src/models/pattern_scores.py`, `src/config.py`, `src/api/services/comprehensive_pipeline.py`, `src/api/routes/inference_integrated.py`.
+  - Refactor notes: `docs/refactor/R1-R3-R4-R5-R6-refactor-notes.md`.
+  - No public API changes. No test files modified.
+
+### Sprint 3 — from worktree-agent-a547f5d687abe6746
+
+- **Sprint 3 — QA Engineer (2026-06-16)**:
+  - **S3-1 — pgvector CI integration tests**:
+    - Updated `.github/workflows/postgres-tests.yml`: added `services.postgres` block with `pgvector/pgvector:pg15`, env vars `POSTGRES_DB: test_db`, `POSTGRES_USER: postgres`, `POSTGRES_PASSWORD: postgres`, healthcheck, `DATABASE_URL` env var for both `alembic upgrade head` and pytest steps. Test command: `pytest -m postgres tests/db/test_incident_memory_postgres.py -v`.
+    - Added `postgres` marker to `pytest.ini` (was missing from the worktree copy, already present in main project `pytest.ini`).
+    - Created `tests/db/test_incident_memory_postgres.py` (8 tests, all `@pytest.mark.postgres`): session dialect detection, ivfflat index proxy check, exact cosine distance values (near≈0.0, opposite≈2.0), ascending distance ordering, cross-tenant isolation (both directions), pgvector vs numpy reference cross-check, k-limit enforcement, multi-axis nearest-neighbor correctness. All tests skip automatically when `DATABASE_URL` is not a postgres URL or the database is unreachable.
+    - GOTCHA: `Base.metadata.create_all` does NOT emit `CREATE INDEX USING ivfflat` (database-specific DDL). The ivfflat index is only present after a real `alembic upgrade head`. The S3-1 test for index existence (`test_ivfflat_index_exists_on_incidents_table`) checks `ix_incidents_tenant_detected` as a proxy that the table was fully created; the CI workflow's alembic step handles the real ivfflat index.
+  - **S3-2 — Automated load tests**:
+    - Created `tests/load/__init__.py` (empty).
+    - Created `tests/load/locustfile.py`: `AgronomistUser` with `wait_time = between(0.1, 0.5)`, three task methods (`single_inference` weight 5, `batch_inference` weight 2, `similarity_search` weight 3). Targets p95 < 50ms/500ms/100ms respectively. Module-level payloads pre-computed to avoid per-request allocation.
+    - Created `requirements-dev.txt` with `locust>=2.20` and `pytest-asyncio>=0.23`.
+    - Installed `locust==2.44.3` into the project venv (`venv/bin/pip install "locust>=2.20" -q`).
+  - **S3-3 — ADR for deterministic attribution**:
+    - Created `docs/architecture/ADR-004-deterministic-attribution.md` (Status: Accepted). Documents the `decode(mu)` path decision, threshold non-transferability constraint, why `model.eval()` alone is insufficient, API contract separation between attribution scores and `/api/inference/comprehensive` anomaly scores, and three rejected alternatives.
+  - **Test run**: `pytest tests/ -m "not postgres" --cov=src --cov-fail-under=90 -q` → **1047 passed, 0 failed, 93.46% total coverage** (gate 90% green, 2026-06-16).
+  - **Done signal**: `tasks/done/sprint3.json` written.
+
+Technical Notes recovered with Sprint 3:
+
+- **Deterministic attribution (Sprint 3, 2026-06-16)**: `AnomalyAttributor._reconstruction_error()` must call `model.encode(x)` → `(mu, _)` → `model.decode(mu)` to bypass VAE reparameterization. Attribution scores from this deterministic path are numerically lower than scores from `model.forward()` (stochastic). Do NOT compare them to `anomaly_score` from `/api/inference/comprehensive`. See `docs/architecture/ADR-004-deterministic-attribution.md`.
+- **Load test (Sprint 3, 2026-06-16)**: locust 2.44.3 installed in venv. Run: `locust -f tests/load/locustfile.py --host http://localhost:8000`. The gevent `RuntimeError: greenlet is being finalized` on locust import teardown is a known artifact of running locust via `python -c`; it does not affect locust itself.
