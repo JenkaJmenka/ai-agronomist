@@ -81,3 +81,6 @@ models/test_customer/
 
 # MCP server config — copy .mcp.example.json and tweak per machine
 .mcp.json
+
+# Root-level data exports (keep datasets out of the repo; tests/fixtures/ stays tracked)
+/*.csv
