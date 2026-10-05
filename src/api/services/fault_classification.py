@@ -70,10 +70,16 @@ def _canonical_sensor_value(
 
 # Maps SensorReading.anomaly_type to the Incident.fault_type taxonomy.
 #
-# Three sources write anomaly_type values to SensorReading rows:
-#   1. synthetic_anomalies.py  — lowercase keys from _TYPE_PROFILES
-#   2. setpoint_scada_detector — UPPER_CASE constants (e.g. UNDER_HEATING)
-#   3. band_breach_detector    — UPPER_CASE constants (e.g. TEMP_BAND_HIGH)
+# Today only synthetic_anomalies.py persists anomaly_type to SensorReading
+# rows (lowercase keys from _TYPE_PROFILES). setpoint_scada_detector and
+# band_breach_detector produce anomaly_type as a dataclass field on their
+# detection result, but neither one is wired to write it to SensorReading --
+# `grep -n "SensorReading" src/api/services/comprehensive_pipeline.py` returns
+# zero hits. This map is forward-looking: it already covers their UPPER_CASE
+# labels (e.g. UNDER_HEATING, TEMP_BAND_HIGH) so no second migration is needed
+# the day real detection starts persisting them. See ADR-010 for why removal
+# (delete_synthetic_anomalies) keys off SensorReading.source rather than this
+# column once that happens.
 #
 # Fault keys are taken verbatim from comprehensive_pipeline._RULE_VOTE_PROFILES
 # so the mapping is always consistent with what the pipeline writes to Incident.

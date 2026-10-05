@@ -246,6 +246,17 @@ def _backfill_synthetic(connection: sa.engine.Connection) -> int:
 
     Implements the escape hatch (not DELETE) — see module docstring.
     Filler rows → 0.10, injected fault rows → 0.85.
+
+    Safe to overwrite every matching row with a flat score despite keying
+    off ``anomaly_type IS NOT NULL`` alone (no source/provenance check):
+    this migration only ever runs on a database below revision 023, and
+    real anomaly detection cannot have written ``anomaly_type`` yet — that
+    lands no earlier than migration 026 (see ADR-010's ordering constraint
+    and fault_classification.py). So at the point this runs,
+    ``anomaly_type IS NOT NULL`` is still exactly the synthetic-injection
+    cohort with no real-detection rows mixed in. Anyone reordering the
+    migration chain so a real-detection writer lands before revision 023
+    breaks this invariant and must revisit this backfill.
     """
     updated = 0
     while True:

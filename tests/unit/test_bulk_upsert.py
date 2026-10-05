@@ -1,21 +1,22 @@
-"""Tests for dialect-aware bulk upsert and chunk-equivalent upload scoring."""
+"""Tests for dialect-aware bulk upsert and chunk-equivalent upload scoring.
+
+The ADR-010 provenance half of ``bulk_upsert_rows`` lives in
+``test_bulk_upsert_provenance.py`` — split off for the 300-line guardrail.
+"""
 
 import asyncio
 import datetime
 import os
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.db.models import Base, SensorReading
+from src.db.models import SensorReading
 from src.db.upsert import bulk_upsert_rows, dedupe_rows_by_key
-
-BASE_TS = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+from tests.unit._bulk_upsert_fixtures import BASE_TS, session  # noqa: F401
 
 
 def _sensor_row(minute: int, temperature: float = 20.0, anomaly_score=None) -> dict:
@@ -29,17 +30,6 @@ def _sensor_row(minute: int, temperature: float = 20.0, anomaly_score=None) -> d
         "light": 1000.0,
         "anomaly_score": anomaly_score,
     }
-
-
-@pytest_asyncio.fixture
-async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as sess:
-        yield sess
-    await engine.dispose()
 
 
 async def _count(session, tenant_id="tenant_upsert"):

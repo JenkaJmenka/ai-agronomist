@@ -38,7 +38,14 @@ import logging
 
 from src.vendors.csv_adapter import CSVAdapter
 from src.api.services.score_transform import canonical as _canonical_score
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, SCORE_SCALE_CALIBRATION, SEQ_LEN
+from src.config import (
+    ANOMALY_THRESHOLD,
+    ANOMALY_SCALING_FACTOR,
+    LATENT_DIM,
+    SCORE_SCALE_CALIBRATION,
+    SEQ_LEN,
+    SYNTHETIC_SOURCE_PREFIX,
+)
 from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
@@ -138,6 +145,16 @@ async def run_inference(
         records = result.scalars().all()
 
         for record in records:
+            if record.source is not None and record.source.startswith(SYNTHETIC_SOURCE_PREFIX):
+                # Migration-window hygiene, not a correctness fix (ADR-010): skip
+                # so a batch inference run can't clobber score_scale on a row
+                # still tagged synthetic before migration 025 has backfilled
+                # `source` everywhere. Once 025 has run, inject writes `source`
+                # directly and delete_synthetic_anomalies keys off `source`, so a
+                # clobbered score_scale here would no longer affect deletability --
+                # this guard only narrows the window in environments that haven't
+                # yet run 025.
+                continue
             record_key = normalize_timestamp_key(record.timestamp)
             if record_key is not None and record_key in canonical_by_key:
                 # ADR-005: store canonical score; preserve raw for recalibration.

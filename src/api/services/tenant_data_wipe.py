@@ -199,8 +199,17 @@ async def wipe_live_demo_data(
 
     # Primary filter: SensorReading rows tagged source='live' by PersistenceBatcher
     # (migration 017 backfills pre-existing anomaly_type='live' rows to this column).
-    # Fallback: pre-tag rows (source=None, anomaly_type=None) that share a timestamp
-    # with a live RawReading — never wipe inject rows (they carry a non-NULL anomaly_type).
+    # Fallback: pre-tag rows (source=None) that share a timestamp with a live
+    # RawReading. No anomaly_type guard here (ADR-010): inject rows written by
+    # the current (post-fix) inject_synthetic_anomalies carry a "synthetic:<type>"
+    # source of their own, which excludes them from this source.is_(None) branch
+    # -- an anomaly_type=NULL check would instead leak a pre-tag live row that
+    # later gains a real detector label. This does NOT hold for every synthetic
+    # row: a legacy row injected before the source marker existed, or one
+    # injected after migration 025 ran but before this fix shipped, still has
+    # source IS NULL and so falls into this fallback branch alongside real
+    # pre-tag live rows -- see migration 025's "Known residual" note and
+    # ADR-010 for the backfill/ordering story.
     sensor_match = SensorReading.source == LIVE_RAW_SOURCE
     if live_timestamps:
         sensor_match = or_(
@@ -208,7 +217,6 @@ async def wipe_live_demo_data(
             and_(
                 SensorReading.timestamp.in_(live_timestamps),
                 SensorReading.source.is_(None),
-                SensorReading.anomaly_type.is_(None),
             ),
         )
     sensor_result = await db.execute(

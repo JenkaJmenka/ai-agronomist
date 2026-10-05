@@ -120,7 +120,11 @@ async def upload_csv(
                         SensorReading,
                         records,
                         update_cols=["temperature", "humidity", "co2", "light"],
-                        preserve_when_null=["anomaly_score", "anomaly_type"],
+                        # "anomaly_type" is a no-op here: preserve_when_null only
+                        # applies to columns in update_cols (src/db/upsert.py),
+                        # and update_cols is just the four sensor floats -- a
+                        # re-upload never touches anomaly_type/source either way.
+                        preserve_when_null=["anomaly_score"],
                     )
                     await db.commit()
                     total_uploaded += len(records)

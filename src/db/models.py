@@ -4,7 +4,7 @@ SQLAlchemy database models for the AI Agronomist platform.
 
 import datetime
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -31,6 +31,15 @@ class SensorReading(Base):
     environments with indexing on tenant_id and timestamp.
     """
     __tablename__ = "sensor_readings"
+
+    # ADR-010 (docs/architecture/ADR-010-synthetic-provenance-marker.md):
+    # declares that every upsert of this model through bulk_upsert_rows
+    # (src/db/upsert.py) automatically gets the "last real writer owns
+    # provenance" rule (src/db/provenance.py). ClassVar excludes it from
+    # SQLAlchemy's declarative mapping -- a plain class-level flag reads
+    # better here than a mixin, since no other model in this file uses one
+    # and the rule applies to exactly one model today.
+    PROVENANCE_TRACKED: ClassVar[bool] = True
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -121,12 +130,17 @@ class SensorReading(Base):
     anomaly_type: Mapped[Optional[str]] = mapped_column(
         String(64),
         nullable=True,
-        doc="Synthetic anomaly type tag set by the inject endpoint; None for real sensor data"
+        doc="Detection/injection label: lowercase keys (e.g. co2_surge, "
+            "synthetic_context) from the inject-test endpoint, or UPPER_CASE "
+            "detector fault names once real detection starts persisting it. "
+            "Does NOT mark synthetic provenance -- use source for that (ADR-010)."
     )
     source: Mapped[Optional[str]] = mapped_column(
         String(64),
         nullable=True,
-        doc="Provenance tag: 'live' for rows persisted by the live SCADA pipeline; None for CSV uploads"
+        doc="Provenance tag: 'live' for rows persisted by the live SCADA pipeline; "
+            "'synthetic:<type>' / 'synthetic:context' for inject-test rows "
+            "(ADR-010); None for CSV uploads and legacy un-backfilled rows."
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),

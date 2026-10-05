@@ -1,5 +1,148 @@
 # Agent Memory
 
+## Task -- Provenance CASE-vs-explicit-update fix, synthetic_anomalies split, ADR-010 completion -- DONE (2026-10-05)
+
+**Goal:** three-stage follow-on to the 2026-10-04 provenance-marker task above.
+(1) Fix a bug qa-engineer pinned: with a provenance column (e.g. `anomaly_type`)
+EXPLICITLY named in `update_cols`, the ADR-010 reset CASE still overrode the
+caller's own value in 4 of 5 state combinations. (2) Bring
+`synthetic_anomalies.py` (384 lines) and `inject_synthetic_anomalies` (~141
+lines, nested closure) under the 300-line / 50-line guardrails. (3) Complete
+ADR-010 with the P0/P1/P2 predicate story, the full CASE contract, deploy
+notes, and residual tickets.
+
+**Stage 1 -- the fix (`src/db/provenance.py`, `src/db/upsert.py`):**
+`case_cols_for` now takes `update_cols` and skips building a CASE entry for
+any `_PROVENANCE_RESET_COLS` member the caller already named there -- it
+falls through to the plain `excluded_col` SET in `bulk_upsert_rows`, so an
+explicit update always wins regardless of either row's `source`. `source`
+itself is unaffected (no caller currently names it in `update_cols`). Full
+contract recorded in ADR-010's "The upsert CASE contract" section.
+
+**Stage 2 -- refactor, verified behaviour-preserving at every step:**
+- New `src/api/services/synthetic_anomaly_generators.py` (299 lines): the
+  per-type profiles/spread dicts, the pure value generators
+  (`_anomaly_value_directed`, `_normal_value`, `_pick_col`,
+  `_col_ranges_from_sample`), and the per-row builder chain
+  (`_type_config_for`, `_resolve_raw_spike_cols`, `_drift_rank_for`,
+  `_InjectionRunContext`, `_canonical_fallback_value`, `_col_values_for_row`,
+  `_canonical_sensor_values`, `_score_for_row`, `_build_injected_row`).
+  `synthetic_anomalies.py` (231 lines) keeps the two service entry points
+  plus the one DB-querying helper, `_resolve_sample_stats`.
+- **Could not delete `_TYPE_PROFILES`'s "dead" third element** as instructed:
+  `tests/api/test_synthetic_anomalies_gas_isolation.py:217` reads
+  `raw_keywords` via a positional `profile[3]` index, which pins the tuple to
+  its 4-element shape. Deleting it passed collection but failed that one test
+  (`1 failed, 3428 passed` on that attempt). Reverted; left a comment at the
+  `_TYPE_PROFILES` definition explaining why the unread element stays. Not
+  edited per the "do not touch tests/" rule -- flagged to team-lead instead.
+- `_TYPE_PROFILES` and `_pick_col` are re-exported (imported but otherwise
+  unused) in `synthetic_anomalies.py` on purpose: that same gas-isolation test
+  imports the module as `synthetic_anomalies_service` and reaches both names
+  as its attributes. Removing the import keeps the application working but
+  breaks that test's import path.
+- `src/api/services/tenant_data_wipe.py`: amended the comment claiming inject
+  rows are "already excluded" from the live-wipe fallback -- true only for
+  post-fix inject output; a legacy un-backfilled row or a post-025-pre-fix
+  inject row still has `source IS NULL` and falls into that fallback branch.
+
+**Stage 3 -- docs:** `docs/architecture/ADR-010-synthetic-provenance-marker.md`
+expanded with the P0/P1/P2 predicate-by-shape table, an EXPLAIN summary (hash
+semi-join, ~260ms/100k rows, no index needed), the `PROVENANCE_TRACKED`
+enforcement-layering rationale, the full upsert CASE contract, the rescoring
+equivalence note, three residual tickets, and deploy notes with prod counts.
+Fixed a garbled sentence in "Alternatives considered". This file's own stale
+section (test_023 regression, Postgres no-op claim) corrected above.
+
+**Verification:** `./venv/bin/python -m pytest tests/ -q` -> `0 failed, 3429
+passed, 18 skipped, 5 xfailed` (3452 collected) both after stage 1 alone and
+again after the full stage 2 refactor -- identical counts, confirming the
+split and extraction added/removed no behavior. `./venv/bin/python -m alembic
+heads` -> single head at `025`, unchanged by this task (no alembic files
+touched). Suite total is 3452, one fewer than the 3453 implied by the prior
+baseline handed off for this task -- most likely a concurrent agent's
+unrelated edit to `tests/` landing mid-session; not something this agent
+changed, and the specific target test and its siblings were independently
+confirmed passing.
+
+This document serves as a record of the agent's past actions, completed tasks, and current state.
+
+## Task -- Synthetic provenance marker: source="synthetic:<type>" -- DONE (2026-10-04)
+
+**Goal:** `sensor_readings.anomaly_type` had exactly one writer of a non-NULL
+value (the inject-test endpoint), so `anomaly_type IS NOT NULL` doubled as a
+de-facto "is synthetic" flag in two call sites. Upcoming real detection would
+start persisting `anomaly_type` too, making "remove all synthetic" destroy
+genuine detections. Fix moves the synthetic signal onto
+`SensorReading.source = "synthetic:<type>"` / `"synthetic:context"`.
+
+**Files modified:**
+- `alembic/versions/025_tag_synthetic_source.py` (new) -- data-only backfill,
+  `revision="025"`, `down_revision="024"`. Verified on real Postgres (pgvector
+  container, port 55432) with all 4 seeded cohorts (live, injected_spike,
+  injected_filler, score_scale_only). The no-op property is `upgrade ->
+  upgrade` (re-running the backfill on an already-tagged DB touches 0 rows) --
+  NOT `upgrade -> downgrade -> upgrade`: the second upgrade in that sequence
+  re-tags every row the downgrade just cleared, so it is a real write, not a
+  no-op. Single head confirmed at 025.
+- `src/api/services/synthetic_anomalies.py`: inject now sets
+  `SensorReading.source` (same marker RawReading already got); delete keys
+  both the "all" and per-type branches off `source` instead of `anomaly_type`;
+  fixed whitespace-only `anomaly_type` 422 (strip() result needs an `or None`
+  fallback); removed dead `_daily_cycle`/`_anomaly_value` (zero callers,
+  `src/db/seeds.py` has its own separate `_daily_cycle`); updated module
+  docstring.
+- `src/api/services/tenant_data_wipe.py`: `wipe_live_demo_data`'s fallback
+  branch no longer requires `anomaly_type IS_(None)` -- that guard leaked a
+  pre-`source`-tag live row once it gained a detector label.
+- `src/db/models.py`: `anomaly_type`/`source` docstrings updated to describe
+  the new marker convention and stop implying `anomaly_type` marks synthetic
+  provenance.
+- `src/api/services/fault_classification.py`: corrected stale "three sources
+  write anomaly_type" claim -- only synthetic_anomalies.py does today
+  (`comprehensive_pipeline.py` has zero `SensorReading` references); map is
+  forward-looking.
+- `src/api/routes/upload.py`: removed the no-op `"anomaly_type"` entry from
+  `preserve_when_null` (it's only consulted for columns in `update_cols`,
+  which never includes `anomaly_type`), with a comment explaining why.
+- `docs/architecture/ADR-010-synthetic-provenance-marker.md` (new): decision
+  record -- why `source` over a new column/RawReading flag/`score_scale`
+  reuse; the ordering constraint that 025 must land before real `anomaly_type`
+  persistence ships; next anomaly-episodes migration is `026`.
+
+**Report answers (investigate-only, not fixed):**
+1. Live upsert (`src/live/persistence.py:384`) uses `on_conflict_do_nothing`,
+   not `DO UPDATE` -- it cannot clobber an existing `synthetic:` marker;
+   first-writer-wins on a timestamp collision.
+2. Confirmed: a CSV re-upload at an injected timestamp
+   (`src/api/routes/upload.py` `update_cols=[temperature,humidity,co2,light]`)
+   overwrites the sensor floats while leaving `source='synthetic:*'` in place
+   -- "remove all synthetic" would then delete a row holding real measured
+   values. Flagged, not fixed (out of this task's scope).
+3. Agree with qa's "intended-conservative" framing. 025's shipped predicate
+   (`source IS NULL AND (score_scale='synthetic' OR EXISTS(sibling raw_readings
+   row tagged 'synthetic:%'))` -- see ADR-010's P0/P1/P2 table; the
+   `anomaly_type IS NOT NULL` variant quoted in an earlier version of this note
+   was a rejected draft, not what shipped) can still leave a row behind: any
+   row written by pre-fix inject code *after* migration 025 has already
+   executed on that database (API/worker deploy-order skew -- see
+   `[[project_api_migration_deploy_skew]]`-style hazard) lands with `source IS
+   NULL` and `anomaly_type` set, and the one-time backfill never re-runs to
+   catch it.
+
+**Test regression caused by this task, since fixed:**
+`tests/api/test_023_resumable.py::test_023_resumes_when_its_columns_already_exist`
+hardcoded `assert version == "024"` after `command.upgrade(config, "head")`,
+which broke the moment migration 025 made head `"025"`. qa-engineer fixed this
+by asserting against `ScriptDirectory.from_config(config).get_current_head()`
+(head-relative, so it survives any future migration being added) instead of
+the literal `"024"`. No longer a regression.
+
+**Full suite:** as of the backend-engineer pass that added the stage-1
+upsert-contract fix and the stage-2 refactor on top of this task,
+`./venv/bin/python -m pytest tests/ -q` -> `0 failed, 3429 passed, 18 skipped,
+5 xfailed` (3452 collected). Green.
+
 This document serves as a record of the agent's past actions, completed tasks, and current state.
 
 ## Task — Fix stale Railway healthcheck docs, add Config as Code sunset tracker — DONE (2026-09-29)

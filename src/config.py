@@ -1381,6 +1381,39 @@ CANONICAL_ANOMALY_THRESHOLD: float = 0.5
 SYNTHETIC_ANOMALY_SCORE_RANGE: tuple[float, float] = (0.75, 0.99)
 SYNTHETIC_CONTEXT_SCORE_RANGE: tuple[float, float] = (0.05, 0.20)
 
+# "<prefix><anomaly_type>" / "<prefix>context" marker written to
+# SensorReading.source / RawReading.source by the inject-test synthetic
+# generator (ADR-010) and read back by delete_synthetic_anomalies and the
+# gas-anomaly real-data filter (src/api/routes/gas_anomalies.py). Routed
+# through synthetic_source() so every writer/reader agrees on the exact
+# string -- a hand-typed "synthetic_" or "Synthetic:" would make removal
+# silently blind to those rows instead of raising an error.
+SYNTHETIC_SOURCE_PREFIX: str = "synthetic:"
+
+
+def synthetic_source(anomaly_type: str | None) -> str:
+    """Build the ``source`` provenance marker for a synthetic row.
+
+    ``anomaly_type=None`` denotes the background filler ("context") rows.
+    """
+    return f"{SYNTHETIC_SOURCE_PREFIX}{anomaly_type or 'context'}"
+
+
+# inject_synthetic_anomalies() tuning constants
+# (src/api/services/synthetic_anomalies.py).
+SYNTHETIC_SAMPLE_SIZE: int = 500  # recent RawReadings sampled to learn column ranges
+SYNTHETIC_DEFAULT_WINDOW_HOURS: int = 48  # injection window when none is requested
+SYNTHETIC_MIN_INTERVAL_SECONDS: int = 60  # floor on spacing between injected rows
+
+# Canonical sensor fallback statistics (min, max, mean) used when a tenant has
+# no RawReading history yet to learn real column ranges from.
+SYNTHETIC_CANONICAL_STATS: dict[str, tuple[float, float, float]] = {
+    "temperature": (19.0, 28.0, 23.0),
+    "humidity": (55.0, 72.0, 63.0),
+    "co2": (380.0, 520.0, 420.0),
+    "light": (0.0, 950.0, 200.0),
+}
+
 # Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly
 # episode persists (debounce to avoid flooding the SSE stream).
 LIVE_ANOMALY_REEMIT_SECONDS: float = float(

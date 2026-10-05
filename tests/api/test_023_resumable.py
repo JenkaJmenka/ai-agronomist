@@ -30,6 +30,7 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -110,9 +111,16 @@ def test_023_resumes_when_its_columns_already_exist(tmp_path, monkeypatch):
 
     command.upgrade(config, "head")
 
+    # Resolved from the script directory rather than hard-coded: the intent is
+    # "the chain resumed all the way to head", and a literal silently turns
+    # every new migration into a failure of this test.
+    expected_head = ScriptDirectory.from_config(config).get_current_head()
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "024", "024 must apply once 023 stops failing on its own columns"
+    assert version == expected_head, (
+        f"resumed upgrade stopped at {version!r}, expected head {expected_head!r} — "
+        "every migration after 023 is blocked while 023 fails on its own columns"
+    )
 
     columns = _sensor_reading_columns(engine)
     for column in (*_COLUMNS_023, *_COLUMNS_024):

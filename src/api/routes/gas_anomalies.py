@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.gas import GasReadingsResponse, GasSummaryResponse
+from src.config import SYNTHETIC_SOURCE_PREFIX
 from src.db.models import RawReading
 from src.db.session import get_db
 from src.models.gas_anomaly_detector import GAS_COLUMNS, GasAnomalyDetector
@@ -34,7 +35,7 @@ router = APIRouter(prefix="/api/gas", tags=["gas"])
 
 def _source_is_real(col: Any) -> Any:
     """SQLAlchemy clause: source IS NULL OR source NOT LIKE 'synthetic:%'."""
-    return or_(col.is_(None), ~col.like("synthetic:%"))
+    return or_(col.is_(None), ~col.like(f"{SYNTHETIC_SOURCE_PREFIX}%"))
 
 
 def _numeric_or_none(value: Any) -> Optional[float]:
