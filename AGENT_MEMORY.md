@@ -5122,3 +5122,39 @@ Technical Notes recovered with Sprint 3:
 ## Follow-up — cold-start diagnostic dataset mismatch (Orchestrator, 2026-10-05)
 
 Follow-up (2026-10-05): `docs/diagnostics/cold_start_stuck_fault_diagnostic.md:5` cites `2026_1d_english_clean.csv`, which matches no file in the repo or in `~/Projects/ai-agronomist-data/`; the canonical CSV there is 199 timestamps short of a full 2026 year (104,921 unique of 105,120), origin of the drop unknown.
+
+## Follow-ups — CI/CD investigation (Orchestrator, 2026-10-05)
+
+Opened after the f429883 push: all four GitHub workflows failed on runner
+acquisition ("The job was not acquired by Runner of type hosted even after
+multiple attempts", ~15m01s each, zero steps executed, empty `--log-failed`),
+while Railway shipped the same commit to production anyway. Billing was ruled
+out by the user (October: ~207 Linux minutes, $0, well under quota). None of the
+three items below is a code defect; all three are pipeline design.
+
+1. **`web/test/e2e/perf.spec.ts:66` flakes on its own budget.** The
+   `filter apply updates the view under 500 ms` test measured 544 ms on the
+   scheduled web-ci run of 2026-10-04 (run 37177433264, 1 failed / 65 passed)
+   and passed on the next cron against the identical commit c29cd6d
+   (run 37260479228). A budget missed by 44 ms that passes and fails on the same
+   code is not a regression signal. Decide one of: raise
+   `FILTER_APPLY_BUDGET_MS`, allow a retry for the perf project only, or
+   investigate the filter-apply path for real slowness. Until then a red web-ci
+   on a scheduled run means nothing on its own.
+
+2. **Railway redeploys all three repo services on every push to main, including
+   docs-only pushes.** On f429883 the api, worker and web deployments were all
+   created at 2026-10-05T19:31:14.177Z. A commit touching only `.gitignore`,
+   `README.md` or `AGENT_MEMORY.md` therefore restarts the API, the worker and
+   the operator UI. Consider per-service Railway watch paths (api/worker on
+   `src/**` + `alembic/**` + `requirements.txt` + `docker/**`, web on `web/**`)
+   so documentation commits stop cycling production.
+
+3. **Nothing gates a deploy on CI.** Railway created those deployments at
+   19:31:14.177Z; GitHub queued the four workflow runs at 19:31:15Z — Railway
+   started building about a second before CI existed, and the deploy succeeded
+   while all four runs failed. The watched-branch and any wait-for-CI setting are
+   not exposed through the Railway CLI (`railway status --json`'s serviceInstance
+   carries only cronSchedule/domains/numReplicas/source/startCommand), so this
+   has to be checked and changed in the dashboard. Consider enabling Railway's
+   "wait for CI" on the three repo services.

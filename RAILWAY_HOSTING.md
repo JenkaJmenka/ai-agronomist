@@ -30,8 +30,7 @@ Everything is one Railway project (**ai-agronomist**, environment **production**
 |---|---|---|
 | `ai-agronomist-api` | FastAPI backend (`src/api/`) — all data, inference, jobs | repo root, branch `main`, Docker (`docker/start-api.sh`, binds `::` dual-stack on `$PORT`, default 8000) |
 | `ai-agronomist-worker` | Async job consumer (`src/workers/`) — portioned CSV uploads, training | repo root, branch `main` |
-| `ai-agronomist-dashboard` | **Legacy** Streamlit UI (`src/dashboard/`) — stays live until cutover completes | repo root, branch `main` |
-| `web` | **New** Next.js operator UI (`web/`) — replaces the dashboard | repo, branch `fe/nextjs-migration`, root directory `web` |
+| `web` | **New** Next.js operator UI (`web/`) — replaces the dashboard | repo, branch `main`, root directory `web` |
 | `ai-agronomist-db` | Postgres (`DATABASE_URL` for api + worker) | Railway plugin |
 | `Redis` | API response cache (`fastapi-cache`) | Railway plugin |
 | `RabbitMQ` (+ Web UI) | Job queue between api and worker | Railway template |
@@ -73,8 +72,7 @@ Already done (2026-07-11, via CLI/GraphQL — no deploy has run yet):
   only until Railway retires Config as Code on 2026-12-01; see the sunset
   follow-up in `docs/runbooks/deploy.md`.
 
-Not done (deliberately — each is a human decision): connecting the repo
-(triggers the first deploy), and the production hostname switch.
+Not done (deliberately — a human decision): the production hostname switch.
 
 ## 4. First deploy — step by step
 
@@ -86,12 +84,7 @@ Not done (deliberately — each is a human decision): connecting the repo
    `{"status":"ok"}`. (`GET /api/auth/validate` was removed in the Phase 2
    auth hardening — the BFF now sends `X-API-Key` / `X-Tenant-Id` directly on
    every request and reads the resulting 401/403 instead of pre-validating.)
-2. **Connect the repo to `web`.** Dashboard: `web` service → **Settings →
-   Source → Connect Repo** → `JenkaJmenka/ai-agronomist`, branch
-   **`fe/nextjs-migration`**. (Root directory is already set to `web`; leave
-   it.) Connecting starts the first build immediately.
-   - CLI alternative: `railway link` in the repo, then use the GraphQL
-     `serviceConnect` mutation with the service id above.
+2. **Repo connection — already done.** `web` is already connected to `JenkaJmenka/ai-agronomist`, branch **`main`** (root directory `web` is already set; leave it). This step does not need to be performed again; it is kept here only for historical context on how the connection was made.
 3. **Watch the first build.** Expect Nixpacks to detect Node via
    `web/package.json` (`packageManager: pnpm@9.15.9`), run the build command
    from `railway.json`, then healthcheck `/api/health`. Build ≈ 2–4 min.
@@ -111,12 +104,10 @@ Not done (deliberately — each is a human decision): connecting the repo
 
 1. Run both UIs in parallel ≈ 1 week; compare error rates and data parity
    (`MIGRATION_PLAN.md` §8 P5 gates).
-2. Switch the production hostname: move the custom domain from
-   `ai-agronomist-dashboard` to `web` (Settings → Networking on each).
-3. Keep Streamlit deployed but demoted for one release.
-4. **Rollback** = move the domain back to the dashboard service. No data
-   migration is involved at any point; both UIs read the same API.
-5. After a clean release: decommission `ai-agronomist-dashboard`.
+2. Switch the production hostname to `web` directly (Settings → Networking on `web`) — there is no `ai-agronomist-dashboard` service in production to move the domain *from* (see §1).
+3. ~~Keep Streamlit deployed but demoted for one release.~~ Moot — there is no `ai-agronomist-dashboard` service in production (see §1); nothing is deployed to demote.
+4. **Rollback:** not possible by moving a domain back — `ai-agronomist-dashboard` does not exist in production, so there is no dashboard deployment to roll back to. No data migration is involved at any point; both UIs read the same API.
+5. ~~Decommission `ai-agronomist-dashboard`.~~ Moot — that service does not exist in production (see §1); there is nothing left to decommission.
 
 ## 6. Environment variables (web service)
 
@@ -138,6 +129,8 @@ biome lint → tsc → vitest → next build → Playwright e2e including
 < 500 ms, channel toggle < 300 ms with zero refetches). E2E is hermetic — the
 Playwright web server points `API_URL` at a dead port and every BFF call is
 mocked, so CI needs no backend. `PostgreSQL Integration Tests` covers `main`.
+
+**Railway does not wait for CI.** Railway builds and deploys on every push to `main` without gating on GitHub Actions — in practice it can start building before the CI workflows are even queued, so a deploy can reach production and succeed while CI is still running or has failed. All three repo-backed services (`ai-agronomist-api`, `ai-agronomist-worker`, `web`) redeploy on every push to `main`, including docs-only changes.
 
 ## 8. Troubleshooting
 
