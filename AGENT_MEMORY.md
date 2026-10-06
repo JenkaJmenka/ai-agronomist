@@ -1,5 +1,129 @@
 # Agent Memory
 
+## Task -- anomaly_episodes table, Part A: migration 026 + ORM model -- DONE (2026-10-06)
+
+**Goal:** general, detection-time, persisted table for fault windows (stuck
+first, band-breach/calibration-drift to follow). Distinct from the existing
+query-time `GET /api/anomalies/episodes` grouping
+(`src/api/services/anomaly_episode_service.py`), which persists nothing --
+name collision accepted deliberately by the user.
+
+**Files:**
+- `alembic/versions/026_add_anomaly_episodes.py` (new) -- `revision="026"`,
+  `down_revision="025"`. Pure `create_table`/`create_index` DDL, no data
+  migration, no dialect branching needed.
+- `src/db/models.py`: new `AnomalyEpisodeRecord` model, appended after `Greenhouse`
+  (named `...Record`, not `AnomalyEpisode`: that name is already the upload-path
+  dataclass in `src/models/episode_grouper.py`, so reusing it would force an
+  import alias at any site touching both)
+  (chronological-by-migration ordering already used in this file). File is
+  now 827 lines, pre-existing violation of the 300-line guardrail (the file
+  was already 664 lines before this change) -- not actioned, flagged only;
+  splitting it is a cross-cutting refactor well beyond this task's scope.
+- `src/api/services/anomaly_episode_service.py`: one-paragraph docstring
+  addition distinguishing the module's query-time grouping from the new
+  table. No logic touched.
+
+**Column decisions:**
+- `id`: `String(36)` UUID PK (`_generate_uuid` default) -- matches
+  `Incident`'s convention (a detected-event entity), not `SensorReading`'s
+  autoincrement-int convention (raw telemetry).
+- `onset_ts` / `end_ts` / `detected_ts`: `NOT NULL` -- all three are known
+  the moment a detector writes any row (end_ts = FaultWindow.last_frozen_ts,
+  continuously updated while a fault is active, not a terminal field).
+- `release_ts`: nullable -- unknown until the freeze actually ends; `NULL`
+  while `is_ongoing=True`.
+- `duration_seconds`: nullable `Integer`, stored-and-derived from
+  `end_ts - onset_ts` (frozen span so far), recomputed by the writer on
+  every update -- not `release_ts - onset_ts` (that longer span is for
+  alert suppression). Not authoritative; no column is.
+- `frozen_sample_count` / `raw_slot_count`: nullable `Integer` -- schema
+  only, see "Known gap" below.
+- `severity`: `String(16)` `NOT NULL` -- every row in this table is
+  inherently a detected fault (unlike `sensor_readings.detected_severity`,
+  nullable because most of *that* table's rows are not flagged).
+- `trigger_value`: nullable `Float` -- `NULL` for detectors with no single
+  representative raw value (e.g. reconstruction-error-based).
+- `is_ongoing`: `Boolean NOT NULL default=False`, migration adds
+  `server_default=sa.false()` (matches `incidents.resolved`'s pattern in
+  migration 002).
+- `source`: nullable `String(64)`, mirrors `SensorReading.source` verbatim
+  (ADR-010): `None` = real, `'synthetic:<type>'` = inject-test.
+- `fault_type`: `String(64) NOT NULL`, deliberately **no DB CHECK**.
+  Mirroring `ck_incidents_fault_type` (migrations 011/016/019) would add a
+  third hand-edited vocabulary location, and a migration must not import
+  the app-side list (025's docstring explains why). Cost: a typo'd
+  `fault_type` is accepted silently today; left to application-layer
+  validation, which does not exist yet either (tracked for Part B).
+
+**Indexes:** `(tenant_id, greenhouse_id, channel, onset_ts)` for the
+multi-tenant time-range lookup; a PARTIAL index on
+`(tenant_id, greenhouse_id) WHERE is_ongoing` for "which episodes are open
+now"; `(fault_type, detector)` for reporting/filtering. No standalone
+`tenant_id` index -- the first composite's prefix covers it.
+
+An earlier draft used a boolean-leading `(is_ongoing, onset_ts)` index on the
+`ix_incidents_resolved_detected` precedent. Replaced on review: precedent is
+not justification, there was no reader to justify it by, and every read here
+filters `tenant_id`, so it would be scanned across tenants while indexing the
+`is_ongoing=false` majority the query never wants. This is the repo's FIRST
+partial index -- it needs BOTH `postgresql_where` and `sqlite_where`, because
+with only the former the SQLite index silently becomes a full index, and tests
+run on SQLite while production runs Postgres.
+
+**Constraints (added on review, both verified on Postgres AND SQLite):**
+`uq_anomaly_episodes_tenant_gh_channel_detector_onset` on
+`(tenant_id, greenhouse_id, channel, detector, onset_ts)` is the UPSERT KEY --
+the conflict target that makes re-uploading the same file idempotent.
+`ck_anomaly_episodes_release_ts_null_while_ongoing` is
+`CHECK (NOT is_ongoing OR release_ts IS NULL)`, ONE-DIRECTIONAL.
+The converse is deliberately NOT enforced because drift and band-breach
+episodes can close without ever observing a first normal sample to release
+against. Do NOT justify it by the end-of-file case: an open freeze at end of
+file is `is_ongoing=true`, `release_ts` NULL, `end_ts` = last frozen sample --
+it is NOT closed. That wrong rationale shipped into three files and had to be
+corrected; it would have told a Part B implementer to write the wrong branch.
+
+**Known gap -- Part B's job, not this task's:** `FaultWindow`
+(`src/models/stuck_fault_detector.py:172`) has no `frozen_sample_count` or
+`raw_slot_count` field, and nothing in the detector writes to this table at
+all yet. This migration only creates columns/indexes.
+
+**CSVAdapter deletes the rows `raw_slot_count` exists to count.** Measured on
+`native_dec_stuck_fault.csv` through the real adapter: `frozen=1897`,
+`raw=1897`, gap 0 -- NOT the 1967 `NATIVE_FIXTURES.md` documents. Cause:
+`_handle_nan` (`src/vendors/csv_adapter.py:311-320`) fills optional columns
+then `dropna(subset=[timestamp] + REQUIRED_SENSOR_COLS)`, and
+`REQUIRED_SENSOR_COLS = ("temperature", "humidity")`. The fixture's 70
+null-humidity rows are dropped before the detector sees them: 3457 rows in,
+3387 out, and 1897 + 70 = 1967. With nulls preserved the detector measures
+exactly 1967.
+
+So a count of *observed* slots can never show a gap on the production upload
+path -- the only survivor is `inf`, which passes `dropna` but fails
+`isfinite`. Counting consumed rows is therefore the wrong definition: it
+measures what the adapter left behind, not what the sensor did. The fix (in
+progress) redefines `raw_slot_count` as EXPECTED slots at the channel's
+nominal cadence, so the gap means "missing readings, whether dropped upstream
+or never logged". Anything comparing observed-row counts against
+`NATIVE_FIXTURES.md` figures must account for this drop first.
+
+**Verification:** Spun up `pgvector/pgvector:pg15` in Docker (port 55432,
+`CREATE EXTENSION vector`) and ran the real chain base->026, confirmed the
+table/index shapes via `\d anomaly_episodes`, then `downgrade 025` (table
+dropped, verified), then `upgrade head` again -- `alembic heads` single
+head `026` both times. Container removed after. `./venv/bin/python -m
+pytest tests/ -q` -> `1 failed, 3428 passed, 18 skipped, 5 xfailed` (3452
+collected, same total as the 2026-10-05 baseline). The one failure,
+`tests/api/test_025_migration.py::test_025_is_the_head_revision`, asserts a
+literal `"025"` head and breaks the moment a new migration lands --
+confirmed via `git stash` that it passes on `main` and fails only with
+026 present. This is the identical regression class `test_023_resumable.py`
+hit at the 025 task (see 2026-10-04 entry above); same fix applies
+(assert against `ScriptDirectory.from_config(config).get_current_head()`
+instead of a literal). Not fixed here -- `tests/` is qa-engineer's file
+ownership per `CLAUDE.md`, not mine. Flagged to team-lead instead of edited.
+
 ## Task -- Provenance CASE-vs-explicit-update fix, synthetic_anomalies split, ADR-010 completion -- DONE (2026-10-05)
 
 **Goal:** three-stage follow-on to the 2026-10-04 provenance-marker task above.
