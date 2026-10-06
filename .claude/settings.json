@@ -46,7 +46,16 @@
       "Bash(railway ssh:*)",
       "Bash(railway connect:*)",
       "Bash(railway run:*)",
-      "Bash(railway config apply:*)"
+      "Bash(railway config apply:*)",
+      "Bash(railway variable:*)",
+      "Bash(railway config migrate:*)",
+      "Bash(railway config partials:*)",
+      "Bash(railway domain:*)",
+      "Bash(railway volume:*)",
+      "Bash(railway add:*)",
+      "Bash(railway delete:*)",
+      "Bash(railway service:*)",
+      "Bash(railway environment:*)"
     ]
   },
   "alwaysThinkingEnabled": true
