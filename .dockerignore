@@ -31,3 +31,6 @@ models/test_customer/
 .cursor/
 data/inference_result_cache/
 data/upload_inference_cache/
+
+# Railway IaC authoring deps — tooling only, never part of a runtime image
+.railway/
