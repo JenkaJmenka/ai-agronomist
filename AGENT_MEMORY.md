@@ -5158,3 +5158,38 @@ three items below is a code defect; all three are pipeline design.
    carries only cronSchedule/domains/numReplicas/source/startCommand), so this
    has to be checked and changed in the dashboard. Consider enabling Railway's
    "wait for CI" on the three repo services.
+
+## Railway builder + Config as Code (Orchestrator, 2026-10-06)
+
+Recorded with the Nixpacks → Railpack switch for `web`. All three facts read
+from `railway status --json` on 2026-10-06, not from the repo files.
+
+1. **`web/railway.json` maps SEVEN settings, not six.** The deployment's
+   `propertyFileMapping` lists `build.builder`, `build.buildCommand`,
+   `deploy.healthcheckPath`, `deploy.healthcheckTimeout`,
+   `deploy.restartPolicyType`, `deploy.restartPolicyMaxRetries` **and
+   `deploy.startCommand`** (`pnpm start --port ${PORT:-3000}`). The Config as
+   Code migration must carry all seven — dropping the start command would leave
+   `web` on Railpack's default `pnpm run start`. `docs/runbooks/deploy.md:170`
+   says six; correct it during Fix 2.
+
+2. **The three root-level `railway*.json` files are read by nothing.**
+   `ai-agronomist-api` and `ai-agronomist-worker` both report
+   `fileServiceManifest: {}` — they run entirely on dashboard settings, which
+   happen to match `railway.api.json` / `railway.worker.json` but are not
+   sourced from them. `railway.dashboard.json` targets a `dashboard` service
+   that no longer exists. Fix 2 order: migrate `web` first, then capture the
+   api/worker **dashboard** settings into `railway.ts` (the files are not a
+   trustworthy source for them), then delete all three dead files.
+
+3. **Without a Node pin, Railpack defaults `web` to Node 24.** Measured with
+   railpack 0.40.1 against a clean checkout of `web/`:
+   `node │ 24.21.0 │ railpack default (lts)`. Nixpacks held it at 20 via the
+   `NIXPACKS_NODE_VERSION` dashboard variable, which Railpack ignores. `web/.nvmrc`
+   now pins it (`node │ 20.20.2 │ idiomatic-version-file`). Any future builder
+   change must re-check the Node version — the default moves on its own as new
+   LTS versions ship.
+
+**Follow-up (not scheduled):** Node 20 reaches end of life in April 2026.
+Upgrade `web` to Node 22 as its own change, after the Railpack switch and the
+Config as Code migration have both landed.
