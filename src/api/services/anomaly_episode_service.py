@@ -22,6 +22,13 @@ ranking and capping happen only *after* grouping.
 
 The pure grouping core (no I/O, no pandas) lives in
 ``anomaly_episode_grouping.py`` and is re-exported here.
+
+Not to be confused with the ``anomaly_episodes`` DB table (migration 026,
+``src/db/models.py``'s ``AnomalyEpisode``): that table holds rows a detector
+writes *at detection time*, one per fault window, and persists them. This
+module computes its episodes fresh on every request from already-flagged
+``sensor_readings`` and persists nothing — same name, deliberately kept,
+opposite mechanism.
 """
 
 from __future__ import annotations

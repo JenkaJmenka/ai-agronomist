@@ -5,7 +5,7 @@ SQLAlchemy database models for the AI Agronomist platform.
 import datetime
 import uuid
 from typing import Any, ClassVar, Dict, List, Optional
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.config import LATENT_DIM
@@ -661,4 +661,205 @@ class Greenhouse(Base):
         return (
             f"<Greenhouse(tenant_id={self.tenant_id!r},"
             f" greenhouse_id={self.greenhouse_id!r})>"
+        )
+
+
+class AnomalyEpisodeRecord(Base):
+    """Persisted, detection-time record of one fault window on one channel.
+
+    This is the ORM model for the ``anomaly_episodes`` table. NOT the same
+    concept as the query-time grouping GET /api/anomalies/episodes builds on
+    the fly (``src/api/services/anomaly_episode_service.py``, which groups
+    already-flagged ``sensor_readings`` rows by (channel, detector,
+    direction) and persists nothing), and NOT the unrelated
+    ``AnomalyEpisode`` dataclass used by the upload-grouping path
+    (``src/models/episode_grouper.py``) or ``_AnomalyEpisode`` used by the
+    live mock source (``src/live/sources/mock_episodes.py``) -- those are
+    pre-existing, in-memory-only concepts with no table backing them. This
+    model is the opposite of all three: one row is written *by a detector*
+    when it declares a fault, and that row is the durable record -- nothing
+    re-derives it from raw readings later. The class is named
+    ``AnomalyEpisodeRecord`` (rather than ``AnomalyEpisode``) specifically to
+    avoid colliding with those pre-existing names at any import site that
+    touches both; the TABLE NAME collision with the query-time concept's
+    output shape is separately deliberate (reviewed and accepted) and is not
+    affected by this class-name choice.
+
+    General by design: every column name is detector-agnostic. The first
+    writer is the stuck-fault detector (``src/models/stuck_fault_detector.py``),
+    but band-breach and calibration-drift detectors are expected to write the
+    same columns — hence e.g. ``trigger_value`` rather than a stuck-specific
+    name like ``frozen_value``.
+
+    Timestamp contract (mirrors ``FaultWindow``,
+    ``src/models/stuck_fault_detector.py:172`` — read that docstring before
+    changing any of these four):
+      - ``onset_ts``: first sample inside the fault.
+      - ``end_ts``: the LAST FROZEN sample — ``FaultWindow.last_frozen_ts``.
+        Known as soon as the fault is declared (updated as the fault
+        continues) — not the release.
+      - ``release_ts``: the first NON-frozen sample after the freeze ends.
+        Two different samples, two different meanings; never collapse them.
+      - ``detected_ts``: when the detector actually wrote this row, which
+        lags ``onset_ts`` by however many consecutive samples the detector
+        requires before calling it a fault. ``detected_ts - onset_ts`` is
+        the detection latency; that value is computed at query time and
+        deliberately has no column here.
+
+    ``frozen_sample_count`` / ``raw_slot_count``: counted over
+    ``[onset_ts, end_ts]``. ``frozen_sample_count`` is how many finite
+    samples the detector actually saw stuck at the frozen value;
+    ``raw_slot_count`` is how many file rows that span covers, nulls
+    included. ``raw_slot_count > frozen_sample_count`` means the sensor was
+    also intermittently offline during the freeze, not merely stuck — a
+    diagnostic distinction, not noise. Neither field exists on
+    ``FaultWindow``/``ChannelFreezeState`` today (see those classes' module);
+    wiring the detector to populate them is tracked separately from this
+    migration, which only creates the columns.
+
+    ``duration_seconds`` is stored-and-derived, not authoritative: it is
+    computed from ``end_ts - onset_ts`` (the frozen span observed so far) by
+    whatever code writes/updates the row, and must be recomputed whenever
+    either timestamp changes rather than written independently. It is not
+    ``release_ts - onset_ts`` — that longer stuck-to-recovery span matters
+    for alert suppression, not for describing how long the value was frozen.
+
+    ``fault_type`` is deliberately NOT constrained by a DB CHECK here, unlike
+    ``incidents.ck_incidents_fault_type``. Mirroring that constraint would
+    mean a THIRD place (after migrations 011/016/019's literal tuples) that
+    must be edited by hand every time the vocabulary grows, and a migration
+    cannot import the app-side list without risking rewriting its own
+    history if that list is later renamed (see migration 025's docstring for
+    why). Validation is left to the application layer instead; a typo'd
+    ``fault_type`` is accepted silently today. See the migration docstring
+    for the full trade-off.
+
+    ``source`` mirrors ``SensorReading.source`` (ADR-010): ``None`` for a
+    real detection, ``'synthetic:<type>'`` for one produced by the
+    inject-test endpoint. Same string, same convention, same column name —
+    deliberately not reinvented here.
+
+    Upsert key: ``uq_anomaly_episodes_tenant_gh_channel_detector_onset``
+    -- UNIQUE (tenant_id, greenhouse_id, channel, detector, onset_ts) -- is
+    the conflict target the Part B writer upserts against: it updates
+    ``end_ts`` on an already-open fault instead of inserting a duplicate
+    row, and it is what makes a re-upload of the same file idempotent. See
+    the migration's "Constraints" section for the full rationale.
+
+    ``release_ts`` / ``is_ongoing`` invariant: enforced by
+    ``ck_anomaly_episodes_release_ts_null_while_ongoing`` -- CHECK (NOT
+    is_ongoing OR release_ts IS NULL) -- in ONE direction only. An ongoing
+    fault cannot have a release timestamp, but a closed (is_ongoing=False)
+    fault is NOT required to have one: drift and band-breach episodes can
+    close without ever observing a first normal sample to release against,
+    unlike a stuck-fault freeze, which always has one.
+    Do not tighten this to a two-way constraint.
+    """
+
+    __tablename__ = "anomaly_episodes"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=_generate_uuid,
+        doc="Unique episode UUID (string for cross-backend portability, "
+            "matching Incident's convention)")
+    tenant_id: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+        doc="Identifier for the multi-tenant customer entity")
+    greenhouse_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="default",
+        doc="Identifier for the specific greenhouse or sensor zone")
+    channel: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+        doc="Raw column name the fault was detected on, e.g. 'temperature'")
+    detector: Mapped[str] = mapped_column(
+        String(64), nullable=False,
+        doc="Detector name that wrote this episode, e.g. 'stuck_fault', "
+            "'band_breach', 'calibration_drift'")
+    fault_type: Mapped[str] = mapped_column(
+        String(64), nullable=False,
+        doc="Fault label, e.g. stuck_fault, calibration_drift, "
+            "temp_band_high. Not DB-constrained -- see class docstring")
+
+    onset_ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        doc="First sample inside the fault window. Always known once the "
+            "detector declares a fault")
+    end_ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        doc="Last frozen sample (FaultWindow.last_frozen_ts). Updated as "
+            "an ongoing fault continues; see class docstring")
+    detected_ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        doc="When the detector actually wrote this row, lagging onset_ts "
+            "by its required consecutive-sample threshold")
+    release_ts: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        doc="First non-frozen sample after the freeze ends. NULL while "
+            "is_ongoing is True -- the release has not happened yet. "
+            "Enforced one-directionally by "
+            "ck_anomaly_episodes_release_ts_null_while_ongoing -- see "
+            "class docstring")
+
+    duration_seconds: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        doc="Stored-and-derived: end_ts - onset_ts in seconds. Recomputed "
+            "by the writer on every update, not independently authoritative")
+    frozen_sample_count: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        doc="Finite samples the detector counted as frozen over "
+            "[onset_ts, end_ts]. Not yet populated by any detector -- see "
+            "class docstring")
+    raw_slot_count: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        doc="File rows spanned by [onset_ts, end_ts], nulls included. "
+            "Gap vs frozen_sample_count means the sensor also went offline "
+            "during the freeze. Not yet populated by any detector")
+
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False,
+        doc="Severity label (e.g. critical, warning) assigned at detection")
+    trigger_value: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        doc="Representative raw value for the fault, e.g. the frozen "
+            "reading. NULL for detectors with no single representative "
+            "value (e.g. reconstruction-error-based)")
+    is_ongoing: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+        doc="True while the fault has not yet released. release_ts and "
+            "duration_seconds are not meaningful while this is True")
+    source: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
+        doc="Provenance tag mirroring SensorReading.source (ADR-010): "
+            "None for a real detection, 'synthetic:<type>' for inject-test")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "greenhouse_id", "channel", "detector", "onset_ts",
+            name="uq_anomaly_episodes_tenant_gh_channel_detector_onset",
+        ),
+        CheckConstraint(
+            "NOT is_ongoing OR release_ts IS NULL",
+            name="ck_anomaly_episodes_release_ts_null_while_ongoing",
+        ),
+        Index(
+            "ix_anomaly_episodes_tenant_gh_channel_onset",
+            "tenant_id", "greenhouse_id", "channel", "onset_ts",
+        ),
+        Index(
+            "ix_anomaly_episodes_ongoing_tenant_gh",
+            "tenant_id", "greenhouse_id",
+            postgresql_where=text("is_ongoing"),
+            sqlite_where=text("is_ongoing"),
+        ),
+        Index(
+            "ix_anomaly_episodes_fault_type_detector",
+            "fault_type", "detector",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AnomalyEpisodeRecord(id={self.id!r}, tenant_id={self.tenant_id!r}, "
+            f"channel={self.channel!r}, fault_type={self.fault_type!r}, "
+            f"is_ongoing={self.is_ongoing})>"
         )
