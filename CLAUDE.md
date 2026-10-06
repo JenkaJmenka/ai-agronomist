@@ -243,12 +243,12 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
+| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/` |
 | tech-lead | `docs/refactor/` |
-| orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md` — never delegate these |
+| orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
 
 Root-level config and docs had no owner until 2026-10-05, and the gap stalled
 two agents in one session: devops-lead declined `requirements-dev.txt` and
@@ -256,6 +256,33 @@ two agents in one session: devops-lead declined `requirements-dev.txt` and
 `alembic.ini` and `RAILWAY_HOSTING.md` for the same reason. Both were right to
 ask. They now belong to backend-engineer, except `AGENT_MEMORY.md` and this
 file, which stay with the orchestrator.
+
+`src/workers/` had the same gap until 2026-10-06, found while planning the
+anomaly-episode writer: the async upload path's persistence point is
+`src/workers/upload_consumer.py`, which no row covered. It is API-adjacent
+service code and already imports only backend-owned modules
+(`src/api/services/`, `src/db/`), so it belongs to backend-engineer. Note the
+asymmetry that caused the confusion: `tests/workers/` is qa-engineer's, under
+`tests/`.
+
+The lesson both times: when a task's real edit point falls outside every row,
+say so and get an owner assigned. Do not pick the nearest-looking agent, and do
+not quietly widen your own scope to cover it.
+
+`docs/handoff/` is backend-engineer's, with one exception to the usual
+one-owner rule: another agent may add to a handoff spec when its own task
+explicitly says so (Task 4 does). It is a cross-agent contract, not one
+agent's working notes.
+
+`.gitignore` is the orchestrator's. It earned a row on 2026-10-06: `docs/*`
+had silently ignored `docs/handoff/task3_4_spec.md`, so the Task 3 spec was
+written locally in one session and absent from every branch in the next —
+Task 3 opened by rebuilding a spec that was never committable. An ignore rule
+can make an agent's finished work invisible rather than merely untracked, so
+changes to it stay with the orchestrator. Verify any new negation with
+`git check-ignore <path>` (no `-v`): it must print nothing and exit 1. With
+`-v` it prints the matching negation rule and exits 0, which looks like
+failure and is not.
 
 ---
 
