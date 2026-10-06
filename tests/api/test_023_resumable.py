@@ -25,32 +25,15 @@ actually covers it — an empty database never enters the backfill loops at all.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import sqlalchemy as sa
 from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from tests.api._alembic_chain import alembic_config, script_head, stamped_revision
 
 # Columns added by 023 (interrupted run) and 024 (never reached in production).
 _COLUMNS_023 = ("anomaly_score_raw", "score_scale")
 _COLUMNS_024 = ("trigger_channel", "trigger_detector", "detected_severity", "trigger_value")
-
-
-def _alembic_config(url: str, monkeypatch) -> Config:
-    # alembic/env.py lets DATABASE_URL override sqlalchemy.url, and conftest
-    # sets it process-wide — without this the migrations would run against the
-    # shared test database instead of the throwaway one.  It must carry the
-    # async driver: env.py imports src.db.session, which builds an async engine
-    # from DATABASE_URL at import time, then downgrades the URL to sync itself.
-    monkeypatch.setenv("DATABASE_URL", url.replace("sqlite://", "sqlite+aiosqlite://"))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    config.set_main_option("sqlalchemy.url", url)
-    return config
 
 
 def _sensor_reading_columns(engine: sa.Engine) -> set[str]:
@@ -94,7 +77,7 @@ def test_023_resumes_when_its_columns_already_exist(tmp_path, monkeypatch):
     """Re-running 023 over a half-applied schema must upgrade to head, not raise."""
     db_path = tmp_path / "interrupted.db"
     url = f"sqlite:///{db_path}"
-    config = _alembic_config(url, monkeypatch)
+    config = alembic_config(url, monkeypatch)
     command.upgrade(config, "022")
 
     # Reproduce the interrupted run: DDL committed, revision never stamped,
@@ -113,10 +96,10 @@ def test_023_resumes_when_its_columns_already_exist(tmp_path, monkeypatch):
 
     # Resolved from the script directory rather than hard-coded: the intent is
     # "the chain resumed all the way to head", and a literal silently turns
-    # every new migration into a failure of this test.
-    expected_head = ScriptDirectory.from_config(config).get_current_head()
-    with engine.connect() as connection:
-        version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    # every new migration into a failure of this test (see
+    # tests/api/_alembic_chain.py for the two times that happened).
+    expected_head = script_head(config)
+    version = stamped_revision(engine)
     assert version == expected_head, (
         f"resumed upgrade stopped at {version!r}, expected head {expected_head!r} — "
         "every migration after 023 is blocked while 023 fails on its own columns"
@@ -140,7 +123,7 @@ def test_023_still_adds_its_columns_on_a_clean_database(tmp_path, monkeypatch):
     """The guard must not skip the DDL when the columns are genuinely absent."""
     db_path = tmp_path / "clean.db"
     url = f"sqlite:///{db_path}"
-    config = _alembic_config(url, monkeypatch)
+    config = alembic_config(url, monkeypatch)
     command.upgrade(config, "022")
 
     engine = sa.create_engine(url)

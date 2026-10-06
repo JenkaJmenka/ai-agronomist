@@ -26,14 +26,12 @@ backfill-only with no DDL — if it grows an ALTER, the Postgres CI job
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from tests.api._alembic_chain import alembic_config, ancestry_of, stamped_revision
 
 _REVISION_BEFORE = "024"
 _REVISION_UNDER_TEST = "025"
@@ -49,19 +47,6 @@ _EXPECTED_MARKER_AFTER_UPGRADE = {
     "score_scale_only": "synthetic:unknown",
     "live": _LIVE_SOURCE,
 }
-
-
-def _alembic_config(url: str, monkeypatch) -> Config:
-    # alembic/env.py lets DATABASE_URL override sqlalchemy.url, and conftest
-    # sets it process-wide — without this the migrations would run against the
-    # shared test database instead of the throwaway one.  It must carry the
-    # async driver: env.py imports src.db.session, which builds an async engine
-    # from DATABASE_URL at import time, then downgrades the URL to sync itself.
-    monkeypatch.setenv("DATABASE_URL", url.replace("sqlite://", "sqlite+aiosqlite://"))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    config.set_main_option("sqlalchemy.url", url)
-    return config
 
 
 def _seed_marker_cohorts(engine: sa.Engine) -> None:
@@ -114,7 +99,7 @@ def _rows_by_label(engine: sa.Engine) -> dict[str, tuple[str | None, str | None]
 def _upgraded_engine(tmp_path, monkeypatch) -> tuple[sa.Engine, Config]:
     """Seed at 024 and upgrade to 025."""
     url = f"sqlite:///{tmp_path / 'marker.db'}"
-    config = _alembic_config(url, monkeypatch)
+    config = alembic_config(url, monkeypatch)
     command.upgrade(config, _REVISION_BEFORE)
 
     engine = sa.create_engine(url)
@@ -190,18 +175,27 @@ def test_025_downgrade_clears_the_marker_without_disturbing_live(tmp_path, monke
         engine.dispose()
 
 
-def test_025_is_the_head_revision(tmp_path, monkeypatch):
-    """``upgrade head`` must land on 025 — a migration nobody reaches is inert."""
+def test_025_is_reachable_from_head(tmp_path, monkeypatch):
+    """``upgrade head`` must apply 025 — a migration nobody reaches is inert.
+
+    Asserted as membership in the chain alembic actually walked, not as
+    ``stamped == "025"``: 025 stopped being head the moment 026 landed, and the
+    equality form turned every later migration into a failure of this file.
+    That the chain has one head and reaches it at all is a property of the
+    chain, covered once in ``test_alembic_chain.py``; what stays meaningful
+    here forever is that *this* revision is still on the applied path.
+    """
     url = f"sqlite:///{tmp_path / 'head.db'}"
-    config = _alembic_config(url, monkeypatch)
+    config = alembic_config(url, monkeypatch)
     command.upgrade(config, "head")
 
     engine = sa.create_engine(url)
     try:
-        with engine.connect() as connection:
-            version = connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar()
-        assert version == _REVISION_UNDER_TEST
+        landed_on = stamped_revision(engine)
+        assert _REVISION_UNDER_TEST in ancestry_of(config, landed_on), (
+            f"{_REVISION_UNDER_TEST} is not an ancestor of the revision "
+            f"`upgrade head` landed on ({landed_on!r}) — the backfill tested "
+            "above never runs"
+        )
     finally:
         engine.dispose()
