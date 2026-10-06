@@ -917,6 +917,24 @@ CADENCE_TOLERANCE_FACTOR: float = float(
     os.environ.get("CADENCE_TOLERANCE_FACTOR", "1.5")
 )
 
+# Minimum number of inter-sample intervals that must have been observed BEFORE
+# a freeze's onset for that pre-onset sample to pin its cadence.  The pinned
+# cadence scales the freeze's raw_slot_count (expected readings), so a single
+# anomalous interval — one outage immediately before onset — must not be able
+# to set it.  Three is the smallest count whose median survives one outlier.
+#
+# This floor is not a threshold for falling back to CADENCE_EXPECTED_SECONDS:
+# a freeze that fails it pins the median of its OWN intervals instead, at the
+# moment the detector's gate fires (src/models/stuck_fault_detector.py,
+# _in_freeze_cadence_seconds).  Raising the floor therefore only moves freezes
+# that begin early in a file from one measured cadence to the other, and the
+# constant scales no fired episode's raw_slot_count at all — scoring a 900 s
+# file against the 300 s default reported 178 expected slots against 60 frozen
+# samples, inventing a gap of 118 readings that were never missing.
+CADENCE_PIN_MIN_INTERVALS: int = int(
+    os.environ.get("CADENCE_PIN_MIN_INTERVALS", "3")
+)
+
 # =============================================================================
 # Setpoint-aware SCADA rules (dynamic climate-computer detection)
 # =============================================================================
