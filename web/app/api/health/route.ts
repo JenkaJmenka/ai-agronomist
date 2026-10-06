@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 /**
- * Railway healthcheck target (`web/railway.json`'s `healthcheckPath`).
+ * Railway healthcheck target (`.railway/railway.ts`'s `healthcheck`).
  * Deliberately its own route rather than reusing `/login`: a healthcheck
  * should only ever say "is the server answering requests" — it must not
  * start failing because of a login-page bug, an `AUTH_DATABASE_URL`/

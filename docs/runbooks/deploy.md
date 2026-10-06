@@ -159,38 +159,77 @@ If a job fails with a schema-version error after deploy:
 
 ---
 
-## Follow-up: Config as Code sunset (2026-12-01)
+## Railway configuration — Infrastructure as Code
 
-**Deadline:** 2026-12-01 — Railway stops reading Config as Code (repo
-`railway*.json` files) for every service in this project.
+**Done 2026-10-06.** Railway stops reading Config as Code (repo `railway*.json`)
+on **2026-12-01**. The project migrated ahead of that: configuration now lives
+in **`.railway/railway.ts`**, applied with `railway config apply`. All four
+`railway*.json` files are deleted.
 
-**Why it matters for `web`.** Of the three per-service config files, only
-`web/railway.json` is still live — its `fileServiceManifest` really maps six
-settings to the Railway dashboard: `build.builder`, `build.buildCommand`,
+**What the file owns.** Whole-project mode, no named partial. All 7 services
+(`ai-agronomist-api`, `ai-agronomist-worker`, `web`, `ai-agronomist-db`,
+`Redis`, `RabbitMQ`, `RabbitMQ Web UI`), all 3 volumes (`redis-volume`,
+`postgres-volume`, `rabbitmq-volume-XkOm`), web's service domain, both TCP
+proxies (Redis 6379, RabbitMQ 5672) and every private network endpoint. All 43
+variables render as `preserve()`, so no values are in git.
+
+> **RULE — never apply a plan unless it reports `0 to destroy`.**
+> Whole-project ownership means omission equals deletion: a resource missing
+> from `railway.ts` can be destroyed on apply. Anything added in the dashboard
+> — a service, volume, domain, TCP proxy or watch path — **must be written into
+> `railway.ts` first**, or the next apply removes it. Read the destroy count
+> before anything else.
+
+**web's seven settings** (previously mapped from `web/railway.json`:
+`build.builder`, `build.buildCommand`, `deploy.startCommand`,
 `deploy.healthcheckPath`, `deploy.healthcheckTimeout`,
-`deploy.restartPolicyType`, `deploy.restartPolicyMaxRetries`. Losing
-`builder: NIXPACKS` and `buildCommand: corepack enable && pnpm install
---frozen-lockfile && pnpm build` can **break web deploys outright** — that is
-a bigger risk than losing the healthcheck. Losing `healthcheckPath:
-/api/health` would silently revert commit `4e95205` (the fix for the 307
-redirect loop that broke the probe on `/`).
+`deploy.restartPolicyType`, `deploy.restartPolicyMaxRetries` — **seven**, not
+six; the earlier count in this runbook omitted `deploy.startCommand`) are now
+on the service itself. `railway.json` was a deploy-time *overlay*: the
+service's own fields were `null` and acquired the values at deploy time, which
+is why the migration plan read `null → <the value railway.json supplied>`.
 
-**Action required.** Before 2026-12-01, migrate those six `web/railway.json`
-settings to dashboard settings or Railway IaC, then delete the file.
+### Applying a change
 
-**Safe to delete now, no operational change.** `railway.api.json` and
-`railway.worker.json` are already inert (`configPath: None` on both
-services — Railway reads nothing from them). `railway.dashboard.json` is
-orphaned: it targets a `dashboard` service that no longer exists in the
-project (live services are `api`, `web`, `worker`, RabbitMQ, RabbitMQ Web
-UI, Redis, `ai-agronomist-db`).
+```bash
+cd <repo root>
+export PATH="/usr/local/bin:$PATH"   # plan needs Node >= 22.6; nvm's 20.x shadows /usr/local/bin/node v24
+node --version                       # must be >= 22.6
+railway config plan --verbose        # READ THE DESTROY COUNT FIRST
+railway config plan --out /tmp/railway-plan.json --verbose
+railway config apply --plan /tmp/railway-plan.json
+```
 
-**Verification.** After migrating, run `railway status --json` and confirm
-`web`'s `latestDeployment.meta.serviceManifest.deploy` still shows the
-expected effective values (`healthcheckPath: /api/health`,
-`healthcheckTimeout: 120`, `restartPolicyType: ON_FAILURE`,
-`restartPolicyMaxRetries: 3`) and that `build` still shows
-`builder: NIXPACKS` with the same `buildCommand`.
+Pin the reviewed plan and apply *that file*, so the change set you read is the
+one that lands. Do **not** pass `--confirm-destructive`: if apply demands it,
+something is being destroyed — stop and re-plan. `plan --out` resolves its
+source tree from `git rev-parse HEAD:.railway`, so `.railway/` must be
+committed first. On Node 20 the plan fails with `node: bad option:
+--experimental-strip-types`.
+
+### Quirk — never set `restartPolicyType` explicitly
+
+`ON_FAILURE` is Railway's default and is **stored as `null`**, so declaring
+`restartPolicyType: "ON_FAILURE"` never converges: every plan reports
+`null → "ON_FAILURE"` forever, even immediately after a successful apply.
+Omit the field to get `ON_FAILURE`. `restartPolicyMaxRetries` does persist and
+is declared (`3` for web). The same is true at service level for api and
+worker, whose restart policy is deliberately omitted entirely.
+
+**`build.builder` is `null` for api and worker, not `DOCKERFILE`.** Their
+Dockerfile build comes from Railway's auto-detection ("Railway will always
+build with a Dockerfile if it finds one"); the `DOCKERFILE` in a deployment
+manifest is the *resolved* build, not stored config. The planner treats
+`RAILPACK` as equal to `null`, since Railpack is the default.
+
+**Verification.** `railway config plan` reports
+`✓ Your Railway configuration is already up to date.` (or exit code `0` with
+`--detailed-exit-code`). For web specifically, `railway status --json` should
+show `latestDeployment.meta.serviceManifest` with `build.builder: RAILPACK`,
+`build.buildCommand: pnpm build`, `deploy.startCommand: pnpm start --port
+${PORT:-3000}`, `deploy.healthcheckPath: /api/health`,
+`deploy.healthcheckTimeout: 120`, `deploy.restartPolicyMaxRetries: 3`, and
+`meta.configFile: None` (no file overlay any more).
 
 ---
 
@@ -284,13 +323,15 @@ expected effective values (`healthcheckPath: /api/health`,
   unauthenticated.
 - **Done:** add `require_api_key`.
 
-**Item 6 — `railway.api.json` / `railway.worker.json` removal, IaC migration
-before 2026-12-01.**
+**Item 6 — `railway*.json` removal, IaC migration before 2026-12-01. DONE
+2026-10-06.**
 
-- **What:** see "[Follow-up: Config as Code sunset](#follow-up-config-as-code-sunset-2026-12-01)"
+- **What:** see "[Railway configuration — Infrastructure as Code](#railway-configuration--infrastructure-as-code)"
   above rather than duplicating it here.
-- **Where:** `railway.api.json`, `railway.worker.json`, `web/railway.json`.
-- **Why it matters:** `railway.api.json` and `railway.worker.json` can be
-  deleted now — both are already inert. `web/railway.json` is the one
-  needing real migration.
-- **Done:** as specified in the Config as Code sunset section above.
+- **Where:** was `railway.api.json`, `railway.worker.json`,
+  `railway.dashboard.json`, `web/railway.json` — all four now deleted.
+- **Why it mattered:** the first three were already inert (`configPath: None`,
+  and `railway.dashboard.json` targeted a service that no longer exists).
+  `web/railway.json` was the only live one and needed real migration.
+- **Done:** configuration moved to `.railway/railway.ts`; plan reports no
+  pending changes.

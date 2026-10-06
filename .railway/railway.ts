@@ -37,7 +37,9 @@ export default defineRailway(() => {
     start: "pnpm start --port ${PORT:-3000}",
     healthcheck: "/api/health",
     healthcheckTimeout: 120,
-    deploy: { restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 3 },
+    // restartPolicyType is omitted on purpose: ON_FAILURE is Railway's default and
+    // is stored as null, so setting it explicitly never converges. See AGENT_MEMORY.md.
+    deploy: { restartPolicyMaxRetries: 3 },
     replicas: { "europe-west4-drams3a": 1 },
     networking: { serviceDomains: { "web-production-cd280.up.railway.app": {} } },
     env: { API_KEY: preserve(), API_URL: preserve(), AUTH_DATABASE_URL: preserve(), AUTH_RESEND_FROM: preserve(), AUTH_RESEND_KEY: preserve(), AUTH_SECRET: preserve(), AUTH_URL: preserve(), PROFILE_LOGGING_ENABLED: preserve() },

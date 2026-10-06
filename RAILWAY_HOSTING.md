@@ -66,11 +66,15 @@ Already done (2026-07-11, via CLI/GraphQL — no deploy has run yet):
   and tracks the API service if it is renamed/moved)
 - **`API_KEY`** = `CHANGE_ME_WHEN_AUTH_ENABLED` placeholder (harmless while
   `AUTH_ENABLED` is off on the API; see §6)
-- Build/start config is **code**, not dashboard state: `web/railway.json`
-  (Nixpacks, `corepack enable && pnpm install --frozen-lockfile && pnpm build`,
-  start `pnpm start --port ${PORT:-3000}`, healthcheck `/api/health`) — true
-  only until Railway retires Config as Code on 2026-12-01; see the sunset
-  follow-up in `docs/runbooks/deploy.md`.
+- Build/start config is **code**, not dashboard state — but it now lives in
+  **`.railway/railway.ts`** (Railway Infrastructure as Code), applied with
+  `railway config apply`. `web/railway.json` and the three root `railway*.json`
+  files were deleted on 2026-10-06, ahead of Railway retiring Config as Code on
+  2026-12-01. web builds with **Railpack**, Node pinned to 20 by `web/.nvmrc`,
+  `buildCommand: pnpm build`, start `pnpm start --port ${PORT:-3000}`,
+  healthcheck `/api/health`. Never apply a plan that reports anything other
+  than `0 to destroy`; see "Railway configuration — Infrastructure as Code" in
+  `docs/runbooks/deploy.md` for the procedure and its quirks.
 
 Not done (deliberately — a human decision): the production hostname switch.
 
@@ -85,9 +89,10 @@ Not done (deliberately — a human decision): the production hostname switch.
    auth hardening — the BFF now sends `X-API-Key` / `X-Tenant-Id` directly on
    every request and reads the resulting 401/403 instead of pre-validating.)
 2. **Repo connection — already done.** `web` is already connected to `JenkaJmenka/ai-agronomist`, branch **`main`** (root directory `web` is already set; leave it). This step does not need to be performed again; it is kept here only for historical context on how the connection was made.
-3. **Watch the first build.** Expect Nixpacks to detect Node via
-   `web/package.json` (`packageManager: pnpm@9.15.9`), run the build command
-   from `railway.json`, then healthcheck `/api/health`. Build ≈ 2–4 min.
+3. **Watch the first build.** Expect Railpack to detect Node, read the version
+   from `web/.nvmrc` (20) and pnpm 9.15.9 from `web/package.json`
+   (`packageManager`), run a single install step plus `pnpm build`, then
+   healthcheck `/api/health`. Build ≈ 2–4 min.
 4. **Generate a domain.** `web` → Settings → Networking → **Generate Domain**.
    This is the service's own URL for the parallel run — the production
    hostname is untouched.

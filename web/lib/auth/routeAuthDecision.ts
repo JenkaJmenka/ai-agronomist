@@ -6,8 +6,8 @@
  *
  * `/api/health` is here for the same reason `/login` and `/api/auth/` are:
  * Railway's healthcheck probe has no session, and a probe that gets
- * redirected instead of a 200 fails the deploy (`web/railway.json`'s
- * `healthcheckPath`).
+ * redirected instead of a 200 fails the deploy (`.railway/railway.ts`'s
+ * `healthcheck`).
  *
  * `hasTenant` is a second, independent axis from `isLoggedIn`: a session can
  * be authenticated yet still lack `tenantId` (see `lib/auth/tenantClaim.ts`

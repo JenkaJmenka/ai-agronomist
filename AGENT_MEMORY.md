@@ -5328,3 +5328,31 @@ because the existing `/node_modules/` entry is root-anchored. web is unaffected
    `.railway/`, failing the build on any destroy.
 3. Cosmetic: `railway config pull` emitted `group("RabbitMQ", ...)` colliding
    with the service named `RabbitMQ`, so the TS binding is `RabbitMQ2`.
+
+### Applied 2026-10-06 — and the `restartPolicyType` quirk
+
+The IaC migration was applied successfully. One field never converged.
+
+**Never set `restartPolicyType` to `ON_FAILURE` explicitly — omit it.**
+`ON_FAILURE` is Railway's default and is **stored as `null`**, so declaring it
+makes every subsequent plan report `deploy.restartPolicyType (null →
+"ON_FAILURE")` forever, including immediately after a successful apply. It is
+not a failed apply and not drift; the value simply cannot be stored. web's
+declaration was removed and the plan went to
+`✓ Your Railway configuration is already up to date.` (exit `0` under
+`--detailed-exit-code`). No apply was needed for that removal, since stored was
+already `null`.
+
+`restartPolicyMaxRetries` **does** persist — `3` is declared for web and
+converged. api and worker omit both fields, taking Railway's `ON_FAILURE` / `10`
+defaults.
+
+This is the same class of trap as the `builder: null` finding above: for several
+fields Railway stores the default as `null` rather than as the literal value, so
+a deployment manifest's *resolved* value is not what the service has stored, and
+writing the resolved value back into `railway.ts` creates a permanent phantom
+diff. Diagnose with a plan, not with the manifest.
+
+`web/railway.json`, `railway.api.json`, `railway.worker.json` and
+`railway.dashboard.json` were deleted in the same commit. Configuration lives
+only in `.railway/railway.ts` from here on.
