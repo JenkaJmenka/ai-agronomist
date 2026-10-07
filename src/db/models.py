@@ -706,16 +706,31 @@ class AnomalyEpisodeRecord(Base):
         the detection latency; that value is computed at query time and
         deliberately has no column here.
 
-    ``frozen_sample_count`` / ``raw_slot_count``: counted over
-    ``[onset_ts, end_ts]``. ``frozen_sample_count`` is how many finite
-    samples the detector actually saw stuck at the frozen value;
-    ``raw_slot_count`` is how many file rows that span covers, nulls
-    included. ``raw_slot_count > frozen_sample_count`` means the sensor was
-    also intermittently offline during the freeze, not merely stuck — a
-    diagnostic distinction, not noise. Neither field exists on
-    ``FaultWindow``/``ChannelFreezeState`` today (see those classes' module);
-    wiring the detector to populate them is tracked separately from this
-    migration, which only creates the columns.
+    ``frozen_sample_count`` is counted over ``[onset_ts, end_ts]``: how many
+    finite samples the detector actually saw stuck at the frozen value.
+
+    ``raw_slot_count`` is NOT a tally of file rows that span covers. It is
+    expected readings at the channel's pinned cadence across the freeze:
+
+      - raw_slot_count = expected readings at the pinned cadence across the
+        freeze: (end_ts - onset_ts) / cadence + 1.
+      - Cadence is pinned once: branch 1, the pre-onset median when at
+        least ``CADENCE_PIN_MIN_INTERVALS`` intervals exist; otherwise
+        branch 2, the median of the freeze's own intervals at gate fire.
+        Never recomputed.
+      - The gap (``raw_slot_count - frozen_sample_count``) counts readings
+        missing FOR THIS CHANNEL, whatever the cause. That includes whole
+        rows the adapter dropped because a different required sensor was
+        null. It is NOT proof this sensor went offline. Fixture A's
+        (``native_dec_stuck_fault.csv``) co2 gap of 70 comes from humidity
+        nulls.
+      - ``CSVAdapter`` drops rows with a null required sensor before
+        detection, which is why the definition is expected slots, not rows
+        counted.
+
+    See ``src/models/stuck_fault_detector.py``'s ``ChannelFreezeState`` and
+    ``expected_slot_count`` for the full derivation; this docstring mirrors
+    that module's wording, not the other way around.
 
     ``duration_seconds`` is stored-and-derived, not authoritative: it is
     computed from ``end_ts - onset_ts`` (the frozen span observed so far) by
@@ -811,9 +826,11 @@ class AnomalyEpisodeRecord(Base):
             "class docstring")
     raw_slot_count: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True,
-        doc="File rows spanned by [onset_ts, end_ts], nulls included. "
-            "Gap vs frozen_sample_count means the sensor also went offline "
-            "during the freeze. Not yet populated by any detector")
+        doc="Expected readings at the pinned cadence across "
+            "[onset_ts, end_ts] -- NOT a row tally. Gap vs "
+            "frozen_sample_count counts readings missing for this "
+            "channel for any cause, including rows the upload adapter "
+            "dropped over a different sensor's null; see class docstring")
 
     severity: Mapped[str] = mapped_column(
         String(16), nullable=False,

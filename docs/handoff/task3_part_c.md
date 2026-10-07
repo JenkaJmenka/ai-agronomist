@@ -9,8 +9,12 @@ user and is recorded verbatim; it is not an orchestrator or agent design.
 
 ## Acceptance items
 
-1. Four humidity stuck episodes, unchanged onsets, severity urgent, via sync
-   AND async.
+1. Five fired episodes for fixture A, via sync AND async:
+   - four humidity, unchanged onsets, severity urgent;
+   - one co2, onset 2026-12-14 00:00, open at EOF: `is_ongoing=true`,
+     `release_ts` NULL, `end_ts` = last frozen sample, frozen 3387, raw 3457.
+     Report its severity as measured; don't assert a value.
+   Temperature: zero episodes.
 2. The 2026-12-18 13:00 episode read back FROM THE DATABASE:
    `end_ts` 2026-12-25 08:50, `duration_seconds` 589,800.
 3. `detection_latency` for it queryable from the DB and equal to 6.00 h.
@@ -18,9 +22,9 @@ user and is recorded verbatim; it is not an orchestrator or agent design.
    measurement. If either differs, report the measured value and stop.
 5. No phantom episode from the trailing 2-sample freeze.
 6. Flip the strict xfail on episode `end_ts`; remove the marker.
-7. A pinned test on the span values of all four episodes.
-8. Idempotent re-upload: the same file twice gives the same row count.
-9. Sync and async produce identical rows for this fixture.
+7. A pinned test on the span values of all five episodes.
+8. Idempotent re-upload: the same file twice gives 5 rows, not 10.
+9. Sync and async produce identical rows (all 5) for this fixture.
 10. Mixed-source rule: any synthetic reading in the window → episode
     `source = 'synthetic:<type>'`; with several types, the earliest by
     timestamp wins. Test it whether or not the fixtures reach it.
@@ -49,38 +53,6 @@ without approval.
 
 ---
 
-## AMENDMENT NEEDED — items 1 and 8 count 4, the real figure is 5
-
-Measured on fixture A after B1 and the cadence work, reproduced independently:
-B2 persists **5 rows for `native_dec_stuck_fault.csv`, not 4**.
-
-| channel | onset | branch | frozen | raw | gap | is_ongoing |
-|---|---|---|---|---|---|---|
-| humidity | 2026-12-14T00:00 | in_freeze | 419 | 419 | 0 | false |
-| humidity | 2026-12-15T11:05 | pre_onset | 266 | 266 | 0 | false |
-| humidity | 2026-12-16T11:20 | pre_onset | 576 | 576 | 0 | false |
-| humidity | 2026-12-18T13:00 | pre_onset | 1897 | 1967 | 70 | false |
-| **co2** | 2026-12-14T00:00 | in_freeze | 3387 | 3457 | 70 | **true** |
-
-Three independent counts agree: `len(emitted_onsets)` = 5,
-`len(completed_faults)` (4, all humidity) + open-and-fired (1, co2) = 5, and
-the gate-fire INFO records = 5. By channel: temperature 0, humidity 4, co2 1.
-
-co2 is frozen for the entire file (3387 samples, row 1 to EOF, never releases),
-so it fires the dual gate and is persisted with `is_ongoing=true`, `release_ts`
-NULL, `end_ts` = last frozen sample. Its gap of 70 is the same 70
-adapter-dropped rows that give the 12-18 humidity episode its gap; both spans
-cover them. Temperature opens ~2009 freezes but none reaches 6 h, so it fires
-nothing.
-
-Consequence: **item 1** ("four humidity stuck episodes") describes a
-humidity-only subset, and **item 8** (re-upload row count) reads naturally as
-4. Both must count against 5 total / 4 humidity / 1 co2, or they pass while
-missing a row B2 writes. The exact wording is the user's call — this note
-records the measurement, it does not change the items above.
-
----
-
 ## Notes for whoever dispatches this
 
 Item 17 names a real latent defect, confirmed in the code: `upload_portions.py`
@@ -99,6 +71,11 @@ are null, so the fixture's 70 null-humidity rows never reach the detector
 (1,897); `raw_slot_count` is EXPECTED slots at the pinned cadence
 (589800/300 + 1 = 1,967). The gap of 70 is therefore "missing readings,
 whether dropped upstream or never logged" — not a count of consumed rows.
+
+The co2 episode's gap of 3457-3387 = 70 is the SAME 70 rows: the adapter drops
+a whole row when any required sensor is null, so humidity nulls removed those
+co2 readings too. The gap counts readings missing for the channel whatever the
+cause — it is not evidence that the co2 sensor went offline.
 
 Item 12's "never the cadence of a fired episode" is scoped to the PINNING
 paths. Two non-pinning paths to `CADENCE_EXPECTED_SECONDS` remain by design:

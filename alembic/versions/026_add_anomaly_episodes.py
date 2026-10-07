@@ -35,11 +35,24 @@ Timestamp contract (mirrors ``FaultWindow``,
                        the detection latency; computed at query time only,
                        deliberately no column for it here.
 
-``frozen_sample_count`` / ``raw_slot_count`` are counted over
-``[onset_ts, end_ts]``: the former is finite samples the detector saw stuck,
-the latter is file rows spanned including nulls. The gap between them is
-diagnostic (intermittent sensor dropout during the freeze, not just a
-stuck value), not noise.
+``frozen_sample_count`` is counted over ``[onset_ts, end_ts]``: the finite
+samples the detector actually saw stuck at the frozen value.
+
+``raw_slot_count`` is NOT a tally of file rows. It is expected readings at
+the channel's pinned cadence across the freeze:
+  - raw_slot_count = expected readings at the pinned cadence across the
+    freeze: (end_ts - onset_ts) / cadence + 1.
+  - Cadence is pinned once: branch 1, the pre-onset median when at least
+    CADENCE_PIN_MIN_INTERVALS intervals exist; otherwise branch 2, the
+    median of the freeze's own intervals at gate fire. Never recomputed.
+  - The gap (raw_slot_count - frozen_sample_count) counts readings missing
+    FOR THIS CHANNEL, whatever the cause. That includes whole rows the
+    adapter dropped because a different required sensor was null. It is
+    NOT proof this sensor went offline. Fixture A's
+    (``native_dec_stuck_fault.csv``) co2 gap of 70 comes from humidity
+    nulls.
+  - ``CSVAdapter`` drops rows with a null required sensor before detection,
+    which is why the definition is expected slots, not rows counted.
 
 ``duration_seconds`` is stored-and-derived from ``end_ts - onset_ts`` (the
 frozen span observed so far), recomputed by the writer on every update — not

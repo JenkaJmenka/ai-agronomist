@@ -172,12 +172,18 @@ Definitions, for when Part B adds the tracking:
 - **`frozen_sample_count`** — the number of *finite* samples the detector
   actually observed stuck at the frozen value, counted over
   `[onset_ts, end_ts]`.
-- **`raw_slot_count`** — the number of file rows (including nulls) that span
-  covers, counted over the same `[onset_ts, end_ts]` window.
-- The gap `raw_slot_count - frozen_sample_count` is diagnostic: a nonzero
-  gap means the sensor was *also* intermittently offline during the freeze,
-  not merely stuck at one value. Treat that gap as a distinct signal, not as
-  noise to suppress or average away.
+- **`raw_slot_count`** — expected readings at the pinned cadence across the
+  freeze: `(end_ts - onset_ts) / cadence + 1`. **Not** a tally of file rows.
+- Cadence is pinned once: branch 1, the pre-onset median when at least
+  `CADENCE_PIN_MIN_INTERVALS` intervals exist; otherwise branch 2, the
+  median of the freeze's own intervals at gate fire. Never recomputed.
+- The gap (`raw_slot_count - frozen_sample_count`) counts readings missing
+  FOR THIS CHANNEL, whatever the cause. That includes whole rows the
+  upload adapter dropped because a *different* required sensor was null.
+  It is **not** proof this sensor went offline. Fixture A's
+  (`native_dec_stuck_fault.csv`) co2 gap of 70 comes from humidity nulls.
+- `CSVAdapter` drops rows with a null required sensor before detection,
+  which is why the definition is expected slots, not rows counted.
 
 ---
 
