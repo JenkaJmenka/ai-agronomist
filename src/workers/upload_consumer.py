@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.sensor_data import StatisticalAnomalyDetail, UploadHighAnomalyDetail
+from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
@@ -522,6 +523,16 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     )
 
     if payload.get("persist_data"):
+        # Task 3/4: persist detection-time stuck-fault episodes. Gated on
+        # persist_data the same way apply_anomaly_scores below is -- rides
+        # on this function's own commit via set_job_result, no commit here.
+        await persist_stuck_fault_episodes(
+            db,
+            tenant_id=job.tenant_id,
+            greenhouse_id=job.greenhouse_id or "default",
+            stuck_carry=finalize_stuck_carry,
+            high_anomalies=response.high_anomalies,
+        )
         # ADR-005: canonical scores + producer-native scores keyed by timestamp.
         _canonical_by_ts, _raw_by_ts = build_upload_score_dicts(
             response.high_anomalies,

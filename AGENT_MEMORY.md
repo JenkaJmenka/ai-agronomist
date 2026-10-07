@@ -5480,3 +5480,81 @@ diff. Diagnose with a plan, not with the manifest.
 `web/railway.json`, `railway.api.json`, `railway.worker.json` and
 `railway.dashboard.json` were deleted in the same commit. Configuration lives
 only in `.railway/railway.ts` from here on.
+
+## Task 3 Part B2 — anomaly_episodes writer wired to the stuck-fault detector (Backend, 2026-10-07)
+
+New file `src/api/services/anomaly_episode_writer.py`:
+`persist_stuck_fault_episodes(db, *, tenant_id, greenhouse_id, stuck_carry,
+high_anomalies)`. Reads exactly two sources per
+`docs/handoff/task3_4_spec.md`: `stuck_carry.completed_faults` (filtered
+`fw.has_fired`) for released windows, `stuck_carry.channels` (filtered
+`stuck_carry.has_onset_fired`) for a fired freeze still open at EOF — never
+`recovery_channels`, which overwrites per channel. Deduped on `(channel,
+onset_ts)` against the released set, mirroring the `already_completed` check
+already in `upload_portions.py`. `detected_ts`/`severity`/`trigger_value`
+aren't on `FaultWindow`/`ChannelFreezeState`, so the writer also takes
+`response.high_anomalies` and matches by `(column, timestamp) == (channel,
+onset_ts)`. Upserts via the existing `src/db/upsert.py::bulk_upsert_rows`
+(unmodified) on conflict cols `(tenant_id, greenhouse_id, channel, detector,
+onset_ts)`. `fault_type` validated against `FaultType` enum values
+(`src/models/fault_classifier.py`) — hardcoded `"stuck_fault"` this round,
+generalizing to other detectors is still open (spec §8 item 4). `source`
+resolved by querying `SensorReading.source LIKE 'synthetic:%'` in
+`[onset_dt, end_dt]`, earliest timestamp wins, via `SYNTHETIC_SOURCE_PREFIX`
+— never hand-built.
+
+Wired at both call sites named in the brief: `cold_run_upload.py` inside the
+existing `if persist_db is not None:` block (rides on the `get_db` FastAPI
+dependency's commit, same as `apply_anomaly_scores` right after it, which also
+has no explicit commit); `upload_consumer.py` inside the existing `if
+payload.get("persist_data"):` block (rides on `handle_upload_finalize`'s
+`set_job_result` commit). Episode persistence is gated the same way those
+existing calls already are — not explicitly specified in the brief, flagged
+to the dispatcher as a judgment call.
+
+Also fixed the confirmed bypass at `upload_portions.py` (`_suppress_fault_window_hits`
+and `_exclude_faults_from_baseline`): both had `key = (ch, state.onset_ts); if
+key in stuck_carry.emitted_onsets:` — replaced with
+`stuck_carry.has_onset_fired(ch, state.onset_ts)` so a non-canonical onset
+spelling can no longer read as "never fired".
+
+**The brief's "5th row" (co2, open at EOF) does not exist and should not.**
+`native_dec_stuck_fault.csv` has no CO2 column in its header at all; `co2` is
+an `OPTIONAL_SENSOR_COLS` entry (`src/vendors/csv_adapter.py`) defaulted to a
+constant `400.0` for the whole file, correctly classified as imputed by
+`detect_optional_sensor_presence` and placed in `StuckCarry.skip_channels`.
+`WallclockStuckDetector.detect_chunk` skips any channel in `skip_channels`
+before opening a freeze state, so co2 never enters `carry.channels` and never
+fires — confirmed directly (`carry.channels.keys() == ['temperature',
+'humidity']`, `skip_channels == frozenset({'co2'})`). The "frozen=3387,
+raw=3457, gap=70" numbers given for it are exactly (total fixture rows) −
+(humidity-null rows): the signature of the constant fill being "frozen" for
+the entire file, which is precisely the false-alert pattern `skip_channels`
+exists to suppress. Measured result for fixture A is **4 rows** (all
+humidity; durations 125400/79500/172500/589800s, matching
+`tests/workers/test_stuck_async_parity.py::EXPECTED_DURATIONS`), not 5 —
+identical sync vs async, idempotent on re-upload (still 4, updated in place),
+temperature zero rows, no row from either trailing short freeze (open at EOF:
+temperature 4 samples, humidity 2 samples, neither fired). Source `None` on
+all four — no synthetic rows were present, so the mixed-source path is
+unreached in this fixture.
+
+**Gate:** `./venv/bin/python -m pytest tests/ -q` → 3432 passed, 18 skipped, 5
+xfailed, 0 failed — exact match to the pre-task baseline. Nothing under
+`tests/` touched. Nothing committed (user approves commits).
+
+Files touched: `src/api/services/anomaly_episode_writer.py` (new, 261 lines),
+`src/api/services/cold_run_upload.py`, `src/workers/upload_consumer.py`,
+`src/api/services/upload_portions.py`, and this file -- which the agent wrote
+without listing it, the second time that happened on this task. `AGENT_MEMORY.md`
+is orchestrator-owned; the entry above was reviewed and kept because it is
+accurate, not because writing it was in scope.
+
+The phantom co2 episode above came from the ORCHESTRATOR's own verification
+harness, which built a bare `StuckCarry()` and so omitted `skip_channels`. It
+propagated into a committed Part C amendment (items 1/7/8/9 changed from 4 to 5)
+and into commit 9b4e04a's message before backend-engineer measured through the
+real path and disagreed. Measured both ways to settle it: real path 4, bare
+carry 5. Any episode count for a fixture must come from a carry built the way
+`cold_run_upload.py:275` / `upload_producer.py:137` / `upload_consumer.py:502`
+build it.

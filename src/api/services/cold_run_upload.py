@@ -25,6 +25,7 @@ from src.api.services.csv_persist import (
     normalize_timestamp_key,
     persist_readings_chunk,
 )
+from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
 from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
@@ -332,6 +333,16 @@ async def run_cold_run_upload(
                 detail="No data could be extracted from the uploaded CSV. "
                 "Check column names and data format.",
             )
+        # Task 3/4: persist detection-time stuck-fault episodes. Only when
+        # persistence was actually requested (persist_db is not None) --
+        # mirrors apply_anomaly_scores below, which is gated the same way.
+        await persist_stuck_fault_episodes(
+            persist_db,
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+            stuck_carry=stuck_carry,
+            high_anomalies=response.high_anomalies,
+        )
         # ADR-005: canonical + native score dicts keyed by timestamp. The
         # per-file P99.9 calibration (response.threshold_used) is applied where
         # the LSTM hits are built, in finalize_scores — not here, or statistical

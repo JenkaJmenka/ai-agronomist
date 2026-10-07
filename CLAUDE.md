@@ -185,6 +185,33 @@ Read tasks/orchestrator_state.json. Proceed to next phase.
 
 ---
 
+## Agent reporting rules
+
+**Every agent report must end with the raw output of `git status --short`** —
+never a hand-written list of files touched. Agents misreport their own blast
+radius: on 2026-10-07 two separate agents wrote to `AGENT_MEMORY.md` and
+omitted it from a report that otherwise said "nothing else", and one of those
+reports also gave the wrong line count for a file it created. The command
+cannot make either mistake. A hand-written list is an agent's recollection; the
+command is the repo's answer.
+
+Also require, and reproduce yourself before relaying:
+
+- **Measured values, never adjusted ones.** If a measurement differs from an
+  expected figure in the brief, the agent reports the difference. Never tune
+  code or an expected value toward a number. Several agents on Task 3 earned
+  trust specifically by reporting a discrepancy, and one of those discrepancies
+  (`raw_slot_count` 1897 vs a documented 1967) exposed a real design defect.
+- **The orchestrator's own measurements are not exempt.** A phantom co2 episode
+  that reached a commit message and a committed brief came from an orchestrator
+  harness that built a bare `StuckCarry()` and so skipped pipeline setup the
+  real upload path performs. Verify a harness reproduces the production path
+  before trusting a number it produces — see
+  `project_imputed_channel_phantom_freeze` in the session memory.
+- **The full suite, never a subset**, run in the FOREGROUND. Agents that
+  background the run and wait for a notification stall silently; three did on
+  Task 3. A long blocking run is correct behaviour.
+
 ## Failure handling
 
 - **Blocking failure** — report to user, propose options, wait for decision

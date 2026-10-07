@@ -721,9 +721,7 @@ class AnomalyEpisodeRecord(Base):
       - The gap (``raw_slot_count - frozen_sample_count``) counts readings
         missing FOR THIS CHANNEL, whatever the cause. That includes whole
         rows the adapter dropped because a different required sensor was
-        null. It is NOT proof this sensor went offline. Fixture A's
-        (``native_dec_stuck_fault.csv``) co2 gap of 70 comes from humidity
-        nulls.
+        null. It is NOT proof this sensor went offline.
       - ``CSVAdapter`` drops rows with a null required sensor before
         detection, which is why the definition is expected slots, not rows
         counted.
@@ -822,8 +820,9 @@ class AnomalyEpisodeRecord(Base):
     frozen_sample_count: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True,
         doc="Finite samples the detector counted as frozen over "
-            "[onset_ts, end_ts]. Not yet populated by any detector -- see "
-            "class docstring")
+            "[onset_ts, end_ts]. Computed by WallclockStuckDetector and "
+            "persisted by anomaly_episode_writer.py, which rejects a stuck "
+            "row whose counts are null -- see class docstring")
     raw_slot_count: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True,
         doc="Expected readings at the pinned cadence across "

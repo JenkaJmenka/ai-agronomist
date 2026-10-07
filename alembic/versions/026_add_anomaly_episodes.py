@@ -48,9 +48,7 @@ the channel's pinned cadence across the freeze:
   - The gap (raw_slot_count - frozen_sample_count) counts readings missing
     FOR THIS CHANNEL, whatever the cause. That includes whole rows the
     adapter dropped because a different required sensor was null. It is
-    NOT proof this sensor went offline. Fixture A's
-    (``native_dec_stuck_fault.csv``) co2 gap of 70 comes from humidity
-    nulls.
+    NOT proof this sensor went offline.
   - ``CSVAdapter`` drops rows with a null required sensor before detection,
     which is why the definition is expected slots, not rows counted.
 

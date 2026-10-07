@@ -432,8 +432,9 @@ def _suppress_fault_window_hits(
 
     # Open emitted faults: [onset_dt, +inf)
     for ch, state in stuck_carry.channels.items():
-        key = (ch, state.onset_ts)
-        if key in stuck_carry.emitted_onsets:
+        # Matched by instant via has_onset_fired, not by spelling against
+        # emitted_onsets directly -- see StuckCarry.has_onset_fired.
+        if stuck_carry.has_onset_fired(ch, state.onset_ts):
             # Check this isn't already in completed_faults
             already_completed = any(
                 fw.channel == ch and fw.onset_ts == state.onset_ts
@@ -511,8 +512,9 @@ def _exclude_faults_from_baseline(
 
     # Open emitted faults that crossed the gate
     for ch, state in stuck_carry.channels.items():
-        key = (ch, state.onset_ts)
-        if key in stuck_carry.emitted_onsets:
+        # Matched by instant via has_onset_fired, not by spelling against
+        # emitted_onsets directly -- see StuckCarry.has_onset_fired.
+        if stuck_carry.has_onset_fired(ch, state.onset_ts):
             already_completed = any(
                 fw.channel == ch and fw.onset_ts == state.onset_ts
                 for fw in stuck_carry.completed_faults

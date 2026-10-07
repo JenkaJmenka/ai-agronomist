@@ -51,8 +51,8 @@ decision — don't rename the table to "fix" it.
 | `detected_ts` | `DateTime(tz)` | no | When the detector actually wrote the row |
 | `release_ts` | `DateTime(tz)` | yes | First non-frozen sample after the freeze ends; NULL while `is_ongoing` |
 | `duration_seconds` | `Integer` | yes | Stored-and-derived, `end_ts - onset_ts`; see §3 |
-| `frozen_sample_count` | `Integer` | yes | Not yet populated by any detector; see §6 |
-| `raw_slot_count` | `Integer` | yes | Not yet populated by any detector; see §6 |
+| `frozen_sample_count` | `Integer` | yes | Computed by `WallclockStuckDetector`, persisted by `anomaly_episode_writer.py`; see §6 |
+| `raw_slot_count` | `Integer` | yes | Computed by `WallclockStuckDetector`, persisted by `anomaly_episode_writer.py`; see §6 |
 | `severity` | `String(16)` | no | e.g. `critical`, `warning`, assigned at detection |
 | `trigger_value` | `Float` | yes | Representative raw value, e.g. the frozen reading; NULL for reconstruction-error-based detectors with no single value |
 | `is_ongoing` | `Boolean` | no | Default `false`. See §4 for the CHECK tying this to `release_ts` |
@@ -158,30 +158,33 @@ CHECK later without reopening the vocabulary-duplication trade-off above.
 
 ---
 
-## 6. Known gap: the two sample counts are not wired to anything
+## 6. The two sample counts: where they come from
 
-`FaultWindow` (`src/models/stuck_fault_detector.py:172`) currently carries
-only `channel`, `onset_ts`/`onset_dt`, `release_ts`/`release_dt`,
-`last_frozen_ts`/`last_frozen_dt`. It has **no** `frozen_sample_count` or
-`raw_slot_count` tracking. This migration only creates the two columns
-(nullable, so no writer is required to populate them yet) — it does not
-touch the detector.
+`FaultWindow` (`src/models/stuck_fault_detector.py:172`) carries `channel`,
+`onset_ts`/`onset_dt`, `release_ts`/`release_dt`, `last_frozen_ts`/
+`last_frozen_dt`, `frozen_sample_count`, `raw_slot_count` and `has_fired`.
+`WallclockStuckDetector` computes both counts inside its consume loop as
+each freeze progresses — neither is derived afterwards from the file or
+from `sensor_readings`. `src/api/services/anomaly_episode_writer.py`
+persists both columns, and rejects a stuck row whose counts are null,
+which is why `nullable` in the schema (§2) is still the correct type and
+not a leftover from before the counts were wired up.
 
-Definitions, for when Part B adds the tracking:
+Definitions:
 
 - **`frozen_sample_count`** — the number of *finite* samples the detector
   actually observed stuck at the frozen value, counted over
   `[onset_ts, end_ts]`.
 - **`raw_slot_count`** — expected readings at the pinned cadence across the
   freeze: `(end_ts - onset_ts) / cadence + 1`. **Not** a tally of file rows.
-- Cadence is pinned once: branch 1, the pre-onset median when at least
-  `CADENCE_PIN_MIN_INTERVALS` intervals exist; otherwise branch 2, the
-  median of the freeze's own intervals at gate fire. Never recomputed.
+- Cadence is pinned once per freeze and never recomputed: branch 1, the
+  pre-onset median when at least `CADENCE_PIN_MIN_INTERVALS` (3) intervals
+  exist; otherwise branch 2, the median of the freeze's own intervals at
+  gate fire.
 - The gap (`raw_slot_count - frozen_sample_count`) counts readings missing
   FOR THIS CHANNEL, whatever the cause. That includes whole rows the
   upload adapter dropped because a *different* required sensor was null.
-  It is **not** proof this sensor went offline. Fixture A's
-  (`native_dec_stuck_fault.csv`) co2 gap of 70 comes from humidity nulls.
+  It is **not** proof this sensor went offline.
 - `CSVAdapter` drops rows with a null required sensor before detection,
   which is why the definition is expected slots, not rows counted.
 
@@ -207,6 +210,13 @@ This is the key Part B's writer must use as the `ON CONFLICT` / merge target:
 This also means a re-upload of a file that was already ingested is
 idempotent with respect to this table: the same onset re-triggers an UPDATE
 of the existing row, not a second row.
+
+Episode persistence is gated the same way the surrounding persistence
+already is: `persist_db is not None` in the sync path
+(`src/api/services/cold_run_upload.py`) and the `persist_data` payload flag
+in the async path (`src/workers/upload_consumer.py`), so a preview-only
+upload writes NO `anomaly_episodes` rows. This is approved behaviour, not a
+caveat.
 
 ---
 

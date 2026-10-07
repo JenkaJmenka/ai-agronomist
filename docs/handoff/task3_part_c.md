@@ -9,12 +9,9 @@ user and is recorded verbatim; it is not an orchestrator or agent design.
 
 ## Acceptance items
 
-1. Five fired episodes for fixture A, via sync AND async:
-   - four humidity, unchanged onsets, severity urgent;
-   - one co2, onset 2026-12-14 00:00, open at EOF: `is_ongoing=true`,
-     `release_ts` NULL, `end_ts` = last frozen sample, frozen 3387, raw 3457.
-     Report its severity as measured; don't assert a value.
-   Temperature: zero episodes.
+1. Four humidity stuck episodes, unchanged onsets, severity urgent, via sync
+   AND async. Temperature: zero episodes. co2: zero episodes — see the note
+   below; it is NOT an episode and must not be asserted as one.
 2. The 2026-12-18 13:00 episode read back FROM THE DATABASE:
    `end_ts` 2026-12-25 08:50, `duration_seconds` 589,800.
 3. `detection_latency` for it queryable from the DB and equal to 6.00 h.
@@ -22,9 +19,9 @@ user and is recorded verbatim; it is not an orchestrator or agent design.
    measurement. If either differs, report the measured value and stop.
 5. No phantom episode from the trailing 2-sample freeze.
 6. Flip the strict xfail on episode `end_ts`; remove the marker.
-7. A pinned test on the span values of all five episodes.
-8. Idempotent re-upload: the same file twice gives 5 rows, not 10.
-9. Sync and async produce identical rows (all 5) for this fixture.
+7. A pinned test on the span values of all four episodes.
+8. Idempotent re-upload: the same file twice gives 4 rows, not 8.
+9. Sync and async produce identical rows (all 4) for this fixture.
 10. Mixed-source rule: any synthetic reading in the window → episode
     `source = 'synthetic:<type>'`; with several types, the earliest by
     timestamp wins. Test it whether or not the fixtures reach it.
@@ -43,6 +40,10 @@ user and is recorded verbatim; it is not an orchestrator or agent design.
     upsert key are rejected, on SQLite (and Postgres if supported).
 17. `upload_portions.py` `:436` and `:515` go through `has_onset_fired`, not raw
     set membership; `from_dict` without `cadence_seconds` logs a WARNING.
+18. A preview-only upload writes ZERO `anomaly_episodes` rows. Episode
+    persistence is gated the same way the surrounding persistence already is:
+    `persist_db is not None` in the sync path and the `persist_data` payload
+    flag in the async path.
 
 **Regression:** `native_july_clearsky.csv` → zero stuck episodes. Fixture A
 statistical counts unchanged. Full suite vs the 3432 baseline.
@@ -72,10 +73,18 @@ are null, so the fixture's 70 null-humidity rows never reach the detector
 (589800/300 + 1 = 1,967). The gap of 70 is therefore "missing readings,
 whether dropped upstream or never logged" — not a count of consumed rows.
 
-The co2 episode's gap of 3457-3387 = 70 is the SAME 70 rows: the adapter drops
-a whole row when any required sensor is null, so humidity nulls removed those
-co2 readings too. The gap counts readings missing for the channel whatever the
-cause — it is not evidence that the co2 sensor went offline.
+**There is no co2 episode, and adding one is a measurement error.** Fixture A
+has NO co2 column. co2 is an OPTIONAL sensor imputed with a constant fill, so
+it reads as frozen for the whole file — the exact false alert `skip_channels`
+suppresses. All three entry points build
+`StuckCarry(skip_channels=frozenset(imputed_channels))`
+(`cold_run_upload.py:275`, `upload_producer.py:137`,
+`upload_consumer.py:502`), and `detect_optional_sensor_presence` returns
+`['co2']` for this fixture, so co2 never opens a freeze state. A harness that
+constructs a bare `StuckCarry()` omits that and manufactures a phantom
+3387-sample co2 episode with a gap of 70. Measured both ways: real path 4 rows,
+bare carry 5. Any count for this fixture must come from a carry built the way
+the upload path builds it.
 
 Item 12's "never the cadence of a fired episode" is scoped to the PINNING
 paths. Two non-pinning paths to `CADENCE_EXPECTED_SECONDS` remain by design:
