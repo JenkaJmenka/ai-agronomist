@@ -49,6 +49,15 @@ docs/architecture/*
 docs/security/*
 !docs/security/auth-audit-phase1.md
 !docs/security/deploy-runbook-phase2.md
+# docs/deployment/railway.md is the Railway service-wiring and resource-tuning
+# reference, owned by devops-lead. Tracked because a correction made only
+# locally is invisible to every other branch -- the same failure that had the
+# Task 3 handoff spec rebuilt from scratch. The rest of docs/deployment/
+# (monitoring-dashboard-config.yaml, phase-4.1-deployment-checklist.md,
+# ops-runbook.md) is Streamlit-era and stays local until someone revises it.
+!docs/deployment/
+docs/deployment/*
+!docs/deployment/railway.md
 # docs/handoff/** is cross-agent task handoff: the schema and contract spec a
 # later task's implementer works from.  The Task 3 spec was written locally in
 # an earlier session and lost to this ignore rule — which is why Task 3 opened

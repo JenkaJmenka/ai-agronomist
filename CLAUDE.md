@@ -273,7 +273,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 | backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
-| devops-lead | `docker/`, `.github/` |
+| devops-lead | `docker/`, `.github/`, `docs/deployment/` |
 | tech-lead | `docs/refactor/` |
 | orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
 
@@ -295,6 +295,14 @@ asymmetry that caused the confusion: `tests/workers/` is qa-engineer's, under
 The lesson both times: when a task's real edit point falls outside every row,
 say so and get an owner assigned. Do not pick the nearest-looking agent, and do
 not quietly widen your own scope to cover it.
+
+`docs/deployment/` is devops-lead's, assigned 2026-10-10. The gap surfaced when
+`docs/deployment/railway.md` was found stale after commit `2f924fa` deleted all four
+`railway*.json` files: the doc still instructs setting a per-service "Config File
+Path" to files that no longer exist. Deployment docs describe the same services
+devops-lead already owns under `docker/`, so they belong together. Note the live
+apply procedure lives in `docs/runbooks/deploy.md`, which this row does NOT cover —
+if that file needs editing, get an owner assigned first.
 
 `docs/handoff/` is backend-engineer's, with one exception to the usual
 one-owner rule: another agent may add to a handoff spec when its own task
