@@ -5558,3 +5558,39 @@ real path and disagreed. Measured both ways to settle it: real path 4, bare
 carry 5. Any episode count for a fixture must come from a carry built the way
 `cold_run_upload.py:275` / `upload_producer.py:137` / `upload_consumer.py:502`
 build it.
+
+## Home-chart first paint cannot be guarded by an e2e spec (Frontend, 2026-10-10)
+
+`d1fdba5` fixed an unconditional `useDeferredValue` in `HomeView` (the same bug
+as `5b74ad4` in `MonitoringView`) and noted it was unverified by test,
+suggesting "a spec with a realistic payload" would catch it. **That was
+attempted and does not work. Do not repeat the sweep.**
+
+Measured: a scratch spec with a 600-row payload (top of the 48-600 range the
+monitoring specs use), `workers=1`, `--repeat-each=20`, rebuilt each time with
+the fix reverted vs restored, CPU throttled via CDP
+`Emulation.setCPUThrottlingRate`:
+
+| rate | fix reverted | fix restored |
+|---|---|---|
+| 6x / 20x / 35x / 40x | 20/20 passed | 20/20 passed |
+| 45x | 5/20 failed | 1/20 failed |
+
+No rate separates the two. Below ~40x nothing starves; at 45x both sides fail
+and their latency ranges overlap almost completely (4.7-6.9s vs 4.9-6.9s)
+because generic hydration cost swamps the 5s budget. `HomeView` composes more
+than the monitoring chart assertions — status bar with its own anomaly-count
+fetch, tiles, anomaly list — so its baseline cost is higher and the window
+between "no starvation" and "everything swamped" is too narrow to isolate the
+defer. Contrast `MonitoringView`, which gave a clean 16/30 -> 0/30 and
+14/20 -> 0/20 at 6x.
+
+**Why:** a regression guard has to fail without the fix and pass with it. A
+spec that passes either way is worse than none — `smoke.spec.ts`'s 1-row home
+assertion is exactly that, and is why the bug shipped unverified.
+
+**How to apply:** the home chart's first paint stays uncovered, by decision.
+If it needs coverage, the route is a unit/integration test asserting the
+rendered row source directly, not an e2e timing assertion. Note also that these
+throttle numbers were taken on a machine running many agents concurrently, so
+treat any threshold from them as unstable.

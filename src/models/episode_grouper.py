@@ -8,18 +8,40 @@ event is one alert with a duration instead of N rows.
 1. Grouping lives at the detection layer (``finalize_scores``).
 2. Episodes are keyed by **(channel, detector)** — a ``stuck_fault`` alert
    is never absorbed into a ``statistical`` episode on the same channel.
-3. Stuck-fault episodes derive their ``duration_seconds`` from the actual
-   frozen span (via ``completed_faults`` / ``frozen_hours_at_detection``),
-   not from the span of alert rows (which would be 0 for a single-row
-   emission).
+3. Stuck-fault episodes derive BOTH their ``end_ts`` and their
+   ``duration_seconds`` from the actual frozen span (via
+   ``completed_faults`` / ``frozen_hours_at_detection``), not from the span
+   of alert rows — which would be 0 for a single-row emission, since a
+   freeze emits exactly one alert, stamped at its onset.
 4. An ``is_ongoing`` flag marks episodes whose freeze had not yet ended
-   at detection time; their ``duration_seconds`` is a lower bound.
+   at end of input.  Both their ``end_ts`` and their ``duration_seconds``
+   describe the span observed SO FAR, which is a lower bound on the eventual
+   fault — the freeze continues past the data.
+5. ``end_ts - start_ts == duration_seconds`` holds for every episode, every
+   detector, every stuck-fault strategy below.  One resolution produces the
+   pair (``_stuck_fault_span``), so the two can never contradict each
+   other — the bug this invariant replaces reported
+   ``duration_seconds=589800`` alongside a zero-length timestamp span.
+6. A stuck fault's frozen span is resolved in this order, first hit wins:
+
+   a. the matching **completed** ``FaultWindow`` (``completed_faults``) —
+      an exact closed span ending at ``last_frozen_ts``;
+   b. the matching **open** ``ChannelFreezeState`` (``open_freezes``, i.e.
+      ``StuckCarry.channels``) — the span observed so far, ending at the
+      real last frozen sample ``last_ts``;
+   c. the alert's own ``frozen_hours_at_detection`` laid off from the onset;
+   d. zero.
+
+   (c) is a LAST RESORT reached only when the caller supplied no open
+   states, and it is short by however long the freeze ran past the gate
+   crossing — see ``_stuck_fault_span`` for why.  Callers holding a
+   ``StuckCarry`` should pass ``open_freezes`` and get (b).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.config import EPISODE_GAP_SECONDS, RECOVERY_SCORE_CAP
@@ -84,6 +106,7 @@ def group_alerts_into_episodes(
     *,
     recovery_channels: dict[str, Any] | None = None,
     completed_faults: list[Any] | None = None,
+    open_freezes: dict[str, Any] | None = None,
     gap_seconds: int = EPISODE_GAP_SECONDS,
     recovery_score_cap: float = RECOVERY_SCORE_CAP,
 ) -> list[AnomalyEpisode]:
@@ -104,6 +127,12 @@ def group_alerts_into_episodes(
     completed_faults:
         ``stuck_carry.completed_faults`` — all completed FaultWindows,
         used to compute final stuck_fault episode durations.
+    open_freezes:
+        ``stuck_carry.channels`` — maps channel → ChannelFreezeState for
+        freezes still open at end of input.  Optional: omitting it does not
+        change any other episode, it only degrades a still-open stuck fault
+        to the ``frozen_hours_at_detection`` lower bound (module docstring
+        rule 6c instead of 6b).
     gap_seconds:
         Max gap before splitting into a new episode.
     recovery_score_cap:
@@ -112,8 +141,12 @@ def group_alerts_into_episodes(
     recovery_channels = recovery_channels or {}
     completed_faults = completed_faults or []
 
-    # Index completed faults by (channel, onset_ts) for O(1) lookup.
-    fault_index = _build_fault_index(completed_faults)
+    # Index completed faults by (channel, onset_ts) for O(1) lookup.  Open
+    # states are already keyed by channel, so they need no index.
+    sources = _StuckFaultSources(
+        fault_index=_build_fault_index(completed_faults),
+        open_freezes=open_freezes or {},
+    )
 
     # Build sortable records: (group_key, dt, alert)
     records: list[tuple[str, datetime, Any]] = []
@@ -137,7 +170,7 @@ def group_alerts_into_episodes(
             _flush_group(
                 current_group, episodes,
                 recovery_channels, recovery_score_cap,
-                fault_index,
+                sources,
             )
             current_key = key
             current_group = [(dt, alert)]
@@ -148,7 +181,7 @@ def group_alerts_into_episodes(
                 _flush_group(
                     current_group, episodes,
                     recovery_channels, recovery_score_cap,
-                    fault_index,
+                    sources,
                 )
                 current_group = [(dt, alert)]
             else:
@@ -157,7 +190,7 @@ def group_alerts_into_episodes(
     _flush_group(
         current_group, episodes,
         recovery_channels, recovery_score_cap,
-        fault_index,
+        sources,
     )
     return episodes
 
@@ -185,52 +218,167 @@ def _build_fault_index(
     return index
 
 
-def _stuck_fault_duration(
-    first_alert: Any,
+@dataclass(frozen=True)
+class _StuckFaultSources:
+    """Everything a stuck-fault episode's frozen span can be resolved from.
+
+    Bundled rather than passed as two parameters so that adding a third
+    source later does not widen every signature between
+    ``group_alerts_into_episodes`` and ``_stuck_fault_span`` again.
+
+    ``fault_index``
+        Released freezes, ``(channel, onset_ts) -> FaultWindow``.
+    ``open_freezes``
+        Freezes still open at end of input, ``channel ->
+        ChannelFreezeState``, exactly as held in ``StuckCarry.channels``.
+        Empty when the caller did not supply any, which is what makes the
+        open-state branch inert by default.
+
+    Both are keyed on the onset, which is also the stuck alert's timestamp.
+    """
+
+    fault_index: dict[tuple[str, str], Any]
+    open_freezes: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _StuckFaultSpan:
+    """The frozen span of one stuck-fault episode: end boundary + duration.
+
+    Both fields leave ``_stuck_fault_span`` together, derived from a single
+    resolution of the freeze, which is what makes ``end_dt - onset_dt ==
+    duration_seconds`` structurally true rather than a convention two
+    separate code paths have to remember.  Never widen this to let a caller
+    supply one field and compute the other.
+    """
+
+    end_dt: datetime
+    duration_seconds: float
+    is_ongoing: bool
+
+
+def _open_freeze_end(state: Any, onset_dt: datetime) -> datetime | None:
+    """Last frozen sample of *state*, if *state* is the freeze at *onset_dt*.
+
+    Returns ``None`` — meaning "no better information here, fall through" —
+    when the channel's open freeze is a DIFFERENT one (a channel can have
+    released the freeze this episode describes and opened a new one since),
+    when either timestamp is missing or unparseable, or when the span would
+    run backwards.  Never raises: a malformed carry must degrade to the
+    lower-bound branch, not fail the whole upload response.
+
+    Onsets are compared as instants rather than as strings:
+    ``ChannelFreezeState.onset_ts`` and the alert's ``timestamp`` are two
+    ISO spellings of the same instant and need not be byte-identical (see
+    ``_canonical_onset_key`` in ``stuck_fault_detector.py``).
+    """
+    try:
+        if _parse_iso(state.onset_ts) != onset_dt:
+            return None
+        end_dt = _parse_iso(state.last_ts)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if end_dt < onset_dt:
+        return None
+    return end_dt
+
+
+def _stuck_fault_span(
+    onset: tuple[datetime, Any],
     actual_channel: str,
-    fault_index: dict[tuple[str, str], Any],
-) -> tuple[float, bool]:
-    """Compute duration_seconds and is_ongoing for a stuck_fault episode.
+    sources: _StuckFaultSources,
+) -> _StuckFaultSpan:
+    """Resolve end_dt, duration_seconds and is_ongoing for a stuck_fault.
 
-    Returns (duration_seconds, is_ongoing).
+    *onset* is the group's first ``(dt, alert)`` entry — the freeze's onset,
+    since a freeze emits exactly one alert and it is stamped at ``onset_ts``.
+    Taking the pair rather than the two values separately keeps the parsed
+    datetime and the alert it came from from drifting apart.
 
-    Strategy:
-    - If a completed FaultWindow matches (same channel + onset_ts),
-      use the full fault duration: onset → fault end. is_ongoing=False.
-    - Otherwise, the freeze was still open at detection time. Use the
-      alert's ``frozen_hours_at_detection`` (hours frozen at the gate
-      crossing) as a lower bound. is_ongoing=True.
+    Resolution order (module docstring rule 6), first hit wins:
+
+    1. A completed ``FaultWindow`` matching (channel, onset_ts): the frozen
+       span is known exactly and ends at ``last_frozen_ts``, the last sample
+       still at the frozen value.  is_ongoing=False.
+    2. An open ``ChannelFreezeState`` matching the same onset: the freeze had
+       not ended at end of input, so the span runs to ``last_ts``, the last
+       frozen sample actually observed.  is_ongoing=True.
+    3. No state supplied for this channel: the alert's own
+       ``frozen_hours_at_detection`` (hours frozen at the GATE CROSSING) laid
+       off from the onset.  is_ongoing=True.
+    4. Nothing recoverable: a zero-length span at the onset.
+
+    Step 3 is a last resort, NOT the normal path for a still-open freeze.
+    The alert is stamped once, at the gate crossing, and never revised, so
+    it is short by however long the freeze ran on afterwards — 35 minutes on
+    the 80-row ongoing fixture, unbounded in general.  Step 2 exists to
+    avoid it and needs no new timestamp source beyond the carry the caller
+    already holds.  Whatever the step, the end boundary and the duration
+    come out of the SAME arithmetic, which is what keeps module docstring
+    rule 5 true by construction: never derive one of them here without the
+    other, and never reach for ``detected_ts`` as a third opinion.
 
     The sole caller invokes this only under ``detector == "stuck_fault"``,
     so the detector discrimination is structurally guaranteed — do not add
     a redundant guard here, and do not move the call out of that branch.
+
+    Prose in ``src/dashboard/services/diagnosis_enricher.py`` and under
+    ``tests/`` still cites this function's former name,
+    ``_stuck_fault_duration``, from when it returned the duration alone.
     """
+    onset_dt, first_alert = onset
     onset_ts = first_alert.timestamp
     fw_key = (actual_channel, onset_ts)
-    fw = fault_index.get(fw_key)
+    fw = sources.fault_index.get(fw_key)
 
     if fw is not None:
         # Use the last frozen sample, not the release (first non-frozen)
-        # sample.  last_frozen_dt is the correct boundary for the frozen span.
+        # sample.  last_frozen_dt is the correct boundary for the frozen span
+        # and is what ``anomaly_episodes.end_ts`` holds; see FaultWindow's
+        # docstring in stuck_fault_detector.py for the two-marker split.
         boundary_dt = fw.last_frozen_dt
-        full_duration = (boundary_dt - fw.onset_dt).total_seconds()
-        return full_duration, False
+        return _StuckFaultSpan(
+            end_dt=boundary_dt,
+            duration_seconds=(boundary_dt - fw.onset_dt).total_seconds(),
+            is_ongoing=False,
+        )
 
-    # Fallback: the freeze was still open, so use elapsed-so-far as a lower
-    # bound.  Stuck hits carry that in frozen_hours_at_detection; rows
-    # persisted before that field existed still carry it in z_score, and there
-    # is no backfill migration.  The legacy read is safe only because the
-    # caller has already established detector == "stuck_fault": a statistical
-    # row also has a numeric z_score, so discriminating on z_score's presence
-    # instead of on the detector would misread it as a duration.
+    open_state = sources.open_freezes.get(actual_channel)
+    if open_state is not None:
+        end_dt = _open_freeze_end(open_state, onset_dt)
+        if end_dt is not None:
+            # Observed-so-far span of a freeze that never released: the real
+            # last frozen sample, so this agrees with the anomaly_episodes
+            # row the writer builds from the same carry state.
+            return _StuckFaultSpan(
+                end_dt=end_dt,
+                duration_seconds=(end_dt - onset_dt).total_seconds(),
+                is_ongoing=True,
+            )
+
+    # Last resort (step 3) — no open state reached us for this channel, so
+    # fall back to elapsed-at-the-gate as a lower bound.  Stuck hits carry
+    # that in frozen_hours_at_detection; rows persisted before that field
+    # existed still carry it in z_score, and there is no backfill migration.
+    # The legacy read is safe only because the caller has already established
+    # detector == "stuck_fault": a statistical row also has a numeric
+    # z_score, so discriminating on z_score's presence instead of on the
+    # detector would misread it as a duration.
     duration_hours = getattr(first_alert, "frozen_hours_at_detection", None)
     if duration_hours is None:
         duration_hours = getattr(first_alert, "z_score", None)
     if duration_hours is not None and duration_hours > 0:
-        return float(duration_hours) * _SECONDS_PER_HOUR, True
+        duration = float(duration_hours) * _SECONDS_PER_HOUR
+        return _StuckFaultSpan(
+            end_dt=onset_dt + timedelta(seconds=duration),
+            duration_seconds=duration,
+            is_ongoing=True,
+        )
 
-    # Last resort: no duration is recoverable from the alert.
-    return 0.0, True
+    # Last resort: no duration is recoverable from the alert, so the span
+    # collapses onto the onset — the one case where end_ts == start_ts is
+    # the truthful answer, because duration_seconds is 0.0 too.
+    return _StuckFaultSpan(end_dt=onset_dt, duration_seconds=0.0, is_ongoing=True)
 
 
 def _flush_group(
@@ -238,7 +386,7 @@ def _flush_group(
     episodes: list[AnomalyEpisode],
     recovery_channels: dict[str, Any],
     recovery_score_cap: float,
-    fault_index: dict[tuple[str, str], Any],
+    sources: _StuckFaultSources,
 ) -> None:
     """Convert a contiguous group of alerts into an AnomalyEpisode."""
     if not group:
@@ -252,20 +400,24 @@ def _flush_group(
     actual_channel = getattr(first_alert, "column", None) or "__lstm__"
 
     start_dt = group[0][0]
-    end_dt = group[-1][0]
 
     scores = [float(a.score) for _, a in group]
     peak = max(scores)
     severities = [getattr(a, "severity", None) for _, a in group]
     best_sev = max(severities, key=_severity_rank)
 
-    # Compute duration.
+    # Resolve the episode's end boundary and duration together.  For a
+    # stuck fault the alert rows do not describe the span (one alert per
+    # freeze, stamped at onset), so both come from the frozen span; for
+    # every other detector the alert rows ARE the span.
     is_ongoing = False
     if detector == "stuck_fault":
-        duration, is_ongoing = _stuck_fault_duration(
-            first_alert, actual_channel, fault_index,
-        )
+        span = _stuck_fault_span(group[0], actual_channel, sources)
+        end_dt = span.end_dt
+        duration = span.duration_seconds
+        is_ongoing = span.is_ongoing
     else:
+        end_dt = group[-1][0]
         duration = (end_dt - start_dt).total_seconds()
 
     # Detect recovery episodes: channel just exited a detected fault

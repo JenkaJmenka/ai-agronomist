@@ -72,6 +72,13 @@ EXPECTED_DETECTED = [
 ]
 EXPECTED_DURATIONS = [125400.0, 79500.0, 172500.0, 589800.0]
 
+# Observed span of the ongoing freeze in the 80-row synthetic fixture below
+# (_build_synthetic_ongoing_csv): onset on row 0 at 00:00, still frozen on the
+# last row at 06:35, so 23700 s.  Deliberately NOT the 21600 s the gate
+# crossing stamps on the alert — see
+# TestFinalPortionFlush.test_ongoing_episode_duration_is_the_full_observed_span.
+EXPECTED_ONGOING_SPAN_SECONDS = 23700.0
+
 # Portion sizes for the shuffled-order matrix
 PORTION_SIZES = [50, 500, 37, 288]
 
@@ -863,11 +870,6 @@ class TestFinalPortionFlush:
         finally:
             os.unlink(tmp)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Task 3/4: episode end_ts must be the last frozen sample; "
-        "today it equals onset (single stuck_fault alert per freeze)",
-    )
     @pytest.mark.asyncio
     async def test_ongoing_episode_end_ts_is_last_frozen(self):
         """Episode end_ts should be the last frozen sample, not the onset."""
@@ -893,6 +895,53 @@ class TestFinalPortionFlush:
         expected_end = "2026-12-20T06:35:00+00:00"
         assert hum_eps[0]["end_ts"] == expected_end, (
             f"end_ts={hum_eps[0]['end_ts']}, expected {expected_end}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ongoing_episode_duration_is_the_full_observed_span(self):
+        """An ongoing episode's duration is the span observed, not the gate value.
+
+        The alert is stamped once, when the dual gate fires, and carries
+        ``frozen_hours_at_detection = 6.0`` from then on — measured on this
+        fixture, i.e. 21600 s laid off from the 00:00 onset.  The freeze then
+        runs on to the last row at 06:35, so the span actually observed is
+        23700 s.  The 2100 s between them is the stretch of freeze that the
+        alert's own field cannot see, which is why the grouper resolves the
+        span from the carry's still-open ``ChannelFreezeState`` instead.
+
+        Pinned beside ``test_ongoing_episode_end_ts_is_last_frozen`` because
+        the boundary and the duration are ONE resolution: together the two
+        tests pin ``end_ts - start_ts == duration_seconds`` by value on this
+        case (00:00 → 06:35 is exactly 23700 s), and a regression that went
+        back to reading the alert would move both.
+        """
+        import tempfile, os
+
+        csv_content = _build_synthetic_ongoing_csv(80)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(csv_content)
+            tmp = f.name
+
+        try:
+            resp = await _run_sync(Path(tmp), chunk_size=50)
+        finally:
+            os.unlink(tmp)
+
+        episodes = _stuck_episodes_from(resp)
+        hum_eps = [ep for ep in episodes if ep["channel"] == "humidity"]
+        assert len(hum_eps) == 1
+        assert hum_eps[0]["is_ongoing"] is True
+
+        gate_seconds = STUCK_WALLCLOCK_MIN_HOURS * 3600.0
+        assert hum_eps[0]["duration_seconds"] == EXPECTED_ONGOING_SPAN_SECONDS, (
+            f"duration_seconds={hum_eps[0]['duration_seconds']}, expected "
+            f"{EXPECTED_ONGOING_SPAN_SECONDS} (full observed span)"
+        )
+        assert hum_eps[0]["duration_seconds"] - gate_seconds == 2100.0, (
+            "the observed span must exceed the gate-crossing lower bound by the "
+            f"35 min the freeze ran past it; gate={gate_seconds}"
         )
 
 

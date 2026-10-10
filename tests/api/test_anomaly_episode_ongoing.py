@@ -12,11 +12,13 @@ hand-written. That is the point of the file: the open-freeze branch of
 ``persist_stuck_fault_episodes`` has no ``FaultWindow`` to read, and the
 episode it writes exists nowhere else.
 
-Relevant to Part C item 6: the UPLOAD RESPONSE's episode for an ongoing freeze
-reports ``end_ts`` equal to the onset (pinned as a strict xfail in
-``tests/workers/test_stuck_async_parity.py``). The persisted row asserted here
-is the same freeze seen through the other concept, and it does carry the last
-frozen sample.
+Part C item 6 closed the gap this file used to describe: the UPLOAD RESPONSE's
+episode for an ongoing freeze reported ``end_ts`` equal to the onset, and the
+persisted row asserted here was the only place the last frozen sample showed
+up. ``episode_grouper`` now resolves the response episode's boundary from the
+open ``ChannelFreezeState`` too, so the two concepts agree —
+``tests/workers/test_stuck_async_parity.py`` pins the response side and
+``tests/models/test_episode_span_contract.py`` the resolution order.
 """
 
 from __future__ import annotations
