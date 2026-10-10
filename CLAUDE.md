@@ -270,7 +270,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
+| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/`, `docs/deployment/`, `docs/runbooks/` |
@@ -295,6 +295,12 @@ asymmetry that caused the confusion: `tests/workers/` is qa-engineer's, under
 The lesson both times: when a task's real edit point falls outside every row,
 say so and get an owner assigned. Do not pick the nearest-looking agent, and do
 not quietly widen your own scope to cover it.
+
+`alembic/` (the migration chain itself, not just `alembic.ini`) is
+backend-engineer's, assigned 2026-10-10. Only `alembic.ini` had a row, so the
+versions directory was uncovered -- found while renumbering the HNSW migration
+on `worktree-hnsw-vector-index`. Migrations are database schema and
+backend-engineer already owns `src/db/`, so they belong together.
 
 `docs/runbooks/` is devops-lead's, assigned 2026-10-10, with the same
 cross-agent exception as `docs/handoff/`: the domain agent may revise the step
