@@ -113,7 +113,11 @@ function HomeBody() {
     () => rowsForActiveWindow({ rows: mergedRows, from, to, isRefetching }),
     [mergedRows, from, to, isRefetching],
   );
-  const deferredChartRows = useDeferredValue(rows);
+  // Same rationale as MonitoringView: deferring exists for rolling live SSE
+  // ticks, not the one-time historical load — bypass outside live mode so
+  // the first paint cannot be starved for seconds under CI-level CPU load.
+  const deferredRowsForLive = useDeferredValue(rows);
+  const deferredChartRows = live ? deferredRowsForLive : rows;
   const tileRows = useMemo(() => carryForwardChannels(rows), [rows]);
 
   const windowStart = from?.toISOString() ?? deferredChartRows[0]?.timestamp ?? null;
