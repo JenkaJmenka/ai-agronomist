@@ -62,10 +62,14 @@ docs/deployment/*
 # (AnomalyMetrics definitions) were revised off the dead Streamlit dashboard on
 # 2026-10-10 and are live references now, so they are tracked too. Their metric
 # thresholds are NOT re-verified -- the file says so itself.
-# phase-4.1-deployment-checklist.md stays local: a dated one-time artifact for a
-# completed phase, archival rather than a doc anyone re-runs. Kept, not deleted.
+# phase-4.1-deployment-checklist.md is archival -- a dated artifact for a
+# completed phase that nobody re-runs -- but tracked anyway: its Streamlit
+# validation line was corrected to web's routes on 2026-10-10, and leaving a
+# correction local-only is the invisibility problem this whole block fixes.
+# Archival means do not maintain it, not keep its fixes hidden.
 !docs/deployment/ops-runbook.md
 !docs/deployment/monitoring-dashboard-config.yaml
+!docs/deployment/phase-4.1-deployment-checklist.md
 # docs/handoff/** is cross-agent task handoff: the schema and contract spec a
 # later task's implementer works from.  The Task 3 spec was written locally in
 # an earlier session and lost to this ignore rule — which is why Task 3 opened
