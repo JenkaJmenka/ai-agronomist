@@ -1,7 +1,7 @@
 """Replace the ivfflat incident-embedding index with HNSW.
 
-Revision ID: 023
-Revises: 022
+Revision ID: 027
+Revises: 026
 Create Date: 2026-08-01
 
 Root cause
@@ -58,8 +58,8 @@ letting CREATE INDEX emit a cryptic syntax error.
 from alembic import op
 import sqlalchemy as sa
 
-revision = "023"
-down_revision = "022"
+revision = "027"
+down_revision = "026"
 branch_labels = None
 depends_on = None
 
