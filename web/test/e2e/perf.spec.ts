@@ -26,6 +26,12 @@ const ROWS = Array.from({ length: DOWNSAMPLED_ROWS }, (_, i) => ({
   anomaly_score: i % 200 === 0 ? 0.9 : null,
 }));
 
+/** URL window enclosing every ROWS timestamp (minute 0 .. 1999 of 2026-06-01). */
+const HOME_WINDOW = {
+  from: "2026-06-01T00:00:00.000Z",
+  to: "2026-06-02T12:00:00.000Z",
+} as const;
+
 test.beforeEach(async ({ page }) => {
   // Profiling must not contend with perf budgets (enabled probe / POST).
   await page.route("**/api/profile**", (route) => {
@@ -52,6 +58,42 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/bff/anomalies/**", (route) =>
     route.fulfill({ json: { rows: [], count: 0, anomaly_count: 0, groups: [] } }),
   );
+});
+
+test(`home cold load paints the chart under ${COLD_TTI_BUDGET_MS} ms`, async ({ page }) => {
+  // Home-only BFF dependencies the shared beforeEach does not cover: the G2
+  // count query (useAnomalyCount + useFlaggedWindow) and the setpoints
+  // hydrate behind the tiles. Left unmocked they reach the BFF proxy and
+  // charge connection failures to the budget.
+  await page.route("**/api/bff/readings/anomalies-in-window**", (route) =>
+    route.fulfill({ json: { rows: [], anomaly_count: 0, total_count: ROWS.length } }),
+  );
+  await page.route("**/api/bff/config/**", (route) =>
+    route.fulfill({
+      json: {
+        config: {
+          crop: "tomato",
+          day_window: { start_hour: 6, end_hour: 18 },
+          co2_enrichment: false,
+          setpoints: {},
+          season_map: {},
+        },
+        sources: {},
+      },
+    }),
+  );
+
+  // Home applies its default period (last 24 h of wall-clock) when the URL has
+  // no range, which clips the fixed-date fixture to nothing — pass the window
+  // that holds ROWS so the budget measures a full 2k-point paint.
+  const startedAt = Date.now();
+  await page.goto(`/?from=${HOME_WINDOW.from}&to=${HOME_WINDOW.to}`);
+  await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
+  // The chart is the content gate: it renders only once the readings land, so
+  // a budget on it covers fetch + 2k-point uPlot init, not just the shell.
+  await expect(page.getByTestId("uplot-chart")).toBeVisible();
+  const elapsed = Date.now() - startedAt;
+  expect(elapsed, `cold TTI ${elapsed} ms`).toBeLessThan(COLD_TTI_BUDGET_MS);
 });
 
 test(`anomalies cold load paints content under ${COLD_TTI_BUDGET_MS} ms`, async ({ page }) => {

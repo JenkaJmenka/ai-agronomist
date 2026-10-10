@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, useQueryState } from "nuqs";
-import { Suspense, useDeferredValue, useEffect, useMemo, useRef } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -30,6 +30,7 @@ import { periodHours, rowsForActiveWindow, windowForPeriod } from "@/lib/periodP
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useChartRangeSelect } from "@/lib/useChartRangeSelect";
 import { useDateRange } from "@/lib/useDateRange";
+import { useLiveDeferred } from "@/lib/useLiveDeferred";
 import { useScope } from "@/lib/useScope";
 
 const PAGE_ID = "home";
@@ -114,10 +115,8 @@ function HomeBody() {
     [mergedRows, from, to, isRefetching],
   );
   // Same rationale as MonitoringView: deferring exists for rolling live SSE
-  // ticks, not the one-time historical load — bypass outside live mode so
-  // the first paint cannot be starved for seconds under CI-level CPU load.
-  const deferredRowsForLive = useDeferredValue(rows);
-  const deferredChartRows = live ? deferredRowsForLive : rows;
+  // ticks, not the first arrival of data — see useLiveDeferred.
+  const deferredChartRows = useLiveDeferred(rows, live);
   const tileRows = useMemo(() => carryForwardChannels(rows), [rows]);
 
   const windowStart = from?.toISOString() ?? deferredChartRows[0]?.timestamp ?? null;
