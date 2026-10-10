@@ -1,6 +1,7 @@
 # HANDOFF — web/ useDeferredValue first-paint starvation: mitigation plan
 
-**Status:** approved by the user, not started. Owner: **frontend-engineer** (`web/`).
+**Status:** **DELIVERED** in `cddf550` (2026-10-10). All four items shipped; §4's dead end
+still stands — do not retry the e2e timing guard. Owner was **frontend-engineer** (`web/`).
 **Baseline at handoff:** HEAD `706c2b0` on `main`, clean tree, all 4 CI workflows green.
 Backend suite 3639 passed / 21 skipped / 4 xfailed / 0 failed. Web: unit 46 files /
 422 tests, e2e **66** tests.
@@ -154,3 +155,42 @@ agent report with raw `git status --short` rather than a hand-written file list 
 CLAUDE.md rule, because agents here misreported their own blast radius twice.
 
 Nothing is committed without the user's approval.
+
+---
+
+## 6. Outcome (2026-10-10, commit `cddf550`)
+
+All four items delivered in one frontend-engineer dispatch. Items were taken **4 → 1 → 2 → 3**:
+the shared hook had to exist before item 2 could assert `toBe` identity on the rendered row
+source without reaching inside a component.
+
+**What shipped.** `web/lib/useLiveDeferred.ts` — `useLiveDeferred(rows, live)`, adopted at all
+three call sites (home chart, monitoring chart, monitoring table). `useDeferredValue` no longer
+appears in either component. The emptiness bypass is **derived** (`deferred.length === 0 &&
+rows.length > 0`) rather than latched in a ref, so a discarded low-priority render cannot leave
+the bypass stuck on, and a window that empties then refills is covered again.
+
+**Risk status.** R1 fixed (gate is on emptiness, so `/?live=true` no longer starves on first
+arrival). R2 fixed on both halves (12 unit tests + the first `/` perf budget). R5 fixed (one
+hook, one place to get right). **R3 remains by design** — the first paint is synchronous, and in
+live mode it now is too; that was the accepted trade-off, not an oversight. R4 unchanged.
+
+**Known nuance, accepted.** When rows go non-empty → empty while live, the hook returns the
+stale non-empty value for one catch-up render. That is pre-existing smoothing semantics and
+bounded by a single render, not a regression.
+
+**Guard strength.** The 12 tests fail in *both* directions, verified by reverting and re-running:
+3 fail if the emptiness gate is removed (i.e. if the mode-only fix is restored), 3 fail if the
+defer is deleted outright. So neither re-narrowing the fix nor deleting the smoothing can regress
+silently. Reverts were restored byte-identically (checksum verified).
+
+**Measured gates** (foreground, from `web/`; reproduced independently by the orchestrator):
+lint 1 pre-existing info · typecheck clean · vitest **48 files / 434 tests** (was 46/422) ·
+build green · playwright **67** (was 66; +1 is item 3's). `/` cold load measured **202 ms**
+against the 2000 ms budget, in family with `/anomalies` at 141 ms on the same run.
+
+**Gotcha worth keeping.** Item 3's perf test must pass an explicit `?from=&to=` window: Home
+applies a default last-24h-of-wall-clock period, which clips a fixed-date fixture to nothing and
+would have measured an empty paint. Render *count* is also not a usable signal in the unit tests
+— React schedules the catch-up render even when `live=false` and the deferred value is unused, so
+the assertions are on the *sequence of rendered values*.

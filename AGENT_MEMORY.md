@@ -5594,3 +5594,46 @@ If it needs coverage, the route is a unit/integration test asserting the
 rendered row source directly, not an e2e timing assertion. Note also that these
 throttle numbers were taken on a machine running many agents concurrently, so
 treat any threshold from them as unstable.
+
+## The defer is gated on emptiness, in one hook (Frontend, 2026-10-10)
+
+Resolves the section above. The unit/integration route it pointed to was taken
+and works; the home chart's first paint is **no longer uncovered**.
+
+`cddf550` extracted `web/lib/useLiveDeferred.ts` — `useLiveDeferred(rows, live)`
+— and adopted it at all three call sites (home chart, monitoring chart,
+monitoring table). `useDeferredValue` now appears in neither component, so
+there is one place to get this right instead of a pattern that was already
+copy-pasted twice.
+
+The gate is on **emptiness, not mode**. `5b74ad4`/`d1fdba5` scoped the defer to
+live mode, which only narrowed the bug: `/?live=true` still deferred the first
+data arrival and could still starve. The bypass condition is
+`deferred.length === 0 && rows.length > 0` — **derived, not latched in a ref**,
+so a discarded low-priority render cannot leave the bypass stuck on, and a
+window that empties then refills gets it again. `useDeferredValue` stays called
+unconditionally; only the returned value is conditional.
+
+**Why:** the failure was never the initial mount, it was the first `[] ->
+populated` update — `useDeferredValue` returns the previous value on an update
+and re-renders the new one at low priority, so React keeps rendering `[]` while
+the populated commit sits in background work.
+
+**How to apply:**
+- Two facts that cost time when writing the tests. React's low-priority
+  catch-up render **does** flush inside `act()`, so the *sequence* of rendered
+  values is deterministic and assertable. But render **count** is not a signal:
+  React schedules the catch-up render even when `live=false` and the deferred
+  value is unused, so an assertion written against the count fails for the
+  wrong reason. Assert the sequence of values.
+- A guard here must fail in **both** directions, and ours does: 3 tests fail if
+  the emptiness gate is removed, 3 fail if the defer is deleted outright. Check
+  both when touching this — deleting the defer "because the bug is fixed"
+  destroys live tick smoothing, which is the behaviour the hook exists for.
+- Perf budgets now cover `/` (cold TTI 2000 ms, measured 202 ms). The test must
+  pass an explicit `?from=&to=` window: Home applies a default last-24h-of-
+  wall-clock period, which clips a fixed-date fixture to nothing and would
+  measure an empty paint. Same wall-clock hazard as the future-dated readings.
+- Still synchronous by design on first paint (accepted trade-off), and a
+  non-empty -> empty transition while live shows the stale value for one
+  catch-up render. Both known, neither a regression.
