@@ -172,11 +172,18 @@ function MonitoringBody({
       }),
     [mergedRows, from, clipTo, isRefetching],
   );
+  // Deferring exists to keep nav/clicks responsive while live SSE ticks land
+  // every second (see "Chart/table can lag a frame behind tiles" history).
+  // Historical loads have no such rapid-update pressure, and deferring the
+  // very first paint of fetched data risks React starving that low-priority
+  // commit under CPU-constrained CI runners — bypass it outside live mode.
   // Chart stays on raw merged rows (no carry-forward polylines).
-  const deferredChartRows = useDeferredValue(rows);
+  const deferredRowsForLive = useDeferredValue(rows);
+  const deferredChartRows = live ? deferredRowsForLive : rows;
   // Table/tiles carry Connext columns onto live ticks so cells are not "—".
   const tableRows = useMemo(() => carryForwardChannels(rows), [rows]);
-  const deferredTableRows = useDeferredValue(tableRows);
+  const deferredTableRowsForLive = useDeferredValue(tableRows);
+  const deferredTableRows = live ? deferredTableRowsForLive : tableRows;
 
   // Envelope for G4 enrichment — prefer URL/live lookback bounds so the queryKey
   // does not churn on every SSE flush (rows[0]/at(-1) move every tick).
