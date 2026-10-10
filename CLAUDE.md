@@ -273,7 +273,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 | backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
-| devops-lead | `docker/`, `.github/`, `docs/deployment/` |
+| devops-lead | `docker/`, `.github/`, `docs/deployment/`, `docs/runbooks/` |
 | tech-lead | `docs/refactor/` |
 | orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
 
@@ -295,6 +295,17 @@ asymmetry that caused the confusion: `tests/workers/` is qa-engineer's, under
 The lesson both times: when a task's real edit point falls outside every row,
 say so and get an owner assigned. Do not pick the nearest-looking agent, and do
 not quietly widen your own scope to cover it.
+
+`docs/runbooks/` is devops-lead's, assigned 2026-10-10, with the same
+cross-agent exception as `docs/handoff/`: the domain agent may revise the step
+runbook covering its own area when its task says so. The directory is
+deliberately mixed — `deploy.md` and `STEP-1-worker-sizing.md` are infra, while
+`STEP-2`..`STEP-5` and `native-dec-fixture-baseline.md` are detector/ML
+material. A single owner for the whole tree would be wrong, so devops-lead owns
+the directory and its infra files, and an ML task that needs a detector runbook
+says so explicitly rather than reassigning the row. It earned a row because
+`deploy.md` is the live Railway apply procedure and was unowned while
+`docs/deployment/railway.md` was being corrected against it.
 
 `docs/deployment/` is devops-lead's, assigned 2026-10-10. The gap surfaced when
 `docs/deployment/railway.md` was found stale after commit `2f924fa` deleted all four

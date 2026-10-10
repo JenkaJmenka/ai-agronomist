@@ -58,6 +58,14 @@ docs/security/*
 !docs/deployment/
 docs/deployment/*
 !docs/deployment/railway.md
+# ops-runbook.md (incident response) and monitoring-dashboard-config.yaml
+# (AnomalyMetrics definitions) were revised off the dead Streamlit dashboard on
+# 2026-10-10 and are live references now, so they are tracked too. Their metric
+# thresholds are NOT re-verified -- the file says so itself.
+# phase-4.1-deployment-checklist.md stays local: a dated one-time artifact for a
+# completed phase, archival rather than a doc anyone re-runs. Kept, not deleted.
+!docs/deployment/ops-runbook.md
+!docs/deployment/monitoring-dashboard-config.yaml
 # docs/handoff/** is cross-agent task handoff: the schema and contract spec a
 # later task's implementer works from.  The Task 3 spec was written locally in
 # an earlier session and lost to this ignore rule — which is why Task 3 opened
