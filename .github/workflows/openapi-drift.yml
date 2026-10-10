@@ -1,0 +1,83 @@
+name: openapi-drift
+
+# web/openapi.json and web/lib/api-types.gen.ts are committed snapshots of
+# the FastAPI schema, not hand-maintained files. Either one can go stale
+# the moment a route or Pydantic model changes anywhere under src/ without
+# anyone re-running the generators — this job rebuilds both from scratch
+# and fails the build if the result doesn't match what's checked in.
+#
+# No path filter: a schema-affecting change can originate from any model or
+# route module under src/, not just src/api/, so this runs on every push and
+# pull request (matching backend-tests.yml and postgres-tests.yml).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: openapi-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: openapi.json / api-types.gen.ts drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          # CPU-only torch, matching backend-tests.yml: the default wheel
+          # pulls ~2.5 GB of CUDA libraries this job never exercises — it
+          # only needs to import src.api.main, not run any model.
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # pnpm version is pinned by web/package.json "packageManager".
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Regenerate openapi.json from the live app definition
+        env:
+          # src/db/session.py defaults DATABASE_URL to a local sqlite file,
+          # but set it explicitly so a runner with a stray value in its
+          # environment can't change what schema gets built.
+          DATABASE_URL: sqlite+aiosqlite:///./test_global.db
+        run: python scripts/dump_openapi.py
+
+      - name: Regenerate api-types.gen.ts from openapi.json
+        working-directory: web
+        run: pnpm gen:api
+
+      - name: Fail on drift
+        run: |
+          if ! git diff --exit-code -- web/openapi.json web/lib/api-types.gen.ts; then
+            echo ""
+            echo "web/openapi.json and/or web/lib/api-types.gen.ts are out of date"
+            echo "with the FastAPI schema. Regenerate them and commit the result:"
+            echo ""
+            echo "  pnpm --dir web gen:api:refresh"
+            echo ""
+            echo "(that assumes a provisioned venv/ at the repo root; if pnpm"
+            echo "isn't available, run the two steps it wraps directly:"
+            echo "  ./venv/bin/python scripts/dump_openapi.py && pnpm --dir web gen:api)"
+            echo ""
+            exit 1
+          fi

@@ -22,6 +22,7 @@ from fakeredis.aioredis import FakeRedis
 from src.live.events import LiveReadingEvent
 from src.live.hub import LiveHub, stream_key
 from src.live.runtime import LiveRuntime
+from src.live.scope_control import clear_all_suppressed_scopes, is_live_scope_suppressed
 from src.live.supervision import run_connector, supervised
 from tests.live.conftest import _safe_redis_close
 
@@ -66,6 +67,13 @@ def _mock_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.live.sources.mock_factory.MOCK_SCADA_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", False)
     monkeypatch.setattr("src.live.runtime_builder.LIVE_SOURCES_JSON", "")
+
+
+@pytest.fixture(autouse=True)
+def _reset_scope_gate() -> None:
+    clear_all_suppressed_scopes()
+    yield
+    clear_all_suppressed_scopes()
 
 
 @pytest.fixture(autouse=True)
@@ -305,7 +313,12 @@ class TestSupervisedRestart:
 class TestRuntimeLifecycle:
 
     @pytest.mark.asyncio
-    async def test_readings_published(self, hub: LiveHub, fake_redis: FakeRedis) -> None:
+    async def test_readings_published(
+        self, hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Idle-by-default (LIVE_AUTOSTART_ENABLED=False) spawns no scope
+        # tasks, so opt in explicitly to exercise the streaming path.
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
         try:
@@ -315,18 +328,24 @@ class TestRuntimeLifecycle:
             await runtime.stop()
 
     @pytest.mark.asyncio
-    async def test_stop_cancels_all_tasks(self, hub: LiveHub) -> None:
+    async def test_stop_cancels_all_tasks(
+        self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
-        assert runtime._tasks
+        assert runtime._all_tasks()
         await runtime.stop()
-        assert not runtime._tasks
+        assert not runtime._all_tasks()
 
     @pytest.mark.asyncio
-    async def test_no_pending_tasks_after_stop(self, hub: LiveHub) -> None:
+    async def test_no_pending_tasks_after_stop(
+        self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
-        task_names = {t.get_name() for t in runtime._tasks}
+        task_names = {t.get_name() for t in runtime._all_tasks()}
         await runtime.stop()
         for t in asyncio.all_tasks():
             if t.get_name() in task_names:
@@ -371,9 +390,10 @@ class TestScorerPassthrough:
 
     @pytest.mark.asyncio
     async def test_passthrough_when_scorer_unavailable(
-        self, hub: LiveHub, fake_redis: FakeRedis
+        self, hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Readings are published even when LiveScorer import fails."""
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         assert runtime._scopes[0].scorer is None
         await runtime.start()
@@ -392,8 +412,11 @@ class TestScorerPassthrough:
 class TestConnectorCrashRestart:
 
     @pytest.mark.asyncio
-    async def test_connector_crash_restarts(self, hub: LiveHub, fake_redis: FakeRedis) -> None:
+    async def test_connector_crash_restarts(
+        self, hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A crashing connector is restarted by the supervisor."""
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
 
@@ -826,3 +849,196 @@ class TestSupervisedBackoffReset:
             f"After a long healthy run, backoff should reset to 1.0s, "
             f"but gap was {gap_to_call4:.2f}s (looks like backoff was not reset)"
         )
+
+# ---------------------------------------------------------------------------
+# Live-only-when-toggled — LIVE_AUTOSTART_ENABLED gate
+# ---------------------------------------------------------------------------
+
+
+class TestAutostartGate:
+    """start() must not let mock/SCADA data flow until an explicit Go Live,
+    unless the deployment opts into headless autostart."""
+
+    @pytest.mark.asyncio
+    async def test_start_suppresses_all_scopes_when_autostart_disabled(
+        self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", False)
+        runtime = LiveRuntime.build_from_config(hub)
+        await runtime.start()
+        try:
+            assert is_live_scope_suppressed(_TENANT, _GH)
+            # Layer B: idle means no merger/connector tasks at all, not just
+            # a muted persistence flag.
+            assert not runtime.is_scope_active(_TENANT, _GH)
+            assert runtime._all_tasks() == [] or all(
+                t.get_name() == "persistence_flush" for t in runtime._all_tasks()
+            )
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_leaves_scopes_active_when_autostart_enabled(
+        self, hub: LiveHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
+        runtime = LiveRuntime.build_from_config(hub)
+        await runtime.start()
+        try:
+            assert not is_live_scope_suppressed(_TENANT, _GH)
+            assert runtime.is_scope_active(_TENANT, _GH)
+        finally:
+            await runtime.stop()
+
+
+class TestSuppressedScopeBlocksPublishAndPersistence:
+    """A muted scope's on_reading closure must skip both the hub publish
+    and the persistence batcher — not just the batcher's own add() gate."""
+
+    @pytest.mark.asyncio
+    async def test_suppressed_scope_blocks_publish_and_persistence(
+        self, hub: LiveHub, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.live.runtime_builder.LIVE_PERSIST_ENABLED", True)
+        # Run the scope's tasks so this actually exercises the suppression
+        # gate rather than trivially passing because nothing started.
+        monkeypatch.setattr("src.live.runtime.LIVE_AUTOSTART_ENABLED", True)
+        from src.live.scope_control import suppress_live_scope
+
+        suppress_live_scope(_TENANT, _GH)
+
+        runtime = LiveRuntime.build_from_config(hub)
+        assert runtime._batcher is not None
+        await runtime.start()
+        try:
+            found = await _wait_for_stream_entry(fake_redis, _TENANT, _GH, timeout=0.5)
+            assert not found, "Suppressed scope must not publish readings to the hub"
+            assert len(runtime._batcher._buffer) == 0, (
+                "Suppressed scope must not buffer readings for persistence"
+            )
+        finally:
+            await runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# Layer B — per-scope start_scope/stop_scope lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestScopeLifecycle:
+    """start_scope/stop_scope spawn and cancel a scope's tasks outright,
+    not just mute persistence — an idle scope must not run connectors at
+    all until Go Live."""
+
+    @pytest.mark.asyncio
+    async def test_start_scope_spawns_tasks_and_unmutes(
+        self, hub: LiveHub, fake_redis: FakeRedis
+    ) -> None:
+        runtime = LiveRuntime.build_from_config(hub)
+        assert not runtime.is_scope_active(_TENANT, _GH)
+        try:
+            started = await runtime.start_scope(_TENANT, _GH)
+            assert started is True
+            assert runtime.is_scope_active(_TENANT, _GH)
+            assert not is_live_scope_suppressed(_TENANT, _GH)
+            found = await _wait_for_stream_entry(fake_redis, _TENANT, _GH, timeout=3.0)
+            assert found
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_scope_idempotent(self, hub: LiveHub) -> None:
+        runtime = LiveRuntime.build_from_config(hub)
+        try:
+            first = await runtime.start_scope(_TENANT, _GH)
+            tasks_after_first = list(runtime._scope_tasks[(_TENANT, _GH)])
+            second = await runtime.start_scope(_TENANT, _GH)
+            assert first is True
+            assert second is False
+            assert runtime._scope_tasks[(_TENANT, _GH)] == tasks_after_first
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_scope_unknown_scope_returns_false(self, hub: LiveHub) -> None:
+        runtime = LiveRuntime.build_from_config(hub)
+        assert await runtime.start_scope("no_such_tenant", "no_such_gh") is False
+
+    @pytest.mark.asyncio
+    async def test_stop_scope_cancels_tasks_and_mutes(self, hub: LiveHub) -> None:
+        runtime = LiveRuntime.build_from_config(hub)
+        await runtime.start_scope(_TENANT, _GH)
+        tasks = list(runtime._scope_tasks[(_TENANT, _GH)])
+        try:
+            stopped = await runtime.stop_scope(_TENANT, _GH)
+            assert stopped is True
+            assert not runtime.is_scope_active(_TENANT, _GH)
+            assert is_live_scope_suppressed(_TENANT, _GH)
+            for task in tasks:
+                assert task.cancelled()
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_scope_idempotent_when_not_running(self, hub: LiveHub) -> None:
+        runtime = LiveRuntime.build_from_config(hub)
+        try:
+            result = await runtime.stop_scope(_TENANT, _GH)
+            assert result is False
+            # Still mutes defensively so a pre-Go-Live pause is a no-op,
+            # not an error.
+            assert is_live_scope_suppressed(_TENANT, _GH)
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_scope_can_be_stopped_and_restarted(
+        self, hub: LiveHub, fake_redis: FakeRedis
+    ) -> None:
+        """Catches the supervised-clean-exit trap: stop_scope MUST cancel
+        the tasks, not let stream() finish naturally — supervised() restarts
+        a coroutine even on a clean exit, so a naive stop would leave the
+        "stopped" scope still running under the hood."""
+        runtime = LiveRuntime.build_from_config(hub)
+        try:
+            await runtime.start_scope(_TENANT, _GH)
+            first_generation = list(runtime._scope_tasks[(_TENANT, _GH)])
+
+            await runtime.stop_scope(_TENANT, _GH)
+            await asyncio.sleep(0.2)
+            for task in first_generation:
+                assert task.cancelled(), (
+                    "stop_scope must cancel tasks outright — a clean exit "
+                    "would be silently restarted by supervised()"
+                )
+
+            restarted = await runtime.start_scope(_TENANT, _GH)
+            assert restarted is True
+            second_generation = runtime._scope_tasks[(_TENANT, _GH)]
+            assert all(task not in first_generation for task in second_generation)
+
+            found = await _wait_for_stream_entry(fake_redis, _TENANT, _GH, timeout=3.0)
+            assert found
+        finally:
+            await runtime.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_with_zero_scopes_started(self, hub: LiveHub) -> None:
+        """stop() must be safe to call when no scope (and no batcher, in
+        this fixture set) was ever started."""
+        runtime = LiveRuntime.build_from_config(hub)
+        await runtime.stop()
+        assert runtime._all_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_concurrent_start_scope_calls_spawn_once(self, hub: LiveHub) -> None:
+        """A double-clicked Go Live toggle must not spawn two task sets."""
+        runtime = LiveRuntime.build_from_config(hub)
+        try:
+            results = await asyncio.gather(
+                runtime.start_scope(_TENANT, _GH),
+                runtime.start_scope(_TENANT, _GH),
+            )
+            assert sorted(results) == [False, True]
+        finally:
+            await runtime.stop()

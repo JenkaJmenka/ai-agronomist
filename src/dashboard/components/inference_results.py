@@ -10,6 +10,7 @@ from src.dashboard.constants import DEFAULT_ANOMALY_THRESHOLD
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from src.api.services.anomaly_ranking import is_statistical_detector
 from src.dashboard.components.anomaly_table import render as render_anomaly_table
 from src.dashboard.services.diagnosis_enricher import enrich_cold_run_rows
 
@@ -236,7 +237,7 @@ def _statistical_anomalies_from_results(results: dict) -> list[dict]:
     stat_rows: list[dict] = []
     for row in _as_dict_list(results.get("high_anomalies")):
         detector = str(row.get("detector", ""))
-        if detector in {"statistical", "lstm+statistical"} and row.get("column"):
+        if is_statistical_detector(detector) and row.get("column"):
             stat_rows.append(row)
     return stat_rows
 
@@ -251,7 +252,14 @@ def stat_rows_to_jump_rows(stat_anomalies: list[dict]) -> list[dict]:
     for item in stat_anomalies:
         row = dict(item)
         row.setdefault("detector", "statistical")
-        row.setdefault("score", min(1.0, float(row.get("z_score", 0)) / 5.0))
+        # None-safe: z_score is present-but-null for stuck_fault rows (they
+        # carry frozen_hours_at_detection instead), and `.get(key, 0)` only
+        # applies its default when the key is absent, not when its value is
+        # None — `float(None)` would otherwise raise. This function isn't
+        # reachable for stuck rows today (see anomalies_page_data callers),
+        # but defend the formula anyway rather than assume that stays true.
+        z = row.get("z_score")
+        row.setdefault("score", min(1.0, float(z) / 5.0) if z is not None else 0.0)
         rows.append(row)
     return rows
 

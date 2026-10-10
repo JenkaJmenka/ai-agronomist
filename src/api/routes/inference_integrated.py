@@ -7,14 +7,17 @@ POST /api/inference/batch       -- batch comprehensive inference
 
 import logging
 from collections import OrderedDict
-from typing import Dict, List, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
-from src.api.routes.inference import get_cached_detector
+from src.api.services.detector_cache import (
+    NoActiveModelError,
+    ResolvedDetector,
+    resolve_tenant_detector,
+)
 from src.config import MAX_PIPELINE_CACHE_SIZE
 from src.api.services.orchestrator_registry import get_memory_cache
 from src.api.schemas.inference_integrated import (
@@ -26,7 +29,6 @@ from src.api.schemas.inference_integrated import (
 )
 from src.api.services.comprehensive_pipeline import ComprehensiveInferencePipeline
 from src.db.session import get_db
-from src.models.model_registry import ModelRegistry
 from src.monitoring.anomaly_metrics import get_anomaly_metrics
 
 logger = logging.getLogger(__name__)
@@ -36,24 +38,18 @@ router = APIRouter(prefix="/api/inference", tags=["inference-integrated"])
 _pipeline_cache: "OrderedDict[str, ComprehensiveInferencePipeline]" = OrderedDict()
 
 
-async def _resolve_checkpoint(
-    customer_id: str, db: AsyncSession
-) -> Optional[str]:
-    registry = ModelRegistry(db)
-    active = await registry.get_active_model(customer_id)
-    if active:
-        return active["checkpoint_path"]
-    return None
-
-
-def _get_pipeline(checkpoint_path: Optional[str]) -> ComprehensiveInferencePipeline:
-    cache_key = checkpoint_path or "__baseline__"
+def _get_pipeline(resolved: ResolvedDetector) -> ComprehensiveInferencePipeline:
+    """Cache the pipeline by the *resolved* (post artifact-store) checkpoint
+    path. Two different db:// artifacts always resolve to two different
+    paths, so they can't collide here; the same artifact always resolves to
+    the same path, so cache hits still work exactly as before.
+    """
+    cache_key = resolved.checkpoint_path or "__baseline__"
     if cache_key in _pipeline_cache:
         _pipeline_cache.move_to_end(cache_key)
         return _pipeline_cache[cache_key]
-    detector = get_cached_detector(checkpoint_path)
     pipeline = ComprehensiveInferencePipeline(
-        detector=detector,
+        detector=resolved.detector,
         metrics=get_anomaly_metrics(),
         orchestrators=get_memory_cache(),
     )
@@ -61,6 +57,22 @@ def _get_pipeline(checkpoint_path: Optional[str]) -> ComprehensiveInferencePipel
     if len(_pipeline_cache) > MAX_PIPELINE_CACHE_SIZE:
         _pipeline_cache.popitem(last=False)
     return pipeline
+
+
+async def _resolve_pipeline(
+    customer_id: str, db: AsyncSession
+) -> ComprehensiveInferencePipeline:
+    """Resolve the tenant's active model and return its cached pipeline.
+
+    Delegates to detector_cache.resolve_tenant_detector (also used by
+    /api/backfill/scores) instead of duplicating the ModelRegistry +
+    resolve_checkpoint glue a further time — that duplication is exactly how
+    this router shipped with db:// checkpoints never resolved (see
+    NoActiveModelError below for why "no active model" is now a hard
+    failure rather than a silent baseline fallback).
+    """
+    resolved = await resolve_tenant_detector(db, customer_id)
+    return _get_pipeline(resolved)
 
 
 def _to_response(result: dict) -> ComprehensiveInferenceResponse:
@@ -112,8 +124,7 @@ async def comprehensive_inference(
     """Run the full anomaly detection pipeline for one sequence."""
     enforce_tenant_access(auth_tenant, request.customer_id)
     try:
-        checkpoint = await _resolve_checkpoint(request.customer_id, db)
-        pipeline = _get_pipeline(checkpoint)
+        pipeline = await _resolve_pipeline(request.customer_id, db)
         sensor_pairs_raw = None
         if request.sensor_pairs:
             sensor_pairs_raw = [
@@ -131,6 +142,11 @@ async def comprehensive_inference(
             climate_context=request.climate_context,
         )
         return _to_response(result)
+    except NoActiveModelError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -157,8 +173,7 @@ async def batch_inference(
     """Run comprehensive inference for multiple sequences."""
     enforce_tenant_access(auth_tenant, request.customer_id)
     try:
-        checkpoint = await _resolve_checkpoint(request.customer_id, db)
-        pipeline = _get_pipeline(checkpoint)
+        pipeline = await _resolve_pipeline(request.customer_id, db)
 
         raw_results = await pipeline.run_batch(
             customer_id=request.customer_id,
@@ -181,6 +196,11 @@ async def batch_inference(
             avg_confidence=avg_confidence,
             results=results,
         )
+    except NoActiveModelError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

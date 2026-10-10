@@ -9,7 +9,7 @@ import {
 } from "@/features/anomalies/api/flaggedWindow";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import { STALE_TIME_MS } from "@/lib/query";
-import { getSeverity } from "@/lib/severity";
+import { resolveRowSeverity } from "@/lib/severity";
 import { useScope } from "@/lib/useScope";
 
 export interface FlaggedWindowState {
@@ -59,7 +59,15 @@ export function useFlaggedWindow(params: {
     for (const row of query.data?.rows ?? []) {
       const score = row.anomaly_score;
       if (typeof score !== "number") continue;
-      flagged.push({ ...row, score, severity: getSeverity({ score, threshold }) });
+      flagged.push({
+        ...row,
+        score,
+        severity: resolveRowSeverity({
+          score,
+          threshold,
+          detectedSeverity: row.detected_severity as string | null | undefined,
+        }),
+      });
     }
     return flagged.sort((a, b) => b.score - a.score);
   }, [query.data, threshold]);

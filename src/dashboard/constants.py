@@ -30,11 +30,32 @@ FAULT_TYPES: list[str] = [
 ]
 
 FAULT_LABELS: dict[str, str] = {
+    # ── original research taxonomy (db/models.py) ────────────────────────────
     "spike_fault": "Spike fault",
     "calibration_drift": "Calibration drift",
     "stuck_fault": "Stuck sensor",
     "bias_offset": "Bias offset",
     "accuracy_decline": "Accuracy decline",
+    # ── setpoint-SCADA detector fault keys ──────────────────────────────────
+    "under_heating": "Under-heating",
+    "over_heating": "Over-heating",
+    "dehumidification_failure": "Dehumidification failure",
+    "humidity_saturation_risk": "Humidity saturation risk",
+    "thermal_divergence": "Thermal divergence",
+    # ── band-breach detector fault keys ─────────────────────────────────────
+    "temp_band_high": "Temperature above crop band",
+    "temp_band_low": "Temperature below crop band",
+    "vpd_band_high": "VPD above crop band",
+    "vpd_band_low": "VPD below crop band",
+    "humidity_band_high": "Humidity above crop band",
+    "humidity_band_low": "Humidity below crop band",
+    "co2_band_high": "CO₂ above crop band",
+    "co2_band_low": "CO₂ below crop band",
+    # ── additional pipeline-derived keys ────────────────────────────────────
+    "correlation_breakdown": "Correlation breakdown",
+    "diurnal_deviation": "Diurnal deviation",
+    "humidity_fault": "Humidity fault",
+    # ── fallback ─────────────────────────────────────────────────────────────
     "unknown": "Unknown / unclassified",
 }
 

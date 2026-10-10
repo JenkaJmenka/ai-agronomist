@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.gas import GasReadingsResponse, GasSummaryResponse
+from src.config import SYNTHETIC_SOURCE_PREFIX
 from src.db.models import RawReading
 from src.db.session import get_db
 from src.models.gas_anomaly_detector import GAS_COLUMNS, GasAnomalyDetector
@@ -33,7 +35,7 @@ router = APIRouter(prefix="/api/gas", tags=["gas"])
 
 def _source_is_real(col: Any) -> Any:
     """SQLAlchemy clause: source IS NULL OR source NOT LIKE 'synthetic:%'."""
-    return or_(col.is_(None), ~col.like("synthetic:%"))
+    return or_(col.is_(None), ~col.like(f"{SYNTHETIC_SOURCE_PREFIX}%"))
 
 
 def _numeric_or_none(value: Any) -> Optional[float]:
@@ -75,6 +77,7 @@ async def gas_summary(
     greenhouse_id: str = Query(..., min_length=1),
     hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Return per-column gas anomaly baselines and time-series for the window.
@@ -82,6 +85,7 @@ async def gas_summary(
     The baseline is fitted from all readings in the window, then each reading
     is scored against it.  Synthetic readings are excluded.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     rows = await _fetch_real_readings(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, hours=hours
     )
@@ -158,6 +162,7 @@ async def gas_readings(
     greenhouse_id: str = Query(..., min_length=1),
     hours: int = Query(24, ge=1, le=8760, description="Lookback window in hours"),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Return raw gas sensor time-series without anomaly scoring.
@@ -165,6 +170,7 @@ async def gas_readings(
     Useful for charting tools that want unprocessed data.  Synthetic
     readings are excluded.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     rows = await _fetch_real_readings(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id, hours=hours
     )

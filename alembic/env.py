@@ -12,6 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from src.db.alembic_schema_filters import include_name, include_object
 from src.db.models import Base
 from src.db.session import _normalize_database_url
 
@@ -25,6 +26,20 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
+
+# Auth.js (the `web` service's own login/session store) lives in a dedicated
+# Postgres schema, fixed at "auth" on both sides, on the SAME database
+# `AUTH_DATABASE_URL` points at (users/accounts/sessions/verification_token/
+# user_tenants — see web/lib/auth/schema.sql). alembic's metadata
+# (target_metadata above) knows nothing about those tables. Without
+# `include_schemas` + the two filters below, `alembic revision
+# --autogenerate` against the real database would see them as
+# unknown-to-metadata and propose DROP TABLE for every one of them —
+# silently destroying the user/session store on the next migration. The
+# filters live in src/db/alembic_schema_filters.py (not inlined here) so
+# they're directly unit-testable — this file runs a real migration as a
+# side effect of being imported and must never be imported from a test.
+# See tests/db/test_alembic_auth_schema_guard.py for the regression guard.
 
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
@@ -40,6 +55,9 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_schemas=True,
+        include_name=include_name,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -51,6 +69,9 @@ def _do_run_migrations(connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         render_as_batch=True,
+        include_schemas=True,
+        include_name=include_name,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

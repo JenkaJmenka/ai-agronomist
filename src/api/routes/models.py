@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import logging
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.services.detector_cache import clear_detector_cache
 from src.db.session import get_db
 from src.models.model_registry import ModelRegistry
@@ -20,7 +21,12 @@ class ActivateRequest(BaseModel):
     model_id: str
 
 @router.get("/{tenant_id}", response_model=Dict[str, Any])
-async def get_active_model(tenant_id: str, db: AsyncSession = Depends(get_db)):
+async def get_active_model(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+):
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     model = await registry.get_active_model(tenant_id)
     if not model:
@@ -28,18 +34,28 @@ async def get_active_model(tenant_id: str, db: AsyncSession = Depends(get_db)):
     return model
 
 @router.get("/{tenant_id}/versions", response_model=List[Dict[str, Any]])
-async def list_model_versions(tenant_id: str, db: AsyncSession = Depends(get_db)):
+async def list_model_versions(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+):
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     return await registry.list_models(tenant_id)
 
 @router.post("/{tenant_id}/train")
-async def train_customer_model(tenant_id: str, db: AsyncSession = Depends(get_db)):
+async def train_customer_model(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+):
     """Queue a portioned retraining job on the worker. Poll /training-status.
 
     Replaces the in-process BackgroundTasks runner: the job record is durable
     across API restarts and the heavy torch training runs on the worker
     service, streaming data from the DB in portions.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     from src.db.jobs import create_job
     from src.mq.publisher import publish_json
     from src.mq.schemas import RetrainJobMessage
@@ -72,11 +88,16 @@ async def train_customer_model(tenant_id: str, db: AsyncSession = Depends(get_db
 
 
 @router.get("/{tenant_id}/training-status")
-async def get_training_status(tenant_id: str, db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+async def get_training_status(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+) -> Dict[str, Any]:
     """Return the status of the most recent training job for this customer.
 
     status values: "pending" | "running" | "completed" | "failed" | "unknown"
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     from src.db.jobs import list_jobs
 
     jobs = await list_jobs(
@@ -102,10 +123,12 @@ async def get_training_status(tenant_id: str, db: AsyncSession = Depends(get_db)
 
 @router.post("/{tenant_id}/rollback")
 async def rollback_model(
-    tenant_id: str, 
+    tenant_id: str,
     request: RollbackRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     success = await registry.rollback_model(tenant_id, request.model_id)
     if not success:
@@ -124,8 +147,10 @@ async def activate_model(
     tenant_id: str,
     request: ActivateRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Set a previously trained model as the active deployment."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     success = await registry.activate_model(tenant_id, request.model_id)
     if not success:
@@ -145,8 +170,10 @@ async def delete_model_version(
     model_id: str,
     force: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Delete one model version. Use force=true to delete the only active model."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     success = await registry.delete_model(tenant_id, model_id, force=force)
     if not success:
@@ -167,8 +194,10 @@ async def delete_model_version(
 async def delete_all_model_versions(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Delete all model versions for a customer."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     count = await registry.clear_models(tenant_id)
     clear_detector_cache()

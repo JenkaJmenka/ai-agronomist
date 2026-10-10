@@ -23,6 +23,8 @@ const flaggedRowSchema = z
   .object({
     timestamp: z.string(),
     anomaly_score: z.number().nullable().optional(),
+    /** Persisted by migration 024; null for rows predating the migration. */
+    detected_severity: z.string().nullable().optional(),
   })
   .loose();
 

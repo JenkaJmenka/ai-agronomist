@@ -5,7 +5,8 @@ import { useSearchParams } from "next/navigation";
 import { parseAsFloat, parseAsString, useQueryStates } from "nuqs";
 
 import { Button } from "@/components/ui/Button";
-import { anomalyJumpWindow } from "@/features/anomalies/lib/anomalyJumpWindow";
+import { monitoringJumpWindow } from "@/features/anomalies/lib/anomalyJumpWindow";
+import { useReadingsBounds } from "@/features/monitoring/hooks/useReadingsBounds";
 import { pickDashboardSearchParams } from "@/lib/dashboardQuery";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 
@@ -13,14 +14,23 @@ interface MonitoringJumpLinkProps {
   readonly timestamp: string;
   /** Affected sensor channels — pre-selected in the Monitoring toggles. */
   readonly channels?: readonly string[] | null;
+  /**
+   * Episode this sample belongs to — when set, the jump frames the whole
+   * episode span instead of a fixed pad around this one sample, so a short
+   * episode does not shrink to a sliver of the chart and a long one is not
+   * clipped. Omit when the sample has no episode context (e.g. Top/Grouped
+   * anomalies rows).
+   */
+  readonly episode?: { readonly start_ts: string; readonly end_ts: string } | null;
 }
 
 /**
- * Anomaly → Monitoring jump: opens a lookback centered on the anomaly (clamped
- * so the window never extends into empty future), carries shared dashboard
- * params, and forces live off so Live rolling does not replace the jump window.
+ * Anomaly → Monitoring jump: opens a lookback framed on the episode (or
+ * centered on the sample when there is no episode context), clamped so the
+ * window never extends into empty future, carries shared dashboard params,
+ * and forces live off so Live rolling does not replace the jump window.
  */
-export function MonitoringJumpLink({ timestamp, channels }: MonitoringJumpLinkProps) {
+export function MonitoringJumpLink({ timestamp, channels, episode }: MonitoringJumpLinkProps) {
   const search = useSearchParams();
   const [{ tenant, gh, threshold }] = useQueryStates({
     tenant: parseAsString.withDefault("tenant_1"),
@@ -28,7 +38,10 @@ export function MonitoringJumpLink({ timestamp, channels }: MonitoringJumpLinkPr
     threshold: parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   });
 
-  const window = anomalyJumpWindow(timestamp);
+  // Exports can be timestamped ahead of the clock; clamping to `now` alone
+  // would slide the window off the anomaly entirely.
+  const { maxTimestamp } = useReadingsBounds({ tenant, gh });
+  const window = monitoringJumpWindow({ timestamp, episode }, { datasetEnd: maxTimestamp });
   const query = pickDashboardSearchParams(search);
   query.set("tenant", tenant);
   query.set("gh", gh);

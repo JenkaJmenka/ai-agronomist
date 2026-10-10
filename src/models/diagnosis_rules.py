@@ -115,12 +115,21 @@ DIAGNOSIS_RULES: Dict[tuple, Dict[str, Any]] = {
     ("saturation", "humidity_max"): {
         "cause": "humidity_limit_exceeded",
         "confidence": 0.80,
-        # Template: RootCauseAnalyzer substitutes the measured RH.
-        # Never claim "at maximum" unless RH ≥ RH_ABSOLUTE_MAX_PERCENT.
-        "description": "Humidity elevated — system may struggle to dehumidify",
+        # Templates: RootCauseAnalyzer substitutes the measured PHYSICAL RH
+        # (never the normalized model input — that produced "Humidity at 1.0%"
+        # for a 55.9 % row).  Two variants because this rule matches on the
+        # saturation *pattern*, which can fire at ordinary humidity: only the
+        # critical variant asserts an elevated moisture load, and
+        # humidity_reasoning_text withholds "at maximum" below
+        # RH_ABSOLUTE_MAX_PERCENT.  Never claim a level the reading lacks.
+        "description": "Humidity saturation pattern — verify dehumidification capacity",
         "description_template": (
             "{rh_phrase} indicates elevated moisture load; "
             "verify dehumidification capacity"
+        ),
+        "description_template_below_critical": (
+            "{rh_phrase}; saturation pattern in the humidity channel — "
+            "verify dehumidification capacity and sensor calibration"
         ),
         "indicators": ["boundary_value", "no_control"],
     },

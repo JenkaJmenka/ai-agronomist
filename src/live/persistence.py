@@ -88,7 +88,8 @@ from typing import Any, Callable, Deque, Dict, Optional
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite as _sqlite_dialect
 
-from src.config import LIVE_PERSIST_FLUSH_SECONDS
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import LIVE_PERSIST_FLUSH_SECONDS, SCORE_SCALE_CALIBRATION
 from src.db.models import RawReading, SensorReading
 from src.live.events import LiveReadingEvent, sanitize_channels
 from src.live.scope_control import is_live_scope_suppressed, suppress_live_scope, resume_live_scope
@@ -128,6 +129,30 @@ def _event_to_row(event: LiveReadingEvent) -> Optional[Dict[str, Any]]:
     if not _CANONICAL_CHANNELS.issubset(event.channels.keys()):
         return None
     safe_channels = sanitize_channels(event.channels)
+
+    # ADR-005 §2.1 — apply canonical transform at write time so every
+    # SensorReading.anomaly_score is on the unified [0,1] scale.
+    # anomaly_score_raw preserves the pre-canonical value for re-calibration.
+    raw_score = event.anomaly_score
+    _live_p, _live_hi = SCORE_SCALE_CALIBRATION["live"]
+    ts_str = (
+        event.timestamp.isoformat()
+        if hasattr(event.timestamp, "isoformat")
+        else str(event.timestamp)
+    )
+    canonical_score = (
+        _canonical_score(
+            raw_score,
+            _live_p,
+            _live_hi,
+            tenant_id=event.tenant_id,
+            greenhouse_id=event.greenhouse_id,
+            timestamp=ts_str,
+        )
+        if raw_score is not None
+        else None
+    )
+
     return {
         "tenant_id": event.tenant_id,
         "greenhouse_id": event.greenhouse_id,
@@ -136,7 +161,9 @@ def _event_to_row(event: LiveReadingEvent) -> Optional[Dict[str, Any]]:
         "humidity": safe_channels.get("humidity", 0.0),
         "co2": safe_channels.get("co2", 0.0),
         "light": safe_channels.get("light", 0.0),
-        "anomaly_score": event.anomaly_score,
+        "anomaly_score": canonical_score,
+        "anomaly_score_raw": raw_score,
+        "score_scale": "live",
         # Provenance tag so live rows can be wiped without clearing CSV uploads.
         "source": "live",
     }

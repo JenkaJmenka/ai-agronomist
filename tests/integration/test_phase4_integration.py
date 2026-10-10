@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.main import app
+from src.api.routes import inference_integrated
+from src.api.services.detector_cache import ResolvedDetector
 from src.api.services.orchestrator_registry import (
     clear_orchestrator_cache,
     get_memory_cache,
@@ -34,9 +36,15 @@ from src.api.services.comprehensive_pipeline import (
 from src.config import INPUT_DIM, LATENT_DIM, MODEL_CONFIG, RANDOM_SEED, SEQ_LEN
 from src.db.incident_memory import IncidentMemory
 from src.db.models import Base, Incident
+from src.models.artifact_store import DB_SCHEME, put_checkpoint
 from src.models.inference import AnomalyDetector
+from src.models.model_registry import ModelRegistry
 from src.monitoring.anomaly_metrics import AnomalyMetrics, reset_anomaly_metrics
-from tests.integration.conftest_pipeline import baseline_sequences, sample_sequence
+from tests.integration.conftest_pipeline import (
+    baseline_sequences,
+    patch_active_model,
+    sample_sequence,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -248,10 +256,7 @@ class TestComprehensiveInferenceAPI:
     def test_comprehensive_returns_200(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -265,10 +270,7 @@ class TestComprehensiveInferenceAPI:
     def test_comprehensive_all_required_fields_present(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -317,10 +319,7 @@ class TestBatchInferenceAPI:
             "greenhouse_id": "gh_1",
             "sequences": [sample_sequence(1), sample_sequence(2)],
         }
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post("/api/inference/batch", json=payload)
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
@@ -487,10 +486,7 @@ class TestMonitoringAPI:
     def test_metrics_after_detection(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -523,10 +519,7 @@ class TestFeedbackLoopIntegration:
         checkpoint_path: str,
         patch_anomaly_score,
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             detect = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -553,10 +546,7 @@ class TestFeedbackLoopIntegration:
     def test_pipeline_version_in_response(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -565,10 +555,7 @@ class TestFeedbackLoopIntegration:
     def test_confidence_level_is_string(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -577,10 +564,7 @@ class TestFeedbackLoopIntegration:
     def test_attribution_sums_to_one(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -591,10 +575,7 @@ class TestFeedbackLoopIntegration:
     def test_pattern_scores_has_seven_patterns(
         self, client: TestClient, comprehensive_payload: dict, checkpoint_path: str
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -608,10 +589,7 @@ class TestFeedbackLoopIntegration:
         checkpoint_path: str,
         patch_anomaly_score,
     ) -> None:
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             detect = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -628,10 +606,7 @@ class TestFeedbackLoopIntegration:
                 "pattern_type_observed": "drift",
             },
         )
-        with patch(
-            "src.api.routes.inference_integrated._resolve_checkpoint",
-            return_value=checkpoint_path,
-        ):
+        with patch_active_model(checkpoint_path):
             second = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
             )
@@ -644,8 +619,8 @@ class TestFeedbackLoopIntegration:
         self, client: TestClient, comprehensive_payload: dict
     ) -> None:
         with patch(
-            "src.api.routes.inference_integrated._get_pipeline",
-            side_effect=RuntimeError("model load failed"),
+            "src.api.routes.inference_integrated._resolve_pipeline",
+            new=AsyncMock(side_effect=RuntimeError("model load failed")),
         ):
             response = client.post(
                 "/api/inference/comprehensive", json=comprehensive_payload
@@ -658,8 +633,118 @@ class TestFeedbackLoopIntegration:
             "sequences": [sample_sequence()],
         }
         with patch(
-            "src.api.routes.inference_integrated._get_pipeline",
-            side_effect=RuntimeError("batch failed"),
+            "src.api.routes.inference_integrated._resolve_pipeline",
+            new=AsyncMock(side_effect=RuntimeError("batch failed")),
         ):
             response = client.post("/api/inference/batch", json=payload)
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Model resolution — the routes now call detector_cache.resolve_tenant_detector
+# for real (no patch_active_model) instead of the raw, never-resolved
+# ModelRegistry checkpoint_path.  This is the coverage gap that let both
+# routes ship with db:// checkpoints unresolved: every test above patches
+# resolution away, so none of them would have caught it.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveActiveModel:
+    @pytest_asyncio.fixture
+    async def registered_tenant(
+        self, db_session: AsyncSession, checkpoint_path: str
+    ) -> str:
+        tenant_id = "tenant_resolve_live"
+        artifact_path = await put_checkpoint(
+            db_session, f"checkpoints/{tenant_id}", checkpoint_path
+        )
+        assert artifact_path.startswith(DB_SCHEME)
+        await ModelRegistry(db_session).register_model(
+            customer_id=tenant_id,
+            model_type="lstm_vae",
+            checkpoint_path=artifact_path,
+        )
+        return tenant_id
+
+    def test_comprehensive_resolves_db_checkpoint_end_to_end(
+        self, client: TestClient, registered_tenant: str
+    ) -> None:
+        payload = {
+            "customer_id": registered_tenant,
+            "greenhouse_id": "gh_1",
+            "sequence": sample_sequence(),
+            "baseline_sequences": baseline_sequences(),
+        }
+        response = client.post("/api/inference/comprehensive", json=payload)
+        assert response.status_code == status.HTTP_200_OK
+        assert "incident_id" in response.json()
+
+    def test_batch_resolves_db_checkpoint_end_to_end(
+        self, client: TestClient, registered_tenant: str
+    ) -> None:
+        payload = {
+            "customer_id": registered_tenant,
+            "sequences": [sample_sequence(1), sample_sequence(2)],
+        }
+        response = client.post("/api/inference/batch", json=payload)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["batch_size"] == 2
+
+    def test_no_active_model_returns_503_naming_tenant(
+        self, client: TestClient
+    ) -> None:
+        response = client.post(
+            "/api/inference/comprehensive",
+            json={
+                "customer_id": "tenant_never_registered",
+                "greenhouse_id": "gh_1",
+                "sequence": sample_sequence(),
+                "baseline_sequences": baseline_sequences(),
+            },
+        )
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        message = response.json()["message"]
+        assert "tenant_never_registered" in message
+        assert "ModelRegistry" in message
+
+    def test_pipeline_cache_key_is_collision_free_across_db_checkpoints(
+        self,
+    ) -> None:
+        """_get_pipeline is keyed on the *resolved* local path. Two db://
+        artifacts must resolve to two distinct keys — the raw registry
+        value (identical db:// prefix aside from the trailing key) is not
+        used directly, which is exactly what let this router load the
+        wrong (or no) model before this fix.
+
+        MAX_PIPELINE_CACHE_SIZE defaults to 1 in this environment, so a
+        route-level end-to-end version of this test can't observe both
+        entries simultaneously — asserting on the key at insertion time is
+        the deterministic way to verify no collision, independent of
+        eviction.
+        """
+        inference_integrated._pipeline_cache.clear()
+        resolved_a = ResolvedDetector(
+            detector=MagicMock(), checkpoint_path="local/artifact_a.pt"
+        )
+        resolved_b = ResolvedDetector(
+            detector=MagicMock(), checkpoint_path="local/artifact_b.pt"
+        )
+
+        inference_integrated._get_pipeline(resolved_a)
+        key_after_a = next(iter(inference_integrated._pipeline_cache))
+        inference_integrated._get_pipeline(resolved_b)
+        key_after_b = next(iter(inference_integrated._pipeline_cache))
+
+        assert key_after_a == "local/artifact_a.pt"
+        assert key_after_b == "local/artifact_b.pt"
+        assert key_after_a != key_after_b
+
+    def test_pipeline_cache_hits_for_the_same_resolved_path(self) -> None:
+        """The same resolved checkpoint path must still hit the cache."""
+        inference_integrated._pipeline_cache.clear()
+        resolved = ResolvedDetector(
+            detector=MagicMock(), checkpoint_path="local/same_artifact.pt"
+        )
+        first = inference_integrated._get_pipeline(resolved)
+        second = inference_integrated._get_pipeline(resolved)
+        assert first is second

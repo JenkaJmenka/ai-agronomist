@@ -13,6 +13,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.config import MAX_HISTORY_LIMIT
 from src.api.routes.inference import get_cached_detector
 from src.api.schemas.learning import (
@@ -85,8 +86,10 @@ def _get_drift_detector(tenant_id: str) -> DriftDetector:
 async def observe_sequences(
     request: ObserveRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> ObserveResponse:
     """Feed a batch of sequences to the tenant's online learner."""
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     manager = _get_manager()
     detector = _get_drift_detector(request.tenant_id)
 
@@ -141,6 +144,7 @@ async def observe_sequences(
 async def observe_sequences_async(
     request: ObserveRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Queue observations for portion-wise online learning on the worker.
 
@@ -148,6 +152,7 @@ async def observe_sequences_async(
     (single writer); the sync /observe endpoint remains for small interactive
     batches and tests. Poll /api/jobs/{job_id} for progress.
     """
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     from src.api.schemas.jobs import JobAcceptedResponse
     from src.config import ONLINE_PORTION_SEQUENCES
     from src.db.jobs import create_job
@@ -185,8 +190,12 @@ async def observe_sequences_async(
 
 
 @router.post("/predict", response_model=PredictResponse)
-async def predict_sequence(request: PredictRequest) -> PredictResponse:
+async def predict_sequence(
+    request: PredictRequest,
+    auth_tenant: str | None = Depends(require_api_key),
+) -> PredictResponse:
     """Score one sequence with the tenant's adapted model (or the base model)."""
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     manager = _get_manager()
     result = manager.predict(
         request.tenant_id, np.asarray(request.sequence, dtype=np.float32)
@@ -205,8 +214,10 @@ async def predict_sequence(request: PredictRequest) -> PredictResponse:
 async def get_statistics(
     tenant_id: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> LearnerStatisticsResponse:
     """Live learner statistics merged with the persisted learning summary."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     learner_stats = _get_manager().get_tenant_statistics(tenant_id)
     summary = await LearningLogStore(db).get_learning_summary(tenant_id=tenant_id)
     return LearnerStatisticsResponse(
@@ -223,8 +234,10 @@ async def get_history(
     event_type: Optional[str] = Query(None),
     limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_HISTORY_LIMIT),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> List[LearningHistoryEntry]:
     """Learning events for a tenant, newest first, optionally filtered."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     entries = await LearningLogStore(db).get_history(
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
@@ -239,8 +252,10 @@ async def get_drift(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> DriftStateResponse:
     """Latest persisted drift check plus live detector state for a tenant."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     latest = await LearningLogStore(db).get_latest_drift(
         tenant_id=tenant_id, greenhouse_id=greenhouse_id
     )
@@ -271,11 +286,13 @@ async def get_drift(
 async def get_active_model_version(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> ActiveModelVersionResponse:
     """Return the currently deployed model version for a tenant.
 
     Returns 404 when no ModelDeployment with is_current=True exists for the tenant.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     registry = ModelRegistry(db)
     active = await registry.get_active_model(tenant_id)
     if active is None:
@@ -293,13 +310,15 @@ async def get_active_model_version(
 async def clear_models(
     tenant_id: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Clears all trained models for a tenant, resetting them to the base model."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     import os
     from src.models.model_registry import ModelRegistry
     registry = ModelRegistry(db)
     count = await registry.clear_models(tenant_id)
-    
+
     # Also clear the online learner from memory so it gets recreated from baseline
     global _manager
     if _manager is not None and tenant_id in _manager.learners:
@@ -319,5 +338,5 @@ async def clear_models(
 
     from src.api.routes.inference import clear_detector_cache
     clear_detector_cache()
-        
+
     return {"status": "success", "deleted_versions": count, "message": f"Successfully cleared {count} model(s) for tenant {tenant_id}"}

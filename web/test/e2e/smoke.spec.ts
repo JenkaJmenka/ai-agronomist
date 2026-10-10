@@ -11,30 +11,133 @@ async function fillDateTimeField(page: Page, testId: string, value: string): Pro
   }
 }
 
+/**
+ * Register BFF stubs that all navigation targets need.
+ *
+ * Extracted from the `app boots` inline mocks so the nav smoke test shares
+ * exactly one payload definition — one edit here covers both tests.
+ *
+ * Only the three routes that gate page rendering are included:
+ * - readings/**  : prevents Monitoring/Climate/Gas/Anomalies/Thresholds from
+ *                  reaching their `isError → throw` error-boundary path.
+ * - config/**    : prevents ConfigurationView (Greenhouse Profile) from
+ *                  throwing to the root Next.js error page ("This page
+ *                  couldn't load") — that page has no segment error.tsx, so
+ *                  the sidebar disappears and subsequent nav clicks time out.
+ * - live/**      : avoids noise from the optional SSE probe on the Home page.
+ */
+async function setupBffMocks(page: Page): Promise<void> {
+  await page.route("**/api/bff/readings/**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [
+          {
+            timestamp: "2026-07-18T12:00:00.000Z",
+            temperature: 22,
+            humidity: 60,
+            co2: 400,
+            light: 500,
+            anomaly_score: 0.01,
+          },
+        ],
+        count: 1,
+        min_timestamp: "2026-07-18T12:00:00.000Z",
+        max_timestamp: "2026-07-18T12:00:00.000Z",
+      },
+    }),
+  );
+  await page.route("**/api/bff/live/**", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/api/bff/config/**", (route) =>
+    route.fulfill({
+      json: {
+        config: {
+          crop: "tomato",
+          day_window: { start_hour: 6, end_hour: 18 },
+          co2_enrichment: false,
+          setpoints: {},
+          season_map: {},
+        },
+        sources: {},
+      },
+    }),
+  );
+}
+
+/**
+ * Readings mock for the two `/anomalies` page tests below.
+ *
+ * `**\/api/bff/readings/**` covers both `readings/window` (feeds `useReadings`
+ * — its `isError` is what throws to the page's error boundary, see the
+ * incident note on the tests below) and `readings/anomalies-in-window`
+ * (feeds `useAnomalyCount` / `useEnrichedAnomalies`'s G2 count query) with
+ * the same glob, so the one payload includes both response shapes'
+ * required fields — `count`/`min_timestamp`/`max_timestamp` for the former,
+ * `anomaly_count`/`total_count` for the latter's zod schema
+ * (`flaggedResponseSchema` in `features/anomalies/api/flaggedWindow.ts`) —
+ * rather than leaving the count query to fail zod parsing on every run.
+ */
+async function mockAnomaliesReadings(page: Page): Promise<void> {
+  await page.route("**/api/bff/readings/**", (route) =>
+    route.fulfill({
+      json: {
+        rows: [{ timestamp: "2026-07-18T12:00:00.000Z", temperature: 22, anomaly_score: 0.01 }],
+        count: 1,
+        min_timestamp: "2026-07-18T12:00:00.000Z",
+        max_timestamp: "2026-07-18T12:00:00.000Z",
+        anomaly_count: 0,
+        total_count: 1,
+      },
+    }),
+  );
+}
+
+/**
+ * NAV_TARGETS drives the sidebar navigation smoke test.
+ *
+ * `heading` is the exact h1 text expected on the destination page — it may
+ * differ from the nav label (e.g. "Thresholds" → "Threshold Management").
+ * Keeping it explicit prevents the test from silently passing on an error
+ * page whose own h1 would satisfy a level-only assertion.
+ */
 const NAV_TARGETS = [
-  { label: "Monitoring", path: "/monitoring" },
-  { label: "Climate Data", path: "/climate" },
-  { label: "Gas Monitoring", path: "/gas" },
-  { label: "Anomaly Detection", path: "/anomalies" },
-  { label: "Thresholds", path: "/thresholds" },
-  { label: "System Metrics", path: "/metrics" },
-  { label: "Upload & Operations", path: "/operations" },
-  { label: "Job Monitoring", path: "/jobs" },
-  { label: "Operator Feedback", path: "/feedback" },
+  { label: "Monitoring", path: "/monitoring", heading: "Monitoring" },
+  { label: "Climate Data", path: "/climate", heading: "Climate Data" },
+  { label: "Gas Monitoring", path: "/gas", heading: "Gas Monitoring" },
+  { label: "Anomaly Detection", path: "/anomalies", heading: "Anomaly Detection" },
+  { label: "Thresholds", path: "/thresholds", heading: "Threshold Management" },
+  { label: "System Metrics", path: "/metrics", heading: "System Metrics" },
+  { label: "Greenhouse Profile", path: "/greenhouse-profile", heading: "Greenhouse Profile" },
+  { label: "App Configuration", path: "/app-configuration", heading: "App Configuration" },
+  { label: "Upload & Operations", path: "/operations", heading: "Upload & Operations" },
+  { label: "Job Monitoring", path: "/jobs", heading: "Job Monitoring" },
+  { label: "Operator Feedback", path: "/feedback", heading: "Operator Feedback" },
 ];
 
 test("app boots and renders the Home page", async ({ page }) => {
+  await setupBffMocks(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
+  await expect(page.getByTestId("home-page")).toBeVisible();
   await expect(page.getByTestId("uplot-chart")).toBeVisible();
 });
 
 test("every sidebar entry navigates", async ({ page }) => {
+  await setupBffMocks(page);
   await page.goto("/");
   for (const target of NAV_TARGETS) {
     await page.getByRole("link", { name: target.label, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`${target.path}(\\?.*)?$`));
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+    // Guard: if the page crashed (no segment error.tsx → Next.js default error
+    // page), fail on the broken target, not on the next target's sidebar click.
+    // "This page couldn't load" is the h1 Next.js renders in that case; the
+    // sidebar disappears with the layout, causing a 30 s timeout one step later.
+    await expect(page.getByRole("heading", { name: "This page couldn't load" })).not.toBeVisible();
+
+    // Assert the EXPECTED heading text, not merely that any h1 exists.
+    // Without this specificity, the error-page h1 would make the assertion
+    // pass on a crashed page, hiding the failure until the next target.
+    await expect(page.getByRole("heading", { name: target.heading, level: 1 })).toBeVisible();
   }
 });
 
@@ -59,6 +162,15 @@ test("monitoring family screens stay navigable after the first open", async ({ p
     }),
   );
   await page.route("**/api/bff/live/events**", (route) => route.fulfill({ status: 204, body: "" }));
+  // live=true in the URL triggers the one-shot resume-on-mount effect
+  // (useLiveReadings) on every page in this nav chain — unmocked it would
+  // fall through to the BFF proxy's dead-port 502 path instead of a
+  // controlled response.
+  await page.route("**/api/bff/live/resume**", (route) =>
+    route.fulfill({
+      json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
+  );
 
   await page.goto("/monitoring?live=true&refresh=10");
   await expect(page.getByRole("heading", { name: "Monitoring" })).toBeVisible();
@@ -96,10 +208,12 @@ test("sidebar preserves period, live, refresh, and threshold across pages", asyn
   await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
 });
 
-test("tenant selector updates the URL", async ({ page }) => {
+test("greenhouse selector updates the URL", async ({ page }) => {
+  // Tenant is no longer client-selectable — the BFF derives it from the
+  // session (security phase 2), so `TenantSelector` was removed and only
+  // the greenhouse picker (`GreenhouseSelector`) remains.
   await page.goto("/");
-  await page.getByTestId("tenant-select").selectOption("tenant_2");
-  await expect(page).toHaveURL(/tenant=tenant_2/);
+  await expect(page.getByTestId("tenant-select")).toHaveCount(0);
   await page.getByTestId("greenhouse-select").selectOption("gh_B");
   await expect(page).toHaveURL(/gh=gh_B/);
 });
@@ -116,11 +230,31 @@ test("custom range form writes an explicit window to the URL", async ({ page }) 
   await fillDateTimeField(page, "custom-range-from", "2026-06-01T12:00");
   await fillDateTimeField(page, "custom-range-to", "2026-06-15T12:30");
   await page.getByTestId("custom-range-apply").click();
-  await expect(page).toHaveURL(/from=.+to=.+/);
-  // Segment values are local time; compare instants, not strings.
+  // Contract: DateTimeField constructs dates with new Date(year, month-1, day, hour, minute),
+  // which uses the browser's local timezone. nuqs then serialises via .toISOString() (UTC) into
+  // the URL. Evaluate the expected instants inside the browser so the assertion is independent
+  // of the Node.js process TZ — the two can diverge when TZ is overridden in the test runner
+  // but the browser resolves timezone from a different source (e.g. OS vs env-var on macOS).
+  const [expectedFromMs, expectedToMs] = await page.evaluate(() => [
+    new Date(2026, 5, 1, 12, 0).getTime(),
+    new Date(2026, 5, 15, 12, 30).getTime(),
+  ]);
+  // Wait until the URL carries the exact submitted window before asserting.
+  // Cannot use /from=.+to=.+/ here — a `from` param is already present in the
+  // default now-derived window, so that pattern resolves immediately without
+  // waiting for nuqs to serialise the submitted values.  The submitted instants
+  // always land on a whole minute (milliseconds === 0), so they can never be
+  // satisfied by the live `now` timestamp whose ms component is non-zero.
+  const expectedFromIso = new Date(expectedFromMs).toISOString();
+  const expectedToIso = new Date(expectedToMs).toISOString();
+  await page.waitForURL(
+    (url) =>
+      url.searchParams.get("from") === expectedFromIso &&
+      url.searchParams.get("to") === expectedToIso,
+  );
   const params = new URL(page.url()).searchParams;
-  expect(new Date(params.get("from") ?? "").getTime()).toBe(new Date("2026-06-01T12:00").getTime());
-  expect(new Date(params.get("to") ?? "").getTime()).toBe(new Date("2026-06-15T12:30").getTime());
+  expect(new Date(params.get("from") ?? "").getTime()).toBe(expectedFromMs);
+  expect(new Date(params.get("to") ?? "").getTime()).toBe(expectedToMs);
 });
 
 test("custom range apply is disabled when from is not before to", async ({ page }) => {
@@ -148,6 +282,12 @@ test("custom range year segment caps at 4 digits and advances to hours", async (
 });
 
 test("anomalies page: threshold control and view toggle render", async ({ page }) => {
+  // Regression: this test navigated to /anomalies with no readings mock.
+  // playwright.config.ts points API_URL at a dead port on purpose, so the
+  // unmocked fetch 502s, useReadings().isError throws, and the page renders
+  // the error boundary instead of the threshold control this test asserts on.
+  // See web/AGENTS.md:57 — e2e mocks all /api/bff/** routes.
+  await mockAnomaliesReadings(page);
   await page.goto("/anomalies");
   await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
   await expect(page.getByTestId("threshold-control")).toBeVisible();
@@ -159,7 +299,16 @@ test("anomalies page: threshold control and view toggle render", async ({ page }
 });
 
 test("anomalies threshold writes to the URL", async ({ page }) => {
+  // Regression: without this mock, the unmocked readings fetch 502s (dead-port
+  // API_URL in playwright.config.ts) and useReadings().isError throws to the
+  // page's error boundary. The slider fill still lands, but the error
+  // boundary unmounts the component before nuqs flushes the URL write, so
+  // `threshold=0.25` never appears — flaky on slower CI, not deterministic
+  // locally, because it's a race between the write and the unmount rather
+  // than a straightforward failure. See web/AGENTS.md:57.
+  await mockAnomaliesReadings(page);
   await page.goto("/anomalies");
+  await expect(page.getByRole("heading", { name: "Anomaly Detection" })).toBeVisible();
   const slider = page.getByTestId("threshold-control").locator("input[type=range]");
   await slider.fill("0.25");
   await expect(page).toHaveURL(/threshold=0.25/);

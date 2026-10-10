@@ -28,6 +28,7 @@ from src.dashboard.components.timeline import (
     init_monitoring_session_state,
     render_timeline_controls,
 )
+from src.dashboard.services.diagnosis_enricher import resolve_stuck_duration_hours
 
 logger = logging.getLogger("dashboard.monitoring")
 
@@ -157,7 +158,19 @@ def _add_anomaly_markers(
                 continue
 
             y_norm = _normalized_y(df, column, float(raw_val))
-            hover_z = f" · z={z_score:.1f}" if z_score is not None else ""
+            # Stuck-fault hits carry no z_score (see UploadHighAnomalyDetail);
+            # render their hours-frozen-at-detection instead of a z-score.
+            # The fallback decision (prefer the new field, fall back to the
+            # legacy z_score overload only for stuck_fault) is shared with
+            # diagnosis_enricher.py and monitoring_jump.py via
+            # resolve_stuck_duration_hours.
+            if detector == "stuck_fault":
+                duration_hours = resolve_stuck_duration_hours(h)
+                hover_z = f" · frozen {duration_hours:.1f}h" if duration_hours is not None else ""
+            elif z_score is not None:
+                hover_z = f" · z={z_score:.1f}"
+            else:
+                hover_z = ""
             _add_marker_dot(
                 fig,
                 timestamp=match_row["timestamp"],

@@ -193,7 +193,14 @@ def _zscore_flags(row: pd.Series) -> Dict[str, bool]:
         span = max(hi - lo, 1e-6)
         z = abs(val - mid) / (span / 2.0)
         zscores[col] = z
-        flags[col] = z > 1.2
+        # z = |val - mid| / (span/2) ≤ 1.0 for any val ∈ [lo, hi], so
+        # z > 1.2 is always False — no in-range value can exceed this bound.
+        # The dead expression `flags[col] = z > 1.2` was removed; the fallback
+        # below (if not any(flags.values())) ensures the most-deviant in-range
+        # sensor is still flagged for multivariate anomalies.
+        # anomaly_group_service._infer_fault_type_from_values has the same
+        # bound; the old "accuracy_decline" branch there was dead for the
+        # same reason and has been removed (see that module's inline comment).
 
     if zscores and not any(flags.values()):
         most_deviant = max(zscores, key=lambda c: zscores[c])
@@ -303,6 +310,39 @@ def _infer_fault_type(
     return "unknown"
 
 
+def resolve_stuck_duration_hours(row: Any) -> Optional[float]:
+    """Hours frozen at detection for a stuck_fault row, else ``None``.
+
+    Shared by every dashboard display site that needs a stuck hit's
+    duration: this function, ``monitoring_jump.py``, and ``1_Monitoring.py``
+    all made the same decision independently before being consolidated
+    here. Prefers ``frozen_hours_at_detection``; falls back to the legacy
+    ``z_score`` overload ONLY when ``detector == "stuck_fault"`` (never
+    based on whether ``z_score`` is merely present, since a legacy
+    STATISTICAL row also has a numeric ``z_score``, and that is exactly the
+    misread this fallback must not cause). Returns ``None`` for non-stuck
+    rows, or when neither field carries a value. Mirrors
+    ``episode_grouper.py::_stuck_fault_duration``'s fallback, and ``row``
+    may be a ``dict`` or a ``pd.Series`` -- both support ``.get()``.
+
+    Coerces to ``float`` or ``None`` to match the return annotation --
+    a non-numeric value (e.g. a stray ``str``) returns ``None`` rather than
+    being passed through untyped, which previously let a ``str`` reach
+    ``1_Monitoring``'s ``f"{v:.1f}"`` format spec and raise ``ValueError``.
+    """
+    if row.get("detector") != "stuck_fault":
+        return None
+    frozen_hours = row.get("frozen_hours_at_detection")
+    if frozen_hours is None:
+        frozen_hours = row.get("z_score")
+    if frozen_hours is None:
+        return None
+    try:
+        return float(frozen_hours)
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_reasoning(
     *,
     incident: Optional[Dict[str, Any]],
@@ -318,15 +358,24 @@ def _build_reasoning(
 
     if row is not None:
         try:
-            z_val = row.get("z_score")
-            if z_val is not None and not pd.isna(z_val):
-                z = float(z_val)
-                method = str(row.get("method", "rolling")).replace("_", " ")
-                col_name = row.get("column")
-                if col_name:
-                    slot = canonical_slot_for_column(str(col_name)) or str(col_name)
-                    label = format_sensor_label(slot)
-                    parts.append(f"{method.title()} z-score {z:.1f}σ on {label}")
+            detector = str(row.get("detector") or "")
+            col_name = row.get("column")
+            if detector == "stuck_fault":
+                frozen_hours = resolve_stuck_duration_hours(row)
+                if frozen_hours is not None:
+                    if col_name:
+                        slot = canonical_slot_for_column(str(col_name)) or str(col_name)
+                        label = format_sensor_label(slot)
+                        parts.append(f"Frozen {float(frozen_hours):.1f}h on {label}")
+            else:
+                z_val = row.get("z_score")
+                if z_val is not None and not pd.isna(z_val):
+                    z = float(z_val)
+                    method = str(row.get("method", "rolling")).replace("_", " ")
+                    if col_name:
+                        slot = canonical_slot_for_column(str(col_name)) or str(col_name)
+                        label = format_sensor_label(slot)
+                        parts.append(f"{method.title()} z-score {z:.1f}σ on {label}")
         except (TypeError, ValueError):
             pass
 
@@ -599,7 +648,7 @@ def cold_run_row_to_series(row: dict[str, Any]) -> pd.Series:
         data["anomaly_detectors"] = detectors
     if column:
         data["anomaly_columns"] = [column]
-    for key in ("z_score", "method", "severity"):
+    for key in ("z_score", "frozen_hours_at_detection", "method", "severity"):
         if row.get(key) is not None:
             data[key] = row[key]
     return pd.Series(data)

@@ -7,10 +7,12 @@ import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SERVER_GROUPING_THRESHOLD } from "@/features/anomalies/api/flaggedWindow";
 import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
+import { EpisodeTable } from "@/features/anomalies/components/EpisodeTable";
 import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomalies";
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
+import { useAnomalyCount } from "@/features/anomalies/hooks/useAnomalyCount";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
 import { discoverChannels } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
@@ -21,6 +23,22 @@ import { useDateRange } from "@/lib/useDateRange";
 import { useScope } from "@/lib/useScope";
 
 type ViewMode = "graphical" | "table";
+
+/** Table view sub-mode. Episodes lead: one row per event, not per 5-min sample. */
+type TableMode = "episodes" | "grouped";
+
+const TABLE_MODE_LABELS: Readonly<Record<TableMode, string>> = {
+  episodes: "Episodes",
+  grouped: "Grouped",
+};
+
+/** Graphical view anomaly list. Episodes lead here too — this is the landing view. */
+type ChartMode = "episodes" | "samples";
+
+const CHART_MODE_LABELS: Readonly<Record<ChartMode, string>> = {
+  episodes: "Episodes",
+  samples: "Samples",
+};
 
 function AnomaliesBody() {
   const {
@@ -37,6 +55,8 @@ function AnomaliesBody() {
     originalCount,
   } = useAnomalies();
   const [view, setView] = useState<ViewMode>("graphical");
+  const [tableMode, setTableMode] = useState<TableMode>("episodes");
+  const [chartMode, setChartMode] = useState<ChartMode>("episodes");
   const [{ from, to }] = useDateRange();
   const { tenant, gh } = useScope();
   const { setpoints, updateSetpoint, resetToDefaults } = useSetpoints();
@@ -53,17 +73,25 @@ function AnomaliesBody() {
     enabled: rows.length > 0 && !isRefetching,
     limit: SERVER_GROUPING_THRESHOLD,
   });
+  // Cheap exact count (G2) — the one authoritative anomaly total for the
+  // page. G4's anomaly_count is also exact but is fetched alongside a
+  // 40+ second row payload in production and, on error, previously fell
+  // back to the downsampled chart row count with no indication it was an
+  // estimate. This is faster, independent of /episodes and /enriched, and
+  // reused below so the episode panel's count can never drift from the
+  // header's.
+  const anomalyCountState = useAnomalyCount({
+    windowStart,
+    windowEnd,
+    threshold,
+    enabled: rows.length > 0 && !isRefetching,
+  });
+  const anomalyTotal = anomalyCountState.count;
+  const tableAnomalies = enrichment.topRows ?? anomalies;
 
   // Dim + debounced URL write for chart drag-select / scroll-zoom.
   const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
   const { chartViewWindow, onTableRowSelect } = useChartViewWindow({ from, to });
-  // Use the exact count from the enriched response once known; while the slow
-  // G4 request is in flight show null (not the downsampled anomalies.length
-  // which can be 35 instead of the true 2649, causing GroupedAnomalies to
-  // pick the wrong routing path and render silently-blank enrichment cells).
-  const anomalyTotal: number | null =
-    enrichment.anomalyCount ?? (enrichment.isLoading ? null : anomalies.length);
-  const tableAnomalies = enrichment.topRows ?? anomalies;
 
   // Scope key ties the chart baseline to this page + tenant + greenhouse.
   const scopeKey = `anomalies:${tenant}:${gh}`;
@@ -112,13 +140,13 @@ function AnomaliesBody() {
               </button>
             ))}
           </div>
-          <p className="text-sm tabular-nums">
+          <p className="text-sm tabular-nums" data-testid="anomaly-count-summary">
             {anomalyTotal !== null ? (
               <span className="font-semibold">{anomalyTotal.toLocaleString()}</span>
             ) : (
               <span className="font-semibold text-text-muted">—</span>
             )}
-            <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} in </span>
+            <span className="text-text-muted"> anomalies ≥ {threshold.toFixed(3)} (exact) in </span>
             <span className="font-semibold">{originalCount.toLocaleString()}</span>
             <span className="text-text-muted"> points</span>
           </p>
@@ -150,39 +178,120 @@ function AnomaliesBody() {
               scopeKey={scopeKey}
             />
           </Card>
-          <Card title="Top anomalies">
-            <AnomalyTable
-              mode="top"
-              anomalies={tableAnomalies}
-              enrichment={enrichment.byTimestamp}
-              isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onTableRowSelect}
-            />
+          <Card title={chartMode === "episodes" ? "Anomaly episodes" : "Top anomalies"}>
+            <div
+              className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+              data-testid="chart-anomaly-mode"
+            >
+              <span className="text-text-muted">Show</span>
+              {(["episodes", "samples"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={chartMode === mode}
+                  onClick={() => setChartMode(mode)}
+                  className={`rounded-[var(--radius-control)] border px-3 py-1 ${
+                    chartMode === mode
+                      ? "border-accent font-medium text-accent"
+                      : "border-border text-text-muted hover:text-text"
+                  }`}
+                >
+                  {CHART_MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            {chartMode === "episodes" ? (
+              <EpisodeTable
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+                onWindowSelect={onTableRowSelect}
+                anomalyCount={anomalyTotal}
+                fallback={
+                  <AnomalyTable
+                    mode="top"
+                    anomalies={tableAnomalies}
+                    enrichment={enrichment.byTimestamp}
+                    isEnrichmentLoading={enrichment.isLoading}
+                    onWindowSelect={onTableRowSelect}
+                  />
+                }
+              />
+            ) : (
+              <AnomalyTable
+                mode="top"
+                anomalies={tableAnomalies}
+                enrichment={enrichment.byTimestamp}
+                isEnrichmentLoading={enrichment.isLoading}
+                onWindowSelect={onTableRowSelect}
+              />
+            )}
           </Card>
-          <Card
-            title={
-              anomalyTotal !== null && anomalyTotal > 0
-                ? `All anomalies (${anomalyTotal.toLocaleString()})`
-                : "All anomalies"
-            }
-          >
-            <AnomalyTable
-              mode="all"
-              anomalies={tableAnomalies}
-              enrichment={enrichment.byTimestamp}
-              isEnrichmentLoading={enrichment.isLoading}
-              onWindowSelect={onTableRowSelect}
-            />
-          </Card>
+          {chartMode === "samples" ? (
+            <Card
+              title={
+                anomalyTotal !== null && anomalyTotal > 0
+                  ? `All anomalies (${anomalyTotal.toLocaleString()})`
+                  : "All anomalies"
+              }
+            >
+              <AnomalyTable
+                mode="all"
+                anomalies={tableAnomalies}
+                enrichment={enrichment.byTimestamp}
+                isEnrichmentLoading={enrichment.isLoading}
+                onWindowSelect={onTableRowSelect}
+              />
+            </Card>
+          ) : null}
         </RefetchingBlock>
       ) : (
         <RefetchingBlock isRefetching={isDimmed}>
-          <Card title="Detected anomalies (grouped)">
-            <GroupedAnomalies
-              windowStart={windowStart}
-              windowEnd={windowEnd}
-              threshold={threshold}
-            />
+          <Card
+            title={tableMode === "episodes" ? "Anomaly episodes" : "Detected anomalies (grouped)"}
+          >
+            <div
+              className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+              data-testid="table-mode"
+            >
+              <span className="text-text-muted">Show</span>
+              {(["episodes", "grouped"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={tableMode === mode}
+                  onClick={() => setTableMode(mode)}
+                  className={`rounded-[var(--radius-control)] border px-3 py-1 ${
+                    tableMode === mode
+                      ? "border-accent font-medium text-accent"
+                      : "border-border text-text-muted hover:text-text"
+                  }`}
+                >
+                  {TABLE_MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            {tableMode === "episodes" ? (
+              <EpisodeTable
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+                anomalyCount={anomalyTotal}
+                fallback={
+                  <GroupedAnomalies
+                    windowStart={windowStart}
+                    windowEnd={windowEnd}
+                    threshold={threshold}
+                  />
+                }
+              />
+            ) : (
+              <GroupedAnomalies
+                windowStart={windowStart}
+                windowEnd={windowEnd}
+                threshold={threshold}
+              />
+            )}
           </Card>
         </RefetchingBlock>
       )}

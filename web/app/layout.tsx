@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 
+import { auth } from "@/auth";
 import { Sidebar } from "@/features/shell/Sidebar";
 import { Providers } from "./providers";
 
@@ -23,17 +24,23 @@ const THEME_INIT_SCRIPT = `(function () {
   } catch (e) {}
 })();`;
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Seeds useScope()'s tenant default (see SessionTenantContext) — proxy.ts
+  // already fail-closes anonymous requests before they reach a page, so a
+  // null session here only happens on public routes like /login.
+  const session = await auth();
+  const tenantId = session?.user?.tenantId ?? null;
+
   return (
     <html lang="en" className={`${inter.variable} h-full antialiased`}>
       <body className="min-h-full">
         {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static theme-restore literal */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
-        <Providers>
+        <Providers tenantId={tenantId}>
           <div className="flex">
             <Sidebar />
             <main className="min-h-dvh flex-1 overflow-x-hidden p-6">{children}</main>

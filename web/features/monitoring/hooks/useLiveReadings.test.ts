@@ -81,6 +81,15 @@ function makeWrapper(queryClient: QueryClient) {
   };
 }
 
+/** Count only the /live/resume fetch calls — the polling fallback also uses
+ *  the global fetch mock (fetchRecentReadings), so a raw call count would
+ *  conflate an unrelated poll with a resume. */
+function resumeFetchCallCount(): number {
+  return vi
+    .mocked(globalThis.fetch)
+    .mock.calls.filter(([url]) => String(url).includes("/api/bff/live/resume")).length;
+}
+
 const READING_PAYLOAD = {
   seq: "",
   timestamp: "2026-07-18T10:00:00Z",
@@ -112,10 +121,15 @@ beforeEach(() => {
   vi.useFakeTimers();
   MockEventSource.lastInstance = null;
   globalThis.EventSource = MockEventSource as unknown as typeof EventSource;
+  // resumeLiveScope's fetch — not under test in this file; live.test.ts owns
+  // request-shape coverage. Stubbed so it resolves instead of hitting a real
+  // network call from the one-shot-resume effect.
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -456,6 +470,59 @@ describe("useLiveReadings — stale detection", () => {
     });
 
     expect(result.current.stale).toBe(false);
+  });
+});
+
+describe("useLiveReadings — one-shot resume on mount/scope change", () => {
+  it("calls resumeLiveScope once when mounted already enabled", () => {
+    const qc = makeQueryClient();
+    renderHook(() => useLiveReadings(true), { wrapper: makeWrapper(qc) });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+    expect(String(url)).toContain("/api/bff/live/resume");
+    expect(init.method).toBe("POST");
+  });
+
+  it("does not call resumeLiveScope when mounted disabled", () => {
+    const qc = makeQueryClient();
+    renderHook(() => useLiveReadings(false), { wrapper: makeWrapper(qc) });
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not call resumeLiveScope again on SSE reconnect (error fallback)", () => {
+    const qc = makeQueryClient();
+    renderHook(() => useLiveReadings(true), { wrapper: makeWrapper(qc) });
+    expect(resumeFetchCallCount()).toBe(1);
+
+    // Trip the SSE error-fallback path — this re-runs the SSE effect (deps
+    // include sseFailed) and also activates the polling fallback (its own
+    // fetchRecentReadings call), but must NOT re-trigger resume: that would
+    // re-seed a database the operator just wiped via Clear all data.
+    act(() => {
+      MockEventSource.lastInstance?.triggerError();
+      MockEventSource.lastInstance?.triggerError();
+      MockEventSource.lastInstance?.triggerError();
+    });
+
+    expect(resumeFetchCallCount()).toBe(1);
+  });
+
+  it("calls resumeLiveScope again when the scope (tenant/gh) changes while live", async () => {
+    const useScopeModule = await import("@/lib/useScope");
+    const qc = makeQueryClient();
+    let enabled = true;
+    const { rerender } = renderHook(() => useLiveReadings(enabled), {
+      wrapper: makeWrapper(qc),
+    });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+
+    vi.mocked(useScopeModule.useScope).mockReturnValue({ tenant: "tenant_2", gh: "gh_B" });
+    enabled = true;
+    rerender();
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -1,7 +1,13 @@
 "use client";
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { parseAsBoolean, parseAsIsoDateTime, parseAsString, useQueryStates } from "nuqs";
+import {
+  parseAsBoolean,
+  parseAsFloat,
+  parseAsIsoDateTime,
+  parseAsString,
+  useQueryStates,
+} from "nuqs";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -21,6 +27,7 @@ import {
   windowForPeriod,
 } from "@/lib/periodPresets";
 import { STALE_TIME_MS } from "@/lib/query";
+import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useRefreshInterval } from "@/lib/useRefreshInterval";
 
 /** Default chart budget until backend G1 downsampling is live everywhere. */
@@ -56,12 +63,13 @@ export interface ReadingsState {
  * (sidebar Monitoring ↔ Climate ↔ Gas stays stuck on the first page).
  */
 export function useReadings(): ReadingsState {
-  const [{ tenant, gh, from, to, live }] = useQueryStates({
+  const [{ tenant, gh, from, to, live, threshold }] = useQueryStates({
     tenant: parseAsString.withDefault("tenant_1"),
     gh: parseAsString.withDefault("gh_A"),
     from: parseAsIsoDateTime,
     to: parseAsIsoDateTime,
     live: parseAsBoolean.withDefault(false),
+    threshold: parseAsFloat.withDefault(DEFAULT_SCORE_THRESHOLD),
   });
   const [refreshSeconds] = useRefreshInterval();
 
@@ -215,6 +223,8 @@ export function useReadings(): ReadingsState {
       gh,
       fetchFrom?.toISOString() ?? "recent",
       fetchTo?.toISOString() ?? "",
+      // Part of the key: the threshold decides which rows survive downsampling.
+      threshold,
     ],
     queryFn: ({ signal }): Promise<RecentReadingsResponse | WindowReadingsResponse> =>
       hasFetchWindow
@@ -224,9 +234,16 @@ export function useReadings(): ReadingsState {
             from: fetchFrom,
             to: fetchTo,
             maxPoints: DEFAULT_MAX_POINTS,
+            threshold,
             signal,
           })
-        : fetchRecentReadings({ tenant, gh, maxPoints: DEFAULT_MAX_POINTS, signal }),
+        : fetchRecentReadings({
+            tenant,
+            gh,
+            maxPoints: DEFAULT_MAX_POINTS,
+            threshold,
+            signal,
+          }),
     staleTime: live ? 0 : STALE_TIME_MS.windowedReadings,
     // Live ticks come from SSE; clip window rolls in React state. Keep prior
     // rows so rolling lookback never flashes skeletons / empty charts.

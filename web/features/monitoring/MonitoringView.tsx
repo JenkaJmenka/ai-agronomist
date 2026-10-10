@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsBoolean, parseAsFloat, parseAsString, useQueryState } from "nuqs";
-import { Suspense, useDeferredValue, useMemo } from "react";
+import { Suspense, useMemo } from "react";
 
 import { Card } from "@/components/ui/Card";
 import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
@@ -28,6 +28,7 @@ import { rowsForActiveWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
 import { useChartRangeSelect } from "@/lib/useChartRangeSelect";
 import { useChartViewWindow } from "@/lib/useChartViewWindow";
+import { useLiveDeferred } from "@/lib/useLiveDeferred";
 import { useScope } from "@/lib/useScope";
 
 interface MonitoringViewProps {
@@ -172,11 +173,14 @@ function MonitoringBody({
       }),
     [mergedRows, from, clipTo, isRefetching],
   );
+  // Deferring exists to keep nav/clicks responsive while live SSE ticks land
+  // every second (see "Chart/table can lag a frame behind tiles" history), not
+  // to cover the first arrival of data — see useLiveDeferred.
   // Chart stays on raw merged rows (no carry-forward polylines).
-  const deferredChartRows = useDeferredValue(rows);
+  const deferredChartRows = useLiveDeferred(rows, live);
   // Table/tiles carry Connext columns onto live ticks so cells are not "—".
   const tableRows = useMemo(() => carryForwardChannels(rows), [rows]);
-  const deferredTableRows = useDeferredValue(tableRows);
+  const deferredTableRows = useLiveDeferred(tableRows, live);
 
   // Envelope for G4 enrichment — prefer URL/live lookback bounds so the queryKey
   // does not churn on every SSE flush (rows[0]/at(-1) move every tick).

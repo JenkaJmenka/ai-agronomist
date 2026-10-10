@@ -22,6 +22,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.config import (
     BOOTSTRAP_GAS_NULL_THRESHOLD,
     BOOTSTRAP_IF_CONTAMINATION,
+    BOOTSTRAP_LOADER_CHUNK_SIZE,
+    BOOTSTRAP_LOADER_RANDOM_SEED,
     BOOTSTRAP_MAX_TRAIN_SEQUENCES,
     BOOTSTRAP_MIN_CLEAN_ROWS,
     BOOTSTRAP_MIN_IF_ROWS,
@@ -245,76 +247,91 @@ def _prepare_raw_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_and_resample(csv_path: str) -> pd.DataFrame:
+    """Stream a CSV file and return a clean DataFrame with ALL rows preserved.
+
+    Every chunk is processed (no reservoir sampling / row cap).  Memory stays
+    bounded because only one chunk is in memory at a time before being appended
+    to the result list.
+
+    Real measurements are never replaced: ``.resample().mean()`` and
+    ``.interpolate()`` are NOT applied to rows that already carry values.
+    Duplicate timestamps are deduplicated (keep last).  Missing sensor columns
+    are added as NaN.  Original nulls are preserved so downstream consumers
+    can distinguish real dropouts from derived values.
+    """
     from src.vendors.csv_adapter import CSVAdapter, TIMESTAMP_COL, pandas_csv_reader_kwargs
-    import random
 
     adapter = CSVAdapter({"filepath": csv_path})
     adapter.connect()
     csv_props = adapter._csv_props
-    
-    MAX_CHUNKS = 10
-    reservoir: list[pd.DataFrame] = []
+
+    processed_chunks: list[pd.DataFrame] = []
     chunk_idx = 0
     total_raw = 0
+    failed_chunks = 0
 
     try:
         reader = pd.read_csv(
             csv_path,
-            chunksize=5000,
+            chunksize=BOOTSTRAP_LOADER_CHUNK_SIZE,
             **pandas_csv_reader_kwargs(csv_props),
         )
         for raw_chunk in reader:
             if raw_chunk.empty:
+                chunk_idx += 1
                 continue
-            
-            if chunk_idx < MAX_CHUNKS:
-                reservoir.append(raw_chunk)
-            else:
-                j = random.randint(0, chunk_idx)
-                if j < MAX_CHUNKS:
-                    reservoir[j] = raw_chunk
-            
-            chunk_idx += 1
+
             total_raw += len(raw_chunk)
-            
+            raw_chunk = _prepare_raw_chunk(raw_chunk)
+
+            try:
+                normalized = adapter.normalize(raw_chunk)
+                chunk_df = normalized.set_index(TIMESTAMP_COL).sort_index()
+                chunk_df.index = pd.to_datetime(chunk_df.index, utc=True)
+                chunk_df = chunk_df[~chunk_df.index.duplicated(keep="last")]
+
+                for col in _SENSOR_COLS:
+                    if col not in chunk_df.columns:
+                        chunk_df[col] = np.nan
+
+                chunk_df = chunk_df[_SENSOR_COLS]
+                processed_chunks.append(chunk_df)
+            except Exception as exc:
+                first_row = chunk_idx * BOOTSTRAP_LOADER_CHUNK_SIZE
+                last_row = first_row + len(raw_chunk) - 1
+                logger.warning(
+                    "Bootstrap loader: skipping chunk %d (rows %d–%d): %s",
+                    chunk_idx,
+                    first_row,
+                    last_row,
+                    exc,
+                )
+                failed_chunks += 1
+
+            chunk_idx += 1
+
     except pd.errors.EmptyDataError as exc:
         raise ValueError("Uploaded CSV contains no valid data.") from exc
 
-    if not reservoir:
-        raise ValueError("Uploaded CSV contains no valid data.")
-
-    # Process and resample each sampled chunk individually
-    # This prevents pandas from expanding the time index with millions of NaNs 
-    # between chronologically distant sampled chunks.
-    pieces: list[pd.DataFrame] = []
-    
-    # Sort reservoir by time (roughly) so the final dataframe is chronological
-    # We can do this safely after processing them
-    processed_chunks = []
-    
-    for raw_chunk in reservoir:
-        raw_chunk = _prepare_raw_chunk(raw_chunk)
-        try:
-            normalized = adapter.normalize(raw_chunk)
-            chunk_df = normalized.set_index(TIMESTAMP_COL).sort_index()
-            chunk_df.index = pd.to_datetime(chunk_df.index, utc=True)
-            chunk_df = chunk_df[~chunk_df.index.duplicated(keep="last")]
-            chunk_df = chunk_df.resample(BOOTSTRAP_RESAMPLE_INTERVAL).mean()
-            
-            for col in _SENSOR_COLS:
-                if col not in chunk_df.columns:
-                    chunk_df[col] = np.nan
-                    
-            chunk_df = chunk_df[_SENSOR_COLS].interpolate(method="linear", limit=3)
-            processed_chunks.append(chunk_df)
-        except Exception:
-            continue
-            
     if not processed_chunks:
         raise ValueError("Uploaded CSV contains no valid data after normalization.")
 
+    if failed_chunks:
+        logger.info(
+            "Bootstrap loader: %d of %d chunks failed normalization",
+            failed_chunks,
+            chunk_idx,
+        )
+
     df = pd.concat(processed_chunks).sort_index()
     df = df[~df.index.duplicated(keep="last")]
+
+    logger.info(
+        "Bootstrap loader: %d raw rows → %d output rows (%.1f%% retained)",
+        total_raw,
+        len(df),
+        100.0 * len(df) / total_raw if total_raw else 0.0,
+    )
     return df
 
 

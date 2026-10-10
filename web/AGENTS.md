@@ -19,7 +19,14 @@ The FastAPI backend stays; the browser only ever talks to the **BFF** under
 - `corepack pnpm build` — production build (also feeds e2e)
 - `corepack pnpm exec playwright test` — e2e + perf budgets (needs the build)
 - `corepack pnpm gen:api` — regenerate `lib/api-types.gen.ts` from the committed
-  `openapi.json`; `gen:api:live` refreshes the snapshot from a running API first
+  `openapi.json`; `gen:api:refresh` rebuilds `openapi.json` in-process from
+  `src/api/main.py` via `scripts/dump_openapi.py` (no running server needed —
+  there is no "live" API involved), then runs `gen:api`. Assumes a provisioned
+  `venv/` at the repo root; it won't resolve from a worktree, where `venv/` is
+  gitignored and per-checkout. **Never hand-edit `openapi.json` or
+  `api-types.gen.ts` — run `pnpm gen:api:refresh`.** CI fails the build on
+  drift between either file and what `scripts/dump_openapi.py` + `gen:api`
+  would regenerate.
 
 All five gates must be green before every push; CI (`.github/workflows/web-ci.yml`)
 enforces the same set including the §1.2 perf budgets in `test/e2e/perf.spec.ts`.

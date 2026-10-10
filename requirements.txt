@@ -10,7 +10,7 @@ starlette>=1.0
 python-multipart>=0.0.6
 
 # Database
-sqlalchemy>=2.0
+sqlalchemy[asyncio]>=2.0
 alembic>=1.13
 aiosqlite>=0.19          # async SQLite (dev/test)
 asyncpg>=0.29            # PostgreSQL async (production Docker/Render)

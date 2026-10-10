@@ -1,0 +1,62 @@
+name: backend-tests
+
+# The Python suite had no CI workflow at all: web-ci covers only web/, and
+# postgres-tests runs migrations plus the postgres-marked tests. Nothing ran
+# the ~2860 backend tests on a push or a pull request, which is how the
+# 2026-09-11 upload incident reached production green.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (unit + integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          # CPU-only torch, matching the Dockerfile: the default wheel pulls
+          # ~2.5 GB of CUDA libraries this runner will never use.
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        env:
+          # conftest.py pins DATABASE_URL to a local SQLite file; set here too
+          # so a runner with a stray value cannot redirect the suite.
+          DATABASE_URL: sqlite+aiosqlite:///./test_global.db
+        run: |
+          # python -m pytest, not bare pytest: it puts the repo root on
+          # sys.path so `import src...` resolves.
+          # --ignore=tests/load: locust scenarios are driven by the locust CLI.
+          # -p no:randomly keeps ordering deterministic.
+          python -m pytest tests/ --ignore=tests/load -q --timeout=300 -p no:randomly
+
+      - name: Fail if the suite collected far fewer tests than expected
+        run: |
+          # Assert a floor on collection so a silent import/collection failure
+          # cannot pass for a green suite - the same class of false green this
+          # workflow exists to end. Bump the floor as the suite grows.
+          count=$(python -m pytest tests/ --ignore=tests/load --collect-only -q 2>/dev/null \
+            | grep -oE "[0-9]+ tests? collected" | grep -oE "^[0-9]+" | head -1)
+          echo "collected: ${count:-0} tests"
+          if [ "${count:-0}" -lt 2500 ]; then
+            echo "Expected at least 2500 collected tests, got ${count:-0}"
+            exit 1
+          fi

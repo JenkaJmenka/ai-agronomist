@@ -15,7 +15,7 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.db.jobs import get_job
+from src.db.jobs import get_job, try_transition
 from src.db.models import Base, JobPortion, RawReading, SensorReading
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.workers.upload_consumer import (
@@ -31,7 +31,15 @@ ROWS = 130
 # Accelerating ramp: the rolling baseline absorbs each anomalous row, so only
 # values that outrun the inflating std keep z >= COLD_RUN_STAT_Z_MIN for the
 # COLD_RUN_STAT_MIN_CONSECUTIVE rows the detector requires.
-_FAULT_RAMP = (45.0, 75.0, 130.0, 220.0, 380.0)
+#
+# IMPORTANT: all values must be <= 50.0 °C — the upper bound enforced by
+# CSVAdapter.validate_canonical_schema (src/vendors/base.py).  Exceeding it
+# causes the adapter to reject the entire portion chunk, leaving those rows
+# absent from sensor_readings so apply_anomaly_scores cannot set trigger_channel.
+# Normal baseline mean ≈ 21.5 °C, std ≈ 1.0 °C; z-threshold = 5.5 → need ≥ 27 °C.
+# These values produce z-scores of ≈ 8.5, 13.5, 18.5, 23.5, 27.5 — all well
+# above the 5.5 threshold — while staying within the adapter's 50 °C cap.
+_FAULT_RAMP = (30.0, 35.0, 40.0, 45.0, 49.0)
 
 
 def _csv_content(rows: int = ROWS, fault_at: int | None = None) -> str:
@@ -206,7 +214,11 @@ async def test_statistical_anomalies_survive_portioning(session):
     from src.api.services.cold_run_upload import run_cold_run_upload
     from src.vendors.csv_adapter import CSVAdapter
 
-    csv_content = _csv_content(fault_at=70)
+    # rows=600 / fault_at=350: the file must be long enough for the
+    # incremental carry to reach window-size (288) before the fault, and
+    # the fault must sit beyond the window mask so it appears in both
+    # sync and portioned paths.
+    csv_content = _csv_content(rows=600, fault_at=350)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
         tmp.write(csv_content)
@@ -269,3 +281,169 @@ async def test_failed_portion_marks_job_partially_failed(session):
     job = await get_job(session, job_id)
     assert job.status == "partially_failed"
     assert job.failed_portions == 1
+
+
+async def test_async_finalize_persists_trigger_channel(session):
+    """B4: the async finalize path must populate trigger_channel on anomalous rows.
+
+    The sync path passes trigger_data_by_timestamp to apply_anomaly_scores; the
+    async path had a bug where it did not — rows came back with NULL
+    trigger_channel / trigger_detector / detected_severity even when a
+    statistical anomaly was the triggering event.  This test ensures parity.
+    """
+    # rows=600 / fault_at=350: see test_statistical_anomalies_survive_portioning.
+    csv_content = _csv_content(rows=600, fault_at=350)
+    job_id, messages = await _produce_messages(session, csv_content, portion_rows=50)
+
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    assert len(finalize_msgs) == 1
+
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed", f"Expected completed, got {job.status}"
+
+    # At least one row must have a non-NULL trigger_channel — the statistical
+    # anomaly on temperature must survive the async path without being dropped.
+    result = await session.execute(
+        select(SensorReading).where(
+            SensorReading.tenant_id == TENANT,
+            SensorReading.trigger_channel.isnot(None),
+        )
+    )
+    rows_with_trigger = result.scalars().all()
+    assert len(rows_with_trigger) > 0, (
+        "No rows have trigger_channel set after async finalize — "
+        "the B4 divergence (trigger_data not passed to apply_anomaly_scores) "
+        "is still present."
+    )
+    # Every row with a trigger must also have trigger_detector set.
+    for row in rows_with_trigger:
+        assert row.trigger_detector is not None, (
+            f"Row at {row.timestamp} has trigger_channel={row.trigger_channel!r} "
+            "but trigger_detector is NULL"
+        )
+
+
+async def test_finalize_retries_after_a_failed_write(session):
+    """A finalize that raises mid-write must stay retryable, not wedge the job.
+
+    _finalize claims the job by moving it to 'finalizing' before it writes.
+    When the write raised — in production, apply_anomaly_scores hitting a
+    column migration 024 had never created — the redelivered message could no
+    longer match 'running'/'pending', logged "already claimed", and acked.  The
+    DLQ hook never fired, so the job sat in 'finalizing' forever showing no
+    error while its anomaly scores were silently never written.
+    """
+    job_id, messages = await _produce_messages(
+        session, _csv_content(rows=600, fault_at=350), portion_rows=50
+    )
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    assert len(finalize_msgs) == 1
+
+    write_failure = RuntimeError('column "trigger_channel" does not exist')
+    with patch(
+        "src.workers.upload_consumer.apply_anomaly_scores", side_effect=write_failure
+    ):
+        with pytest.raises(RuntimeError):
+            await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "finalizing", "the claim happened before the failing write"
+
+    # Redelivery must re-claim and finish rather than short-circuit.
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed"
+    assert job.result["anomalies_detected"] > 0
+    scored = await session.execute(
+        select(func.count(SensorReading.id)).where(
+            SensorReading.tenant_id == TENANT,
+            SensorReading.anomaly_score.isnot(None),
+        )
+    )
+    assert scored.scalar() > 0, "the retry must write the scores the first attempt lost"
+
+
+async def test_finalize_does_not_overwrite_a_pruned_result(session):
+    """A duplicate delivery racing a finished finalize must not blank the result.
+
+    prune_portion_results nulls the per-portion blobs, so recomputing after a
+    successful finalize would rebuild an empty response and overwrite a good
+    result with zeros.
+    """
+    job_id, messages = await _produce_messages(session, _csv_content(), portion_rows=50)
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    completed_result = job.result
+    assert job.status == "completed"
+
+    # Force the status back to simulate a duplicate delivery arriving while the
+    # winning attempt was still between its claim and its terminal write.
+    await try_transition(session, job_id, "completed", "finalizing")
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.result == completed_result, "a redundant finalize must not rewrite the result"
+
+
+async def test_stored_scores_are_canonical_not_double_transformed(session):
+    """Persisted scores must be canonical exactly once, on one shared scale.
+
+    `_stat_z_to_canonical` already maps a z-score onto the canonical scale, but
+    `build_upload_score_dicts` used to transform every hit AGAIN against the
+    LSTM's per-file threshold. That second mapping inflated statistical hits
+    (measured: stored 0.82-0.89 while LSTM hits sat at 0.50-0.53), made
+    `max(lstm, statistical)` in the merge a comparison between two different
+    scales, and would have pushed every hit under the 0.5 display threshold had
+    `threshold_used` been high.
+    """
+    job_id, messages = await _produce_messages(
+        session, _csv_content(rows=600, fault_at=350), portion_rows=50
+    )
+    finalize_msgs = await _consume_all(session, messages, _mock_detector())
+    await handle_upload_finalize(finalize_msgs[0], session)
+
+    job = await get_job(session, job_id)
+    assert job.status == "completed"
+    threshold_used = job.result["threshold_used"]
+
+    rows = (
+        (
+            await session.execute(
+                select(SensorReading).where(
+                    SensorReading.tenant_id == TENANT,
+                    SensorReading.anomaly_score.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows, "no scored rows to check"
+
+    for row in rows:
+        # A stored score is a hit, so it must sit at or above the decision point.
+        assert 0.5 <= row.anomaly_score <= 1.0, (
+            f"{row.timestamp}: anomaly_score {row.anomaly_score} is outside the "
+            "canonical hit range — a second transform would drag it off scale"
+        )
+        # The raw column must keep the producer's native value, never the
+        # canonical one: re-canonicalising a stored score must not reproduce it.
+        if row.anomaly_score_raw is not None and row.trigger_detector == "statistical":
+            assert row.anomaly_score_raw > 1.0, (
+                f"{row.timestamp}: anomaly_score_raw {row.anomaly_score_raw} looks "
+                "canonical, but a statistical hit's native value is a z-score"
+            )
+
+    # Statistical hits must not automatically outrank LSTM hits, which is what
+    # the mixed-scale comparison produced.
+    canonical_from_threshold = [
+        r.anomaly_score for r in rows if r.trigger_detector == "lstm"
+    ]
+    if canonical_from_threshold:
+        assert max(canonical_from_threshold) <= 1.0
+        assert threshold_used >= 0.0

@@ -3,6 +3,14 @@
 import logging
 import os
 
+# ENVIRONMENT defaults to "production" (src/config.py) so a real deployment
+# that forgets to set it fails closed instead of silently running with auth
+# disabled — see assert_auth_configured() in src/api/auth.py. The test suite
+# is exactly the case that must declare non-production explicitly, and must
+# do so before src.config (or anything importing it) is loaded anywhere in
+# the session — this file is pytest's first import across all of tests/.
+os.environ.setdefault("ENVIRONMENT", "test")
+
 # Limit OpenMP threads to avoid pytest shutdown deadlock from leaked torch threads.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")

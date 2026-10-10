@@ -166,6 +166,13 @@ async function mockAllRoutes(page: Page) {
       json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
     }),
   );
+  // Toggling Live off pauses the scope — unmocked, this would escape to the
+  // real BFF proxy (dead port in e2e) instead of a controlled response.
+  await page.route("**/api/bff/live/pause**", (route) =>
+    route.fulfill({
+      json: { paused: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
+  );
   await page.route("**/api/bff/live/status**", (route) =>
     route.fulfill({
       json: {
@@ -204,6 +211,13 @@ async function mockAllRoutesV2(page: Page, sseBody = SSE_BODY_V2) {
   await page.route("**/api/bff/live/resume**", (route) =>
     route.fulfill({
       json: { resumed: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
+    }),
+  );
+  // Toggling Live off pauses the scope — unmocked, this would escape to the
+  // real BFF proxy (dead port in e2e) instead of a controlled response.
+  await page.route("**/api/bff/live/pause**", (route) =>
+    route.fulfill({
+      json: { paused: true, tenant_id: "tenant_1", greenhouse_id: "gh_A" },
     }),
   );
   await page.route("**/api/bff/live/status**", (route) =>
@@ -259,6 +273,39 @@ test("Live button is present and toggles live mode", async ({ page }) => {
   await page.getByTestId("live-toggle").click();
   await expect(page).toHaveURL(/live=true/);
   await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "true");
+
+  // Toggle off — pauses the scope so mock-SCADA rows stop landing in the DB
+  // the moment Live goes off, instead of continuing behind the operator's back.
+  const pauseRequest = page.waitForRequest("**/api/bff/live/pause**");
+  await page.getByTestId("live-toggle").click();
+  await pauseRequest;
+  await expect(page).not.toHaveURL(/live=true/);
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "false");
+});
+
+test("live toggle reverts and shows a message when the scope has no configured source", async ({
+  page,
+}) => {
+  await mockAllRoutes(page);
+  // Override the happy-path resume mock from mockAllRoutes with the
+  // not_configured verdict this scope actually gets back.
+  await page.route("**/api/bff/live/resume**", (route) =>
+    route.fulfill({
+      json: {
+        resumed: false,
+        scope_status: "not_configured",
+        tenant_id: "tenant_1",
+        greenhouse_id: "gh_A",
+      },
+    }),
+  );
+
+  await page.goto("/monitoring");
+  await page.getByTestId("live-toggle").click();
+
+  await expect(page.getByTestId("live-not-configured")).toBeVisible();
+  await expect(page.getByTestId("live-toggle")).toHaveAttribute("data-live", "false");
+  await expect(page).not.toHaveURL(/live=true/);
 });
 
 test("live toggle shows active state and appends live rows to the table", async ({ page }) => {

@@ -18,9 +18,21 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import SCORE_SCALE_CALIBRATION
 from src.db.models import Base, SensorReading
 from src.live.events import LiveReadingEvent
 from src.live.persistence import PersistenceBatcher, _BUFFER_CAP, _CANONICAL_CHANNELS, _event_to_row
+
+# ADR-005: live scores are transformed at write time.
+_LIVE_P, _LIVE_HI = SCORE_SCALE_CALIBRATION["live"]
+
+
+def _expected_live_canonical(raw: float) -> float:
+    """Compute the expected canonical score for a given live raw score."""
+    result = _canonical_score(raw, _LIVE_P, _LIVE_HI)
+    assert result is not None, f"canonical({raw!r}, {_LIVE_P!r}, {_LIVE_HI!r}) returned None"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +164,14 @@ class TestEventToRow:
         assert _event_to_row(event) is None
 
     def test_anomaly_score_included(self) -> None:
-        event = _make_event(anomaly_score=0.85)
+        raw = 0.85
+        event = _make_event(anomaly_score=raw)
         row = _event_to_row(event)
-        assert abs(row["anomaly_score"] - 0.85) < 1e-6
+        # ADR-005: stored score is canonical, raw is preserved in anomaly_score_raw.
+        expected_canonical = _expected_live_canonical(raw)
+        assert abs(row["anomaly_score"] - expected_canonical) < 1e-6
+        assert abs(row["anomaly_score_raw"] - raw) < 1e-6
+        assert row["score_scale"] == "live"
 
     def test_anomaly_score_none(self) -> None:
         event = _make_event(anomaly_score=None)

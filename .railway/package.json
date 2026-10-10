@@ -1,0 +1,9 @@
+{
+  "name": "ai-agronomist-railway-iac",
+  "private": true,
+  "description": "Railway IaC authoring deps. Tooling only - never part of a runtime image.",
+  "packageManager": "pnpm@9.15.9",
+  "devDependencies": {
+    "railway": "3.13.0"
+  }
+}

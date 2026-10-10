@@ -45,6 +45,10 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # ENVIRONMENT now defaults to "production" (fail-closed: a deployment
+      # that forgets to set it refuses to start rather than silently running
+      # with auth disabled) — local docker-compose must opt out explicitly.
+      ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/anomaly_db
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0

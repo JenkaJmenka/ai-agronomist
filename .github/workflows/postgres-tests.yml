@@ -46,12 +46,37 @@ jobs:
       - name: Run Alembic migrations
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          PGPASSWORD: postgres
         run: |
+          # Stop short of 023 and seed one row per backfill cohort. An empty
+          # database never enters 023's backfill loops, so a migration that
+          # only breaks once it has rows to touch upgrades clean here and
+          # fails in production instead — which is exactly what happened.
+          alembic upgrade 022
+          psql -h localhost -U postgres -d test_db -c "
+            INSERT INTO sensor_readings
+              (tenant_id, greenhouse_id, timestamp, temperature, humidity,
+               co2, light, anomaly_score, source, anomaly_type)
+            VALUES
+              ('t1','gh','2026-01-01T00:00:00Z',21,60,420,500,0.21,'live',NULL),
+              ('t1','gh','2026-01-02T00:00:00Z',21,60,420,500,0.90,NULL,'heat_spike'),
+              ('t1','gh','2026-01-03T00:00:00Z',21,60,420,500,0.44,NULL,NULL);"
           alembic upgrade head
+
+      - name: Verify migration 023 classified every seeded row
+        env:
+          PGPASSWORD: postgres
+        run: |
+          unscaled=$(psql -h localhost -U postgres -d test_db -tAc \
+            "SELECT count(*) FROM sensor_readings WHERE score_scale IS NULL;")
+          if [ "$unscaled" != "0" ]; then
+            echo "023 left $unscaled row(s) unclassified — a backfill loop bailed out early"
+            exit 1
+          fi
 
       # Must run before pytest: the pg_db fixture drops and recreates the schema
       # via Base.metadata, which destroys the index the migration just built.
-      - name: Assert migration 023 produced the HNSW vector index
+      - name: Assert migration 027 produced the HNSW vector index
         env:
           PGPASSWORD: postgres
         run: |
@@ -62,14 +87,37 @@ jobs:
           echo "$indexes" | grep -qx 'ix_incidents_embedding_hnsw' \
             || { echo "::error::HNSW index missing after alembic upgrade head"; exit 1; }
           if echo "$indexes" | grep -qx 'ix_incidents_embedding_ivfflat'; then
-            echo "::error::migration 023 must drop the ivfflat index it replaces"
+            echo "::error::migration 027 must drop the ivfflat index it replaces"
             exit 1
           fi
 
-      # POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py pins DATABASE_URL
-      # to SQLite before any app import, which silently skipped every test here.
-      - name: Run pgvector integration tests
+      - name: Run PostgreSQL-only tests
+        env:
+          # POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py overwrites
+          # DATABASE_URL with the SQLite test database before any test module is
+          # imported, so every test here skipped and this job reported green
+          # while exercising nothing.
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+        run: |
+          # Collect by marker across the whole tree, not a hardcoded file
+          # list: a new tests/db/test_*_postgres.py (or any other
+          # pytest.mark.postgres file, wherever it lives) is picked up
+          # automatically instead of silently never running here. A
+          # hardcoded list is exactly how tests/db/test_alembic_auth_schema_guard.py
+          # and tests/integration/test_pgvector_incident_memory.py both went
+          # uncollected in this job despite carrying the marker.
+          pytest -m postgres -v tests/
+
+      - name: Fail if any PostgreSQL-only test was skipped
         env:
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
-          pytest -m postgres tests/db/test_incident_memory_postgres.py -v
+          # A skip here means the suite silently stopped covering Postgres —
+          # the failure mode this job was added to prevent. Marker-based
+          # collection (not a file list) so this check can't itself develop
+          # the same blind spot the step above just closed.
+          pytest -m postgres -q --override-ini="addopts=" tests/ 2>&1 | tee /tmp/pg-tests.log
+          if grep -qE "[0-9]+ skipped" /tmp/pg-tests.log; then
+            echo "PostgreSQL-only tests were skipped — they are not actually running"
+            exit 1
+          fi

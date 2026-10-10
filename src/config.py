@@ -139,7 +139,25 @@ NORM_MAX: float = 1.0
 TEMP_RANGE: Tuple[float, float] = (20.0, 30.0)      # Celsius
 HUMIDITY_RANGE: Tuple[float, float] = (50.0, 80.0)  # Percentage
 CO2_RANGE: Tuple[float, float] = (300.0, 500.0)     # ppm
-LIGHT_RANGE: Tuple[float, float] = (0.0, 1000.0)    # lux
+# Canonical light unit: W/m² (solar irradiance).
+# The comment "lux" on this constant was incorrect — the numeric band matches
+# solar irradiance in W/m², not lux (0-1000 lux is near-darkness; clear-sky
+# greenhouse solar irradiance reaches 1000-1200 W/m²).  The upper bound is
+# raised from 1000.0 to 1200.0 to accommodate measured clear-sky peaks
+# (fixture max: 1019.98 W/m² on 2026-07-02).  All callers must supply and
+# interpret light values in W/m².  See LIGHT_CANONICAL_UNIT below.
+LIGHT_RANGE: Tuple[float, float] = (0.0, 1200.0)    # W/m² irradiance
+
+# Single source of truth for the canonical physical unit of the light channel.
+LIGHT_CANONICAL_UNIT: str = "W/m²"
+
+# Conversion factors from non-canonical units to W/m².
+# Source (lux): CIE S 010/E luminous efficacy for standard daylight (D65),
+#   ~120 lm/W → 1 lux ≈ 1/120 W/m².
+# Source (PPFD): Thimijan & Heins (1983), PAR 400-700 nm band;
+#   1 W/m² ≈ 4.57 µmol·m⁻²·s⁻¹ → 1 µmol·m⁻²·s⁻¹ ≈ 1/4.57 W/m².
+LIGHT_LUX_TO_W_PER_M2: float = 1.0 / 120.0
+LIGHT_PPFD_TO_W_PER_M2: float = 1.0 / 4.57
 
 # Metadata for sensor identification
 SENSOR_NAMES: List[str] = ["temperature", "humidity", "co2", "light"]
@@ -148,7 +166,7 @@ SENSOR_UNITS: Dict[str, str] = {
     "temperature": "°C",
     "humidity": "%",
     "co2": " ppm",
-    "light": " lux",
+    "light": " W/m²",  # canonical unit; see LIGHT_CANONICAL_UNIT
 }
 
 # =============================================================================
@@ -223,6 +241,38 @@ COLD_RUN_THRESHOLD_METHOD: str = "percentile"
 COLD_RUN_PERCENTILE: float = 99.9
 COLD_RUN_MIN_ANOMALIES: int = 1
 COLD_RUN_BASELINE_FRACTION: float = 0.2
+
+# Absolute anomalousness gate layered on top of the file-relative threshold
+# above.  COLD_RUN_PERCENTILE is a quantile of the uploaded file's own scores,
+# so it flags 0.1 % of ANY file by construction — a clean 105 120-row year
+# yields ~105 "anomalies" and a 10x larger file yields 10x more.  The gate
+# raises the threshold to median + z * MAD of the same scores, which tracks how
+# far the tail sits from the bulk instead of how many rows there are: a clean
+# file then yields zero hits and a file with N genuine faults yields ~N.
+#
+# Disabled by default.  It only ever RAISES the threshold, so enabling it can
+# never add anomalies, but it does move the ADR-005 canonical anchor
+# (canonical 0.5 == threshold) for every score in the file, and it changes what
+# tests/api/test_inference_upload_cold_run.py asserts about anomalies_detected
+# and threshold_method.  Enable per-deployment after validating the hit counts
+# against a labelled file.
+COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
+# Robust z-score a raw score must clear above the bulk of the distribution.
+# Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
+# "anomalous" starts.
+COLD_RUN_ROBUST_GATE_Z: float = float(os.environ.get("COLD_RUN_ROBUST_GATE_Z", "5.5"))
+# Hours after FaultWindow.release_ts (first non-frozen sample) during which
+# statistical hits on the faulted channel are suppressed.  Distinct from
+# baseline exclusion, which ends at last_frozen_ts.
+#
+# Rationale: after a stuck fault releases, the rolling baseline
+# (window=288, min_periods=72) needs 72 valid samples to produce a non-NaN
+# rolling mean.  At the fixture's 5-min cadence, 72 samples ≈ 6.0 h wall-
+# clock.  Measured on the Dec stuck-fault fixture: 73 valid samples / 6.08 h
+# for the last release (12-25 08:55 → first non-NaN at 15:00).  N = 6 h
+# covers the measured blind time within one sample.
+COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS: float = 6.0
+
 # Rolling-window statistical detection (5-min data → 288 = 24 h).
 COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
@@ -636,26 +686,137 @@ ACTIVE_LEARNING_FEEDBACK_WINDOW_DAYS: int = 30
 ACTIVE_LEARNING_DEFAULT_OPERATOR_CONFIDENCE: float = 0.8
 
 # =============================================================================
-# API Authentication (Phase D — production hardening)
+# API Authentication (Phase D — production hardening; Phase 2 credential model)
 # =============================================================================
-import os
-from typing import Dict
+import dataclasses
+import json
+from typing import FrozenSet, Union
+
+# Deployment environment name. "production" gates behavior that must never
+# run with auth disabled — see assert_auth_configured() in src/api/auth.py,
+# called at FastAPI startup (not per-request).
+#
+# Defaults to "production", not "development": a deployment that forgets to
+# set this must refuse to start (loud, safe) rather than silently serving
+# every tenant-scoped route to anyone. Non-production is the state that must
+# be declared explicitly (local dev / CI / tests set ENVIRONMENT=development
+# or =test) — see tests/conftest.py and docker-compose.yml for where that
+# happens in this repo.
+ENVIRONMENT: str = os.environ.get("ENVIRONMENT", "production").strip().lower()
+
+# Railway always sets this (any deployed environment, not just the one named
+# "production") even though the app's own ENVIRONMENT var is not guaranteed
+# to be configured on every service. Used as a second, independent signal in
+# assert_auth_configured() so a deployment can't fail open just because one
+# of the two variables was forgotten.
+RAILWAY_ENVIRONMENT_NAME: str = os.environ.get("RAILWAY_ENVIRONMENT_NAME", "").strip().lower()
+
+# A credential may be scoped to every tenant ("*") only when caller_type is
+# "web": the BFF holds exactly one such credential and resolves the actual
+# tenant per-request from the caller's session via the X-Tenant-Id header
+# (see src/api/auth.py:require_api_key). An "integration" credential is
+# scoped to its own fixed tenant and never accepts a caller-supplied
+# tenant override.
+_CALLER_TYPES = ("web", "integration")
 
 
-def _parse_tenant_api_keys() -> Dict[str, str]:
-    """Parse ``TENANT_API_KEYS=tenant_a:secret1,tenant_b:secret2`` from env."""
-    raw = os.environ.get("TENANT_API_KEYS", "")
-    keys: Dict[str, str] = {}
-    for part in raw.split(","):
-        part = part.strip()
-        if not part or ":" not in part:
-            continue
-        tenant_id, api_key = part.split(":", 1)
-        tenant_id = tenant_id.strip()
-        api_key = api_key.strip()
-        if tenant_id and api_key:
-            keys[tenant_id] = api_key
-    return keys
+@dataclasses.dataclass(frozen=True)
+class ApiCredential:
+    """One issued API credential. Never holds the raw key — only its hash."""
+
+    key_hash: str
+    caller_type: str
+    name: str
+    tenant_ids: Union[FrozenSet[str], str]  # FrozenSet[str], or "*" (web only)
+    scopes: FrozenSet[str] = dataclasses.field(default_factory=frozenset)
+
+
+def _build_credential(key_id: str, raw: dict) -> ApiCredential:
+    """Validate and construct one credential entry.
+
+    Raises ``ValueError`` on any malformed field so a bad
+    ``API_CREDENTIALS_JSON`` fails the whole startup instead of silently
+    dropping or under-scoping a credential.
+    """
+    missing = [f for f in ("key_hash", "caller_type", "name", "tenant_ids") if f not in raw]
+    if missing:
+        raise ValueError(f"API credential {key_id!r} missing field(s): {missing}")
+
+    caller_type = raw["caller_type"]
+    if caller_type not in _CALLER_TYPES:
+        raise ValueError(
+            f"API credential {key_id!r} has invalid caller_type {caller_type!r}; "
+            f"expected one of {_CALLER_TYPES}"
+        )
+
+    tenant_ids_raw = raw["tenant_ids"]
+    tenant_ids: Union[FrozenSet[str], str]
+    if tenant_ids_raw == "*":
+        if caller_type != "web":
+            raise ValueError(
+                f"API credential {key_id!r}: tenant_ids='*' is only permitted "
+                "for caller_type='web'"
+            )
+        tenant_ids = "*"
+    else:
+        if not isinstance(tenant_ids_raw, list) or not tenant_ids_raw:
+            raise ValueError(
+                f"API credential {key_id!r}: tenant_ids must be a non-empty "
+                "list of tenant ids, or '*' for caller_type='web'"
+            )
+        tenant_ids = frozenset(tenant_ids_raw)
+        if caller_type == "integration" and len(tenant_ids) != 1:
+            raise ValueError(
+                f"API credential {key_id!r}: integration credentials must be "
+                "scoped to exactly one tenant"
+            )
+
+    key_hash = raw["key_hash"]
+    if not isinstance(key_hash, str) or len(key_hash) != 64:
+        raise ValueError(
+            f"API credential {key_id!r}: key_hash must be a 64-char SHA-256 hex digest"
+        )
+
+    return ApiCredential(
+        key_hash=key_hash.lower(),
+        caller_type=caller_type,
+        name=raw["name"],
+        tenant_ids=tenant_ids,
+        scopes=frozenset(raw.get("scopes", [])),
+    )
+
+
+def _parse_api_credentials() -> Dict[str, ApiCredential]:
+    """Parse ``API_CREDENTIALS_JSON`` — a JSON object of ``key_id -> credential``.
+
+    Replaces the flat ``TENANT_API_KEYS=tenant:key,...`` map, which had no
+    caller-type or scope concept and stored raw keys rather than hashes.
+    Nothing is deployed against the old format, so this is a breaking change.
+
+    Credential shape::
+
+        {
+          "<key_id>": {
+            "key_hash": "<sha256 hex digest of the raw key>",
+            "caller_type": "web" | "integration",
+            "name": "<human label>",
+            "tenant_ids": ["tenant_a", ...] | "*",   # "*" only for caller_type=web
+            "scopes": ["..."]                         # optional, defaults to []
+          }
+        }
+
+    Raises ``ValueError`` (crashing startup) on any malformed entry.
+    """
+    raw_env = os.environ.get("API_CREDENTIALS_JSON", "").strip()
+    if not raw_env:
+        return {}
+    try:
+        parsed = json.loads(raw_env)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"API_CREDENTIALS_JSON is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("API_CREDENTIALS_JSON must be a JSON object of key_id -> credential")
+    return {key_id: _build_credential(key_id, entry) for key_id, entry in parsed.items()}
 
 
 # =============================================================================
@@ -689,6 +850,12 @@ GAS_SENSOR_COLUMNS: List[str] = [
     "co",
 ]
 
+# Z-score thresholds for gas anomaly severity classification. Shared with
+# cold_run_detector.py, which imports these (not local copies) so the two
+# statistical detectors agree on where "warning" becomes "critical".
+GAS_Z_WARNING: float = 2.0
+GAS_Z_CRITICAL: float = 3.0
+
 # =============================================================================
 # SCADA Spike / CUSUM / Dropout Detection (Phase A)
 # =============================================================================
@@ -720,6 +887,61 @@ STUCK_VARIANCE_THRESHOLD: float = 1e-4
 # Normalized-space range below which a window is treated as truly flat (stuck).
 STUCK_FLAT_RANGE_THRESHOLD: float = 1e-4
 
+# Wall-clock stuck-fault gate for the CSV upload path.
+# Unlike the sample-indexed detectors above (STUCK_WINDOW_K, STUCK_EPSILON),
+# this gate uses elapsed wall-clock time so it works correctly regardless of
+# the input's sampling cadence.  A freeze must persist for at least
+# STUCK_WALLCLOCK_MIN_HOURS AND have at least STUCK_WALLCLOCK_MIN_SAMPLES
+# identical readings (so a sparse two-sample gap cannot satisfy the gate).
+STUCK_WALLCLOCK_MIN_HOURS: float = float(
+    os.environ.get("STUCK_WALLCLOCK_MIN_HOURS", "6.0")
+)
+STUCK_WALLCLOCK_MIN_SAMPLES: int = int(
+    os.environ.get("STUCK_WALLCLOCK_MIN_SAMPLES", "12")
+)
+
+# Per-channel epsilon for the wall-clock stuck detector (raw sensor units).
+# Two readings whose absolute difference is <= epsilon are treated as identical.
+# Calibrated against native Connext export resolution per sensor type.
+STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
+    "temperature": 0.01,   # °C  — native resolution ~0.01
+    "humidity": 0.01,       # %   — native resolution ~0.01
+    "co2": 1.0,             # ppm — native resolution ~1
+    "light": 1.0,           # W/m² — native resolution ~1
+}
+
+# Channels checked by the wall-clock stuck detector.  Light is excluded
+# because diurnal zero (nighttime darkness) is normal, not a stuck sensor.
+STUCK_WALLCLOCK_CHANNELS: Tuple[str, ...] = ("temperature", "humidity", "co2")
+
+# Expected inter-sample cadence (seconds) and tolerance factor.
+# The cadence check flags input whose median interval deviates beyond
+# CADENCE_EXPECTED_SECONDS × CADENCE_TOLERANCE_FACTOR.
+CADENCE_EXPECTED_SECONDS: int = int(
+    os.environ.get("CADENCE_EXPECTED_SECONDS", "300")
+)
+CADENCE_TOLERANCE_FACTOR: float = float(
+    os.environ.get("CADENCE_TOLERANCE_FACTOR", "1.5")
+)
+
+# Minimum number of inter-sample intervals that must have been observed BEFORE
+# a freeze's onset for that pre-onset sample to pin its cadence.  The pinned
+# cadence scales the freeze's raw_slot_count (expected readings), so a single
+# anomalous interval — one outage immediately before onset — must not be able
+# to set it.  Three is the smallest count whose median survives one outlier.
+#
+# This floor is not a threshold for falling back to CADENCE_EXPECTED_SECONDS:
+# a freeze that fails it pins the median of its OWN intervals instead, at the
+# moment the detector's gate fires (src/models/stuck_fault_detector.py,
+# _in_freeze_cadence_seconds).  Raising the floor therefore only moves freezes
+# that begin early in a file from one measured cadence to the other, and the
+# constant scales no fired episode's raw_slot_count at all — scoring a 900 s
+# file against the 300 s default reported 178 expected slots against 60 frozen
+# samples, inventing a gap of 118 readings that were never missing.
+CADENCE_PIN_MIN_INTERVALS: int = int(
+    os.environ.get("CADENCE_PIN_MIN_INTERVALS", "3")
+)
+
 # =============================================================================
 # Setpoint-aware SCADA rules (dynamic climate-computer detection)
 # =============================================================================
@@ -733,6 +955,13 @@ OVERHEAT_OUTDOOR_TEMP_C: float = float(os.environ.get("OVERHEAT_OUTDOOR_TEMP_C",
 # Relative humidity condensation / dehumidification thresholds.
 RH_CRIT_PERCENT: float = float(os.environ.get("RH_CRIT_PERCENT", "95.0"))
 RH_ABSOLUTE_MAX_PERCENT: float = float(os.environ.get("RH_ABSOLUTE_MAX_PERCENT", "98.0"))
+
+# Range a value must fall inside before operator-facing text may quote it as a
+# relative humidity percentage.  Anything outside is not RH in physical units —
+# most likely a normalized model input, which is how "Humidity at 1.0%" reached
+# the UI for a 55.9 % RH row.  Callers that cannot prove a number is physical
+# must describe the condition without quoting it.
+RH_PLAUSIBLE_RANGE_PERCENT: Tuple[float, float] = (0.0, 100.0)
 # Humidity deficit (g/m³) at/below which dehumidification is considered failed.
 # Corrected 2026-07: rescaled 10× (was 0.5) after psychrometric HD coefficient
 # fix (216.7 → 2167.0 for kPa inputs).  The old 0.5 was calibrated to an HD
@@ -803,7 +1032,7 @@ SENSOR_NOISE_TARGETS: Dict[str, float] = {
     "temperature": 0.05,   # °C RMS
     "humidity": 0.1,       # % RMS
     "co2": 5.0,            # ppm RMS
-    "light": 2.0,          # lux RMS
+    "light": 2.0,          # W/m² RMS
 }
 
 # =============================================================================
@@ -823,6 +1052,20 @@ BOOTSTRAP_IF_CONTAMINATION: float = 0.04
 
 # Resampling cadence applied to raw SCADA data before bootstrap processing.
 BOOTSTRAP_RESAMPLE_INTERVAL: str = "5min"
+
+# Chunk size (rows) for streaming CSV reads in the bootstrap loader.
+# Keeps memory bounded without discarding data — every chunk is processed.
+# Override via BOOTSTRAP_LOADER_CHUNK_SIZE env var.
+BOOTSTRAP_LOADER_CHUNK_SIZE: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_CHUNK_SIZE", "5000")
+)
+
+# Random seed used by the bootstrap loader for reproducible sampling when a
+# row cap is active.  Mirrors RANDOM_SEED but is independent so upstream
+# changes to the global seed do not silently alter bootstrap outputs.
+BOOTSTRAP_LOADER_RANDOM_SEED: int = int(
+    os.environ.get("BOOTSTRAP_LOADER_RANDOM_SEED", str(RANDOM_SEED))
+)
 
 # Output paths for the bootstrap pipeline.
 BOOTSTRAP_CLEAN_PATH: str = "data/bootstrapped_clean.csv"
@@ -898,7 +1141,7 @@ SPIKE_DELTA_MAX: Dict[str, float] = {
     "temperature": 5.0,   # °C
     "humidity": 10.0,     # %
     "co2": 50.0,          # ppm
-    "light": 200.0,       # lux
+    "light": 200.0,       # W/m² per 5-min step
 }
 
 # =============================================================================
@@ -918,7 +1161,7 @@ SPIKE_MAD_FLOOR: Dict[str, float] = {
     "temperature": 0.1,   # °C
     "humidity": 0.2,      # %
     "co2": 10.0,          # ppm
-    "light": 4.0,         # lux
+    "light": 4.0,         # W/m² (was labelled lux; canonical unit is W/m²; numeric floor unchanged)
 }
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
@@ -926,7 +1169,11 @@ OOB_LIMITS: Dict[str, Tuple[float, float]] = {
     "temperature": (-40.0, 80.0),
     "humidity": (0.0, 100.0),
     "co2": (0.0, 5000.0),
-    "light": (0.0, 200000.0),
+    # W/m² hard limit.  The previous value of 200000.0 was lux-scaled — only
+    # valid if the canonical unit were lux.  2000.0 W/m² is far above the
+    # clear-sky solar maximum at Earth's surface (~1400 W/m²) and only flags
+    # hardware faults (stuck-high, direct sensor illumination, cable short).
+    "light": (0.0, 2000.0),
 }
 
 # Stuck-at — 1-D series epsilon for the document-aligned detector.
@@ -942,7 +1189,7 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
     "humidity": 0.04,      # (%)²
     "co2": 25.0,           # (ppm)²
-    "light": 100.0,        # (lux)²
+    "light": 100.0,        # (W/m²)²
 }
 # spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
@@ -958,13 +1205,13 @@ BIAS_EMA_SPAN: int = int(os.environ.get("BIAS_EMA_SPAN", "288"))
 BIAS_EMA_THRESHOLD: float = float(os.environ.get("BIAS_EMA_THRESHOLD", "2.0"))
 # Per-sensor absolute deviation limits for the EMA bias check. A single
 # absolute threshold cannot serve sensors whose scales differ by orders of
-# magnitude: 2 lux of light jitter is measurement noise, while a 2°C
+# magnitude: 2 W/m² of light jitter is measurement noise, while a 2°C
 # temperature offset is a real calibration fault.
 BIAS_EMA_THRESHOLD_BY_SENSOR: Dict[str, float] = {
     "temperature": 2.0,   # °C
     "humidity": 5.0,      # %
     "co2": 50.0,          # ppm
-    "light": 100.0,       # lux
+    "light": 100.0,       # W/m²
 }
 
 # Spatial Correlation Breakdown — rolling Pearson pair detector.
@@ -1053,7 +1300,7 @@ AUTH_ENABLED: bool = os.environ.get("AUTH_ENABLED", "false").lower() in (
     "true",
     "yes",
 )
-TENANT_API_KEYS: Dict[str, str] = _parse_tenant_api_keys()
+API_CREDENTIALS: Dict[str, ApiCredential] = _parse_api_credentials()
 
 # Single source of truth for the Redis connection default — previously
 # duplicated as a literal in both src/api/main.py (FastAPICache init) and
@@ -1065,7 +1312,14 @@ REDIS_CACHE_EXPIRE_SECONDS: int = int(os.environ.get("REDIS_CACHE_EXPIRE_SECONDS
 DOWNSAMPLE_MAX_POINTS_FLOOR: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_FLOOR", "100"))
 DOWNSAMPLE_MAX_POINTS_CEIL: int = int(os.environ.get("DOWNSAMPLE_MAX_POINTS_CEIL", "10000"))
 # Rows whose anomaly_score sits in this top quantile always survive downsampling.
+# Fallback only — used when the caller does not say which rows it will highlight.
 DOWNSAMPLE_ANOMALY_QUANTILE: float = float(os.environ.get("DOWNSAMPLE_ANOMALY_QUANTILE", "0.90"))
+# Share of the point budget reserved for threshold-flagged rows. The live path
+# scores EVERY reading, so preserving all flagged rows unconditionally would
+# defeat downsampling; past this share we fall back to the quantile heuristic.
+DOWNSAMPLE_ANOMALY_BUDGET_RATIO: float = float(
+    os.environ.get("DOWNSAMPLE_ANOMALY_BUDGET_RATIO", "0.5")
+)
 
 # Anomaly aggregation endpoints (migration plan G3/G4).
 ANOMALY_ENRICHED_DEFAULT_LIMIT: int = int(
@@ -1084,6 +1338,11 @@ MOCK_SCADA_ENABLED: bool = _env_flag("MOCK_SCADA_ENABLED", True)
 MOCK_SCADA_SCOPES: str = os.environ.get("MOCK_SCADA_SCOPES", "tenant_1:gh_A")
 MOCK_SCADA_INTERVAL_SECONDS: float = float(os.environ.get("MOCK_SCADA_INTERVAL_SECONDS", "2.0"))
 MOCK_SCADA_ANOMALY_RATE: float = float(os.environ.get("MOCK_SCADA_ANOMALY_RATE", "0.02"))
+
+# Live sources stay muted until an explicit Go Live from the UI, so mock/SCADA
+# data never pollutes an uploaded CSV dataset. Set to true for headless/demo
+# deployments that want data flowing without a browser.
+LIVE_AUTOSTART_ENABLED: bool = _env_flag("LIVE_AUTOSTART_ENABLED", False)
 
 # Merge grace period: wait this long for all sources to report before
 # emitting a merged reading (handles clock skew between vendors).
@@ -1116,6 +1375,69 @@ LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SEC
 LIVE_ANOMALY_THRESHOLD: float = float(
     os.environ.get("LIVE_ANOMALY_THRESHOLD", "0.05")
 )
+
+# ---------------------------------------------------------------------------
+# ADR-005 — Canonical anomaly score scale (§2, §7)
+#
+# SCORE_SCALE_CALIBRATION is the ONE place (p, hi) calibration pairs live.
+# Do NOT write a second copy anywhere else — import this dict instead.
+#
+#   p  = the producer's own decision threshold (raw, pre-canonical)
+#   hi = saturation value (None for unbounded scales)
+#
+# The upload path computes p per-file at runtime; it is NOT a constant and
+# therefore has no entry here.  Pass p at the call site using the value
+# returned by calibrate_threshold().
+# ---------------------------------------------------------------------------
+SCORE_SCALE_CALIBRATION: dict[str, tuple[float, float | None]] = {
+    "live":  (LIVE_ANOMALY_THRESHOLD, None),   # raw LSTM-VAE recon error, unbounded
+    "batch": (ANOMALY_THRESHOLD,      1.0),    # fused detector probability in [0, 1]
+}
+
+# Threshold on the canonical scale — simultaneously correct for every producer.
+# 0.5 == the producing detector's own decision point by construction.
+CANONICAL_ANOMALY_THRESHOLD: float = 0.5
+
+# Score bands for ground-truth (synthetic) rows.  These are emitted DIRECTLY
+# without running the transform — the generator has no detector and no raw score.
+# Injected faults land in [0.75, 0.99]; background filler in [0.05, 0.20].
+# Filler deliberately sits below the live noise floor (canonical ~0.17) so a
+# fabricated normal row never outranks a real measured one.
+SYNTHETIC_ANOMALY_SCORE_RANGE: tuple[float, float] = (0.75, 0.99)
+SYNTHETIC_CONTEXT_SCORE_RANGE: tuple[float, float] = (0.05, 0.20)
+
+# "<prefix><anomaly_type>" / "<prefix>context" marker written to
+# SensorReading.source / RawReading.source by the inject-test synthetic
+# generator (ADR-010) and read back by delete_synthetic_anomalies and the
+# gas-anomaly real-data filter (src/api/routes/gas_anomalies.py). Routed
+# through synthetic_source() so every writer/reader agrees on the exact
+# string -- a hand-typed "synthetic_" or "Synthetic:" would make removal
+# silently blind to those rows instead of raising an error.
+SYNTHETIC_SOURCE_PREFIX: str = "synthetic:"
+
+
+def synthetic_source(anomaly_type: str | None) -> str:
+    """Build the ``source`` provenance marker for a synthetic row.
+
+    ``anomaly_type=None`` denotes the background filler ("context") rows.
+    """
+    return f"{SYNTHETIC_SOURCE_PREFIX}{anomaly_type or 'context'}"
+
+
+# inject_synthetic_anomalies() tuning constants
+# (src/api/services/synthetic_anomalies.py).
+SYNTHETIC_SAMPLE_SIZE: int = 500  # recent RawReadings sampled to learn column ranges
+SYNTHETIC_DEFAULT_WINDOW_HOURS: int = 48  # injection window when none is requested
+SYNTHETIC_MIN_INTERVAL_SECONDS: int = 60  # floor on spacing between injected rows
+
+# Canonical sensor fallback statistics (min, max, mean) used when a tenant has
+# no RawReading history yet to learn real column ranges from.
+SYNTHETIC_CANONICAL_STATS: dict[str, tuple[float, float, float]] = {
+    "temperature": (19.0, 28.0, 23.0),
+    "humidity": (55.0, 72.0, 63.0),
+    "co2": (380.0, 520.0, 420.0),
+    "light": (0.0, 950.0, 200.0),
+}
 
 # Minimum seconds between re-emissions of a LiveAnomalyEvent while an anomaly
 # episode persists (debounce to avoid flooding the SSE stream).
@@ -1240,4 +1562,56 @@ DEFAULT_SEASON_MAP: dict = _parse_json_env(
 DEFAULT_DAY_WINDOW: dict = _parse_json_env(
     "DEFAULT_DAY_WINDOW",
     {"start_hour": 6, "end_hour": 22},
+)
+
+# =============================================================================
+# Episode Grouping & Recovery Scoring (Tasks 3 + 5)
+# =============================================================================
+# Maximum gap (seconds) between consecutive alerts on the same channel before
+# they are split into separate episodes. Default: 2× expected cadence (10 min).
+EPISODE_GAP_SECONDS: int = int(os.environ.get("EPISODE_GAP_SECONDS", "600"))
+
+# Score cap for recovery episodes: post-fault transitions are informational,
+# not the loudest event.  Capped at 0.4 (below CANONICAL_ANOMALY_THRESHOLD)
+# so recovery never outranks a genuine excursion or the fault itself.
+RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
+
+# Window (hours) after a stuck-fault recovery during which excursions on
+# downstream control channels (heating setpoint, pipe temps) are attributed
+# to the recovery — physically real controller responses, not independent
+# faults.  Prevents recovery knock-on from dominating the run (D4).
+RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
+    os.environ.get("RECOVERY_KNOCKON_WINDOW_HOURS", "4.0")
+)
+
+# Query-time episode merging (docs/architecture/episode_grouping.md) — groups
+# historical flagged rows into episodes at request time, reusing the same
+# contiguity rule as the upload-path detector so the two views never disagree.
+# NOTE: placed here (not near ANOMALY_GROUP_SAMPLE_IDS) because the default
+# below references EPISODE_GAP_SECONDS, which must already be defined.
+ANOMALY_EPISODE_GAP_SECONDS: int = int(
+    os.environ.get("ANOMALY_EPISODE_GAP_SECONDS", str(EPISODE_GAP_SECONDS))
+)
+ANOMALY_EPISODE_MAX: int = int(os.environ.get("ANOMALY_EPISODE_MAX", "200"))
+# Slope magnitude below this fraction of the channel's band span per hour
+# reads as "flat" rather than worsening/easing — keeps sensor noise from
+# flipping the trend label.
+ANOMALY_TREND_FLAT_DEADBAND: float = float(
+    os.environ.get("ANOMALY_TREND_FLAT_DEADBAND", "0.05")
+)
+
+# Rows whose trigger_detector/direction were never persisted (LSTM-only score
+# backfill, live ingestion — neither writes the migration-024 trigger columns)
+# fall back to a degraded grouping key: detector="unknown", direction=None.
+# That key alone cannot tell two unrelated in-band excursions on the same
+# channel apart, so a channel that spends all day inside its normal band
+# (e.g. the light curve's diurnal ramp) merges into one multi-hour "episode".
+# When both components are degraded simultaneously, cap how far a group's
+# value is allowed to drift — as a fraction of the channel's configured band
+# span — before forcing a split, even if consecutive rows are within
+# ANOMALY_EPISODE_GAP_SECONDS of each other.  No-ops for channels with no
+# configured band (SCADA columns) — there is nothing to measure the drift
+# against, so those fall back to time-gap-only contiguity.
+ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION: float = float(
+    os.environ.get("ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION", "0.25")
 )

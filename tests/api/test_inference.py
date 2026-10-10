@@ -24,7 +24,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select
 
 from src.api.main import app
-from src.config import LATENT_DIM
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import ANOMALY_SCALING_FACTOR, LATENT_DIM, SCORE_SCALE_CALIBRATION
 from src.db.session import get_db
 from src.db.models import Base, SensorReading
 
@@ -211,11 +212,28 @@ async def test_inference_saves_to_database(patch_detector, test_client, test_dat
     )
     assert response.status_code == status.HTTP_200_OK
 
-    # Query the database to retrieve rows and assert the presence of updated anomaly scores
+    # Query the database to retrieve rows and assert the presence of updated anomaly scores.
+    # The inference route applies the ADR-005 canonical transform before persisting:
+    #   raw = 1.44 / ANOMALY_SCALING_FACTOR = 0.72
+    #   p, hi = SCORE_SCALE_CALIBRATION["batch"]   (0.8, 1.0)
+    #   raw <= p → canonical = 0.5 * raw / p = 0.5 * 0.72 / 0.8 = 0.45
+    # Derive from calibration so the test survives recalibration.
+    _batch_p, _batch_hi = SCORE_SCALE_CALIBRATION["batch"]
+    _raw_score = 1.44 / ANOMALY_SCALING_FACTOR
+    _expected_canonical = _canonical_score(_raw_score, _batch_p, _batch_hi)
+    assert _expected_canonical is not None, "Expected a finite canonical score from calibration"
+
     result = await test_database.execute(select(SensorReading).where(SensorReading.tenant_id == "tenant_1"))
     readings = result.scalars().all()
     assert len(readings) == 150
-    assert all(r.anomaly_score == pytest.approx(0.72) for r in readings)
+    # ADR-005: the stored score is the canonical-transformed value, not the raw.
+    assert all(
+        r.anomaly_score == pytest.approx(_expected_canonical) for r in readings
+    ), f"Expected canonical {_expected_canonical:.4f}, got {readings[0].anomaly_score!r}"
+    # Provenance: raw score must be preserved for recalibration without re-inference.
+    assert all(
+        r.anomaly_score_raw == pytest.approx(_raw_score) for r in readings
+    ), f"Expected raw {_raw_score:.4f}, got {readings[0].anomaly_score_raw!r}"
 
 
 def test_inference_persist_without_timestamps_returns_400(test_client, test_sequences):

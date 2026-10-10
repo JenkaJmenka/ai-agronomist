@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 from fastapi import HTTPException
@@ -280,11 +280,23 @@ async def apply_anomaly_scores(
     greenhouse_id: str,
     anomaly_scores_by_timestamp: dict[str, float] | None,
     anomaly_metadata_by_timestamp: dict[str, dict[str, list[str]]] | None = None,
+    anomaly_score_raw_by_timestamp: dict[str, float] | None = None,
+    score_scale: str | None = None,
+    trigger_data_by_timestamp: dict[str, dict[str, object]] | None = None,
 ) -> None:
     """Sparse post-pass: attach calibrated scores/metadata to already-persisted rows.
 
     Used when rows are persisted chunk-by-chunk before the file-level threshold
     is known (single-pass upload and the portioned upload finalize step).
+
+    ``anomaly_scores_by_timestamp`` must already contain canonical [0,1] scores
+    (ADR-005).  Pass ``anomaly_score_raw_by_timestamp`` and ``score_scale`` to
+    also populate the new provenance columns added by migration 023.
+
+    Pass ``trigger_data_by_timestamp`` (from ``build_trigger_data_by_timestamp``)
+    to populate the trigger label columns added by migration 024.
+    Each entry: {"channel": str|None, "detector": str, "severity": str|None,
+                 "value": float|None}.
     """
     if anomaly_scores_by_timestamp:
         params = []
@@ -295,11 +307,47 @@ async def apply_anomaly_scores(
                 )
             except (ValueError, TypeError):
                 continue
-            params.append({"ts": ts, "score": float(score)})
+            row: dict[str, Any] = {"ts": ts, "score": float(score)}
+            if anomaly_score_raw_by_timestamp is not None:
+                # Set the key unconditionally — None when this producer has no
+                # native score — for the same reason as the trigger fields below:
+                # executemany binds one statement across every param row, so a
+                # row missing a key fails the whole batch.
+                raw_value = anomaly_score_raw_by_timestamp.get(key)
+                row["raw_score"] = None if raw_value is None else float(raw_value)
+            if score_scale is not None:
+                row["scale"] = score_scale
+            if trigger_data_by_timestamp is not None:
+                trigger = trigger_data_by_timestamp.get(key, {})
+                # Include all trigger fields (None when not available) so every
+                # param row has the same keys — required for executemany.
+                channel = trigger.get("channel")
+                row["t_channel"] = str(channel) if channel is not None else None
+                row["t_detector"] = str(trigger.get("detector") or "")
+                severity = trigger.get("severity")
+                row["t_severity"] = str(severity) if severity is not None else None
+                raw_val = trigger.get("value")
+                if raw_val is not None and isinstance(raw_val, (int, float)):
+                    import math
+                    row["t_value"] = float(raw_val) if math.isfinite(float(raw_val)) else None
+                else:
+                    row["t_value"] = None
+            params.append(row)
         if params:
             # Core-level table update: executemany with WHERE bindparams is not
             # available through the ORM-enabled UPDATE path.
             table = SensorReading.__table__
+            # Build values dict based on which optional columns are present.
+            values: dict[str, Any] = {"anomaly_score": bindparam("score")}
+            if any("raw_score" in p for p in params):
+                values["anomaly_score_raw"] = bindparam("raw_score")
+            if any("scale" in p for p in params):
+                values["score_scale"] = bindparam("scale")
+            if any("t_channel" in p for p in params):
+                values["trigger_channel"] = bindparam("t_channel")
+                values["trigger_detector"] = bindparam("t_detector")
+                values["detected_severity"] = bindparam("t_severity")
+                values["trigger_value"] = bindparam("t_value")
             stmt = (
                 update(table)
                 .where(
@@ -307,7 +355,7 @@ async def apply_anomaly_scores(
                     table.c.greenhouse_id == greenhouse_id,
                     table.c.timestamp == bindparam("ts"),
                 )
-                .values(anomaly_score=bindparam("score"))
+                .values(**values)
             )
             await db.execute(stmt, params)
 

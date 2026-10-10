@@ -9,14 +9,28 @@ Last updated: 2026-07-11 · Delivery status lives in `MIGRATION_PLAN.md` §0 (sa
 
 ## 1. What runs where
 
-Everything is one Railway project (**ai-agronomist**, environment **production**):
+Everything is one Railway project (**ai-agronomist**, environment **production**).
+
+> **`ENVIRONMENT` on `ai-agronomist-api` (security phase 2, 2026-09-28):**
+> the app's own `ENVIRONMENT` var defaults to `"production"` — unset is
+> treated as production, not development. This is deliberate: a deployment
+> that forgets to set it must fail closed (refuse to start unless
+> `AUTH_ENABLED=true`), not silently serve every tenant-scoped route to
+> anyone the way an opt-in default would. Railway's own
+> `RAILWAY_ENVIRONMENT_NAME` (always present on a deployed service) backs
+> this up as a second, independent signal — either one alone is enough to
+> require `AUTH_ENABLED=true`. **Set `ENVIRONMENT=production` explicitly on
+> `ai-agronomist-api`** rather than relying on the default, and set
+> `ENVIRONMENT=development` (or `=test`) on any non-production deployment of
+> this service (a preview/staging environment, a personal Railway fork,
+> etc.) — leaving it unset there now means production semantics, including
+> the startup refusal.
 
 | Service | What it is | Source |
 |---|---|---|
 | `ai-agronomist-api` | FastAPI backend (`src/api/`) — all data, inference, jobs | repo root, branch `main`, Docker (`docker/start-api.sh`, binds `::` dual-stack on `$PORT`, default 8000) |
 | `ai-agronomist-worker` | Async job consumer (`src/workers/`) — portioned CSV uploads, training | repo root, branch `main` |
-| `ai-agronomist-dashboard` | **Legacy** Streamlit UI (`src/dashboard/`) — stays live until cutover completes | repo root, branch `main` |
-| `web` | **New** Next.js operator UI (`web/`) — replaces the dashboard | repo, branch `fe/nextjs-migration`, root directory `web` |
+| `web` | **New** Next.js operator UI (`web/`) — replaces the dashboard | repo, branch `main`, root directory `web` |
 | `ai-agronomist-db` | Postgres (`DATABASE_URL` for api + worker) | Railway plugin |
 | `Redis` | API response cache (`fastapi-cache`) | Railway plugin |
 | `RabbitMQ` (+ Web UI) | Job queue between api and worker | Railway template |
@@ -38,7 +52,8 @@ API key and never talks to FastAPI directly.
 - **Tooling:** pnpm **9.15.9 via corepack** (never pnpm 11 — incompatible with
   Node 20), Biome, Vitest, Playwright (e2e + CI-enforced perf budgets)
 - **Types:** generated from the committed `web/openapi.json` snapshot
-  (`pnpm gen:api`; refresh with `gen:api:live` against a running API)
+  (`pnpm gen:api`; refresh with `gen:api:refresh`, which rebuilds the
+  schema in-process from `src/api/main.py` — no running API needed)
 
 ## 3. Current state of the `web` service
 
@@ -51,30 +66,33 @@ Already done (2026-07-11, via CLI/GraphQL — no deploy has run yet):
   and tracks the API service if it is renamed/moved)
 - **`API_KEY`** = `CHANGE_ME_WHEN_AUTH_ENABLED` placeholder (harmless while
   `AUTH_ENABLED` is off on the API; see §6)
-- Build/start config is **code**, not dashboard state: `web/railway.json`
-  (Nixpacks, `corepack enable && pnpm install --frozen-lockfile && pnpm build`,
-  start `pnpm start --port ${PORT:-3000}`, healthcheck `/`)
+- Build/start config is **code**, not dashboard state — but it now lives in
+  **`.railway/railway.ts`** (Railway Infrastructure as Code), applied with
+  `railway config apply`. `web/railway.json` and the three root `railway*.json`
+  files were deleted on 2026-10-06, ahead of Railway retiring Config as Code on
+  2026-12-01. web builds with **Railpack**, Node pinned to 20 by `web/.nvmrc`,
+  `buildCommand: pnpm build`, start `pnpm start --port ${PORT:-3000}`,
+  healthcheck `/api/health`. Never apply a plan that reports anything other
+  than `0 to destroy`; see "Railway configuration — Infrastructure as Code" in
+  `docs/runbooks/deploy.md` for the procedure and its quirks.
 
-Not done (deliberately — each is a human decision): connecting the repo
-(triggers the first deploy), and the production hostname switch.
+Not done (deliberately — a human decision): the production hostname switch.
 
 ## 4. First deploy — step by step
 
 1. **Redeploy the API from `main` first.** The web app needs endpoints that
    shipped on `main` on 2026-07-11 (`anomalies-in-window`, `anomalies/groups`,
-   `anomalies/enriched`, `jobs/{id}/events` SSE, `auth/validate`). In the
-   Railway dashboard: `ai-agronomist-api` → Deployments → Redeploy (or push to
-   `main` if auto-deploy is on). Verify:
-   `curl https://<api-domain>/api/auth/validate` → `{"ok":true,...}`.
-2. **Connect the repo to `web`.** Dashboard: `web` service → **Settings →
-   Source → Connect Repo** → `JenkaJmenka/ai-agronomist`, branch
-   **`fe/nextjs-migration`**. (Root directory is already set to `web`; leave
-   it.) Connecting starts the first build immediately.
-   - CLI alternative: `railway link` in the repo, then use the GraphQL
-     `serviceConnect` mutation with the service id above.
-3. **Watch the first build.** Expect Nixpacks to detect Node via
-   `web/package.json` (`packageManager: pnpm@9.15.9`), run the build command
-   from `railway.json`, then healthcheck `/`. Build ≈ 2–4 min.
+   `anomalies/enriched`, `jobs/{id}/events` SSE). In the Railway dashboard:
+   `ai-agronomist-api` → Deployments → Redeploy (or push to `main` if
+   auto-deploy is on). Verify: `curl https://<api-domain>/health` →
+   `{"status":"ok"}`. (`GET /api/auth/validate` was removed in the Phase 2
+   auth hardening — the BFF now sends `X-API-Key` / `X-Tenant-Id` directly on
+   every request and reads the resulting 401/403 instead of pre-validating.)
+2. **Repo connection — already done.** `web` is already connected to `JenkaJmenka/ai-agronomist`, branch **`main`** (root directory `web` is already set; leave it). This step does not need to be performed again; it is kept here only for historical context on how the connection was made.
+3. **Watch the first build.** Expect Railpack to detect Node, read the version
+   from `web/.nvmrc` (20) and pnpm 9.15.9 from `web/package.json`
+   (`packageManager`), run a single install step plus `pnpm build`, then
+   healthcheck `/api/health`. Build ≈ 2–4 min.
 4. **Generate a domain.** `web` → Settings → Networking → **Generate Domain**.
    This is the service's own URL for the parallel run — the production
    hostname is untouched.
@@ -91,20 +109,22 @@ Not done (deliberately — each is a human decision): connecting the repo
 
 1. Run both UIs in parallel ≈ 1 week; compare error rates and data parity
    (`MIGRATION_PLAN.md` §8 P5 gates).
-2. Switch the production hostname: move the custom domain from
-   `ai-agronomist-dashboard` to `web` (Settings → Networking on each).
-3. Keep Streamlit deployed but demoted for one release.
-4. **Rollback** = move the domain back to the dashboard service. No data
-   migration is involved at any point; both UIs read the same API.
-5. After a clean release: decommission `ai-agronomist-dashboard`.
+2. Switch the production hostname to `web` directly (Settings → Networking on `web`) — there is no `ai-agronomist-dashboard` service in production to move the domain *from* (see §1).
+3. ~~Keep Streamlit deployed but demoted for one release.~~ Moot — there is no `ai-agronomist-dashboard` service in production (see §1); nothing is deployed to demote.
+4. **Rollback:** not possible by moving a domain back — `ai-agronomist-dashboard` does not exist in production, so there is no dashboard deployment to roll back to. No data migration is involved at any point; both UIs read the same API.
+5. ~~Decommission `ai-agronomist-dashboard`.~~ Moot — that service does not exist in production (see §1); there is nothing left to decommission.
 
 ## 6. Environment variables (web service)
 
 | Var | Value | Notes |
 |---|---|---|
 | `API_URL` | `http://${{ai-agronomist-api.RAILWAY_PRIVATE_DOMAIN}}:8000` | Private IPv6 host; port 8000 is `start-api.sh`'s default. If the API service defines `PORT` explicitly, change to `:${{ai-agronomist-api.PORT}}`. |
-| `API_KEY` | placeholder until auth is on | When `AUTH_ENABLED=true` on the API, set to a tenant key from its `TENANT_API_KEYS`. Server-side only — **never** `NEXT_PUBLIC_*`. |
+| `API_KEY` | placeholder until auth is on | When `AUTH_ENABLED=true` on the API, set to the raw key for a `caller_type=web` entry in its `API_CREDENTIALS_JSON` (see `src/api/scripts/generate_api_key.py`). Server-side only — **never** `NEXT_PUBLIC_*`. |
 | `PORT` | injected by Railway | Bound explicitly by the start command. |
+| `AUTH_SECRET` | **not yet set** | New (security phase 2) — Auth.js session/cookie signing key. Generate with `npx auth secret`. Server-side only. |
+| `AUTH_DATABASE_URL` | **not yet set** | New (security phase 2) — points at the **existing** `ai-agronomist-db` Postgres (same instance as the API's `DATABASE_URL`, not a second plugin). Auth.js's users/sessions/verification-token tables plus `user_tenants` live in a dedicated **`auth` schema** (not `public`), applied by hand from `web/lib/auth/schema.sql` — `public` stays exclusively the FastAPI app's alembic-managed schema so `alembic revision --autogenerate` never sees these tables. `web`'s pool sets `search_path=auth` (`web/lib/auth/db.ts`); `src/` never reads this schema. |
+| `AUTH_RESEND_KEY` | **not yet set** | New (security phase 2) — Resend API key for magic-link email (name matches Auth.js's own `AUTH_{PROVIDER}_KEY` convention, not a made-up name). Outside production, `web/lib/auth/emailProvider.ts` mocks the sender (logs the link) instead of calling Resend, so this can stay unset until cutover. **Never** `NEXT_PUBLIC_*`. |
+| `AUTH_RESEND_FROM` | **required**, no default | New (security phase 2) — the from-address for magic-link email. There is no fallback: `web/lib/auth/emailProvider.ts` throws rather than send from an address this project does not own, so magic-link login fails once `AUTH_RESEND_KEY` is set but this is not. Resend requires the sending domain in this address to be verified in the Resend account (add the SPF/DKIM DNS records Resend provides for that domain) before it can deliver to arbitrary recipients — until that's done, Resend only allows sending to the account owner's own verified address via its shared `onboarding@resend.dev` sender, which is not usable for real operator logins. No Auth.js convention exists for this var name; chosen to mirror `AUTH_RESEND_KEY`. |
 
 ## 7. CI
 
@@ -114,6 +134,8 @@ biome lint → tsc → vitest → next build → Playwright e2e including
 < 500 ms, channel toggle < 300 ms with zero refetches). E2E is hermetic — the
 Playwright web server points `API_URL` at a dead port and every BFF call is
 mocked, so CI needs no backend. `PostgreSQL Integration Tests` covers `main`.
+
+**Railway does not wait for CI.** Railway builds and deploys on every push to `main` without gating on GitHub Actions — in practice it can start building before the CI workflows are even queued, so a deploy can reach production and succeed while CI is still running or has failed. All three repo-backed services (`ai-agronomist-api`, `ai-agronomist-worker`, `web`) redeploy on every push to `main`, including docs-only changes.
 
 ## 8. Troubleshooting
 

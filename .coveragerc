@@ -3,13 +3,8 @@ concurrency = thread, greenlet
 source = src
 branch = True
 omit =
-    src/orchestrator.py
-    src/agents/*
     src/dashboard/*
     src/db/seeds.py
-    src/models/test_*.py
-    src/models/csv_adapter.py
-    src/models/data_source.py
 
 [report]
 precision = 2

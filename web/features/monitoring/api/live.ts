@@ -132,26 +132,77 @@ export const statusResponseSchema = z.object({
 
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
 
+// ---------------------------------------------------------------------------
+// POST /api/bff/live/{resume,pause}  (live scope control)
+// ---------------------------------------------------------------------------
+
+/**
+ * `scope_status` is optional: an older API deployed ahead of the frontend
+ * during a rolling deploy window won't send it yet (deploy-skew history —
+ * see project memory). Treat its absence as "no new information", not
+ * failure.
+ *
+ * "unmanaged" is the runtime-unavailable case: when app.state.live_runtime
+ * is None the route has no runtime to ask and no way to tell started/
+ * already_running/not_configured apart, so it says so rather than
+ * guessing. It is NOT a "not configured" verdict — the toggle must treat
+ * it as indeterminate, not act on it.
+ */
 const resumeResponseSchema = z.object({
   resumed: z.boolean(),
+  scope_status: z.enum(["started", "already_running", "not_configured", "unmanaged"]).optional(),
   tenant_id: z.string(),
   greenhouse_id: z.string(),
 });
 
-/**
- * Re-enable live publish/persistence after Clear all data muted the scope.
- * Called when the operator turns Go Live on.
- */
-export async function resumeLiveScope(params: { tenant: string; gh: string }): Promise<void> {
+export type ResumeLiveScopeResult = z.infer<typeof resumeResponseSchema>;
+
+const pauseResponseSchema = z.object({
+  paused: z.boolean(),
+  scope_status: z.enum(["stopped", "not_running", "not_configured", "unmanaged"]).optional(),
+  tenant_id: z.string(),
+  greenhouse_id: z.string(),
+});
+
+/** POST the tenant/gh scope to a live-control action and zod-parse the response. */
+async function postLiveScopeAction<T>(
+  action: "resume" | "pause",
+  params: { tenant: string; gh: string },
+  schema: z.ZodType<T>,
+): Promise<T> {
   const query = new URLSearchParams({
     tenant_id: params.tenant,
     greenhouse_id: params.gh,
   });
-  const res = await fetch(`/api/bff/live/resume?${query}`, { method: "POST" });
+  const res = await fetch(`/api/bff/live/${action}?${query}`, { method: "POST" });
   if (!res.ok) {
-    throw new Error(`Failed to resume live scope (${res.status})`);
+    throw new Error(`Failed to ${action} live scope (${res.status})`);
   }
-  resumeResponseSchema.parse(await res.json());
+  return schema.parse(await res.json());
+}
+
+/**
+ * Re-enable live publish/persistence after Clear all data muted the scope.
+ * Called when the operator turns Go Live on. Returns the parsed result so
+ * callers can react to `scope_status: "not_configured"` — an HTTP 200 that
+ * will never actually stream because the greenhouse has no configured live
+ * source.
+ */
+export async function resumeLiveScope(params: {
+  tenant: string;
+  gh: string;
+}): Promise<ResumeLiveScopeResult> {
+  return postLiveScopeAction("resume", params, resumeResponseSchema);
+}
+
+/**
+ * Mute live publish/persistence for a scope. Live scopes now start muted on
+ * the backend, so this is called when the operator turns Go Live off, to
+ * stop synthetic mock-SCADA rows from continuing to land in the DB behind
+ * the UI's back.
+ */
+export async function pauseLiveScope(params: { tenant: string; gh: string }): Promise<void> {
+  await postLiveScopeAction("pause", params, pauseResponseSchema);
 }
 
 // ---------------------------------------------------------------------------

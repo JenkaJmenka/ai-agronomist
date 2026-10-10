@@ -29,6 +29,30 @@ You plan, decompose, delegate, analyze outcomes, and decide next steps.
 - **Done signals:** `tasks/done/<agent-name>.json`
 - **Watcher log:** `tasks/watcher.log`
 
+### Always run Python through `./venv/bin/python`
+
+```bash
+./venv/bin/python -m pytest tests/ -q     # correct
+python3 -m pytest tests/ -q               # WRONG — system interpreter
+```
+
+Bare `python3` resolves to the system Python, which does not have this project's
+dependencies. The failure mode is deceptive rather than obvious: the repo has a
+top-level `alembic/` directory, so with the real package absent `import alembic`
+still *succeeds* as a namespace package — `alembic.__file__` is `None` and the
+error surfaces later as `ModuleNotFoundError: No module named 'alembic.config'`,
+which reads like a broken install rather than the wrong interpreter.
+
+This has already cost two sessions: migration tests were twice written off as
+"pre-existing broken alembic install" and excluded from runs. Under the venv they
+pass. Before reporting any test failure as pre-existing, re-run it with
+`./venv/bin/python`.
+
+The only acceptable test gate is the **full** suite — `./venv/bin/python -m pytest tests/ -q`.
+Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently excludes
+`tests/workers/`, where a real failing assertion once hid for four commits while three
+separate reports called the branch green.
+
 ## Agent model assignment
 
 | Agent | Model | Reason |
@@ -161,6 +185,33 @@ Read tasks/orchestrator_state.json. Proceed to next phase.
 
 ---
 
+## Agent reporting rules
+
+**Every agent report must end with the raw output of `git status --short`** —
+never a hand-written list of files touched. Agents misreport their own blast
+radius: on 2026-10-07 two separate agents wrote to `AGENT_MEMORY.md` and
+omitted it from a report that otherwise said "nothing else", and one of those
+reports also gave the wrong line count for a file it created. The command
+cannot make either mistake. A hand-written list is an agent's recollection; the
+command is the repo's answer.
+
+Also require, and reproduce yourself before relaying:
+
+- **Measured values, never adjusted ones.** If a measurement differs from an
+  expected figure in the brief, the agent reports the difference. Never tune
+  code or an expected value toward a number. Several agents on Task 3 earned
+  trust specifically by reporting a discrepancy, and one of those discrepancies
+  (`raw_slot_count` 1897 vs a documented 1967) exposed a real design defect.
+- **The orchestrator's own measurements are not exempt.** A phantom co2 episode
+  that reached a commit message and a committed brief came from an orchestrator
+  harness that built a bare `StuckCarry()` and so skipped pipeline setup the
+  real upload path performs. Verify a harness reproduces the production path
+  before trusting a number it produces — see
+  `project_imputed_channel_phantom_freeze` in the session memory.
+- **The full suite, never a subset**, run in the FOREGROUND. Agents that
+  background the run and wait for a notification stall silently; three did on
+  Task 3. A long blocking run is correct behaviour.
+
 ## Failure handling
 
 - **Blocking failure** — report to user, propose options, wait for decision
@@ -186,7 +237,7 @@ Pydantic v2, SQLAlchemy 2.x async. After writing: run smoke tests, fix until gre
 
 **qa-engineer:**
 ```
-Target 90% coverage. Run: python3 -m pytest tests/ --cov=src --cov-fail-under=90
+Target 90% coverage. Run: ./venv/bin/python -m pytest tests/ --cov=src --cov-fail-under=90
 Iterate max 4 times. Write coverage summary to docs/coverage/.
 ```
 
@@ -219,11 +270,65 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/` |
+| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
-| devops-lead | `docker/`, `.github/` |
+| devops-lead | `docker/`, `.github/`, `docs/deployment/`, `docs/runbooks/` |
 | tech-lead | `docs/refactor/` |
+| orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
+
+Root-level config and docs had no owner until 2026-10-05, and the gap stalled
+two agents in one session: devops-lead declined `requirements-dev.txt` and
+`README.md` as outside `docker/`/`.github/`, then backend-engineer paused on
+`alembic.ini` and `RAILWAY_HOSTING.md` for the same reason. Both were right to
+ask. They now belong to backend-engineer, except `AGENT_MEMORY.md` and this
+file, which stay with the orchestrator.
+
+`src/workers/` had the same gap until 2026-10-06, found while planning the
+anomaly-episode writer: the async upload path's persistence point is
+`src/workers/upload_consumer.py`, which no row covered. It is API-adjacent
+service code and already imports only backend-owned modules
+(`src/api/services/`, `src/db/`), so it belongs to backend-engineer. Note the
+asymmetry that caused the confusion: `tests/workers/` is qa-engineer's, under
+`tests/`.
+
+The lesson both times: when a task's real edit point falls outside every row,
+say so and get an owner assigned. Do not pick the nearest-looking agent, and do
+not quietly widen your own scope to cover it.
+
+`docs/runbooks/` is devops-lead's, assigned 2026-10-10, with the same
+cross-agent exception as `docs/handoff/`: the domain agent may revise the step
+runbook covering its own area when its task says so. The directory is
+deliberately mixed — `deploy.md` and `STEP-1-worker-sizing.md` are infra, while
+`STEP-2`..`STEP-5` and `native-dec-fixture-baseline.md` are detector/ML
+material. A single owner for the whole tree would be wrong, so devops-lead owns
+the directory and its infra files, and an ML task that needs a detector runbook
+says so explicitly rather than reassigning the row. It earned a row because
+`deploy.md` is the live Railway apply procedure and was unowned while
+`docs/deployment/railway.md` was being corrected against it.
+
+`docs/deployment/` is devops-lead's, assigned 2026-10-10. The gap surfaced when
+`docs/deployment/railway.md` was found stale after commit `2f924fa` deleted all four
+`railway*.json` files: the doc still instructs setting a per-service "Config File
+Path" to files that no longer exist. Deployment docs describe the same services
+devops-lead already owns under `docker/`, so they belong together. Note the live
+apply procedure lives in `docs/runbooks/deploy.md`, which this row does NOT cover —
+if that file needs editing, get an owner assigned first.
+
+`docs/handoff/` is backend-engineer's, with one exception to the usual
+one-owner rule: another agent may add to a handoff spec when its own task
+explicitly says so (Task 4 does). It is a cross-agent contract, not one
+agent's working notes.
+
+`.gitignore` is the orchestrator's. It earned a row on 2026-10-06: `docs/*`
+had silently ignored `docs/handoff/task3_4_spec.md`, so the Task 3 spec was
+written locally in one session and absent from every branch in the next —
+Task 3 opened by rebuilding a spec that was never committable. An ignore rule
+can make an agent's finished work invisible rather than merely untracked, so
+changes to it stay with the orchestrator. Verify any new negation with
+`git check-ignore <path>` (no `-v`): it must print nothing and exit 1. With
+`-v` it prints the matching negation rule and exits 0, which looks like
+failure and is not.
 
 ---
 

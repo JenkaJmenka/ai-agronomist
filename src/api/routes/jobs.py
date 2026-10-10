@@ -11,8 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.jobs import JobListResponse, JobStatusResponse
-from src.config import JOB_EVENTS_MAX_SECONDS, JOB_EVENTS_POLL_SECONDS
+from src.config import AUTH_ENABLED, JOB_EVENTS_MAX_SECONDS, JOB_EVENTS_POLL_SECONDS
 from src.db.jobs import _HEAVY_RESULT_KEYS, get_job, list_jobs_light, set_job_result
 from src.db.models import Job
 from src.db.session import get_db
@@ -24,6 +25,22 @@ _TERMINAL_STATUSES: tuple[str, ...] = ("completed", "failed", "partially_failed"
 # _HEAVY_RESULT_KEYS is imported from src.db.jobs where it is also used by
 # _JsonStripHeavyKeys to strip the same keys at the SQL layer — single source
 # of truth for which keys are "heavy" and must not appear in list responses.
+
+
+def _enforce_job_ownership(auth_tenant: Optional[str], job: Job) -> None:
+    """Hide a cross-tenant job behind 404, never 403.
+
+    These routes carry no ``tenant_id`` parameter of their own to bind via
+    ``enforce_tenant_access`` — the job's own row is the only source of
+    tenant identity, so ownership can only be checked after the fetch. A
+    mismatch (or auth enabled with no resolved tenant, which is itself a
+    bug) must not confirm the job's existence to a caller who doesn't own
+    it, so this 404s exactly like "job not found" rather than 403ing.
+    """
+    if not AUTH_ENABLED:
+        return
+    if auth_tenant is None or job.tenant_id != auth_tenant:
+        raise HTTPException(status_code=404, detail=f"Job {job.id!r} not found")
 
 
 def _list_row_to_response(row: dict[str, Any]) -> JobStatusResponse:
@@ -88,10 +105,15 @@ def _to_response(job: Job) -> JobStatusResponse:
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: str, db: AsyncSession = Depends(get_db)) -> JobStatusResponse:
+async def get_job_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
+) -> JobStatusResponse:
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    _enforce_job_ownership(auth_tenant, job)
     return _to_response(job)
 
 
@@ -110,7 +132,9 @@ def _event_payload(job: Job) -> str:
 
 @router.get("/{job_id}/events")
 async def stream_job_events(
-    job_id: str, db: AsyncSession = Depends(get_db)
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ) -> StreamingResponse:
     """SSE job progress stream (G5) — replaces the dashboard's 5 s poll.
 
@@ -122,6 +146,7 @@ async def stream_job_events(
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    _enforce_job_ownership(auth_tenant, job)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         deadline = time.monotonic() + JOB_EVENTS_MAX_SECONDS
@@ -156,10 +181,15 @@ async def stream_job_events(
 
 
 @router.post("/{job_id}/cancel", response_model=JobStatusResponse)
-async def cancel_job(job_id: str, db: AsyncSession = Depends(get_db)) -> JobStatusResponse:
+async def cancel_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
+) -> JobStatusResponse:
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    _enforce_job_ownership(auth_tenant, job)
     if job.status not in _TERMINAL_STATUSES:
         await set_job_result(db, job_id, status="failed", error="Job cancelled by user")
         job = await get_job(db, job_id)
@@ -174,6 +204,7 @@ async def get_jobs(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: Optional[str] = Depends(require_api_key),
 ) -> JobListResponse:
     """List jobs — heavy result arrays stripped server-side at the SQL layer.
 
@@ -183,6 +214,7 @@ async def get_jobs(
     Both exclusions happen in the SELECT, so the DB never sends the large
     blobs to Python.  The full result is available via GET /api/jobs/{id}.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     job_rows = await list_jobs_light(
         db,
         tenant_id=tenant_id,

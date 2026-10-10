@@ -23,10 +23,60 @@ results/
 # asserts its Table 9 worked values; a fresh clone must have the spec its tests conform to.
 # docs/USER_GUIDE.md and docs/ANOMALY_CATALOG.md are shipped operator
 # documentation linked from README.md — they must survive a fresh clone.
+# docs/runbooks/** is onboarding material: step-by-step procedures written for
+# someone with no prior knowledge of this project, plus the agent prompts they
+# reference. Useless if it does not survive a clone.
+# docs/architecture/ADR-*.md are decision records — they explain why the code is
+# the way it is, and are cited from commit messages and source comments.
+# Everything else under docs/ (working notes, review reports, plans) stays local.
 docs/*
 !docs/anomaly_framework_spec.md
 !docs/USER_GUIDE.md
 !docs/ANOMALY_CATALOG.md
+!docs/runbooks/
+!docs/runbooks/**
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/ADR-*.md
+# These two are cited as required reading by docs/runbooks/** — a runbook that
+# points at a file missing from a fresh clone is a broken runbook.
+!docs/architecture/upload_detector_convergence.md
+!docs/architecture/episode_grouping.md
+# docs/security/auth-audit-phase1.md and docs/security/deploy-runbook-phase2.md
+# are the phase-1 audit and phase-2 runbook, committed as the audit trail for
+# d76ca19. Other working notes under docs/security/ stay local.
+!docs/security/
+docs/security/*
+!docs/security/auth-audit-phase1.md
+!docs/security/deploy-runbook-phase2.md
+# docs/deployment/railway.md is the Railway service-wiring and resource-tuning
+# reference, owned by devops-lead. Tracked because a correction made only
+# locally is invisible to every other branch -- the same failure that had the
+# Task 3 handoff spec rebuilt from scratch. The rest of docs/deployment/
+# (monitoring-dashboard-config.yaml, phase-4.1-deployment-checklist.md,
+# ops-runbook.md) is Streamlit-era and stays local until someone revises it.
+!docs/deployment/
+docs/deployment/*
+!docs/deployment/railway.md
+# ops-runbook.md (incident response) and monitoring-dashboard-config.yaml
+# (AnomalyMetrics definitions) were revised off the dead Streamlit dashboard on
+# 2026-10-10 and are live references now, so they are tracked too. Their metric
+# thresholds are NOT re-verified -- the file says so itself.
+# phase-4.1-deployment-checklist.md is archival -- a dated artifact for a
+# completed phase that nobody re-runs -- but tracked anyway: its Streamlit
+# validation line was corrected to web's routes on 2026-10-10, and leaving a
+# correction local-only is the invisibility problem this whole block fixes.
+# Archival means do not maintain it, not keep its fixes hidden.
+!docs/deployment/ops-runbook.md
+!docs/deployment/monitoring-dashboard-config.yaml
+!docs/deployment/phase-4.1-deployment-checklist.md
+# docs/handoff/** is cross-agent task handoff: the schema and contract spec a
+# later task's implementer works from.  The Task 3 spec was written locally in
+# an earlier session and lost to this ignore rule — which is why Task 3 opened
+# with its spec missing from every branch and had to be rebuilt from the task
+# prompt.  A handoff doc that cannot survive a clone cannot do its job.
+!docs/handoff/
+!docs/handoff/**
 implementation plan/
 tasks/
 
@@ -56,3 +106,12 @@ models/test_customer/
 
 # Root tooling (husky / lint-staged) — commit pnpm-lock.yaml for reproducible hooks
 /node_modules/
+
+# Railway IaC authoring deps — /node_modules/ above is root-anchored and misses this
+.railway/node_modules/
+
+# MCP server config — copy .mcp.example.json and tweak per machine
+.mcp.json
+
+# Root-level data exports (keep datasets out of the repo; tests/fixtures/ stays tracked)
+/*.csv

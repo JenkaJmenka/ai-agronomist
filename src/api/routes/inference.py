@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
+from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.schemas.sensor_data import (
     InferenceRequest,
     InferenceResponse,
@@ -36,7 +37,15 @@ import os
 import logging
 
 from src.vendors.csv_adapter import CSVAdapter
-from src.config import ANOMALY_THRESHOLD, ANOMALY_SCALING_FACTOR, LATENT_DIM, SEQ_LEN
+from src.api.services.score_transform import canonical as _canonical_score
+from src.config import (
+    ANOMALY_THRESHOLD,
+    ANOMALY_SCALING_FACTOR,
+    LATENT_DIM,
+    SCORE_SCALE_CALIBRATION,
+    SEQ_LEN,
+    SYNTHETIC_SOURCE_PREFIX,
+)
 from src.api.services.csv_persist import normalize_timestamp_key
 
 logger = logging.getLogger(__name__)
@@ -48,8 +57,10 @@ router = APIRouter()
 @router.post("/inference", response_model=InferenceResponse)
 async def run_inference(
     request: InferenceRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     seqs = request.sequences
     if not seqs:
         raise HTTPException(status_code=400, detail="Empty sequences")
@@ -102,8 +113,12 @@ async def run_inference(
                 detail="timestamps required (one per sequence) to persist anomaly scores",
             )
 
-        scores_by_key: dict[str, float] = {}
+        # raw_by_key: pre-canonical scores (raw / ANOMALY_SCALING_FACTOR).
+        # canonical_by_key: ADR-005 scores stored in anomaly_score column.
+        raw_by_key: dict[str, float] = {}
+        canonical_by_key: dict[str, float] = {}
         dt_timestamps: list[datetime] = []
+        _batch_p, _batch_hi = SCORE_SCALE_CALIBRATION["batch"]
         for ts_str, score in zip(request.timestamps, batch_scores):
             try:
                 dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -115,7 +130,11 @@ async def run_inference(
             dt_timestamps.append(dt)
             key = normalize_timestamp_key(dt)
             if key is not None:
-                scores_by_key[key] = float(score)
+                raw_score = float(score)
+                can = _canonical_score(raw_score, _batch_p, _batch_hi, timestamp=ts_str)
+                raw_by_key[key] = raw_score
+                if can is not None:
+                    canonical_by_key[key] = can
 
         stmt = select(SensorReading).where(
             SensorReading.tenant_id == request.tenant_id,
@@ -126,9 +145,22 @@ async def run_inference(
         records = result.scalars().all()
 
         for record in records:
+            if record.source is not None and record.source.startswith(SYNTHETIC_SOURCE_PREFIX):
+                # Migration-window hygiene, not a correctness fix (ADR-010): skip
+                # so a batch inference run can't clobber score_scale on a row
+                # still tagged synthetic before migration 025 has backfilled
+                # `source` everywhere. Once 025 has run, inject writes `source`
+                # directly and delete_synthetic_anomalies keys off `source`, so a
+                # clobbered score_scale here would no longer affect deletability --
+                # this guard only narrows the window in environments that haven't
+                # yet run 025.
+                continue
             record_key = normalize_timestamp_key(record.timestamp)
-            if record_key is not None and record_key in scores_by_key:
-                record.anomaly_score = scores_by_key[record_key]
+            if record_key is not None and record_key in canonical_by_key:
+                # ADR-005: store canonical score; preserve raw for recalibration.
+                record.anomaly_score = canonical_by_key[record_key]
+                record.anomaly_score_raw = raw_by_key[record_key]
+                record.score_scale = "batch"
 
         try:
             await db.commit()
@@ -160,6 +192,7 @@ async def run_inference_from_csv(
     include_embeddings: bool = Form(default=False),
     train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """
     Run cold-run inference on an uploaded CSV.
@@ -171,6 +204,7 @@ async def run_inference_from_csv(
     When persist_data is true, also loads rows into the database with
     anomaly scores attached so Monitoring and Anomaly pages work immediately.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 
@@ -266,6 +300,7 @@ async def run_inference_from_csv_async(
     persist_data: bool = Form(default=False),
     train_model: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ):
     """Queue a CSV for portioned processing; poll /api/jobs/{job_id} for results.
 
@@ -277,6 +312,7 @@ async def run_inference_from_csv_async(
     Railway containers share no filesystem. The local temp file is transient
     scratch on the API side only, deleted before the request returns.
     """
+    enforce_tenant_access(auth_tenant, tenant_id)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 

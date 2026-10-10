@@ -1,18 +1,35 @@
 name: web-ci
 
 on:
+  # No path filter: a backend-only merge to main must not be able to land
+  # without the FE gates running. Task 2 merged to main (dd483d1) without
+  # ever triggering this workflow - it touched no web/** files, so the old
+  # push filter below never fired, and the last real run stayed at 83e6830
+  # until #75 happened to touch web/ and exposed the gap. That is the same
+  # class of hole as a test subset silently not covering a changed path.
   push:
     branches: [fe/nextjs-migration, main]
-    paths:
-      - "web/**"
-      - ".github/workflows/web-ci.yml"
+  # pull_request keeps the path filter: a PR that only touches backend code
+  # has no FE regression to check, and this is the one place the filter's
+  # review-time cost/benefit still favors skipping the run.
   pull_request:
     paths:
       - "web/**"
       - ".github/workflows/web-ci.yml"
+  schedule:
+    # 03:17 UTC daily - off-peak, offset from the top of the hour (GitHub's
+    # scheduler is congested at :00). No workflow in this repo has an
+    # existing cron convention to mirror, so this is a fresh choice.
+    - cron: "17 3 * * *"
 
 concurrency:
-  group: web-ci-${{ github.ref }}
+  # Event name folded into the key, not just github.ref: a scheduled run and
+  # a push-to-main run both resolve github.ref to refs/heads/main, so without
+  # the event name they'd land in the same group and cancel-in-progress would
+  # let one cancel the other. pull_request already has a ref unique to the PR
+  # (refs/pull/<n>/merge), so this is a no-op for that case - re-pushing to a
+  # PR still cancels its own stale run, which is the behavior we want.
+  group: web-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

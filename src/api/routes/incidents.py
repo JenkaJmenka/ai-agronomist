@@ -66,8 +66,10 @@ def _to_incident_response(incident: Incident, distance: Optional[float] = None) 
 async def store_incident(
     request: IncidentCreateRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> IncidentStoreResponse:
     """Store a detected anomaly as an incident."""
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     memory = IncidentMemory(db)
     incident_id = await memory.store_incident(
         tenant_id=request.tenant_id,
@@ -92,8 +94,10 @@ async def find_similar(
     max_age_days: Optional[int] = Query(None, ge=1),
     resolved_only: bool = Query(False),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> List[IncidentResponse]:
     """Find the k most similar past incidents (most similar first)."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     memory = IncidentMemory(db)
     similar = await memory.find_similar(
         embedding=_validate_query_embedding(embedding),
@@ -114,8 +118,10 @@ async def suggest_fixes(
     k: int = Query(DEFAULT_SUGGESTION_NEIGHBORS, ge=1, le=MAX_SIMILAR_RESULTS),
     min_confidence: float = Query(DEFAULT_MIN_ACTION_CONFIDENCE, ge=0.0, le=1.0),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> SuggestionsResponse:
     """Suggest root cause and fixes based on similar resolved incidents."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     memory = IncidentMemory(db)
     suggestions = await memory.suggest_fixes(
         embedding=_validate_query_embedding(embedding),
@@ -145,10 +151,15 @@ async def resolve_incident(
     incident_id: str,
     request: IncidentResolveRequest,
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> Dict[str, Any]:
     """Mark an incident as resolved with root cause and actions taken."""
+    enforce_tenant_access(auth_tenant, request.tenant_id)
     memory = IncidentMemory(db)
     try:
+        # IncidentMemory._get_incident (called internally) already scopes the
+        # lookup by (incident_id, tenant_id) and raises ValueError -> 404
+        # below when the incident belongs to a different tenant.
         await memory.resolve_incident(
             incident_id=incident_id,
             tenant_id=request.tenant_id,
@@ -173,8 +184,10 @@ async def get_statistics(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> StatisticsResponse:
     """Tenant-scoped incident statistics."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     memory = IncidentMemory(db)
     statistics = await memory.get_statistics(tenant_id=tenant_id, greenhouse_id=greenhouse_id)
     return StatisticsResponse(**statistics)
@@ -186,8 +199,10 @@ async def get_recurring_issues(
     greenhouse_id: Optional[str] = Query(None),
     min_occurrences: int = Query(DEFAULT_MIN_RECURRENCES, ge=1),
     db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
 ) -> List[RecurringIssue]:
     """Root causes that keep re-occurring for a tenant."""
+    enforce_tenant_access(auth_tenant, tenant_id)
     memory = IncidentMemory(db)
     recurring = await memory.get_recurring_issues(
         tenant_id=tenant_id, greenhouse_id=greenhouse_id, min_occurrences=min_occurrences

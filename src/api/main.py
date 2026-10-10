@@ -35,13 +35,14 @@ try:
 except (ImportError, ValueError):
     logging.basicConfig(level=logging.INFO)
 
-from src.config import REDIS_URL
+from src.api.auth import assert_auth_configured
+from src.config import ENVIRONMENT, REDIS_URL
 from src.db.jobs import fail_stale_preparing_jobs
 from src.db.session import AsyncSessionLocal, engine, get_db, init_db
 from src.mq.connection import close_mq
 from src.api.routes import (
     anomalies,
-    auth,
+    backfill,
     bootstrap,
     feedback,
     feedback_integrated,
@@ -72,6 +73,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Asynchronous lifespan manager handling startup database initialization
     and shutdown resource cleanup.
     """
+    # Fail closed, at startup, before serving a single request: a production
+    # deployment with auth disabled must never come up (see
+    # src.api.auth.assert_auth_configured for the rationale).
+    assert_auth_configured()
+
     logger.info("Starting up FastAPI application...")
 
     # Pin the CPU torch thread pool once at startup (the sync upload path and
@@ -178,12 +184,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Failed to cleanly dispose of database resources: {e}", exc_info=True)
 
 
+# Interactive docs leak the full route/schema surface to anyone who can reach
+# the API — disabled in production; web/openapi.json type generation depends
+# on them staying on everywhere else (dev, staging, tests).
+_DOCS_ENABLED = ENVIRONMENT != "production"
+
 # Instantiate the FastAPI app
 app = FastAPI(
     title="AI Agronomist API",
     description="REST API for multi-tenant greenhouse telemetry data ingestion, inference, and threshold management.",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 # CORS configurations allowing Streamlit dashboard and local React/Vue dev tools
@@ -339,9 +353,9 @@ app.include_router(live.router)
 app.include_router(readings.router)
 app.include_router(network_anomalies.router)
 app.include_router(anomalies.router)
-app.include_router(auth.router)
 app.include_router(operational_config.router)
 app.include_router(seasonal_baselines.router)
+app.include_router(backfill.router)
 
 
 @app.get("/metrics", include_in_schema=False)

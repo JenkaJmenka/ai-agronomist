@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -14,6 +15,7 @@ from src.api.schemas.sensor_data import (
     UploadHighAnomalyDetail,
     UploadInferenceResponse,
 )
+from src.api.services.score_transform import canonical as _canonical_score
 from src.config import ADAPTIVE_RANGE_SAMPLE_ROWS
 from src.models.data_utils import SENSOR_RANGES, AdaptiveRangeAccumulator
 from src.models.inference import AnomalyDetector
@@ -23,10 +25,13 @@ from src.api.services.csv_persist import (
     normalize_timestamp_key,
     persist_readings_chunk,
 )
+from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
+from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
     PortionScores,
     StatCarry,
+    StuckCarry,
     finalize_scores,
     score_portion,
 )
@@ -43,6 +48,10 @@ def build_anomaly_scores_by_timestamp(
 
     Only anomalies above the file-calibrated threshold are stored. Normal
     sequence scores stay unset so dashboard filtering stays sparse and accurate.
+
+    .. deprecated::
+        Prefer ``build_upload_score_dicts`` which also computes canonical scores
+        and raw scores for ADR-005 provenance columns.
     """
     scores: dict[str, float] = {}
     for hit in high_anomalies:
@@ -51,6 +60,50 @@ def build_anomaly_scores_by_timestamp(
             continue
         scores[key] = max(scores.get(key, 0.0), float(hit.score))
     return scores
+
+
+def build_upload_score_dicts(
+    high_anomalies: list[UploadHighAnomalyDetail],
+) -> tuple[dict[str, float], dict[str, float | None]]:
+    """Build (canonical_by_ts, raw_by_ts) dicts for the upload write path.
+
+    ``hit.score`` is already canonical — each producer canonicalises against its
+    own decision point in ``finalize_scores`` (the LSTM against the per-file
+    ``threshold_used``, the statistical detector against ``COLD_RUN_STAT_Z_MIN``).
+    Transforming again here applied the LSTM's threshold to scores that were
+    already canonical: a second, wrong mapping that inflated statistical hits to
+    ~0.82-0.89 while LSTM hits sat at ~0.50-0.53, and that would have pushed
+    every hit below the 0.5 display threshold had ``threshold_used`` been high.
+
+    The highest canonical score per timestamp wins, and that hit's native score
+    travels with it for the provenance column.
+
+    Returns
+    -------
+    canonical_by_ts:
+        ADR-005 canonical scores for ``SensorReading.anomaly_score``.
+    raw_by_ts:
+        Producer-native scores for ``SensorReading.anomaly_score_raw``.  Carries a
+        key for every key in ``canonical_by_ts``, with None where the producer has
+        no native scalar (stuck_fault), so the two never disagree on keys.
+    """
+    best_by_ts: dict[str, UploadHighAnomalyDetail] = {}
+    for hit in high_anomalies:
+        key = normalize_timestamp_key(hit.timestamp)
+        if key is None or not math.isfinite(hit.score):
+            continue
+        current = best_by_ts.get(key)
+        if current is None or hit.score > current.score:
+            best_by_ts[key] = hit
+
+    canonical_by_ts: dict[str, float] = {}
+    raw_by_ts: dict[str, float | None] = {}
+    for key, hit in best_by_ts.items():
+        canonical_by_ts[key] = float(hit.score)
+        raw = hit.score_raw
+        raw_by_ts[key] = float(raw) if raw is not None and math.isfinite(raw) else None
+
+    return canonical_by_ts, raw_by_ts
 
 
 def build_anomaly_metadata_by_timestamp(
@@ -69,6 +122,47 @@ def build_anomaly_metadata_by_timestamp(
         if hit.column and hit.column not in entry["columns"]:
             entry["columns"].append(hit.column)
     return metadata
+
+
+def build_trigger_data_by_timestamp(
+    high_anomalies: list[UploadHighAnomalyDetail],
+) -> dict[str, dict[str, object]]:
+    """Per-timestamp primary trigger: most-severe hit's detector/severity/value.
+
+    For rows where multiple columns fire at the same timestamp, the winner
+    is chosen by ``anomaly_rank_key`` (severity, then detector tier, then
+    |z_score| — see that function for why this ranks an urgent stuck-fault
+    freeze above a statistical warning, unlike the old |z|-only tiebreak,
+    which never even saw stuck hits since they carry no z_score).
+    LSTM-only hits (column=None, z_score=None) are included so
+    trigger_detector is always populated; trigger_channel stays None for them.
+    """
+    # {ts_key: {"channel", "detector", "severity", "value", "_rank"}}
+    best: dict[str, dict[str, object]] = {}
+    for hit in high_anomalies:
+        key = normalize_timestamp_key(hit.timestamp)
+        if key is None:
+            continue
+        rank = anomaly_rank_key(hit)
+        existing = best.get(key)
+        if existing is None or rank > existing["_rank"]:
+            best[key] = {
+                "channel": hit.column,
+                "detector": hit.detector or "lstm",
+                "severity": hit.severity,
+                "value": hit.value,
+                "_rank": rank,
+            }
+    # Strip the internal sort key before returning.
+    return {
+        k: {
+            "channel": v["channel"],
+            "detector": v["detector"],
+            "severity": v["severity"],
+            "value": v["value"],
+        }
+        for k, v in best.items()
+    }
 
 
 def _read_chunks(tmp_path: str, chunk_size: int, csv_props: dict[str, Any]):
@@ -178,6 +272,7 @@ async def run_cold_run_upload(
 
     portions: list[PortionScores] = []
     stat_carry = StatCarry()
+    stuck_carry = StuckCarry(skip_channels=frozenset(imputed_channels))
     prev_overlap_df = pd.DataFrame()
     sensor_rows_persisted = 0
     raw_rows_persisted = 0
@@ -205,6 +300,7 @@ async def run_cold_run_upload(
             detector=detector,
             seq_len=seq_len,
             include_embeddings=include_embeddings,
+            stuck_carry=stuck_carry,
         )
         portions.append(portion)
 
@@ -227,6 +323,7 @@ async def run_cold_run_upload(
         imputed_channels=imputed_channels,
         stat_carry=stat_carry,
         include_embeddings=include_embeddings,
+        stuck_carry=stuck_carry,
     )
 
     if persist_db is not None:
@@ -236,14 +333,34 @@ async def run_cold_run_upload(
                 detail="No data could be extracted from the uploaded CSV. "
                 "Check column names and data format.",
             )
+        # Task 3/4: persist detection-time stuck-fault episodes. Only when
+        # persistence was actually requested (persist_db is not None) --
+        # mirrors apply_anomaly_scores below, which is gated the same way.
+        await persist_stuck_fault_episodes(
+            persist_db,
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+            stuck_carry=stuck_carry,
+            high_anomalies=response.high_anomalies,
+        )
+        # ADR-005: canonical + native score dicts keyed by timestamp. The
+        # per-file P99.9 calibration (response.threshold_used) is applied where
+        # the LSTM hits are built, in finalize_scores — not here, or statistical
+        # hits would be canonicalised a second time against the wrong p.
+        _canonical_by_ts, _raw_by_ts = build_upload_score_dicts(
+            response.high_anomalies,
+        )
         await apply_anomaly_scores(
             db=persist_db,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
-            anomaly_scores_by_timestamp=build_anomaly_scores_by_timestamp(
+            anomaly_scores_by_timestamp=_canonical_by_ts,
+            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
                 response.high_anomalies
             ),
-            anomaly_metadata_by_timestamp=build_anomaly_metadata_by_timestamp(
+            anomaly_score_raw_by_timestamp=_raw_by_ts,
+            score_scale="upload",
+            trigger_data_by_timestamp=build_trigger_data_by_timestamp(
                 response.high_anomalies
             ),
         )
@@ -294,9 +411,14 @@ def _merge_by_timestamp(
         key = _merge_timestamp_key(stat.timestamp)
         if key in lstm_by_ts:
             lstm = lstm_by_ts[key]
+            # Both sides are canonical (ADR-005), so max() compares like with
+            # like and score_raw follows whichever score won — mixing a winning
+            # score with the loser's native value would misreport provenance.
+            winner = lstm if lstm.score >= stat.score else stat
             merged.append(
                 UploadHighAnomalyDetail(
-                    score=max(lstm.score, stat.score),
+                    score=winner.score,
+                    score_raw=winner.score_raw,
                     timestamp=stat.timestamp,
                     detector="lstm+statistical",
                     sequence_index=lstm.sequence_index,
