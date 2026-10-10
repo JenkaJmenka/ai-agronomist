@@ -1,6 +1,7 @@
 services:
   db:
-    image: postgres:15
+    # pgvector build, not stock postgres: migration 002 runs CREATE EXTENSION vector.
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -9,6 +10,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs on FIRST cluster init only; existing volumes need `down -v` to pick it up.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d anomaly_db"]
       interval: 5s

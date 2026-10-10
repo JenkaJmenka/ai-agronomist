@@ -74,6 +74,23 @@ jobs:
             exit 1
           fi
 
+      # Must run before pytest: the pg_db fixture drops and recreates the schema
+      # via Base.metadata, which destroys the index the migration just built.
+      - name: Assert migration 027 produced the HNSW vector index
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          indexes=$(psql -h localhost -U postgres -d test_db -At \
+            -c "SELECT indexname FROM pg_indexes WHERE tablename = 'incidents';")
+          echo "$indexes"
+          echo "$indexes" | grep -qx 'ix_incidents_embedding_hnsw' \
+            || { echo "::error::HNSW index missing after alembic upgrade head"; exit 1; }
+          if echo "$indexes" | grep -qx 'ix_incidents_embedding_ivfflat'; then
+            echo "::error::migration 027 must drop the ivfflat index it replaces"
+            exit 1
+          fi
+
       - name: Run PostgreSQL-only tests
         env:
           # POSTGRES_TEST_URL, not DATABASE_URL: tests/conftest.py overwrites
