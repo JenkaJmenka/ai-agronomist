@@ -234,3 +234,38 @@ by whoever implements Part B:
 4. Generalize the writer so band-breach and calibration-drift detectors can
    also write this table (the schema is already detector-agnostic; the
    writer code is not written yet for any detector).
+
+---
+
+## 9. Task 4 — query-time convergence (deferred, recorded here)
+
+Task 4 made the query-time view (`GET /api/anomalies/episodes`) source a
+stuck fault's span from this table instead of from the single flagged
+`sensor_readings` row (see `src/api/services/anomaly_episode_service.py`'s
+module docstring and `_augment_stuck_fault_episode`). The items below came
+up while doing that work but are explicitly NOT implemented as part of it —
+recorded here so the next reader does not have to rediscover them.
+
+1. **`sample_count` has two meanings under one field name.** For a
+   stuck-fault episode it is the alert count (always 1 — one alert fires at
+   `onset_ts`, see `WallclockStuckDetector._check_gate`), never the
+   flagged-row count, because the query-time grouper only ever sees that one
+   row per freeze. For every other detector it is the flagged-row count, as
+   it always was. See the field docstring on
+   `AnomalyEpisodeSummary.sample_count` (`src/api/schemas/anomaly_episodes.py`)
+   and `anomaly_episode_service._augment_stuck_fault_episode`.
+
+2. **`finalize_scores` runs ONLY on the upload path.** The live SSE
+   ingestion path never calls it, so whatever suppression and baseline
+   exclusion it does do not apply there. A live-ingested stuck fault is
+   flagged and (if persisted) written to this table the same as an
+   uploaded one, but the upload-time episode response's
+   suppression/exclusion behaviour has no live-path counterpart.
+
+3. **No "baseline rebuilding" UI status exists yet** for a channel whose
+   statistical baseline is recovering after a fault released. Measured
+   blind time with no such status: 6.08 h after an isolated fault, and
+   172–244 h after overlapping freezes on the same channel. During that
+   window the channel's statistical detector is still trusting a baseline
+   contaminated by the fault, with nothing in the API response surfacing
+   that to a caller. Deferred — no implementation attempted here.
