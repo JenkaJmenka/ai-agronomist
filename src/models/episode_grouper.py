@@ -22,6 +22,8 @@ event is one alert with a duration instead of N rows.
    pair (``_stuck_fault_span``), so the two can never contradict each
    other — the bug this invariant replaces reported
    ``duration_seconds=589800`` alongside a zero-length timestamp span.
+   ``frozen_sample_count`` and ``raw_slot_count`` come out of that same
+   resolution, so all four describe one span.
 6. A stuck fault's frozen span is resolved in this order, first hit wins:
 
    a. the matching **completed** ``FaultWindow`` (``completed_faults``) —
@@ -36,6 +38,17 @@ event is one alert with a duration instead of N rows.
    states, and it is short by however long the freeze ran past the gate
    crossing — see ``_stuck_fault_span`` for why.  Callers holding a
    ``StuckCarry`` should pass ``open_freezes`` and get (b).
+
+7. Three counts ride on a stuck-fault episode and they are NOT
+   interchangeable.  ``sample_count`` counts ALERT ROWS, so it is always 1
+   for a freeze (decision 3).  ``frozen_sample_count`` counts samples
+   observed at the frozen value, and ``raw_slot_count`` counts the samples
+   the channel owed over the same span at its pinned cadence, so their
+   difference is readings missing inside the freeze.  Only arms (a) and (b)
+   can supply the latter two; (c) and (d) leave them ``None``, meaning NOT
+   MEASURED.  Each field says this again at its own definition, because
+   reading ``sample_count`` as a reading count is the specific mistake
+   these fields exist to make impossible.
 """
 
 from __future__ import annotations
@@ -45,6 +58,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.config import EPISODE_GAP_SECONDS, RECOVERY_SCORE_CAP
+from src.models.stuck_fault_detector import expected_slot_count
 
 # Seconds per hour, used by stuck_fault duration conversion.
 _SECONDS_PER_HOUR = 3600.0
@@ -60,7 +74,14 @@ def _parse_iso(ts: str) -> datetime:
 
 @dataclass
 class AnomalyEpisode:
-    """One continuous anomaly event on a single channel."""
+    """One continuous anomaly event on a single channel.
+
+    A stuck-fault episode carries THREE counts, and they mean three
+    different things: ``sample_count`` counts alert rows, which for a
+    freeze is always 1; ``frozen_sample_count`` counts samples observed at
+    the frozen value; ``raw_slot_count`` counts the samples the channel
+    should have produced.  Each is documented at its own definition below.
+    """
 
     channel: str
     detector: str
@@ -68,13 +89,49 @@ class AnomalyEpisode:
     end_ts: str
     duration_seconds: float
     peak_score: float
+
+    # The number of ALERT ROWS this episode was built from.  It is NOT a
+    # count of readings, samples, or frozen samples.
+    #
+    # For a ``stuck_fault`` episode it is ALWAYS 1, because a freeze emits
+    # exactly one alert and that alert is stamped at the freeze's onset
+    # (module docstring, design decision 3).  A freeze that ran for seven
+    # days across two thousand frozen samples still produces exactly one
+    # alert row, so this field still reads 1.  Do not read it as "how many
+    # samples were frozen" and do not change it to that: the frozen-sample
+    # tally is ``frozen_sample_count`` below, and the slots the channel
+    # owed over the same span are ``raw_slot_count``.
+    #
+    # For every other detector (``lstm``, ``statistical``) each flagged row
+    # emits its own alert, so the alert count and the flagged-row count are
+    # the same number and this field is both.
     sample_count: int
+
     severity: str
     is_recovery: bool = False
     is_ongoing: bool = False
     onset_ts: str | None = None
     detected_ts: str | None = None
     frozen_value: float | None = None
+
+    # Finite samples the detector observed at the frozen value over this
+    # episode's span ``[start_ts, end_ts]``, tallied as rows were consumed
+    # and never re-derived from timestamps.  ``stuck_fault`` only.
+    #
+    # ``None`` means NOT MEASURED — either the detector is not
+    # ``stuck_fault`` at all, or the resolution arm that produced this
+    # episode's span had no count to give (see ``_stuck_fault_span``).
+    # Never substitute 0: that would assert that a freeze froze zero
+    # samples, which no real freeze does.
+    frozen_sample_count: int | None = None
+
+    # Slots the channel SHOULD have produced over the same span at its
+    # pinned cadence (``expected_slot_count``), not a tally of rows.
+    # ``raw_slot_count - frozen_sample_count > 0`` therefore means readings
+    # are MISSING inside the freeze.  ``stuck_fault`` only, ``None`` under
+    # the same conditions and with the same "not measured" meaning as
+    # ``frozen_sample_count``.
+    raw_slot_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON response."""
@@ -92,6 +149,8 @@ class AnomalyEpisode:
             "onset_ts": self.onset_ts,
             "detected_ts": self.detected_ts,
             "frozen_value": self.frozen_value,
+            "frozen_sample_count": self.frozen_sample_count,
+            "raw_slot_count": self.raw_slot_count,
         }
 
 
@@ -243,18 +302,28 @@ class _StuckFaultSources:
 
 @dataclass(frozen=True)
 class _StuckFaultSpan:
-    """The frozen span of one stuck-fault episode: end boundary + duration.
+    """One stuck-fault episode's frozen span: boundary, duration, counts.
 
-    Both fields leave ``_stuck_fault_span`` together, derived from a single
-    resolution of the freeze, which is what makes ``end_dt - onset_dt ==
-    duration_seconds`` structurally true rather than a convention two
-    separate code paths have to remember.  Never widen this to let a caller
-    supply one field and compute the other.
+    Every field leaves ``_stuck_fault_span`` together, derived from a
+    single resolution of the freeze.  That is what makes ``end_dt -
+    onset_dt == duration_seconds`` structurally true rather than a
+    convention two separate code paths have to remember, and it is equally
+    what keeps the two counts describing the SAME span as that pair — a
+    count resolved from one arm beside a boundary resolved from another
+    would be the same class of contradiction invariant 5 exists to
+    prevent.  Never widen this to let a caller supply one field and compute
+    another.
+
+    ``frozen_sample_count`` / ``raw_slot_count`` are ``None`` when the arm
+    that won carried no count (arms 3 and 4 never carry one).  ``None`` is
+    "not measured"; 0 would be a measurement, and a false one.
     """
 
     end_dt: datetime
     duration_seconds: float
     is_ongoing: bool
+    frozen_sample_count: int | None = None
+    raw_slot_count: int | None = None
 
 
 def _open_freeze_end(state: Any, onset_dt: datetime) -> datetime | None:
@@ -283,12 +352,64 @@ def _open_freeze_end(state: Any, onset_dt: datetime) -> datetime | None:
     return end_dt
 
 
+def _open_freeze_sample_count(state: Any) -> int | None:
+    """Frozen samples tallied on the still-open freeze *state*.
+
+    ``ChannelFreezeState.sample_count`` is the detector's own running tally
+    of finite samples seen at the frozen value, maintained as rows are
+    consumed, so it is surfaced as-is.  Returns ``None`` for a state that
+    carries no integer tally (a hand-built or legacy-deserialised state),
+    which reads as "not measured" rather than as zero frozen samples.
+    """
+    count = getattr(state, "sample_count", None)
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    return count
+
+
+def _open_freeze_slot_count(
+    state: Any,
+    onset_dt: datetime,
+    end_dt: datetime,
+) -> int | None:
+    """Expected slots of still-open freeze *state* over ``[onset, end]``.
+
+    ``ChannelFreezeState`` deliberately holds no slot counter — its
+    docstring records why: the tally it used to keep counted rows that
+    survived ``CSVAdapter``, which measured the adapter and not the sensor.
+    So the figure for a freeze that never released has exactly one
+    canonical source, ``expected_slot_count`` over the span's two endpoints
+    at the freeze's pinned cadence, and that function's contract requires
+    callers in this position to use it rather than re-derive the count.
+    It is also the call ``anomaly_episode_writer`` makes for the very same
+    open state, which is what makes this episode and the persisted
+    ``anomaly_episodes`` row carry the same number instead of two
+    independently derived ones.
+
+    Returns ``None`` when the state carries no usable cadence, so an
+    unpinnable freeze reports "not measured" instead of a count scaled by
+    a placeholder.  Never raises: ``expected_slot_count`` rejects a
+    non-positive cadence and a backwards span, and a malformed carry must
+    degrade this one field rather than fail the whole upload response.
+    """
+    try:
+        cadence_seconds = float(state.cadence_seconds)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if cadence_seconds <= 0:
+        return None
+    try:
+        return expected_slot_count(onset_dt, end_dt, cadence_seconds)
+    except ValueError:
+        return None
+
+
 def _stuck_fault_span(
     onset: tuple[datetime, Any],
     actual_channel: str,
     sources: _StuckFaultSources,
 ) -> _StuckFaultSpan:
-    """Resolve end_dt, duration_seconds and is_ongoing for a stuck_fault.
+    """Resolve span, duration, ongoing flag and counts for a stuck_fault.
 
     *onset* is the group's first ``(dt, alert)`` entry — the freeze's onset,
     since a freeze emits exactly one alert and it is stamped at ``onset_ts``.
@@ -299,14 +420,30 @@ def _stuck_fault_span(
 
     1. A completed ``FaultWindow`` matching (channel, onset_ts): the frozen
        span is known exactly and ends at ``last_frozen_ts``, the last sample
-       still at the frozen value.  is_ongoing=False.
+       still at the frozen value.  is_ongoing=False.  BOTH counts available —
+       surfaced from ``FaultWindow.frozen_sample_count`` and
+       ``FaultWindow.raw_slot_count``, which the detector resolved at release
+       (``None`` on a hand-built window, passed through as such).
     2. An open ``ChannelFreezeState`` matching the same onset: the freeze had
        not ended at end of input, so the span runs to ``last_ts``, the last
-       frozen sample actually observed.  is_ongoing=True.
+       frozen sample actually observed.  is_ongoing=True.  BOTH counts
+       available, but asymmetrically: ``frozen_sample_count`` is the state's
+       own ``sample_count`` tally, while the state holds NO slot counter by
+       design, so ``raw_slot_count`` comes from ``expected_slot_count`` over
+       the same two endpoints at the freeze's pinned cadence — the single
+       canonical derivation that function's contract mandates for an open
+       freeze, and the one ``anomaly_episode_writer`` already uses for the
+       same state.  ``None`` when the state carries no usable cadence.
     3. No state supplied for this channel: the alert's own
        ``frozen_hours_at_detection`` (hours frozen at the GATE CROSSING) laid
-       off from the onset.  is_ongoing=True.
-    4. Nothing recoverable: a zero-length span at the onset.
+       off from the onset.  is_ongoing=True.  NEITHER count available — the
+       alert carries no sample tally and no cadence.  Both stay ``None``.
+    4. Nothing recoverable: a zero-length span at the onset.  NEITHER count
+       available; both stay ``None``.
+
+    A count is never estimated, substituted or carried over from a losing
+    arm: ``None`` means the winning arm did not know, and 0 would claim it
+    did.
 
     Step 3 is a last resort, NOT the normal path for a still-open freeze.
     The alert is stamped once, at the gate crossing, and never revised, so
@@ -337,10 +474,18 @@ def _stuck_fault_span(
         # and is what ``anomaly_episodes.end_ts`` holds; see FaultWindow's
         # docstring in stuck_fault_detector.py for the two-marker split.
         boundary_dt = fw.last_frozen_dt
+        # Both counts come off the window that supplied the boundary, so all
+        # four values describe one span.  They are surfaced, never recomputed:
+        # frozen_sample_count is the detector's tally and raw_slot_count was
+        # already resolved through expected_slot_count at release.  Either can
+        # be None on a hand-built window; that None is passed through, because
+        # "this window tracked no counts" is the truth in that case.
         return _StuckFaultSpan(
             end_dt=boundary_dt,
             duration_seconds=(boundary_dt - fw.onset_dt).total_seconds(),
             is_ongoing=False,
+            frozen_sample_count=fw.frozen_sample_count,
+            raw_slot_count=fw.raw_slot_count,
         )
 
     open_state = sources.open_freezes.get(actual_channel)
@@ -354,6 +499,10 @@ def _stuck_fault_span(
                 end_dt=end_dt,
                 duration_seconds=(end_dt - onset_dt).total_seconds(),
                 is_ongoing=True,
+                frozen_sample_count=_open_freeze_sample_count(open_state),
+                raw_slot_count=_open_freeze_slot_count(
+                    open_state, onset_dt, end_dt,
+                ),
             )
 
     # Last resort (step 3) — no open state reached us for this channel, so
@@ -369,6 +518,12 @@ def _stuck_fault_span(
         duration_hours = getattr(first_alert, "z_score", None)
     if duration_hours is not None and duration_hours > 0:
         duration = float(duration_hours) * _SECONDS_PER_HOUR
+        # No counts here, by nature of the source: the alert carries elapsed
+        # hours at the gate crossing and nothing else — no sample tally, and
+        # no cadence to turn the span into expected slots.  Both counts stay
+        # None.  Deriving a slot count from this span and a default cadence
+        # would be the fabricated-gap bug ChannelFreezeState's docstring
+        # describes, dressed up as a measurement.
         return _StuckFaultSpan(
             end_dt=onset_dt + timedelta(seconds=duration),
             duration_seconds=duration,
@@ -377,7 +532,9 @@ def _stuck_fault_span(
 
     # Last resort: no duration is recoverable from the alert, so the span
     # collapses onto the onset — the one case where end_ts == start_ts is
-    # the truthful answer, because duration_seconds is 0.0 too.
+    # the truthful answer, because duration_seconds is 0.0 too.  The counts
+    # stay None rather than 0: a zero-length span is still a freeze that
+    # froze samples, we simply have no record of how many.
     return _StuckFaultSpan(end_dt=onset_dt, duration_seconds=0.0, is_ongoing=True)
 
 
@@ -411,11 +568,17 @@ def _flush_group(
     # freeze, stamped at onset), so both come from the frozen span; for
     # every other detector the alert rows ARE the span.
     is_ongoing = False
+    frozen_sample_count: int | None = None
+    raw_slot_count: int | None = None
     if detector == "stuck_fault":
         span = _stuck_fault_span(group[0], actual_channel, sources)
         end_dt = span.end_dt
         duration = span.duration_seconds
         is_ongoing = span.is_ongoing
+        # The counts ride along with the boundary and duration that were
+        # resolved from the same freeze; they are never filled in elsewhere.
+        frozen_sample_count = span.frozen_sample_count
+        raw_slot_count = span.raw_slot_count
     else:
         end_dt = group[-1][0]
         duration = (end_dt - start_dt).total_seconds()
@@ -461,4 +624,6 @@ def _flush_group(
         onset_ts=onset_ts,
         detected_ts=detected_ts,
         frozen_value=frozen_value,
+        frozen_sample_count=frozen_sample_count,
+        raw_slot_count=raw_slot_count,
     ))

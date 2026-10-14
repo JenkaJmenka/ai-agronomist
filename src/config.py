@@ -1585,10 +1585,31 @@ RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
 )
 
 # Query-time episode merging (docs/architecture/episode_grouping.md) — groups
-# historical flagged rows into episodes at request time, reusing the same
-# contiguity rule as the upload-path detector so the two views never disagree.
+# historical flagged rows into episodes at request time, using the same
+# CONTIGUITY GAP as the upload-path detector by default.
+#
+# That shared gap is the whole of the claim: the two groupers split on the
+# same silence.  It does NOT mean the two views agree in general — they do
+# not, and no gap constant could make them.  The query-time path sees only
+# the flagged rows that were stored, and a stuck fault's span is not
+# recoverable from those (one freeze stores exactly one alert row, at its
+# onset), while its grouping key carries a `direction` component the
+# upload-path grouper has no equivalent for.  Agreement on a stuck fault's
+# span requires a shared SOURCE for the span — the persisted
+# `anomaly_episodes` row — not a shared gap.
 # NOTE: placed here (not near ANOMALY_GROUP_SAMPLE_IDS) because the default
 # below references EPISODE_GAP_SECONDS, which must already be defined.
+#
+# This constant INTENTIONALLY SHADOWS EPISODE_GAP_SECONDS above and is kept
+# separate on purpose — do not "unify" the two into one knob.  It defaults to
+# EPISODE_GAP_SECONDS, so the detection-time and query-time groupers apply the
+# same gap unless someone deliberately sets ANOMALY_EPISODE_GAP_SECONDS — the
+# same gap, which is not the same as the same episodes.  It exists so the
+# query-time path can be retuned independently against historical rows — a
+# different gap there changes how stored readings merge on read, with no
+# redeploy of the detector
+# and no effect on what detection persists.  Collapsing them would remove that
+# override and make any query-side experiment a change to detection.
 ANOMALY_EPISODE_GAP_SECONDS: int = int(
     os.environ.get("ANOMALY_EPISODE_GAP_SECONDS", str(EPISODE_GAP_SECONDS))
 )
@@ -1600,6 +1621,14 @@ ANOMALY_TREND_FLAT_DEADBAND: float = float(
     os.environ.get("ANOMALY_TREND_FLAT_DEADBAND", "0.05")
 )
 
+# `direction` ("drop" / "spike") is QUERY-SIDE ONLY: it is a migration-024
+# trigger column on sensor_readings and a component of this path's grouping
+# key.  The upload-path grouper (src/models/episode_grouper.py) has no such
+# field and should not grow one.  It is also MEANINGLESS for a stuck fault on
+# either path — a frozen sensor has not dropped or spiked, it has stopped
+# moving — so a stuck-fault episode carries no direction at all, rather than
+# an "unknown" one.
+#
 # Rows whose trigger_detector/direction were never persisted (LSTM-only score
 # backfill, live ingestion — neither writes the migration-024 trigger columns)
 # fall back to a degraded grouping key: detector="unknown", direction=None.

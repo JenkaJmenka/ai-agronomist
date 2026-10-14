@@ -6473,7 +6473,7 @@
           "Anomalies"
         ],
         "summary": "Get Anomaly Episodes",
-        "description": "Query-time anomaly episode merging \u2014 one row per continuous event.\n\nMerges contiguous 5-minute flagged rows sharing a (channel, detector,\ndirection) key into episodes with start/end/duration/trend, reusing the\nsame contiguity rule as the upload-path detector\n(``src/models/episode_grouper.py``) so the two views never disagree.  See\n``docs/architecture/episode_grouping.md`` and\n``src/api/services/anomaly_episode_service.py`` for the grouping rules.\n\nEpisodes are built from EVERY flagged row in the window\n(``_fetch_minimal_flagged_rows``), never from a top-N-by-score subset \u2014\ngrouping a top-N list would manufacture gaps that do not exist in the\ndata.  Episodes are ranked by ``peak_score`` and capped at\n``ANOMALY_EPISODE_MAX`` only after grouping.\n\nADR-005 \u00a72 \u2014 threshold is optional, same handling as ``/groups``: the\nserver defaults to ``CANONICAL_ANOMALY_THRESHOLD`` and echoes the\neffective value in the response.",
+        "description": "Query-time anomaly episode merging \u2014 one row per continuous event.\n\nMerges contiguous 5-minute flagged rows sharing a (channel, detector,\ndirection) key into episodes with start/end/duration/trend, using the\nsame gap-based contiguity rule as the upload-path detector\n(``src/models/episode_grouper.py``). That is the ONLY thing the two\nviews share in code \u2014 the ``_severity_rank`` import in\n``anomaly_episode_grouping.py``. They otherwise disagree by\nconstruction: the upload path groups by ``(channel, detector)`` from\nin-memory alerts at detection time and is never persisted; this endpoint\ngroups by ``(channel, detector, direction)`` from persisted\n``sensor_readings`` rows, queried fresh on every request. For stuck\nfaults specifically, this endpoint also sources the real span from the\n``anomaly_episodes`` table (see\n``anomaly_episode_service._augment_stuck_fault_episodes``) rather than\nfrom the single flagged row the grouping key would otherwise see. See\n``docs/architecture/episode_grouping.md`` and\n``src/api/services/anomaly_episode_service.py`` for the grouping rules.\n\nEpisodes are built from EVERY flagged row in the window\n(``_fetch_minimal_flagged_rows``), never from a top-N-by-score subset \u2014\ngrouping a top-N list would manufacture gaps that do not exist in the\ndata.  Episodes are ranked by ``peak_score`` and capped at\n``ANOMALY_EPISODE_MAX`` only after grouping.\n\nADR-005 \u00a72 \u2014 threshold is optional, same handling as ``/groups``: the\nserver defaults to ``CANONICAL_ANOMALY_THRESHOLD`` and echoes the\neffective value in the response.",
         "operationId": "get_anomaly_episodes_api_anomalies_episodes_get",
         "parameters": [
           {
@@ -7310,6 +7310,28 @@
               }
             ],
             "title": "Frozen Value"
+          },
+          "frozen_sample_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frozen Sample Count"
+          },
+          "raw_slot_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Slot Count"
           }
         },
         "type": "object",
@@ -7364,7 +7386,14 @@
             "title": "End Ts"
           },
           "duration_seconds": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Duration Seconds"
           },
           "sample_count": {
@@ -7471,6 +7500,28 @@
             },
             "type": "array",
             "title": "Samples"
+          },
+          "frozen_sample_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frozen Sample Count"
+          },
+          "raw_slot_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Slot Count"
           }
         },
         "type": "object",
@@ -7480,7 +7531,6 @@
           "detector",
           "start_ts",
           "end_ts",
-          "duration_seconds",
           "sample_count",
           "peak_score",
           "peak_ts",

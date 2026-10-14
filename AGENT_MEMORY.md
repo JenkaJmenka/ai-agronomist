@@ -5637,3 +5637,107 @@ the populated commit sits in background work.
 - Still synchronous by design on first paint (accepted trade-off), and a
   non-empty -> empty transition while live shows the stale value for one
   catch-up render. Both known, neither a regression.
+
+## Task 4 — one source of truth for episodes (Orchestrator, 2026-10-14)
+
+**Three things were called "episode", and the comment claiming they agreed was
+false.** (1) detection-time `AnomalyEpisode` dataclass in
+`src/models/episode_grouper.py` (NOT named `Episode`), built in `finalize_scores`,
+returned in the upload response, never persisted; (2) query-time merging in
+`src/api/services/anomaly_episode_service.py` behind `GET /api/anomalies/episodes`,
+recomputed per request from flagged `sensor_readings`; (3) the `anomaly_episodes`
+table, ORM class `AnomalyEpisodeRecord` in `src/db/models.py` (NOT
+`AnomalyEpisode`). The query side returned `duration_seconds = 0.0` for every
+stuck fault, because `anomaly_episode_grouping.py:190` derived it from the
+flagged-row span and a freeze emits exactly one alert row, stamped at onset.
+
+**The brief's bullet "both views read from `anomaly_episodes`" was infeasible.**
+`cold_run_upload.py` calls `finalize_scores` at `:319` and
+`persist_stuck_fault_episodes` at `:339`, so the rows do not exist when the upload
+response is built; both are gated on `if persist_db is not None:`, so on the
+no-persist path there are no rows at all while the response must still return
+episodes. Approved reframe: the QUERY side reads the table, the upload side keeps
+deriving from detector state, and a test pins the equality. Shipped that way.
+
+**`sample_count` stays 1 for a stuck fault** — the alert count, not a sample
+tally, because a freeze emits one alert at onset. Documented at the field
+definition in both schemas rather than left implied. `frozen_sample_count` and
+`raw_slot_count` are the sample figures and are now exposed on both views.
+
+**Four defects, all found by qa, three of them one bug class.** D1: the record
+lookup keyed on a raw `onset_ts`, naive under SQLite and aware under asyncpg, so
+the keys never matched and *every* stuck fault silently took the absent-record
+branch — the fix was inert on every dev and test backend, and
+`anomaly_episode_service.py:241-246` (the record-FOUND branch) was executed by
+none of the 3655 tests then passing. D2: `_augment_stuck_fault_episode` never
+replaced `end_ts`, breaking `end_ts - start_ts == duration_seconds` on the query
+side. D3: `AnomalyEpisodeSchema` (`src/api/schemas/sensor_data.py`, the UPLOAD
+response — a different schema from `AnomalyEpisodeSummary`) had neither count
+field, and `AnomalyEpisodeSchema(**ep.to_dict())` at `upload_portions.py:757` let
+Pydantic v2 drop both silently. D4: `_iso` only calls `.isoformat()`, so
+`_iso(record.end_ts)` kept the UTC offset on asyncpg and lost it on SQLite; the
+instant was right, the string was offset-less, and JS parses that as LOCAL time.
+
+**The lesson across D1 and D4: a green suite proves nothing about a path the
+suite never executes, and SQLite-vs-asyncpg tz handling will hide the difference.**
+Both defects were prod-correct and dev/test-wrong, which is the hardest direction
+to notice. `_as_utc` in `anomaly_episode_service.py` now normalizes at the key
+boundary and before `_iso`; `_iso` itself was deliberately NOT changed (15 call
+sites across 6 service files).
+
+**A false invariant in a comment existed in three places, not one.** The brief
+named `routes/anomalies.py:135`; the same "the two views never disagree" overclaim
+was also in `src/config.py`, and ml-engineer then found a third instance in prose
+it had written itself an hour earlier. When deleting a false invariant, grep for
+the claim, not the file.
+
+**Deferred, logged, not done:** version the Redis cache key by schema (`GET
+/episodes` is `@cache(expire=300)`, so a response cached by old code lacks newer
+keys and a strict client rejects it); audit the other 14 `_iso()` call sites for
+DB-sourced naive datetimes reaching the UI — `samples[].timestamp`
+(`sample_enrichment.py:97`) is a KNOWN live instance, consumed by
+`episodes.ts:31` as a bare `z.string()`; `syncUploadResultSchema`
+(`web/features/operations/api/operations.ts:27`) is `.loose()` and declares no
+`episodes` field, so the upload response's new counts reach the browser as
+untyped passthrough nothing reads; generalize the `anomaly_episodes` writer
+beyond stuck faults (spec §8 item 4).
+
+**Process:** all four agents shared one working tree, so no agent's suite run
+isolated its own half — green-with-all was the only thing verified, and
+attribution on failure would have been impossible. Use worktree isolation next
+time. Two concurrent pytest processes collide on sqlite table creation and produce
+a false `table incidents already exists`; that cost one agent a false alarm.
+Ownership held: `tests/` stayed qa's (backend refused to unmark its own pins to
+make its run look clean), `web/` incl. the generated OpenAPI artifacts stayed
+frontend's, and the user's brief items that landed outside backend's rows were
+rerouted to their owners rather than widening anyone's scope.
+
+**Gate:** `./venv/bin/python -m pytest tests/ -q` → **3684 passed, 22 skipped, 4
+xfailed, 0 failed**, measured twice independently (qa, then orchestrator, exit 0).
+The 4 remaining xfails are pre-existing and unrelated. Nothing committed — the
+user reviews a six-commit split and approves each.
+
+## Follow-up — lint-staged biome rewrites the generated OpenAPI artifacts (Orchestrator, 2026-10-14)
+
+Logged, not fixed. The `lint-staged` hook runs `biome check --write` over
+`web/**/*.{ts,tsx,js,jsx,json}`, which matches `web/openapi.json` and
+`web/lib/api-types.gen.ts`. Both are generated by `pnpm gen:api:refresh`
+(`web/package.json:14` → `../venv/bin/python ../scripts/dump_openapi.py && pnpm
+gen:api`), so biome reformats them on the way into the commit and **what is
+committed never matches what the generator emits**. Observed on Task 4: the hook
+reported "Applying modifications from tasks" on both web commits (`1b50acf`,
+`088c991`).
+
+Consequence: the next person to run `gen:api:refresh` sees a pure-formatting diff
+and cannot tell it from real contract drift — which is the exact signal
+`docs/` already treats as meaningful (see the OpenAPI-drift work on
+`fix/openapi-drift-and-dump-script`).
+
+Two fixes, not implemented:
+1. Exclude the generated files from biome (a `files.includes` negation in
+   `web/biome.json`, or drop them from the `lint-staged` glob).
+2. **Recommended:** run biome INSIDE `gen:api:refresh`, so the generator's own
+   output is already normalized and the hook becomes a no-op on these two files.
+   This keeps one formatting authority instead of two and leaves the artifacts
+   lint-clean by construction, so a diff after regeneration means a real contract
+   change. Option 1 leaves them unformatted and merely unchecked.

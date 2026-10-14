@@ -71,6 +71,8 @@ const EPISODES_PAYLOAD = {
           detected_severity: "warning",
         },
       ],
+      frozen_sample_count: null,
+      raw_slot_count: null,
     },
     {
       episode_id: "temperature:statistical:drop:2026-12-25T09:10:00+00:00",
@@ -104,6 +106,8 @@ const EPISODES_PAYLOAD = {
           detected_severity: "warning",
         },
       ],
+      frozen_sample_count: null,
+      raw_slot_count: null,
     },
   ],
   episode_count: 2,
@@ -276,4 +280,57 @@ test("grouped view remains reachable from the table view", async ({ page }) => {
 
   await expect(page.getByTestId("episode-table")).toBeHidden();
   await expect(page.getByTestId("group-by")).toBeVisible();
+});
+
+test("a stuck-fault episode with no matching table row shows duration unknown, not a fabricated zero", async ({
+  page,
+}) => {
+  // Regression: duration_seconds went from a required number to nullable so
+  // a pre-migration-026 stuck fault can report "unknown" instead of a false
+  // 0.0. An un-widened zod schema throws here and the whole page 500s.
+  await page.route("**/api/bff/anomalies/episodes**", (route) =>
+    route.fulfill({
+      json: {
+        episodes: [
+          {
+            episode_id: "temperature:stuck:2026-12-25T09:00:00+00:00",
+            channel: "temperature",
+            detector: "stuck",
+            direction: null,
+            start_ts: "2026-12-25T09:00:00+00:00",
+            end_ts: "2026-12-25T09:00:00+00:00",
+            duration_seconds: null,
+            sample_count: 1,
+            peak_score: 0.95,
+            peak_ts: "2026-12-25T09:00:00+00:00",
+            severity: "critical",
+            first_value: 21.0,
+            last_value: 21.0,
+            peak_value: 21.0,
+            trend: "flat",
+            movement: "steady",
+            slope_per_hour: null,
+            affected_sensors: ["temperature"],
+            headline: "Temperature stuck at 21.0\u00b0C",
+            is_truncated_start: false,
+            is_truncated_end: false,
+            samples: [],
+            frozen_sample_count: null,
+            raw_slot_count: null,
+          },
+        ],
+        episode_count: 1,
+        anomaly_count: 1,
+        threshold: 0.5,
+        score_scale_version: 2,
+      },
+    }),
+  );
+
+  await page.goto("/anomalies");
+  await page.getByRole("tab", { name: "Table view" }).click();
+
+  const summary = page.getByTestId("episode-summary").first();
+  await expect(summary).toBeVisible();
+  await expect(summary).toContainText("duration unknown");
 });

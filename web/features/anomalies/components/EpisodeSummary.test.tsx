@@ -31,6 +31,8 @@ function buildEpisode(overrides: Partial<AnomalyEpisode> = {}): AnomalyEpisode {
     is_truncated_start: false,
     is_truncated_end: false,
     samples: [],
+    frozen_sample_count: null,
+    raw_slot_count: null,
     ...overrides,
   };
 }
@@ -81,6 +83,32 @@ describe("EpisodeSummary — expand/zoom decoupling", () => {
       </details>,
     );
     expect(screen.queryByTestId("episode-zoom-button")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duration rendering — null must render distinctly from a real zero.
+// ---------------------------------------------------------------------------
+
+describe("EpisodeSummary — duration rendering", () => {
+  it("renders 'duration unknown' when duration_seconds is null (stuck fault, no table row)", () => {
+    render(
+      <details>
+        <EpisodeSummary episode={buildEpisode({ duration_seconds: null })} />
+      </details>,
+    );
+    expect(screen.getByTestId("episode-summary")).toHaveTextContent("duration unknown");
+  });
+
+  it("renders a real zero duration as 'single reading', not 'duration unknown'", () => {
+    render(
+      <details>
+        <EpisodeSummary episode={buildEpisode({ duration_seconds: 0 })} />
+      </details>,
+    );
+    const summary = screen.getByTestId("episode-summary");
+    expect(summary).toHaveTextContent("single reading");
+    expect(summary).not.toHaveTextContent("duration unknown");
   });
 });
 

@@ -43,7 +43,7 @@ const episodeSchema = z.object({
   direction: z.enum(EPISODE_DIRECTIONS).nullable(),
   start_ts: z.string(),
   end_ts: z.string(),
-  duration_seconds: z.number(),
+  duration_seconds: z.number().nullable(),
   sample_count: z.number(),
   peak_score: z.number(),
   peak_ts: z.string(),
@@ -63,6 +63,24 @@ const episodeSchema = z.object({
   is_truncated_start: z.boolean(),
   is_truncated_end: z.boolean(),
   samples: z.array(episodeSampleSchema).default([]),
+  /**
+   * Stuck-fault-only; null for every other detector and for a stuck fault
+   * with no matching `anomaly_episodes` row. `.nullish()` (not `.nullable()`)
+   * because a response served from the 300s query-result cache
+   * (REDIS_CACHE_EXPIRE_SECONDS) can predate this field and omit the key
+   * entirely — the transform folds that absence into the same `null` an
+   * explicit server-sent null produces, so callers only ever see
+   * `number | null`, never `undefined`.
+   */
+  frozen_sample_count: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null),
+  /** Stuck-fault-only; expected readings at the channel's pinned cadence across the freeze, not a row tally. Same cache-staleness reasoning as frozen_sample_count. */
+  raw_slot_count: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null),
 });
 
 export type AnomalyEpisode = z.infer<typeof episodeSchema>;

@@ -53,6 +53,27 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
+### Current baseline — 3684 passed, 22 skipped, 4 xfailed, 0 failed
+
+Measured 2026-10-14 on `main` plus the Task 4 working tree, twice independently
+(qa-engineer, then the orchestrator). **This line is the baseline. Numbers in
+`AGENT_MEMORY.md` are dated snapshots, not baselines** — update this line when the
+figure changes, and date it.
+
+The distinction earned its own heading on 2026-10-14. Task 4 briefed two agents
+with `3432/18/5/0`, taken from the newest entry in `AGENT_MEMORY.md` — accurate
+for 2026-10-07 and stale by three commits, because `593917d` had since added 804
+lines of stuck-fault acceptance tests. Both agents measured `3639/22/4/0`,
+reported the +207/+4/−1 as a discrepancy rather than explaining it away, and were
+right. An agent handed a stale baseline either wastes a round reconciling it or,
+worse, tunes toward it.
+
+So: give agents this line, never a figure scavenged from a memory entry. Tell them
+to report what they measure, and never hand them a target number — on Task 4 six
+briefed premises proved wrong (a dataclass name, this baseline, "both counts exist
+on both sides", a line-number reading, and two more), and every one surfaced
+because an agent contradicted the brief instead of accommodating it.
+
 ## Agent model assignment
 
 | Agent | Model | Reason |

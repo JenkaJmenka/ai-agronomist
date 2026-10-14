@@ -11,6 +11,10 @@ Grouping key: ``(channel, detector, direction)`` — mirrors the upload path's
 ``statistical`` episode on the same channel, see
 ``docs/architecture/episode_grouping.md``) plus a ``direction`` split (a
 humidity drop and a humidity spike 20 minutes apart are different events).
+``direction`` is query-side-only and is meaningless for a stuck fault (a
+freeze has no direction, see ``_RowInfo.direction`` derivation) — this is
+documented, not reconciled with the upload path, which has no direction
+concept at all.
 Contiguity uses the same gap rule as the upload path
 (``ANOMALY_EPISODE_GAP_SECONDS``, defaulting to ``EPISODE_GAP_SECONDS``).
 
@@ -24,18 +28,29 @@ The pure grouping core (no I/O, no pandas) lives in
 ``anomaly_episode_grouping.py`` and is re-exported here.
 
 Not to be confused with the ``anomaly_episodes`` DB table (migration 026,
-``src/db/models.py``'s ``AnomalyEpisode``): that table holds rows a detector
-writes *at detection time*, one per fault window, and persists them. This
-module computes its episodes fresh on every request from already-flagged
-``sensor_readings`` and persists nothing — same name, deliberately kept,
-opposite mechanism.
+``src/db/models.py``'s ``AnomalyEpisodeRecord``): that table holds rows a
+detector writes *at detection time*, one per fault window, and persists
+them. This module computes its episodes fresh on every request from
+already-flagged ``sensor_readings`` and persists nothing — same name on the
+table, deliberately kept, opposite mechanism.
+
+Stuck-fault exception: a freeze emits exactly ONE flagged ``sensor_readings``
+row (the alert at ``onset_ts`` — see ``WallclockStuckDetector._check_gate``),
+so the row-derived span for a stuck-fault episode is always a single-row
+group: ``duration_seconds`` would always read 0.0 and the frozen/raw counts
+would always be unknown. ``_augment_stuck_fault_episodes`` below replaces
+those fields, for stuck-fault episodes only, by looking up the matching
+``anomaly_episodes`` row and sourcing the real span from it. Every other
+detector keeps the pure row-derived behaviour in
+``anomaly_episode_grouping.py``.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.anomaly_episode_grouping import (  # noqa: F401
@@ -46,6 +61,7 @@ from src.api.services.sample_enrichment import (
     _build_sample,
     _build_sorted_incidents,
     _enrich_samples_fast,
+    _iso,
     _row_dict_from_minimal,
 )
 from src.config import (
@@ -53,6 +69,14 @@ from src.config import (
     ANOMALY_EPISODE_MAX,
     ANOMALY_TREND_FLAT_DEADBAND,
 )
+from src.db.models import AnomalyEpisodeRecord
+from src.models.episode_grouper import _parse_iso
+from src.models.fault_classifier import FaultType
+
+# Single source of truth for the detector name is FaultType — see
+# fault_classification.py and anomaly_episode_writer.py, which both key off
+# the same value rather than a second hardcoded literal.
+_STUCK_FAULT_DETECTOR: str = FaultType.STUCK_FAULT.value
 
 
 async def fetch_anomaly_episodes(
@@ -103,6 +127,11 @@ async def fetch_anomaly_episodes(
     if not episodes:
         return []
 
+    await _augment_stuck_fault_episodes(
+        db, episodes, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        start=start, end=end,
+    )
+
     # Rank by peak_score and cap AFTER grouping — capping first would
     # fracture contiguous events that only look separate under a score
     # cutoff (the constraint this module must not violate).
@@ -111,6 +140,134 @@ async def fetch_anomaly_episodes(
 
     _enrich_episode_samples(episodes, incidents)
     return episodes
+
+
+async def _fetch_stuck_fault_episode_records(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    channels: set[str],
+    start: datetime,
+    end: datetime,
+) -> dict[tuple[str, datetime], AnomalyEpisodeRecord]:
+    """Load persisted stuck-fault rows for this window, keyed by (channel, onset_ts).
+
+    Restricted to ``channels`` actually present among this request's
+    stuck-fault episodes. The window filter is an index-friendly narrowing,
+    not a correctness requirement: the alert row that produced each episode
+    is itself inside ``[start, end]``, and its ``onset_ts`` is that same
+    timestamp (see module docstring), so a matching record's ``onset_ts`` is
+    always inside the window too.
+    """
+    stmt = select(AnomalyEpisodeRecord).where(
+        AnomalyEpisodeRecord.tenant_id == tenant_id,
+        AnomalyEpisodeRecord.greenhouse_id == greenhouse_id,
+        AnomalyEpisodeRecord.detector == _STUCK_FAULT_DETECTOR,
+        AnomalyEpisodeRecord.channel.in_(channels),
+        AnomalyEpisodeRecord.onset_ts >= start,
+        AnomalyEpisodeRecord.onset_ts <= end,
+    )
+    result = await db.execute(stmt)
+    return {
+        (record.channel, _as_utc(record.onset_ts)): record
+        for record in result.scalars().all()
+    }
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a possibly tz-naive datetime to tz-aware UTC.
+
+    SQLite (every dev/test backend) returns a naive ``datetime`` from a
+    ``DateTime(timezone=True)`` column; asyncpg (production Postgres)
+    returns an aware one. Without this, the dict key built here from
+    ``record.onset_ts`` only ever matched the tz-aware key built from
+    ``_parse_iso(episode["start_ts"])`` on Postgres — every stuck fault
+    fell through to the absent-record branch under SQLite, silently, since
+    both branches return a valid-looking response. Mirrors ``_parse_iso``'s
+    own naive-defaults-to-UTC assumption (``src/models/episode_grouper.py``)
+    rather than inventing a second rule.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+async def _augment_stuck_fault_episodes(
+    db: AsyncSession,
+    episodes: list[dict[str, Any]],
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+) -> None:
+    """Source stuck-fault episodes from ``anomaly_episodes``, in place.
+
+    No-ops (no query issued) when no episode in this batch is a stuck
+    fault. Every other detector's episode is untouched.
+    """
+    stuck_channels = {
+        episode["channel"] for episode in episodes
+        if episode["detector"] == _STUCK_FAULT_DETECTOR
+    }
+    if not stuck_channels:
+        return
+
+    records_by_key = await _fetch_stuck_fault_episode_records(
+        db, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        channels=stuck_channels, start=start, end=end,
+    )
+    for episode in episodes:
+        if episode["detector"] != _STUCK_FAULT_DETECTOR:
+            continue
+        key = (episode["channel"], _parse_iso(episode["start_ts"]))
+        _augment_stuck_fault_episode(episode, records_by_key.get(key))
+
+
+def _augment_stuck_fault_episode(
+    episode: dict[str, Any],
+    record: AnomalyEpisodeRecord | None,
+) -> None:
+    """Replace the row-derived span with the detector's persisted one, in place.
+
+    The query-time grouper sees exactly one flagged row per freeze, so
+    without ``record`` the episode's ``duration_seconds`` reads 0.0 — a
+    frozen channel misreported as having recovered instantly. This is THE
+    BUG described in the module docstring.
+
+    ``record`` is ``None`` for a stuck fault whose alert row exists in
+    ``sensor_readings`` but whose ``anomaly_episodes`` row does not — e.g.
+    uploaded before migration 026, or persisted on the no-DB-write preview
+    path (``persist_db is None``, see ``anomaly_episode_writer.py``). In
+    that case the real span is simply not recoverable from what this
+    request has: report ``duration_seconds`` (and the two sample counts) as
+    ``None`` — unknown — rather than silently repeating the false 0.0, and
+    without fabricating a row to fill the gap.
+
+    ``sample_count`` is set unconditionally to 1 per the field contract: for
+    a stuck-fault episode it is the alert count (always one alert fired at
+    onset), never the flagged-row count — see
+    ``AnomalyEpisodeSummary.sample_count``.
+    """
+    episode["sample_count"] = 1
+    if record is None:
+        episode["duration_seconds"] = None
+        episode["frozen_sample_count"] = None
+        episode["raw_slot_count"] = None
+        return
+
+    # end_ts and duration_seconds leave together, from the same record, so
+    # the boundary and the duration can never describe different spans
+    # (episode_grouper.py design decision 5 -- end_ts - start_ts ==
+    # duration_seconds holds for every episode, every detector).
+    episode["end_ts"] = _iso(_as_utc(record.end_ts))
+    episode["duration_seconds"] = (
+        float(record.duration_seconds) if record.duration_seconds is not None else None
+    )
+    episode["severity"] = record.severity
+    episode["frozen_sample_count"] = record.frozen_sample_count
+    episode["raw_slot_count"] = record.raw_slot_count
 
 
 def _enrich_episode_samples(

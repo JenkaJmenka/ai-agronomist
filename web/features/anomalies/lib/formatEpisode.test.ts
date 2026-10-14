@@ -36,6 +36,8 @@ function episode(overrides: Partial<AnomalyEpisode> = {}): AnomalyEpisode {
     is_truncated_start: false,
     is_truncated_end: false,
     samples: [],
+    frozen_sample_count: null,
+    raw_slot_count: null,
     ...overrides,
   };
 }
