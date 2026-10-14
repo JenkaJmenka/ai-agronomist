@@ -3,8 +3,14 @@ import type { AnomalyEpisode } from "@/features/anomalies/api/episodes";
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
 
-/** Compact span label: "45 min", "2.5 hr", or "single reading" for a lone sample. */
-export function formatDuration(seconds: number): string {
+/**
+ * Compact span label: "45 min", "2.5 hr", "single reading" for a lone sample,
+ * or "duration unknown" when the backend has no span to derive it from (a
+ * stuck fault with no matching `anomaly_episodes` row). That case must read
+ * as distinct from a genuine zero-length episode, not collapse into it.
+ */
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null) return "duration unknown";
   if (seconds <= 0) return "single reading";
   if (seconds < SECONDS_PER_HOUR) {
     return `${Math.round(seconds / SECONDS_PER_MINUTE)} min`;

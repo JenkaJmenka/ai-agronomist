@@ -68,7 +68,7 @@ function buildExportRows(episodes: readonly AnomalyEpisode[]): unknown[][] {
   return episodes.map((e) => [
     e.start_ts,
     e.end_ts,
-    e.duration_seconds,
+    e.duration_seconds ?? "",
     e.channel,
     e.direction ?? "",
     e.sample_count,
