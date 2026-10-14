@@ -388,6 +388,17 @@ class AnomalyEpisodeSchema(BaseModel):
     onset_ts: Optional[str] = None
     detected_ts: Optional[str] = None
     frozen_value: Optional[float] = None
+    # Stuck-fault-only, from the same resolution that produces end_ts and
+    # duration_seconds (episode_grouper.py design decision 5 -- one
+    # resolution produces all four so they can't contradict each other).
+    # None for every non-stuck-fault episode. upload_portions.py builds
+    # this schema via AnomalyEpisodeSchema(**ep.to_dict()), and
+    # AnomalyEpisode.to_dict() already emits both keys (src/models/
+    # episode_grouper.py) -- Pydantic v2 drops unmodeled dict keys
+    # silently, which is what dropped these two before this schema
+    # declared them.
+    frozen_sample_count: Optional[int] = None
+    raw_slot_count: Optional[int] = None
 
 
 class StatisticalColdRunSummary(BaseModel):
