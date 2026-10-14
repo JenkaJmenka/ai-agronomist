@@ -1595,9 +1595,19 @@ export interface paths {
          * @description Query-time anomaly episode merging — one row per continuous event.
          *
          *     Merges contiguous 5-minute flagged rows sharing a (channel, detector,
-         *     direction) key into episodes with start/end/duration/trend, reusing the
-         *     same contiguity rule as the upload-path detector
-         *     (``src/models/episode_grouper.py``) so the two views never disagree.  See
+         *     direction) key into episodes with start/end/duration/trend, using the
+         *     same gap-based contiguity rule as the upload-path detector
+         *     (``src/models/episode_grouper.py``). That is the ONLY thing the two
+         *     views share in code — the ``_severity_rank`` import in
+         *     ``anomaly_episode_grouping.py``. They otherwise disagree by
+         *     construction: the upload path groups by ``(channel, detector)`` from
+         *     in-memory alerts at detection time and is never persisted; this endpoint
+         *     groups by ``(channel, detector, direction)`` from persisted
+         *     ``sensor_readings`` rows, queried fresh on every request. For stuck
+         *     faults specifically, this endpoint also sources the real span from the
+         *     ``anomaly_episodes`` table (see
+         *     ``anomaly_episode_service._augment_stuck_fault_episodes``) rather than
+         *     from the single flagged row the grouping key would otherwise see. See
          *     ``docs/architecture/episode_grouping.md`` and
          *     ``src/api/services/anomaly_episode_service.py`` for the grouping rules.
          *
@@ -1865,6 +1875,10 @@ export interface components {
             detected_ts?: string | null;
             /** Frozen Value */
             frozen_value?: number | null;
+            /** Frozen Sample Count */
+            frozen_sample_count?: number | null;
+            /** Raw Slot Count */
+            raw_slot_count?: number | null;
         };
         /**
          * AnomalyEpisodeSummary
@@ -1884,7 +1898,7 @@ export interface components {
             /** End Ts */
             end_ts: string;
             /** Duration Seconds */
-            duration_seconds: number;
+            duration_seconds?: number | null;
             /** Sample Count */
             sample_count: number;
             /** Peak Score */
@@ -1922,6 +1936,10 @@ export interface components {
             is_truncated_end: boolean;
             /** Samples */
             samples: components["schemas"]["AnomalyEpisodeSample"][];
+            /** Frozen Sample Count */
+            frozen_sample_count?: number | null;
+            /** Raw Slot Count */
+            raw_slot_count?: number | null;
         };
         /**
          * AnomalyEpisodesResponse
