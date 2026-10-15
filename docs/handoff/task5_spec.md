@@ -11,12 +11,22 @@ DIFFERENT channel from a stuck fault that just released, so TAG it as a
 likely knock-on effect." The field never suppresses or rescores anymore —
 it is purely informational.
 
-Exact contract, stated identically at all three live definitions below:
+Exact contract sentence, shared by all three live definitions below --
+verbatim in two (`AnomalyEpisode.is_recovery` and
+`AnomalyEpisodeSummary.is_recovery`); the third
+(`AnomalyEpisodeSchema.is_recovery`, the upload-path field, always `False`)
+appends one more sentence on top of it rather than repeating it standalone
+-- verified directly against the generated `app.openapi()` output for both
+schema fields:
 
 > True when this episode is on a channel other than a stuck-fault channel
 > and starts no earlier than `EPISODE_GAP_SECONDS` before, and within
 > `RECOVERY_KNOCKON_WINDOW_HOURS` after, that fault's release. Informational
 > only; does not suppress or rescore.
+
+`AnomalyEpisodeSchema.is_recovery`'s full description is that sentence plus:
+"Always False in this upload-path response -- the live computation is
+query-time only; see AnomalyEpisodeSummary.is_recovery."
 
 (The brief that specified this task used the name `RECOVERY_TAG_WINDOW_HOURS`
 for the forward-looking constant. That constant does not exist and was not
@@ -136,7 +146,7 @@ releases — as a recovery response, when it is not one. Start-anchoring
 episode that merely overlaps a release, but started far earlier, has a
 `start_ts` far outside the bound and is correctly left untagged.
 
-### Correction: the brief's pipe_1 case was right; both my first measurement of it AND my first write-up of that measurement were wrong
+### Correction: the brief's pipe_1 case was right; I read the wrong view as "the hits," then misdiagnosed why
 
 An earlier version of this document stated the brief's acceptance case —
 "`measured_pipe_1_temp` hits at 12-16 09:25–09:40, minutes after a humidity
@@ -165,46 +175,51 @@ conclusion, not after being corrected on it.
 
 What actually happens, verified via the established harness
 (`tests.api.test_fixture_a_stuck_contract.fixture_a_response`,
-`REFERENCE_CHUNK_SIZE = 10**7`) and independently re-verified with
-`chunk_size=5000` (production's real default, `CHUNK_SIZE` in
-`src/api/routes/upload.py` — fixture A's ~3457 rows fit inside one such
-chunk, same as `10**7` for this fixture): `measured_pipe_1_temp` has SEVEN
-statistical hits on 2026-12-16, at 09:10, 09:15, 09:20, 09:25, 09:30, 09:35,
-09:40. `measured_hd` separately hits 09:25 through 10:15. Both channels are
-genuinely anomalous across 09:25–09:40 at the same time. At 5-minute
-spacing with `EPISODE_GAP_SECONDS=600`, the upload-path grouper
-(`group_alerts_into_episodes`, called directly on `response.high_anomalies`)
-merges all seven pipe_1 hits into ONE episode, 09:10 → 09:40, `n=7`. The
-brief's premise was correct at this level.
+`REFERENCE_CHUNK_SIZE = 10**7`) and independently re-confirmed at
+`chunk_size=500`, `chunk_size=5000` (production's real default, `CHUNK_SIZE`
+in `src/api/routes/upload.py`), and `chunk_size=10**7`:
+`measured_pipe_1_temp` has SEVEN statistical hits on 2026-12-16, at 09:10,
+09:15, 09:20, 09:25, 09:30, 09:35, 09:40 — **identical at every chunk size
+checked**, including 500. `measured_hd` separately hits 09:25 through
+10:15. Both channels are genuinely anomalous across 09:25–09:40 at the same
+time. At 5-minute spacing with `EPISODE_GAP_SECONDS=600`, the upload-path
+grouper (`group_alerts_into_episodes`, called directly on
+`response.high_anomalies`) merges all seven pipe_1 hits into ONE episode,
+09:10 → 09:40, `n=7`. The brief's premise was correct at this level, at
+every chunk size — pinned by `tests/api/test_recovery_tag_fixture_a.py`'s
+`PIPE_1_UPLOAD_SAMPLES = 7`, using the `chunk_size=500` harness in
+`tests/api/_episode_view_fixtures.py` (`CHUNK_ROWS = 500`).
 
-My first pass measured this differently for two compounding reasons:
+**The actual cause of my first measurement was simpler, and chunk size was
+never it.** An earlier revision of this section claimed `chunk_size=500`
+changed which rows crossed threshold for pipe_1. That claim was itself
+wrong — re-measured directly (above) and contradicted by the committed,
+green acceptance test cited there, which pins `n=7` at `chunk_size=500`.
+The chunk-size explanation has been removed rather than left to stand
+alongside evidence against it.
 
-1. **Wrong harness**: I used `chunk_size=500` (borrowed from an unrelated
-   test fixture's harness), not production's actual default. That
-   difference alone changes the statistical detector's rolling-window
-   scores enough to change which rows cross threshold on which channel —
-   the "verify your harness reproduces the production path" trap this repo
-   has hit before. This part was a plain measurement error, corrected by
-   re-running at the right chunk size.
-2. **A real, separate mechanism**: even re-measured at the correct chunk
-   size, the QUERY-TIME grouper (`anomaly_episode_grouping.build_episodes`,
-   fed from `sensor_readings.trigger_channel` — see §2's row-collapse note)
-   sees a NARROWER slice of this same event: only the three rows where
-   pipe_1 WON the single `trigger_channel` slot (09:10, 09:15, 09:20) —
-   `measured_hd` wins it from 09:25 onward because its score is higher
-   there. Confirmed unaffected by chunk size (identical `trigger_channel`
-   sequence at `chunk_size=500` and `chunk_size=5000`). So the query-time
-   pipe_1 episode genuinely is `start=09:10, end=09:20, n=3` — five minutes
-   BEFORE the 09:15 release, not the fuller 09:10–09:40 upload-path view.
-
-Point 1 needed only re-measuring. Point 2 is real and is exactly why plain
-start-anchored tagging (the first implementation) missed this case: the
-query-time episode legitimately starts before the release that caused it,
-because the row-collapse already discarded its later, after-release rows
-in favor of `measured_hd`. The backward resolution bound (§ above) is the
-fix for this — not for the wrong-chunk-size error, which simply needed
-re-measuring, and not a new finding each time this section was revised; it
-is the same underlying fact described more precisely at each pass.
+What I had actually done was read the QUERY-TIME grouper's output
+(`anomaly_episode_grouping.build_episodes`, fed from
+`sensor_readings.trigger_channel` — see §2's row-collapse note) and report
+it as "the hits," when the brief's claim was about hits at the level the
+brief stated them — the raw per-channel hit stream, i.e. the upload-path
+view. The two views differ because `sensor_readings` persists exactly one
+`trigger_channel` per timestamp: pipe_1 WINS that slot only at 09:10,
+09:15, 09:20; `measured_hd` wins it from 09:25 onward because its score is
+higher there. This row-collapse is independent of chunk size — confirmed
+identical at `chunk_size=500` and `chunk_size=5000` — so it was never a
+harness problem. The query-time pipe_1 episode genuinely is `start=09:10,
+end=09:20, n=3`, five minutes BEFORE the 09:15 release; that is a real,
+narrower, correct view of the same event, not a wrong measurement of it.
+Reporting that narrower view as "the hits" — and from there, as "the
+brief's premise is false" — is the error, and it is exactly why
+start-anchored tagging (the first implementation) also missed this case:
+the query-time episode legitimately starts before the release that caused
+it, because the row-collapse already discarded its later, after-release
+rows in favor of `measured_hd`. The backward resolution bound (§ above) is
+the fix for the tagging gap; re-reading the brief's claim at the level it
+was stated is what should have caught the write-up error before it needed
+a second correction.
 
 ### Backward bound: confirmed at `EPISODE_GAP_SECONDS` (600 s)
 

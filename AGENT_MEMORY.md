@@ -5799,3 +5799,150 @@ these briefs: **when an unexpected modification appears outside your ownership,
 report it and leave it alone — do not revert it.** Agent 2's instinct was better
 still: it declined to write either constant name while the tree was ambiguous,
 and described the behaviour instead, which stayed correct either way.
+
+## Second one-off model substitution — ADR-011 on Opus (Orchestrator, 2026-10-15)
+
+**Still not a new default.** The architect row in `CLAUDE.md` stays
+`claude-fable-5`. This is the second recorded exception on Task 5, for the same
+cause as the first: Fable 5.1 out of usage credits.
+
+The first substitution (above) moved only the factual doc corrections to Opus
+and deliberately kept the design note on Fable. That note — ADR-011 — then
+blocked the Task 5 PR. Fable was retried once after the stale-ref work landed
+and failed again on dispatch, writing nothing. Rather than hold a finished,
+green, four-commit PR indefinitely on a credit balance, the user moved the ADR
+itself to Opus with the brief unchanged.
+
+**The Fable review is preserved, just decoupled from merge.** When credits
+return, tech-lead on Fable reviews ADR-011. That review is explicitly **NOT a
+merge blocker** — the PR may go ready and merge before it happens. This keeps
+the user's standing "reviews co-run on Fable" directive intact while refusing to
+let a billing state gate delivery.
+
+The shape worth reusing: when a model is unavailable, split the deliverable from
+the review of it. Produce the artifact on whatever model is available, and queue
+the preferred model's review as a follow-up rather than a gate. Deferring twice
+cost a full round-trip each time and did not improve the artifact.
+
+### The ADR filename is load-bearing
+
+`ADR-011-cross-channel-recovery-tagging.md`, not a descriptive name.
+`.gitignore:39` ignores `docs/architecture/*` with negations only for
+`ADR-*.md`, `upload_detector_convergence.md` and `episode_grouping.md`. A note
+named `task5_recovery_tagging.md` would have been written, looked finished, and
+been **silently absent from the PR** — the same failure that lost a Task 3 spec
+for an entire session. Verified before dispatch with `git check-ignore` on the
+candidate paths, and verified again on the real file before marking the PR
+ready.
+
+Two of the four stale-reference fixes from the first substitution hit this same
+rule: `anomaly_math_definitions.md` and `anomaly-quality-phase-architect.md` are
+untracked working notes (20 of 28 files under `docs/architecture/` are), so those
+corrections are local-only by design and never reach any branch. `docs/coverage/`
+is ignored the same way. **Before briefing doc work, check what is tracked** —
+"fix these four references" was wrong framing for two of them.
+
+## Backlog — three follow-ups out of Task 5 (Orchestrator, 2026-10-15)
+
+Recorded only. No code for any of these on `task-5-is-recovery-tagging`.
+
+### BACKLOG-1 — multi-channel hits per timestamp in the persisted view
+
+`sensor_readings` has `UniqueConstraint(tenant_id, greenhouse_id, timestamp)`
+and `trigger_channel` holds only "the raw column name with the highest-|z| hit
+at this timestamp" (`src/db/models.py:106`). One channel per timestamp, so a
+lower-scoring **concurrent** channel is invisible at query time.
+
+Measured on fixture A: `measured_pipe_1_temp` genuinely hits at 09:10–09:40 on
+2026-12-16 (7 hits, confirmed against the upload path), but from 09:25 onward
+`measured_hd` (peak 0.806) outranks it (0.693) and owns those rows. The
+query-time view therefore sees pipe_1 as 09:10–09:20, n=3.
+
+**Why this matters beyond cosmetics:** Task 5 exists to keep a coincident real
+fault visible — tagging deliberately never suppresses, because "a real heating
+fault could coincide" with a recovery. But if that coinciding fault happens to
+score *below* another channel at the same timestamps, the persisted view hides
+it before tagging ever runs. The storage model can mask exactly the case the
+tagging policy is designed to preserve.
+
+Pinned, not fixed, by
+`tests/api/test_recovery_tag_fixture_a.py::TestTheTwoViewsOfThePipe1Event`.
+`ADR-011` links here under known limitations.
+
+### BACKLOG-2 — exclude generated OpenAPI artifacts from lint-staged
+
+**This reverses the recommendation in the earlier follow-up entry above**
+("lint-staged biome rewrites the generated OpenAPI artifacts", 2026-10-14),
+which preferred running biome *inside* `gen:api:refresh`. The user's decision
+on 2026-10-15 is the other option: drop `web/openapi.json` and
+`web/lib/api-types.gen.ts` from the `lint-staged` glob, so that **committed
+output equals generator output by construction rather than by luck**.
+
+"By luck" is literal. On the Task 5 commit the hook did fire and reported
+"Applying modifications from tasks" on both files — yet re-running
+`pnpm gen:api:refresh` afterwards left the tree clean, so no drift resulted
+*this time*. That is a coincidence of formatting agreement, not a guarantee,
+and it is precisely the signal that cannot be relied upon: the next person to
+regenerate must be able to read a non-empty diff as real contract drift.
+
+### BACKLOG-3 — Task 6 runs parallel agents in separate worktrees
+
+Two shared-tree collisions in Task 5, both from agents behaving correctly in
+isolation:
+
+1. `be-task5` found `web/openapi.json` and `api-types.gen.ts` modified outside
+   its ownership, could not account for them, and reverted with
+   `git checkout --`. They were `fe-task5`'s legitimate regen, finished minutes
+   earlier.
+2. `arch-staleref` read `src/` mid-write and reported the tree broken
+   (`anomaly_episode_service.py` importing a constant already deleted from
+   `config.py`). A transient half-landed state; the import succeeded once
+   `be-task5` finished.
+
+Mitigated in Task 5 by briefing agents to **report and leave alone**, never
+revert, anything outside their ownership — which worked after the first
+incident. Worktree isolation removes the class instead of managing it, at the
+cost of a merge step. See [[project_agent_branch_drift]] and
+[[project_background_agent_stalls]] — the latter notes background agents stall
+outside the working dir, so worktree setup needs checking against that.
+
+### BACKLOG-4 — no index covers `release_ts` for `_fetch_recovery_release_events`
+
+Found by the ADR-011 author while verifying Task 5, and confirmed against
+`src/db/models.py` and `alembic/versions/026_add_anomaly_episodes.py`.
+
+The new query filters on `tenant_id`, `greenhouse_id`, `detector`, and a
+`release_ts` range. `anomaly_episodes` has exactly three indexes:
+
+- `ix_anomaly_episodes_tenant_gh_channel_onset` — covers only the two leading
+  columns of this filter
+- `ix_anomaly_episodes_ongoing_tenant_gh` — PARTIAL, on `is_ongoing`
+- `ix_anomaly_episodes_fault_type_detector` — `(fault_type, detector)`
+
+`release_ts` carries no index at all. Note the task spec's §7 listed only two
+of these three indexes, omitting the partial one — the ADR lists all three.
+
+**Do not add an index reflexively.** Measure the query plan on a realistic row
+count first. `anomaly_episodes` is written one row per fault window, so the
+table may stay small enough that the scan never matters, and an unnecessary
+index costs write throughput on the upload path. Accepted as out of scope for
+Task 5 rather than overlooked.
+
+### BACKLOG-5 — `StuckCarry.recovery_channels` is now dead state (ml-engineer)
+
+Two findings folded into one item; both in `src/models/stuck_fault_detector.py`,
+which is ml-engineer's and was deliberately untouched by Task 5.
+
+1. **The field is no longer read by episode grouping.** Task 5 removed the
+   same-channel recovery path from `src/models/episode_grouper.py`, so nothing
+   in `src/api/` consumes `recovery_channels` any more. Its one remaining
+   reader is the statistical detector's baseline purge, which is why the field
+   is still live and was NOT removed.
+2. **Its docstring is now false.** It still says the field is used "by episode
+   grouping to tag recovery alerts". Episode grouping does not read it, and
+   tagging no longer happens there at all — `is_recovery` is set query-time in
+   `src/api/services/anomaly_episode_service.py`.
+
+So the field stays, the docstring must change, and anyone auditing dead state
+should know the baseline purge is the reason it survives. Recorded as the
+residual follow-up in `ADR-011`.
