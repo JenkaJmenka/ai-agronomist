@@ -200,31 +200,53 @@ one more clause, also quoted from `web/openapi.json`:
 
 **The storage model can hide the very case this policy exists to preserve.**
 
+> **Resolved as a decision, not yet as code, by
+> [ADR-012](./ADR-012-concurrent-channel-hits.md).** Read it before acting on
+> anything in this section: it measures the effect, reframes the cause, and
+> records the chosen fix. Two claims below are narrowed by it, noted inline.
+
 The policy above is built on never suppressing: a real fault on another
 channel may genuinely coincide with a recovery, so the tag labels the episode
 and leaves its score, rank and rows alone. That holds for everything the
 tagging can see. But one channel per timestamp survives into
 `sensor_readings` — `UniqueConstraint(tenant_id, greenhouse_id, timestamp)`,
-with `trigger_channel` keeping only the highest-|z| hit (`src/db/models.py`).
-A **concurrent** fault that scores below another channel at the same
-timestamps is therefore already gone from the persisted view before
-`_apply_cross_channel_recovery_tags` runs. Tagging cannot preserve, label or
-even notice what the storage layer dropped.
+with `trigger_channel` keeping a single hit (`src/db/models.py`). A
+**concurrent** fault that scores below another channel at the same timestamps
+is therefore already gone from the view `_apply_cross_channel_recovery_tags`
+reads, before it runs. Tagging cannot preserve, label or even notice what the
+query path dropped.
+
+Two refinements from ADR-012, which measured this:
+
+- **The loss is in the query path, not the database.** `raw_readings.data["anomaly_columns"]`
+  already carries the complete channel set for every collided timestamp —
+  measured 17 of 17 on fixture A. Episode grouping simply never reads it
+  (`_fetch_minimal_flagged_rows`, `anomaly_group_queries.py`). The JSON holds
+  channel **names only**, so it can rebuild spans but not `peak_score`.
+- **The winner is not chosen by |z| alone,** despite the `src/db/models.py`
+  docstring quoted above and in the section before it. `build_trigger_data_by_timestamp`
+  ranks by `anomaly_rank_key` — severity, then detector tier, then |z_score|,
+  with score only a later tiebreak. The model docstring is stale; it is
+  reproduced verbatim above rather than silently corrected, because it is a
+  quote.
 
 This is not a flaw in the decision recorded here, and this ADR does not
 resolve it: it is a gap one layer beneath, pre-existing and explicitly out of
 scope for Task 5. The fixture A split in the section above is the observable
-instance of it. It is recorded as backlog, not as work:
+instance of it — one of 6 damaged episodes out of 10, per ADR-012's
+measurement. Its backlog heading remains the stable reference for the history:
 
 > `AGENT_MEMORY.md` → **BACKLOG-1 — multi-channel hits per timestamp in the
 > persisted view** (under "Backlog — three follow-ups out of Task 5
 > (Orchestrator, 2026-10-15)")
 
-There is no issue tracker; that heading is the stable reference. The behaviour
-is pinned, not fixed, by
+There is no issue tracker. The behaviour is pinned, not fixed, by
 `tests/api/test_recovery_tag_fixture_a.py::TestTheTwoViewsOfThePipe1Event`, so
 a future change that widens the query-time view fails there and updates these
-numbers deliberately.
+numbers deliberately. ADR-012 spells out exactly what that class and
+`TestTaggingChangesNothingElse` must become when it does, and notes that the
+tagging assertions in this ADR must be re-run — on fixture A no `is_recovery`
+verdict is expected to flip, but that is derived, not measured.
 
 ## Residual follow-up
 
