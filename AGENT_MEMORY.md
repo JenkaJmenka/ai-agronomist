@@ -5741,3 +5741,61 @@ Two fixes, not implemented:
    This keeps one formatting authority instead of two and leaves the artifacts
    lint-clean by construction, so a diff after regeneration means a real contract
    change. Option 1 leaves them unformatted and merely unchecked.
+
+## Agent model substitution — architect on Opus, one-off (Orchestrator, 2026-10-15)
+
+**This is not a new default.** The architect row in `CLAUDE.md` stays
+`claude-fable-5`, and the user's standing directive — final reviews co-run by
+tech-lead and architect on Fable — is unchanged.
+
+On Task 5 the architect agent (`arch-task5`) failed outright with "You're out of
+usage credits. Run /usage-credits to keep using Fable 5.1", having written
+nothing. Two deliverables were blocked: a short design note under
+`docs/architecture/`, and four stale `RECOVERY_SCORE_CAP` references to a
+constant the task deletes.
+
+The user split them. The **factual doc corrections** ran on Opus as a one-off,
+because leaving docs that describe a deleted constant as live is actively
+misleading. The **design note stays on Fable** and waits for credits; the Task 5
+PR opens as DRAFT and must not merge until it lands. The note must cover the
+upload-path vs query-time `trigger_channel` asymmetry, the grace rationale, and
+quote the final contract wording from `openapi.json` (so it comes after the
+regen, not before).
+
+### The architect agent cannot patch large files
+
+Found while dispatching the above, and the reason the correction took two
+dispatches instead of one. `architect` and `tech-lead` are defined with **Read,
+Write, Glob only — no Edit, no Bash**. Every other domain agent has `Bash` and
+can patch precisely with `sed`.
+
+`Write` overwrites a whole file, so a one-line fix in a large document means
+retyping it from memory with no diff tool to verify. `arch-staleref` rewrote the
+159-line `episode_grouping.md` safely, then **correctly refused** the 824/1521/451
+-line files rather than risk silently corrupting a LaTeX-dense doc. That refusal
+was good judgement and should not be read as an agent stalling.
+
+Consequences for briefing these two agents:
+- Do not give them surgical edits inside large files. Either scope to whole-file
+  rewrites of short documents, or get an `Edit`-capable agent assigned for those
+  specific lines (the `claude` catch-all has full tools) — a documented ownership
+  deviation, not a new default.
+- Do not make "run this grep and confirm it returns nothing" a completion
+  criterion. They cannot run `grep` or `git`. Verify such claims yourself.
+
+### Concurrent agents on one working tree
+
+Two collisions in one phase, both from agents behaving correctly in isolation:
+1. `be-task5` found `web/openapi.json` and `api-types.gen.ts` modified, could not
+   account for them, and reverted with `git checkout --`. They were
+   `fe-task5`'s legitimate regen, completed minutes earlier.
+2. `arch-staleref` read `src/` mid-write and reported the tree broken
+   (`anomaly_episode_service.py` importing a constant already deleted from
+   `config.py`). It was a transient half-landed state; the import succeeded once
+   `be-task5` finished.
+
+Both agents were right to report. The fix is the instruction, now standard in
+these briefs: **when an unexpected modification appears outside your ownership,
+report it and leave it alone — do not revert it.** Agent 2's instinct was better
+still: it declined to write either constant name while the tree was ambiguous,
+and described the behaviour instead, which stayed correct either way.

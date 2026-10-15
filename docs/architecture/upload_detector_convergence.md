@@ -546,7 +546,7 @@ The current test suite pins:
 **Critical regression targets:**
 - 6.00 h stuck detection latency (onset_ts → detected_ts)
 - 163.83 h frozen duration (last_frozen_dt boundary, not end_dt)
-- Recovery episodes capped below stuck-fault peak (RECOVERY_SCORE_CAP=0.4)
+- Recovery episodes tagged informationally, never rescored (no score cap)
 - Zero light alerts on clear-sky July midday irradiance
 - Canonical score never saturates at 1.0 for finite input
 
