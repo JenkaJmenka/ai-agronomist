@@ -745,12 +745,14 @@ def finalize_scores(
         high_anomalies.sort(key=lambda h: h.timestamp)
 
     # Task 5: group contiguous per-channel alerts into episodes.
-    recovery_chs = stuck_carry.recovery_channels if stuck_carry else {}
+    # recovery_channels is no longer threaded through here -- cross-channel
+    # recovery tagging is query-time only (docs/handoff/task5_spec.md),
+    # since stuck_carry is per-upload and cannot see a fault released in an
+    # earlier upload.
     done_faults = stuck_carry.completed_faults if stuck_carry else []
     open_freezes = stuck_carry.channels if stuck_carry else {}
     raw_episodes = group_alerts_into_episodes(
         high_anomalies,
-        recovery_channels=recovery_chs,
         completed_faults=done_faults,
         open_freezes=open_freezes,
     )

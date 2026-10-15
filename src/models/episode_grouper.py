@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from src.config import EPISODE_GAP_SECONDS, RECOVERY_SCORE_CAP
+from src.config import EPISODE_GAP_SECONDS
 from src.models.stuck_fault_detector import expected_slot_count
 
 # Seconds per hour, used by stuck_fault duration conversion.
@@ -108,6 +108,19 @@ class AnomalyEpisode:
     sample_count: int
 
     severity: str
+    # True when this episode is on a channel other than a stuck-fault
+    # channel and starts no earlier than EPISODE_GAP_SECONDS before, and
+    # within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release.
+    # Informational only; does not suppress or rescore.
+    #
+    # ALWAYS False on this (detection-time) path: the tagging needs a
+    # released fault's release_ts, which may belong to an earlier upload
+    # that this in-memory grouping pass never sees (stuck_carry is
+    # per-upload). The real computation reads the persisted
+    # anomaly_episodes table instead and lives entirely at query time
+    # (src/api/services/anomaly_episode_service.py). Kept here, always
+    # False, only so the upload response's AnomalyEpisodeSchema keeps a
+    # stable shape.
     is_recovery: bool = False
     is_ongoing: bool = False
     onset_ts: str | None = None
@@ -163,11 +176,9 @@ def _severity_rank(sev: str | None) -> int:
 def group_alerts_into_episodes(
     high_anomalies: list[Any],
     *,
-    recovery_channels: dict[str, Any] | None = None,
     completed_faults: list[Any] | None = None,
     open_freezes: dict[str, Any] | None = None,
     gap_seconds: int = EPISODE_GAP_SECONDS,
-    recovery_score_cap: float = RECOVERY_SCORE_CAP,
 ) -> list[AnomalyEpisode]:
     """Group high_anomalies into contiguous per-(channel, detector) episodes.
 
@@ -181,8 +192,6 @@ def group_alerts_into_episodes(
     ----------
     high_anomalies:
         ``UploadHighAnomalyDetail`` list from ``finalize_scores``.
-    recovery_channels:
-        ``stuck_carry.recovery_channels`` — maps channel → FaultWindow.
     completed_faults:
         ``stuck_carry.completed_faults`` — all completed FaultWindows,
         used to compute final stuck_fault episode durations.
@@ -194,10 +203,7 @@ def group_alerts_into_episodes(
         rule 6c instead of 6b).
     gap_seconds:
         Max gap before splitting into a new episode.
-    recovery_score_cap:
-        Peak score ceiling for recovery episodes.
     """
-    recovery_channels = recovery_channels or {}
     completed_faults = completed_faults or []
 
     # Index completed faults by (channel, onset_ts) for O(1) lookup.  Open
@@ -226,31 +232,19 @@ def group_alerts_into_episodes(
 
     for key, dt, alert in records:
         if key != current_key:
-            _flush_group(
-                current_group, episodes,
-                recovery_channels, recovery_score_cap,
-                sources,
-            )
+            _flush_group(current_group, episodes, sources)
             current_key = key
             current_group = [(dt, alert)]
         else:
             last_dt = current_group[-1][0]
             gap = (dt - last_dt).total_seconds()
             if gap > gap_seconds:
-                _flush_group(
-                    current_group, episodes,
-                    recovery_channels, recovery_score_cap,
-                    sources,
-                )
+                _flush_group(current_group, episodes, sources)
                 current_group = [(dt, alert)]
             else:
                 current_group.append((dt, alert))
 
-    _flush_group(
-        current_group, episodes,
-        recovery_channels, recovery_score_cap,
-        sources,
-    )
+    _flush_group(current_group, episodes, sources)
     return episodes
 
 
@@ -541,8 +535,6 @@ def _stuck_fault_span(
 def _flush_group(
     group: list[tuple[datetime, Any]],
     episodes: list[AnomalyEpisode],
-    recovery_channels: dict[str, Any],
-    recovery_score_cap: float,
     sources: _StuckFaultSources,
 ) -> None:
     """Convert a contiguous group of alerts into an AnomalyEpisode."""
@@ -583,24 +575,6 @@ def _flush_group(
         end_dt = group[-1][0]
         duration = (end_dt - start_dt).total_seconds()
 
-    # Detect recovery episodes: channel just exited a detected fault
-    # AND the episode's start is within the recovery window.
-    is_recovery = False
-    if actual_channel in recovery_channels and detector != "stuck_fault":
-        fw = recovery_channels[actual_channel]
-        _RECOVERY_WINDOW_HOURS = 4.0
-        try:
-            fault_end_dt = _parse_iso(fw.release_ts)
-            gap_hours = (
-                (start_dt - fault_end_dt).total_seconds() / 3600.0
-            )
-            is_recovery = 0 <= gap_hours <= _RECOVERY_WINDOW_HOURS
-        except (ValueError, AttributeError):
-            pass
-
-    if is_recovery:
-        peak = min(peak, recovery_score_cap)
-
     # Stuck-fault specific fields.
     onset_ts: str | None = None
     detected_ts: str | None = None
@@ -619,7 +593,8 @@ def _flush_group(
         peak_score=peak,
         sample_count=len(group),
         severity=best_sev or "unclassified",
-        is_recovery=is_recovery,
+        # is_recovery omitted -- always its default (False) on this path,
+        # see the field's docstring above for why.
         is_ongoing=is_ongoing,
         onset_ts=onset_ts,
         detected_ts=detected_ts,
