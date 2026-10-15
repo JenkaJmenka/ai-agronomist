@@ -206,8 +206,16 @@ brief stated them — the raw per-channel hit stream, i.e. the upload-path
 view. The two views differ because `sensor_readings` persists exactly one
 `trigger_channel` per timestamp: pipe_1 WINS that slot only at 09:10,
 09:15, 09:20; `measured_hd` wins it from 09:25 onward because its score is
-higher there. This row-collapse is independent of chunk size — confirmed
-identical at `chunk_size=500` and `chunk_size=5000` — so it was never a
+higher there.
+
+Measured directly against the real pipeline (real upload with
+`persist_db` set, then the real `GET /api/anomalies/episodes`-backing
+`fetch_anomaly_episodes` against that same database -- not a bare harness,
+not inferred from a test constant) at `chunk_size` 500, 5000, and `10**7`:
+upload-path pipe_1 hit count is `n=7` at every one of the three; query-time
+pipe_1 episode is `start=2026-12-16T09:10, end=09:20, n=3` at every one of
+the three. Both counts are identical across all three chunk sizes checked
+-- the row-collapse is independent of chunk size, so it was never a
 harness problem. The query-time pipe_1 episode genuinely is `start=09:10,
 end=09:20, n=3`, five minutes BEFORE the 09:15 release; that is a real,
 narrower, correct view of the same event, not a wrong measurement of it.
