@@ -57,9 +57,10 @@ separately-tuned fudge factor -- see ``docs/handoff/task5_spec.md`` for the
 rejected overlap-based alternative and why. Tagging is informational only:
 it never suppresses the hit or changes its score or rank. This lives here,
 not in ``src/models/episode_grouper.py``, because the tagging needs
-cross-upload reach -- ``stuck_carry.recovery_channels`` is in-memory per
-upload and cannot see a fault released by an earlier one, while this
-module already reads the persisted ``anomaly_episodes`` table for the
+cross-upload reach -- ``stuck_carry`` (including its now-removed
+``recovery_channels`` field, BACKLOG-5) is in-memory per upload and
+cannot see a fault released by an earlier one, while this module already
+reads the persisted ``anomaly_episodes`` table for the
 stuck-fault-augmentation purpose above. See
 ``_apply_cross_channel_recovery_tags`` and
 ``docs/handoff/task5_spec.md``. A hit on the SAME channel as its own fault,
@@ -427,8 +428,9 @@ async def _apply_cross_channel_recovery_tags(
     Cross-upload by construction: reads every released stuck-fault
     ``anomaly_episodes`` row in range regardless of which upload wrote it --
     the whole reason this tagging lives here and not in
-    ``src/models/episode_grouper.py``, whose ``stuck_carry.recovery_channels``
-    is per-upload and cannot see a fault released by an earlier one.
+    ``src/models/episode_grouper.py``, whose ``stuck_carry`` (including its
+    now-removed ``recovery_channels`` field, BACKLOG-5) is per-upload and
+    cannot see a fault released by an earlier one.
 
     Purely additive: never reorders ``episodes`` or touches ``peak_score``,
     so it is safe to run after the rank-then-cap step in

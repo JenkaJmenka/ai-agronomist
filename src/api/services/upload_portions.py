@@ -745,7 +745,8 @@ def finalize_scores(
         high_anomalies.sort(key=lambda h: h.timestamp)
 
     # Task 5: group contiguous per-channel alerts into episodes.
-    # recovery_channels is no longer threaded through here -- cross-channel
+    # recovery_channels (removed from StuckCarry in BACKLOG-5, not merely
+    # omitted from this call) is not threaded through here -- cross-channel
     # recovery tagging is query-time only (docs/handoff/task5_spec.md),
     # since stuck_carry is per-upload and cannot see a fault released in an
     # earlier upload.
