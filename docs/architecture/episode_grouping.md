@@ -65,7 +65,8 @@ AnomalyEpisode:
   peak_score:       float     # max alert score in the episode
   sample_count:     int       # number of alerts in the episode
   severity:         str       # worst severity in the episode
-  is_recovery:      bool      # post-fault transition, not independent
+  is_recovery:      bool      # cross-channel knock-on tag; see below.
+                              # ALWAYS False on this detection-time path
   is_ongoing:       bool      # freeze still open at detection time
   onset_ts:         str|null  # stuck_fault only: freeze onset
   detected_ts:      str|null  # stuck_fault only: when detection fired
@@ -135,19 +136,54 @@ after `finalize_scores` returns. A live-monitoring path would need a
 separate mechanism (e.g. an SSE update) to push a revised duration when
 the freeze ends. That is out of scope for the cold-run upload path.
 
-## Recovery scoring (Task 3)
+## Recovery handling (Task 3, revised by Task 5)
 
 When a channel exits a detected stuck fault:
 
 1. **Baseline cleanup:** the fault-period values are NaN-ed out in the
    statistical carry so the rolling z-score baseline is not contaminated.
-2. **Score cap:** recovery episodes (`is_recovery=True`) have their
-   peak score capped at `RECOVERY_SCORE_CAP` (default: 0.4, below the
-   canonical anomaly threshold). The stuck fault episode (score 1.0)
-   always outranks the recovery.
-3. **Visibility:** recovery episodes are still reported to the operator
-   (they indicate the sensor came back) — they are just not scored as
-   the largest anomaly in the run.
+2. **Same-channel suppression:** statistical hits on the faulted channel
+   inside `[onset, release + COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS]`
+   (6 h) never become alerts at all — they are dropped by
+   `_suppress_fault_window_hits` in
+   `src/api/services/upload_portions.py`, before grouping. The
+   stuck-fault episode therefore outranks anything on its own channel
+   because nothing on that channel survives to compete with it.
+
+**There is no score cap.** Task 5 deleted the `RECOVERY_SCORE_CAP`
+setting from `src/config.py`, together with the same-channel
+`is_recovery` computation and the `peak = min(peak, cap)` adjustment that
+used to live in this grouper's `_flush_group`. A recovery episode's
+`peak_score` is never adjusted. That path was dead by construction in any
+case: the 6 h suppression in step 2 removed the hits before the flag
+could fire.
+
+### What `is_recovery` means now (Task 5)
+
+`is_recovery` was repurposed from a same-channel score cap into a
+**cross-channel informational tag**. It is true for a non-stuck-fault
+episode on a channel OTHER than the faulted one, whose `start_ts` falls
+within `RECOVERY_KNOCKON_WINDOW_HOURS` (default 4.0, `src/config.py`)
+after that fault's `release_ts` — with a grace on the near side so an
+episode already underway when the fault released is still tagged. The
+tag never suppresses a hit and never changes a score, a severity, or a
+rank.
+
+It is computed at **query time**, in
+`src/api/services/anomaly_episode_service.py`
+(`_apply_cross_channel_recovery_tags` and its two helpers), which backs
+`GET /api/anomalies/episodes` — not in this grouper. Tagging needs a
+`release_ts` from the persisted `anomaly_episodes` table, and the fault
+that released may belong to an earlier upload than the one producing the
+hit being tagged; `stuck_carry.recovery_channels` is in-memory per-upload
+state and cannot see it.
+
+Consequence: `AnomalyEpisode.is_recovery` on this detection-time path is
+**always `False`**, kept only so the upload response keeps a stable
+shape. The live field is `AnomalyEpisodeSummary.is_recovery`
+(`src/api/schemas/anomaly_episodes.py`). The window and grace constants
+are named at the live definition; see `docs/handoff/task5_spec.md` for
+the full rationale and the measured window evidence.
 
 ## Stuck-fault mid-freeze detection (Task 2b)
 

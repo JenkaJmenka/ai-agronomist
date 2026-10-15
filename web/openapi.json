@@ -7270,6 +7270,7 @@
           "is_recovery": {
             "type": "boolean",
             "title": "Is Recovery",
+            "description": "True when this episode is on a channel other than a stuck-fault channel and starts no earlier than EPISODE_GAP_SECONDS before, and within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. Informational only; does not suppress or rescore. Always False in this upload-path response -- the live computation is query-time only; see AnomalyEpisodeSummary.is_recovery.",
             "default": false
           },
           "is_ongoing": {
@@ -7522,6 +7523,12 @@
               }
             ],
             "title": "Raw Slot Count"
+          },
+          "is_recovery": {
+            "type": "boolean",
+            "title": "Is Recovery",
+            "description": "True when this episode is on a channel other than a stuck-fault channel and starts no earlier than EPISODE_GAP_SECONDS before, and within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. Informational only; does not suppress or rescore.",
+            "default": false
           }
         },
         "type": "object",

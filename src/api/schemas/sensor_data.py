@@ -379,7 +379,24 @@ class AnomalyEpisodeSchema(BaseModel):
     peak_score: float = Field(ge=0.0, le=1.0)
     sample_count: int = Field(ge=1)
     severity: str
-    is_recovery: bool = False
+    # ALWAYS False in this (upload-path) response -- the tagging needs
+    # anomaly_episodes rows that may belong to an earlier upload, which
+    # this response's detection pass cannot see. The live computation is
+    # query-time only; see AnomalyEpisodeSummary.is_recovery
+    # (src/api/schemas/anomaly_episodes.py) and
+    # src/models/episode_grouper.py's AnomalyEpisode.is_recovery.
+    is_recovery: bool = Field(
+        default=False,
+        description=(
+            "True when this episode is on a channel other than a "
+            "stuck-fault channel and starts no earlier than "
+            "EPISODE_GAP_SECONDS before, and within "
+            "RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. "
+            "Informational only; does not suppress or rescore. Always "
+            "False in this upload-path response -- the live computation "
+            "is query-time only; see AnomalyEpisodeSummary.is_recovery."
+        ),
+    )
     is_ongoing: bool = Field(
         default=False,
         description="True when the freeze had not yet ended at detection time. "

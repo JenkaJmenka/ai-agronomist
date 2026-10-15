@@ -1,12 +1,24 @@
-"""Episode grouping + recovery scoring (Tasks 3 + 5).
+"""Detection-time episode grouping (Tasks 3 + 5).
 
 Acceptance tests:
-  1. Fixture A recovery is ONE grouped episode, not 35 rows
-  2. That episode reports start, end, duration
-  3. The recovery episode is NOT the highest-scoring event
+  1. The post-release run is grouped into episodes, not one per row
+  2. Every episode reports start, end, duration
+  3. The stuck fault, not a post-release excursion, is the top-scoring event
   4. A genuine out-of-bounds excursion still produces an alert
   5. Two anomalies separated by a long gap remain TWO episodes
   6. Different channels at the same timestamp are distinct episodes
+  7. The upload path never tags ``is_recovery``
+
+Scope note (Task 5): ``is_recovery`` was repurposed from a same-channel
+score cap into cross-channel tagging, and the tagging is computed at QUERY
+time only -- ``src/api/services/anomaly_episode_service.py``, because a
+fault can release in a different upload from the one that produced the hit
+(``docs/handoff/task5_spec.md`` §2).  The upload path this module exercises
+therefore reports ``is_recovery=False`` on every episode, which
+``TestFixtureAEpisodes.test_upload_path_never_tags_is_recovery`` pins.  The
+tagging behaviour itself is covered by
+``tests/api/test_recovery_tag_window.py`` and
+``tests/api/test_recovery_tag_fixture_a.py``.
 """
 
 from __future__ import annotations
@@ -28,7 +40,6 @@ from src.api.services.upload_portions import (
 from src.config import (
     EPISODE_GAP_SECONDS,
     LATENT_DIM,
-    RECOVERY_SCORE_CAP,
     STUCK_WALLCLOCK_MIN_HOURS,
 )
 from src.models.episode_grouper import (
@@ -141,18 +152,30 @@ class TestFixtureAEpisodes:
         self.stuck_episodes = [
             e for e in self.episodes if e.detector == "stuck_fault"
         ]
-        self.recovery_episodes = [
-            e for e in self.episodes if e.is_recovery
+        self.statistical_episodes = [
+            e for e in self.episodes if e.detector == "statistical"
         ]
-        self.humidity_recovery = [
-            e for e in self.recovery_episodes if e.channel == "humidity"
+        self.post_release_episodes = [
+            e for e in self.statistical_episodes
+            if _parse_onset(e.start_ts) > FREEZE_END
         ]
 
-    def test_recovery_is_one_episode_not_35_rows(self):
-        """The 2026-12-25 recovery must be ONE grouped episode."""
-        assert len(self.humidity_recovery) <= 1, (
-            f"Expected at most 1 humidity recovery episode, "
-            f"got {len(self.humidity_recovery)}"
+    def test_post_release_alerts_group_into_episodes_not_raw_rows(self):
+        """The run after the 2026-12-25 release is grouped, not one-per-row.
+
+        Task 3 acceptance 1.  The alerts that follow the final release are
+        contiguous 5-minute samples; emitting one episode per alert row is
+        the defect this guards.  Measured on fixture A: 36 alert rows
+        collapse into 2 episodes (``measured_hd`` and
+        ``calculated_heating_temp``).
+        """
+        assert len(self.post_release_episodes) == 2, (
+            f"Expected 2 post-release episodes, got "
+            f"{[(e.channel, e.start_ts) for e in self.post_release_episodes]}"
+        )
+        total_samples = sum(e.sample_count for e in self.post_release_episodes)
+        assert total_samples == 36, (
+            f"Expected 36 grouped alert rows, got {total_samples}"
         )
 
     def test_episode_has_start_end_duration(self):
@@ -163,26 +186,27 @@ class TestFixtureAEpisodes:
             assert ep.duration_seconds >= 0.0, "Negative duration"
             assert ep.sample_count >= 1, "Empty episode"
 
-    def test_recovery_episode_not_highest_scoring(self):
-        """The stuck fault that preceded recovery must rank above it.
+    def test_stuck_fault_is_the_highest_scoring_episode(self):
+        """Task 3 acceptance 3: no excursion outranks the fault itself.
 
-        This is the Task 3 acceptance criterion: the recovery is not
-        scored as the largest anomaly in the run.
+        Stated over every statistical episode rather than over the tagged
+        ones: Task 5 moved tagging to query time, so an ``is_recovery``
+        filter here would select nothing and the check would pass
+        vacuously.  The invariant it was guarding -- a post-fault
+        excursion must not be the loudest event in the run -- is
+        unchanged and is what this asserts.
         """
-        if not self.episodes:
-            pytest.skip("No episodes produced")
-
+        assert self.episodes, "No episodes produced — the check would be vacuous"
         highest_episode = max(self.episodes, key=lambda e: e.peak_score)
-        for recovery_ep in self.recovery_episodes:
-            assert recovery_ep.peak_score < highest_episode.peak_score, (
-                f"Recovery episode (peak={recovery_ep.peak_score}) outranks "
-                f"highest episode (peak={highest_episode.peak_score})"
-            )
-
-        # The highest-scoring episode should be a stuck_fault.
         assert highest_episode.detector == "stuck_fault", (
             f"Expected stuck_fault as highest scorer, got {highest_episode.detector}"
         )
+        for episode in self.statistical_episodes:
+            assert episode.peak_score < highest_episode.peak_score, (
+                f"Statistical episode on {episode.channel} "
+                f"(peak={episode.peak_score}) outranks the stuck fault "
+                f"(peak={highest_episode.peak_score})"
+            )
 
     def test_stuck_fault_episode_exists(self):
         """At least one stuck_fault episode for humidity must exist."""
@@ -194,46 +218,40 @@ class TestFixtureAEpisodes:
             f"got {len(humidity_stuck)}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "follow-up task: repurpose is_recovery as cross-channel tagging "
-            "— faulted-channel recovery episodes can no longer occur because "
-            "the 6 h post-release suppression window exceeds the 4 h recovery "
-            "window"
-        ),
-    )
-    def test_stuck_fault_outranks_recovery(self):
-        """The stuck fault episode (score=1.0) outranks recovery."""
-        humidity_stuck = [
-            e for e in self.stuck_episodes if e.channel == "humidity"
-        ]
-        # Precondition: both stuck and recovery episodes must exist.
-        # If neither exists the test MUST fail (not skip silently).
-        assert humidity_stuck, (
-            "No humidity stuck_fault episodes found — precondition failed"
-        )
-        assert self.humidity_recovery, (
-            "No humidity recovery episodes found — the 6 h post-release "
-            "suppression window (COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS) "
-            "exceeds the 4 h recovery window (RECOVERY_KNOCKON_WINDOW_HOURS), "
-            "so humidity recovery episodes can no longer occur"
-        )
-        stuck_peak = max(e.peak_score for e in humidity_stuck)
-        recovery_peak = max(
-            (e.peak_score for e in self.humidity_recovery),
-            default=0.0,
-        )
-        assert stuck_peak > recovery_peak, (
-            f"Stuck peak {stuck_peak} should exceed recovery peak {recovery_peak}"
-        )
+    # ``test_stuck_fault_outranks_recovery`` stood here as a strict xfail
+    # waiting for Task 5.  It is removed rather than unmarked: it asserted a
+    # non-empty ``humidity_recovery`` list as its own precondition, and
+    # ``is_recovery`` no longer means "same channel as a just-released
+    # fault" — it now means the OPPOSITE, a channel other than the faulted
+    # one, so a humidity episode can never be tagged against a humidity
+    # fault and that precondition is unsatisfiable by construction, not
+    # merely unmet today.  The invariant it expressed — a stuck fault
+    # outranks the excursions around it, and tagging changes no ranking —
+    # survives in ``test_stuck_fault_is_the_highest_scoring_episode`` above
+    # and, for the tagged cross-channel case the field now describes, in
+    # ``tests/api/test_recovery_tag_fixture_a.py``.
+    #
+    # ``test_recovery_score_capped`` stood beside it, asserting
+    # ``peak_score <= RECOVERY_SCORE_CAP``.  That constant is deleted and
+    # tagging must not touch ``peak_score`` at all, so the assertion is
+    # replaced by its inverse — scores are left alone — pinned where
+    # tagging actually happens, in
+    # ``test_recovery_tag_window.py::TestTaggingDoesNotRescore``.
 
-    def test_recovery_score_capped(self):
-        """Recovery episodes must have peak_score <= RECOVERY_SCORE_CAP."""
-        for ep in self.recovery_episodes:
-            assert ep.peak_score <= RECOVERY_SCORE_CAP, (
-                f"Recovery peak {ep.peak_score} exceeds cap {RECOVERY_SCORE_CAP}"
-            )
+    def test_upload_path_never_tags_is_recovery(self):
+        """The upload response reports ``is_recovery=False`` on every episode.
+
+        Not an accident of this fixture: the tagging needs a released
+        fault's ``release_ts``, which can belong to an earlier upload that
+        this in-memory detection pass never sees, so the upload path
+        deliberately computes nothing (``docs/handoff/task5_spec.md`` §2).
+        A True here means the deleted detection-time computation came back.
+        """
+        tagged = [e for e in self.episodes if e.is_recovery]
+        assert tagged == [], (
+            f"Upload path tagged {[(e.channel, e.start_ts) for e in tagged]}; "
+            f"is_recovery is query-time only"
+        )
 
     # --- Regression assertions (Correction 2) ----------------------------
 

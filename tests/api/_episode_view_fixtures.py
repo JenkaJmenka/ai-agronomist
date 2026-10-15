@@ -18,7 +18,8 @@ schema drops two of the dataclass's fields (see the D3 note in
 to call the grouper directly would risk the imputed-channel phantom-freeze
 trap described in ``test_anomaly_episode_persistence.py``.
 
-Consumed by ``tests/api/test_episode_view_parity.py``.
+Consumed by ``tests/api/test_episode_view_parity.py`` and
+``tests/api/test_recovery_tag_fixture_a.py``.
 """
 
 from __future__ import annotations
@@ -127,6 +128,9 @@ class BothViews:
         # Detection-time, as the grouper's dataclasses carry it — a superset
         # of the response's fields while D3 stands.
         self.detection = stuck_only(detection_episodes)
+        # Every detector, unfiltered: the Task 5 tagging pins compare the
+        # STATISTICAL episodes around a fault across the two views.
+        self.all_response = sorted(response_episodes, key=lambda ep: ep["start_ts"])
 
 
 async def _upload_fixture_a(session: AsyncSession) -> BothViews:
@@ -205,23 +209,42 @@ def _fetch_episodes(client: TestClient) -> list[dict[str, Any]]:
 
 
 @contextlib.contextmanager
-def _query_view(views: BothViews) -> Iterator[list[dict[str, Any]]]:
-    """Stuck episodes from the real endpoint, reading *views*' database."""
+def _endpoint_view(views: BothViews) -> Iterator[list[dict[str, Any]]]:
+    """EVERY query-time episode from the real endpoint, reading *views*' db."""
     async def override_get_db() -> AsyncIterator[AsyncSession]:
         yield views.session
 
     app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(app) as client:
-            yield stuck_only(_fetch_episodes(client))
+            yield _fetch_episodes(client)
     finally:
         app.dependency_overrides.clear()
+
+
+@contextlib.contextmanager
+def _query_view(views: BothViews) -> Iterator[list[dict[str, Any]]]:
+    """Stuck episodes only — the span pins compare like with like."""
+    with _endpoint_view(views) as episodes:
+        yield stuck_only(episodes)
 
 
 @pytest.fixture
 def query_episodes(both_views: BothViews) -> Iterator[list[dict[str, Any]]]:
     """Query-time stuck episodes for an upload whose episode rows exist."""
     with _query_view(both_views) as episodes:
+        yield episodes
+
+
+@pytest.fixture
+def all_query_episodes(both_views: BothViews) -> Iterator[list[dict[str, Any]]]:
+    """Query-time episodes of EVERY detector, not just the stuck faults.
+
+    The span pins want stuck faults alone; the Task 5 tagging pins
+    (``test_recovery_tag_fixture_a.py``) are about the statistical
+    episodes AROUND a fault, so they need the unfiltered list.
+    """
+    with _endpoint_view(both_views) as episodes:
         yield episodes
 
 

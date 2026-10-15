@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AnomalyEpisodeSample(BaseModel):
@@ -83,6 +83,21 @@ class AnomalyEpisodeSummary(BaseModel):
     # AnomalyEpisodeRecord.raw_slot_count's docstring in src/db/models.py).
     # None under the same two conditions as frozen_sample_count.
     raw_slot_count: Optional[int] = None
+    # Always False for a stuck-fault episode itself (it IS the faulted
+    # channel). Computed in anomaly_episode_service.py from every released
+    # stuck-fault `anomaly_episodes` row in range, on ANY channel — unlike
+    # `raw_slot_count`/`frozen_sample_count` above, this does not require a
+    # matching record for THIS episode's own channel, so it is never None.
+    is_recovery: bool = Field(
+        default=False,
+        description=(
+            "True when this episode is on a channel other than a "
+            "stuck-fault channel and starts no earlier than "
+            "EPISODE_GAP_SECONDS before, and within "
+            "RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. "
+            "Informational only; does not suppress or rescore."
+        ),
+    )
 
 
 class AnomalyEpisodesResponse(BaseModel):

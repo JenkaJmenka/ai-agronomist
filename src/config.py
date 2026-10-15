@@ -1565,21 +1565,20 @@ DEFAULT_DAY_WINDOW: dict = _parse_json_env(
 )
 
 # =============================================================================
-# Episode Grouping & Recovery Scoring (Tasks 3 + 5)
+# Episode Grouping & Recovery Tagging (Tasks 3 + 5 + 5b)
 # =============================================================================
 # Maximum gap (seconds) between consecutive alerts on the same channel before
 # they are split into separate episodes. Default: 2× expected cadence (10 min).
 EPISODE_GAP_SECONDS: int = int(os.environ.get("EPISODE_GAP_SECONDS", "600"))
 
-# Score cap for recovery episodes: post-fault transitions are informational,
-# not the loudest event.  Capped at 0.4 (below CANONICAL_ANOMALY_THRESHOLD)
-# so recovery never outranks a genuine excursion or the fault itself.
-RECOVERY_SCORE_CAP: float = float(os.environ.get("RECOVERY_SCORE_CAP", "0.4"))
-
-# Window (hours) after a stuck-fault recovery during which excursions on
-# downstream control channels (heating setpoint, pipe temps) are attributed
-# to the recovery — physically real controller responses, not independent
-# faults.  Prevents recovery knock-on from dominating the run (D4).
+# Window (hours) after a stuck-fault's release during which a statistical hit
+# on a DIFFERENT channel is TAGGED is_recovery=True — e.g. a heating setpoint
+# or pipe-temp excursion that is a physically real controller response to the
+# fault clearing, not an independent event.  Tagging is informational only:
+# it never suppresses the hit or changes its score (Task 5 repurposes this
+# constant from a same-channel score cap to cross-channel tagging; see
+# docs/handoff/task5_spec.md).  Reused rather than duplicated so the env-var
+# override key does not change.
 RECOVERY_KNOCKON_WINDOW_HOURS: float = float(
     os.environ.get("RECOVERY_KNOCKON_WINDOW_HOURS", "4.0")
 )

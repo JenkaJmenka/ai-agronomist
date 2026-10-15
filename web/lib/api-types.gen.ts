@@ -1860,6 +1860,7 @@ export interface components {
             severity: string;
             /**
              * Is Recovery
+             * @description True when this episode is on a channel other than a stuck-fault channel and starts no earlier than EPISODE_GAP_SECONDS before, and within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. Informational only; does not suppress or rescore. Always False in this upload-path response -- the live computation is query-time only; see AnomalyEpisodeSummary.is_recovery.
              * @default false
              */
             is_recovery: boolean;
@@ -1940,6 +1941,12 @@ export interface components {
             frozen_sample_count?: number | null;
             /** Raw Slot Count */
             raw_slot_count?: number | null;
+            /**
+             * Is Recovery
+             * @description True when this episode is on a channel other than a stuck-fault channel and starts no earlier than EPISODE_GAP_SECONDS before, and within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. Informational only; does not suppress or rescore.
+             * @default false
+             */
+            is_recovery: boolean;
         };
         /**
          * AnomalyEpisodesResponse

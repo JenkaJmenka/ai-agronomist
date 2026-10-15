@@ -48,7 +48,8 @@ CSV file
 - Statistical baseline threaded via `StatCarry.rows` (last `ROLLING_WINDOW` rows)
 - Stuck state threaded via `StuckCarry` (one `ChannelFreezeState` per channel)
 - Threshold calibrated over the full file's LSTM score distribution
-- Recovery-scoring and episode-grouping run once in `finalize_scores`
+- Episode-grouping runs once in `finalize_scores`; no recovery computation here
+  (`is_recovery` is tagged query-time, in `anomaly_episode_service.py`)
 
 ### Comprehensive pipeline (`_run_with_components`)
 
@@ -536,7 +537,7 @@ The current test suite pins:
 
 | Test file | Count | What it pins |
 |-----------|-------|-------------|
-| `test_episode_grouping.py` | 19 | Episode boundaries, durations (34.83/22.08/47.92/163.83 h), severity, recovery scoring |
+| `test_episode_grouping.py` | 18 | Episode boundaries, durations (34.83/22.08/47.92/163.83 h), severity, `is_recovery` never set on the upload path |
 | `test_stuck_fault_upload.py` | 14 | Stuck-fault detection, gate timing, imputed-channel exclusion |
 | `test_label_integrity.py` | 27 | Trigger channel/detector/severity persistence, reasoning generation |
 | `test_score_transform.py` | 33 | Canonical score transform, non-finite guards |
@@ -546,7 +547,7 @@ The current test suite pins:
 **Critical regression targets:**
 - 6.00 h stuck detection latency (onset_ts → detected_ts)
 - 163.83 h frozen duration (last_frozen_dt boundary, not end_dt)
-- Recovery episodes capped below stuck-fault peak (RECOVERY_SCORE_CAP=0.4)
+- Recovery episodes tagged informationally, never rescored (no score cap)
 - Zero light alerts on clear-sky July midday irradiance
 - Canonical score never saturates at 1.0 for finite input
 
