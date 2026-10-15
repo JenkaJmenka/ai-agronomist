@@ -18,7 +18,7 @@ upload, and vice versa.
 The question is whether and how to bring the comprehensive detector set to
 the upload path without violating the upload path's design invariants:
 bounded memory (5,000-row chunks with rolling carry), streaming throughput,
-and the 111 tests that pin current alert values.
+and the 173 tests that pin current alert values.
 
 ## Current Architecture
 
