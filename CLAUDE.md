@@ -53,12 +53,17 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3684 passed, 22 skipped, 4 xfailed, 0 failed
+### Current baseline — 3721 passed, 22 skipped, 3 xfailed, 0 failed
 
-Measured 2026-10-14 on `main` plus the Task 4 working tree, twice independently
-(qa-engineer, then the orchestrator). **This line is the baseline. Numbers in
-`AGENT_MEMORY.md` are dated snapshots, not baselines** — update this line when the
-figure changes, and date it.
+Measured 2026-10-15 by the orchestrator on `origin/main` at `6119302` (the Task 5
+merge, PR #79), in a clean detached worktree, full suite, 353s. The previous line
+read `3684/22/4/0`, measured 2026-10-14 on `main` plus the Task 4 working tree:
++37 passed and one fewer xfail, which is the Task 5 merge landing 30 recovery-tag
+tests plus the rest of that PR. Re-measure before briefing agents from this line —
+it went stale within a day last time, and Task 4 lost a round to exactly that.
+
+**This line is the baseline. Numbers in `AGENT_MEMORY.md` are dated snapshots,
+not baselines** — update this line when the figure changes, and date it.
 
 The distinction earned its own heading on 2026-10-14. Task 4 briefed two agents
 with `3432/18/5/0`, taken from the newest entry in `AGENT_MEMORY.md` — accurate
