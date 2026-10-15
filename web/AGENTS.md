@@ -33,7 +33,7 @@ enforces the same set including the §1.2 perf budgets in `test/e2e/perf.spec.ts
 
 Local Git hooks (repo root, after `corepack pnpm install` once):
 
-- **pre-commit** — `lint-staged` runs biome `--write` on staged `web/**/*.{ts,tsx,js,jsx,json}`
+- **pre-commit** — `lint-staged` runs biome `--write` on staged `web/**/*.{ts,tsx,js,jsx,json}`, excluding the generated `openapi.json` and `lib/api-types.gen.ts` (committed output must equal `gen:api:refresh` output exactly; see `.github/workflows/openapi-drift.yml`)
 - **pre-push** — `pnpm lint` + `typecheck` + `test` inside `web/` (e2e remains CI-only)
 
 Do not use `--no-verify` unless explicitly requested. Agent skill:
