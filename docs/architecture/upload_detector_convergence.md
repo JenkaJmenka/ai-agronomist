@@ -531,18 +531,27 @@ visible and intentional rather than accidental.
 
 ## Question 6: Migration and risk
 
-### What is pinned today (111 tests)
+### What is pinned today (173 tests)
+
+This count is current — every row below was recounted with
+`pytest <path> --collect-only -q` on 2026-10-15. The Phase-1 gate table
+under *Verification per phase* further down still reads "All 111 tests
+pass"; that figure is left alone deliberately, because it records what
+the gate verified when Phase 1 was written, not today's inventory.
 
 The current test suite pins:
 
 | Test file | Count | What it pins |
 |-----------|-------|-------------|
 | `test_episode_grouping.py` | 18 | Episode boundaries, durations (34.83/22.08/47.92/163.83 h), severity, `is_recovery` never set on the upload path |
-| `test_stuck_fault_upload.py` | 14 | Stuck-fault detection, gate timing, imputed-channel exclusion |
+| `test_stuck_fault_upload.py` | 18 | Stuck-fault detection, gate timing, imputed-channel exclusion |
 | `test_label_integrity.py` | 27 | Trigger channel/detector/severity persistence, reasoning generation |
 | `test_score_transform.py` | 33 | Canonical score transform, non-finite guards |
-| `test_light_unit.py` | 7+ | Clear-sky July no false positives, light unit conversion |
+| `test_light_unit.py` | 31 | Clear-sky July no false positives, light unit conversion |
 | `test_023_migration.py` | 16 | Score backfill, migration mechanics |
+| `test_recovery_tag_fixture_a.py` | 13 | Cross-channel `is_recovery` tagging on real pipeline output — one persisted upload of `native_dec_stuck_fault.csv`, its humidity releases detected by the real detector, read back through `GET /api/anomalies/episodes`; also pins that the query-time and upload-time views of the same pipe-1 excursion report the same peak |
+| `test_recovery_tag_cross_upload.py` | 4 | A release persisted by one upload tags a hit written by a later one — the reason tagging is computed at query time from `anomaly_episodes` rather than from per-upload `stuck_carry` state |
+| `test_recovery_tag_window.py` | 13 | Tagging-window boundaries measured in seconds around a release (`EPISODE_GAP_SECONDS` back, `RECOVERY_KNOCKON_WINDOW_HOURS` forward), start-anchored rather than overlap-based, cross-channel requirement, and that tagging never rescores or reranks |
 
 **Critical regression targets:**
 - 6.00 h stuck detection latency (onset_ts → detected_ts)
