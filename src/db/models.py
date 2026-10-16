@@ -879,3 +879,71 @@ class AnomalyEpisodeRecord(Base):
             f"channel={self.channel!r}, fault_type={self.fault_type!r}, "
             f"is_ongoing={self.is_ongoing})>"
         )
+
+
+class LiveScopeState(Base):
+    """Operator-chosen desired state for one live (tenant, greenhouse) scope.
+
+    Why this table exists
+    ---------------------
+    Before it, the only record that an operator had pressed "Go Live" was
+    :class:`~src.live.runtime.LiveRuntime`'s in-process task map plus the
+    ``_suppressed_scopes`` set in :mod:`src.live.scope_control`.  Both die with
+    the uvicorn process, so every redeploy silently returned every scope to
+    idle with no resume and no signal.  Persisting the operator's intent lets
+    the API restore it on boot.
+
+    This is **desired** state, not observed state.  ``live`` means "the
+    operator wants connectors running for this scope"; it does not mean they
+    are running right now, and it says nothing about whether data is actually
+    arriving (see the freshness fields on ``GET /api/live/status`` for that).
+
+    ``LIVE_AUTOSTART_ENABLED=false`` semantics are preserved: a scope with no
+    row here, or a row saying ``paused``, never starts on its own.  Only an
+    explicit ``POST /api/live/resume`` writes ``live``.
+    """
+
+    __tablename__ = "live_scope_state"
+
+    # Column values for desired_state. Mirrored by the CheckConstraint below
+    # and by src.api.services.live_scope_state_service.
+    DESIRED_LIVE: ClassVar[str] = "live"
+    DESIRED_PAUSED: ClassVar[str] = "paused"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        doc="Multi-tenant customer identifier",
+    )
+    greenhouse_id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        doc="Greenhouse zone identifier",
+    )
+    desired_state: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="Operator intent: 'live' (resume on boot) or 'paused' (stay idle)",
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        doc="When the operator last changed this scope's desired state",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "desired_state IN ('live', 'paused')",
+            name="ck_live_scope_state_desired_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<LiveScopeState(tenant_id={self.tenant_id!r},"
+            f" greenhouse_id={self.greenhouse_id!r},"
+            f" desired_state={self.desired_state!r})>"
+        )

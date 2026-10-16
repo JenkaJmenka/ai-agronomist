@@ -1363,6 +1363,22 @@ LIVE_PERSIST_ENABLED: bool = _env_flag("LIVE_PERSIST_ENABLED", True)
 # Flush cadence for the live-to-DB persistence writer.
 LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SECONDS", "10.0"))
 
+# How old the newest persisted row for a *live* scope may get before
+# GET /api/live/status reports that scope as stale.
+#
+# Default 180 s = 18x the persistence flush cadence (10 s) and 90x the mock
+# poll interval (2 s), so an ordinary flush cycle, a connector reconnect, or
+# a supervised() back-off restart never trips it — only a feed that has
+# genuinely stopped writing does.  Raise it for slow real SCADA vendors whose
+# poll interval approaches this value.
+#
+# A live scope with no rows at all is also stale: "Go Live is on and nothing
+# has ever been written" is precisely the production failure this signal
+# exists to surface.
+LIVE_STALE_AFTER_SECONDS: float = float(
+    os.environ.get("LIVE_STALE_AFTER_SECONDS", "180.0")
+)
+
 # Anomaly threshold for the live scoring path.
 #
 # IMPORTANT: this MUST NOT inherit ANOMALY_THRESHOLD (0.8, the batch/fused-
