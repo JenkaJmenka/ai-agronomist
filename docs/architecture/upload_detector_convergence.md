@@ -352,7 +352,7 @@ random subsampling at ~1–5% — but that is a separate design decision.
 | Carry | Fields | Threaded through |
 |-------|--------|-----------------|
 | `StatCarry` | `rows` (last N), `seen` (dedup set), `total_rows`, `columns` | `score_portion` → next `score_portion` |
-| `StuckCarry` | `channels` (per-channel freeze state), `chunk_medians`, `emitted_onsets`, `skip_channels`, `recovery_channels`, `completed_faults` | `score_portion` → next `score_portion` |
+| `StuckCarry` | `channels` (per-channel freeze state), `chunk_medians`, `emitted_onsets`, `skip_channels`, `completed_faults` | `score_portion` → next `score_portion` |
 
 Adding a third bespoke carry (e.g., for noise-detector baseline variance
 accumulation, or for episode-grouper incremental state) would be a smell.

@@ -175,8 +175,10 @@ It is computed at **query time**, in
 `GET /api/anomalies/episodes` — not in this grouper. Tagging needs a
 `release_ts` from the persisted `anomaly_episodes` table, and the fault
 that released may belong to an earlier upload than the one producing the
-hit being tagged; `stuck_carry.recovery_channels` is in-memory per-upload
-state and cannot see it.
+hit being tagged; the `StuckCarry` threaded through the upload path is
+in-memory per-upload state and cannot see it. (It once carried a
+`recovery_channels` field intended for exactly this; it was never read here
+and was removed as dead state in `d0bcf0d`.)
 
 Consequence: `AnomalyEpisode.is_recovery` on this detection-time path is
 **always `False`**, kept only so the upload response keeps a stable

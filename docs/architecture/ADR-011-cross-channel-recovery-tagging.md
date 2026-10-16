@@ -250,10 +250,28 @@ verdict is expected to flip, but that is derived, not measured.
 
 ## Residual follow-up
 
-`StuckCarry.recovery_channels`' docstring
-(`src/models/stuck_fault_detector.py`) still says the field is used "by
-episode grouping to tag recovery alerts". That is no longer true — episode
-grouping no longer reads it; only the statistical detector's baseline purge
-does. The field itself is left in place because it still has that reader. The
-file is ml-engineer's and was not touched by Task 5, so the correction is
-deferred rather than made here.
+**Resolved — the field is gone.** `StuckCarry.recovery_channels` was removed
+from `src/models/stuck_fault_detector.py` in `d0bcf0d`, and the four test
+assertions that named it were retired in `7ef81c5`. It had no reader anywhere
+in `src/`. A runtime `__getattribute__` trap over the full suite found
+accesses from exactly six sites: `to_dict`/`from_dict` serialization, the
+single write, and those four assertions. At the write site the *same*
+`FaultWindow` object was appended to `completed_faults` on the next line, so
+the field was redundant rather than merely unread — and held strictly less,
+being channel-keyed and therefore overwriting when a channel faulted twice.
+
+**This section previously said the opposite, and that is worth recording.**
+It claimed the field was "left in place because it still has that reader",
+naming the statistical detector's baseline purge as the reader. That was never
+true at the time it was written. The purge — `_purge_fault_from_stat_carry` —
+had been deleted in `7347f86` (2026-09-22) and replaced by
+`_exclude_faults_from_baseline` (`src/api/services/upload_portions.py:476`),
+which reads `completed_faults`, not `recovery_channels`. This ADR wrote the
+claim down on 2026-10-15, three weeks later.
+
+**The lesson:** the claim was not independently derived. It came from reading
+`recovery_channels`' own docstring and restating it — and that docstring was
+the very artifact the follow-up existed to correct. A comment under audit is
+the one source that cannot corroborate itself. Settle "does anything read
+this?" against call sites, never against the prose attached to the
+declaration.
