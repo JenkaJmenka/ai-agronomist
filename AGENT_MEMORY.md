@@ -5974,11 +5974,13 @@ which is ml-engineer's and was deliberately untouched by Task 5.
    reader is the statistical detector's baseline purge, which is why the field
    is still live and was NOT removed.~~ **CORRECTED 2026-10-15: that reader
    does not exist.** It was `_purge_fault_from_stat_carry`, deleted in
-   `7347f86` (2026-09-22, 110 commits before this entry was written) and
-   replaced by `_exclude_faults_from_baseline`
+   `7347f86` (2026-09-22) and replaced by `_exclude_faults_from_baseline`
    (`src/api/services/upload_portions.py:476`), which reads `completed_faults`,
    `channels` and `emitted_onsets`. This entry took the claim from the field's
    own docstring and recorded it as a verified reader; it was never checked.
+   Both this entry and `ADR-011`'s claim were introduced by the same commit,
+   `9b49aa2` (2026-10-15) — three weeks, and 107 commits
+   (`git rev-list --count 7347f86..9b49aa2`), after the reader was deleted.
    The field is **dead state** — written at `stuck_fault_detector.py:1064` and
    serialized, read by nothing.
 2. **Its docstring is now false.** It still says the field is used "by episode
