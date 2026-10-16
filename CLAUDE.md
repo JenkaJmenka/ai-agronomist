@@ -53,14 +53,19 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3721 passed, 22 skipped, 3 xfailed, 0 failed
+### Current baseline — 3725 passed, 22 skipped, 3 xfailed, 0 failed
 
-Measured 2026-10-15 by the orchestrator on `origin/main` at `6119302` (the Task 5
-merge, PR #79), in a clean detached worktree, full suite, 353s. The previous line
-read `3684/22/4/0`, measured 2026-10-14 on `main` plus the Task 4 working tree:
-+37 passed and one fewer xfail, which is the Task 5 merge landing 30 recovery-tag
-tests plus the rest of that PR. Re-measure before briefing agents from this line —
-it went stale within a day last time, and Task 4 lost a round to exactly that.
+Measured 2026-10-16 by the orchestrator on branch `task-5-leftovers-round2` at
+merge commit `ad9f9aa`, full suite in the foreground, 346.29s:
+`./venv/bin/python -m pytest tests/ -q`. That branch is the Task 5 leftovers
+round 2+3 work (BACKLOG-2/-5, ADR-012, doc corrections) and is **open as a PR,
+not yet merged** — until it lands, `origin/main` at `6119302` still measures
+`3721/22/3/0`, which is the figure to brief agents working off main.
+
+The +4 is BACKLOG-5's `TestRollingDeployCarryCompat`, which pins that a
+`StuckCarry` payload serialized before `recovery_channels` was removed still
+deserializes after it. Net test churn on that branch: one test renamed, one
+assertion retired, four added.
 
 **This line is the baseline. Numbers in `AGENT_MEMORY.md` are dated snapshots,
 not baselines** — update this line when the figure changes, and date it.
