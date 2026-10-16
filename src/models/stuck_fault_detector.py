@@ -650,10 +650,13 @@ class StuckCarry:
     ``skip_channels`` excludes imputed channels (constant fill values that
     would otherwise trigger a false stuck alert for the entire file).
 
-    ``recovery_channels`` maps channel → FaultWindow for channels that just
-    exited a detected fault.  Used by the statistical detector to purge
-    contaminated baseline values and by episode grouping to tag recovery
-    alerts.
+    ``completed_faults`` accumulates one ``FaultWindow`` per released
+    freeze that crossed the gate.  It is the only record of a released
+    fault: baseline exclusion, alert suppression and episode grouping all
+    read it.  (A per-channel ``recovery_channels`` dict holding the same
+    windows was removed in BACKLOG-5 — it had no reader, and being keyed by
+    channel it silently dropped all but the most recent release per
+    channel.)
 
     Serialisation
     -------------
@@ -672,7 +675,6 @@ class StuckCarry:
     cadence_median_seconds: float | None = None
     emitted_onsets: set[tuple[str, str]] = field(default_factory=set)
     skip_channels: frozenset[str] = field(default_factory=frozenset)
-    recovery_channels: dict[str, FaultWindow] = field(default_factory=dict)
     completed_faults: list[FaultWindow] = field(default_factory=list)
 
     def has_onset_fired(self, channel: str, onset_ts: str) -> bool:
@@ -783,9 +785,6 @@ class StuckCarry:
             "cadence_median_seconds": self.cadence_median_seconds,
             "emitted_onsets": [list(pair) for pair in self.emitted_onsets],
             "skip_channels": list(self.skip_channels),
-            "recovery_channels": {
-                ch: _fault_window(fw) for ch, fw in self.recovery_channels.items()
-            },
             "completed_faults": [_fault_window(fw) for fw in self.completed_faults],
         }
 
@@ -795,6 +794,20 @@ class StuckCarry:
 
         Restores timezone-aware UTC datetimes, set-of-tuples for
         ``emitted_onsets``, and ``frozenset`` for ``skip_channels``.
+
+        Every field is read with an explicit ``d.get(...)`` and passed as a
+        NAMED kwarg to ``cls(...)``.  That form is load-bearing for rolling
+        deploys, not a style choice: unknown keys in ``d`` are ignored, so a
+        payload serialised by an OLD worker and deserialised by a NEW one
+        survives a field removal.  The carry crosses a process boundary
+        twice — the RabbitMQ portion message
+        (``UploadPortionMessage.stuck_carry_state``) and a persisted portion
+        row read back at finalize — and both can hold a payload written
+        before the deploy.  Refactoring this to ``cls(**d)`` would turn every
+        such in-flight payload into a hard ``TypeError``.
+        ``UPLOAD_PORTION_SCHEMA_VERSION`` does NOT guard against this: it
+        stayed at 2 across the BACKLOG-5 removal of ``recovery_channels``,
+        so this property of the constructor call is the only protection.
         """
 
         def _parse_dt(s: str | None) -> datetime | None:
@@ -847,6 +860,8 @@ class StuckCarry:
                 has_fired=bool(fd["has_fired"]),
             )
 
+        # Named kwargs, never ``cls(**d)`` — see the docstring: this is what
+        # lets a pre-deploy payload with a since-removed key still load.
         return cls(
             channels={
                 ch: _freeze_state(ch, sd)
@@ -861,10 +876,6 @@ class StuckCarry:
                 for pair in d.get("emitted_onsets", [])
             },
             skip_channels=frozenset(d.get("skip_channels", [])),
-            recovery_channels={
-                ch: _fault_window(fd)
-                for ch, fd in d.get("recovery_channels", {}).items()
-            },
             completed_faults=[
                 _fault_window(fd) for fd in d.get("completed_faults", [])
             ],
@@ -1033,7 +1044,8 @@ class WallclockStuckDetector:
                     )
                     if alert is not None:
                         alerts.append(alert)
-                    # Record recovery for baseline cleanup (Task 3).
+                    # Record the released window for baseline exclusion,
+                    # alert suppression and episode grouping (Task 3).
                     # Only if a fault was actually detected for this
                     # freeze (key is in emitted_onsets).
                     if carry.has_onset_fired(channel, state.onset_ts):
@@ -1061,7 +1073,6 @@ class WallclockStuckDetector:
                             ),
                             has_fired=True,
                         )
-                        carry.recovery_channels[channel] = fw
                         carry.completed_faults.append(fw)
                     if not is_cadence_pin_resolved:
                         cadence_pin = _pre_onset_cadence_seconds(

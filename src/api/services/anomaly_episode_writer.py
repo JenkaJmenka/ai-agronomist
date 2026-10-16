@@ -14,9 +14,12 @@ Two sources, never conflated (task3_4_spec.md section "Read episodes from
 exactly two sources"):
 
 - **Released** — ``stuck_carry.completed_faults`` where ``fw.has_fired``.
-  ``stuck_carry.recovery_channels`` is NEVER used here: it is a per-channel
-  dict that overwrites on every release, so it silently drops all but the
-  most recent released window per channel.
+  ``stuck_carry.recovery_channels`` (removed in BACKLOG-5; it had no
+  reader) was never used here either: it was a per-channel dict that
+  overwrote on every release, so it would have silently dropped all but
+  the most recent released window per channel. ``completed_faults`` is a
+  list and keeps every release, which is why this writer reads that
+  instead.
 - **Open** — ``stuck_carry.channels`` where
   ``stuck_carry.has_onset_fired(channel, state.onset_ts)``.  A freeze that
   fired the gate but never released has no ``FaultWindow`` at all, so this
