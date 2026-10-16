@@ -294,7 +294,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 | backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
-| devops-lead | `docker/`, `.github/`, `docs/deployment/`, `docs/runbooks/` |
+| devops-lead | `docker/`, `.github/`, `.husky/`, `docs/deployment/`, `docs/runbooks/` |
 | tech-lead | `docs/refactor/` |
 | orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
 
@@ -346,6 +346,28 @@ if that file needs editing, get an owner assigned first.
 one-owner rule: another agent may add to a handoff spec when its own task
 explicitly says so (Task 4 does). It is a cross-agent contract, not one
 agent's working notes.
+
+`.husky/` is devops-lead's, assigned 2026-10-16. It had no row, which surfaced
+when the pre-commit hook was found to fail in every git worktree: `node_modules/`
+is gitignored, so `pnpm exec lint-staged` cannot resolve and the hook aborts.
+Six commits across two rounds were therefore made with `--no-verify`. The hook is
+local developer CI and devops-lead already owns `.github/`, so they belong
+together. Note the asymmetry that made the gap easy to miss: the `lint-staged`
+*config* lives in root `package.json`, which this row does NOT cover — that was
+assigned to frontend-engineer for BACKLOG-2 and still has no standing owner.
+
+Two facts worth keeping with this row, both learned the hard way:
+
+- **`core.hooksPath` is an absolute path into the main checkout**
+  (`<main>/.husky/_`), so a worktree commit runs the MAIN checkout's copy of
+  `.husky/pre-commit` with cwd set to the worktree. A hook fix is therefore
+  inert in worktrees until the main checkout's own branch carries it. Anyone
+  testing such a fix from a worktree beforehand will see the old hook and
+  conclude it does not work.
+- **Never commit with `--no-verify` if the commit touches a file the
+  lint-staged glob covers.** If the hook cannot run, stop and report. "It would
+  have been a no-op anyway" is a judgement made *instead of* the check, and it
+  is exactly the reasoning that lets a real bypass through later.
 
 `.gitignore` is the orchestrator's. It earned a row on 2026-10-06: `docs/*`
 had silently ignored `docs/handoff/task3_4_spec.md`, so the Task 3 spec was
