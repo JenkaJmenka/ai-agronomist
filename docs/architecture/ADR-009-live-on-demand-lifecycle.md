@@ -1,13 +1,184 @@
 # ADR-009: On-Demand Lifecycle for Live / Mock SCADA Data Sources
 
-Status: **Proposed** — design only, no implementation.
-Date: 2026-09-15
-Scope: `src/live/**`, `src/api/routes/live.py`, `src/config.py`, `web/features/monitoring/**`
+Status: **Accepted in principle, superseded in mechanism** — the problem in §1
+was fixed on 2026-09-16 by `9c14dc3`, with a much smaller mechanism than the
+§4–§6 design; the durable-state gap that fix left open was closed on 2026-10-17
+by `f9b2378` (migration `028`), using the option §5.1 had rejected. The Redis
+session/lease store (§5.2), the reconciler (§4.3), the `/sessions` API (§6), the
+client-data guardrail (§7) and the §9 config changes were **never built**. §0 is
+the authoritative record of what shipped; §2–§12 are preserved as the
+2026-09-15 design and are read as history, not as current state.
+Date: 2026-09-15 — revised 2026-10-17 (§0 added; §2 re-dated as history; §4–§12
+annotated against what shipped. No design text was deleted.)
+Scope: `src/live/**`, `src/api/routes/live.py`, `src/config.py`,
+`src/api/services/live_boot_resume.py`, `src/api/services/live_freshness.py`,
+`src/api/services/live_scope_state_service.py`,
+`src/api/services/tenant_data_wipe.py`, `src/db/models.py`,
+`alembic/versions/028_add_live_scope_state.py`, `web/features/monitoring/**`
 
 > **Authoring note.** This document was produced on **Opus** (via the Agent tool),
 > not on the `claude-fable-5` model specified for the architect role in
 > `.claude/agents/architect.md`, because Fable 5 credits were exhausted at the
 > time of writing. No other deviation from the architect role was made.
+>
+> The 2026-10-17 revision (§0 and the annotations) was likewise written on
+> **Opus**, in the architect's `docs/architecture/` ownership area, because the
+> `Edit`/`Grep` grant that would let the architect agent patch a 781-line file
+> in place landed in `31fd26a` and does not apply to an already-running session.
+
+---
+
+## 0. Implementation record (added 2026-10-17)
+
+This ADR stayed marked **Proposed** for a month while the code moved underneath
+it — it was already stale the day after it was written. Everything below is
+verified against the tree at `f9b2378`;
+line references in §2–§12 are as of **2026-09-15** and several have since moved.
+
+### 0.1 What shipped, and when
+
+**2026-09-16 — `9c14dc3`, "stop idle scope connectors outright instead of muting
+persistence."** The requirement-2 fix, built *without* the §4–§6 machinery:
+
+| Piece | Where |
+|---|---|
+| `LIVE_AUTOSTART_ENABLED`, default `False` | `src/config.py:1345` |
+| Gate: autostart on → start every scope; off → every scope idle | `src/live/runtime.py:119` (docstring `:103-111`) |
+| Per-scope task map; `start_scope` / `stop_scope` spawn or cancel a scope's merger + connector tasks as a unit | `src/live/runtime.py:170`, `:187`, `_scope_tasks` at `:69` |
+| `POST /api/live/resume` / `POST /api/live/pause` drive the lifecycle | `src/api/routes/live.py:198`, `:280` |
+| `GET /api/live/status` reports `paused` for a configured-but-idle scope | `src/api/routes/live.py:46`, `:101` |
+
+The commit message states the reason plainly: `MOCK_SCADA_ENABLED` defaults to
+`True`, so connectors previously ran forever even when autostart gated
+*persistence* off. Stopping the tasks outright means an idle scope never runs a
+connector at all, rather than running one whose output is discarded.
+`dbedda7`, the same day, added a data-layer proof that an idle scope writes no
+rows.
+
+**2026-09-17 — `719fd8f`, `242d000`, `ec17512`, `8a021cb`.** Honest
+`not_configured` reporting. `POST /api/live/resume` on a scope with no source
+wired up now returns `resumed: false, scope_status: "not_configured"`
+(`src/api/routes/live.py:219-243`) instead of a green toggle that claims a
+success it cannot deliver.
+
+**2026-10-17 — `f9b2378`.** The remedy for the defect this ADR's own design
+created (§0.2):
+
+| Piece | Where |
+|---|---|
+| Desired state (`live` / `paused`) persisted per scope | `LiveScopeState`, `src/db/models.py:884`; table `live_scope_state` |
+| Migration, `down_revision = "027"`, **inserts no rows** — an empty table means every scope idle, preserving `LIVE_AUTOSTART_ENABLED=false` semantics | `alembic/versions/028_add_live_scope_state.py` |
+| Boot resume: intersect stored-`live` with `runtime.configured_scopes()`, start those | `src/api/services/live_boot_resume.py`, called at `src/api/main.py:155` |
+| Boot log names resumed / idle / stored-live-but-unconfigured / failed scopes, replacing the bare `"Live runtime started."` | `live_boot_resume.log_boot_resume` |
+| A wipe writes `paused` before its `DELETE`s, so a wiped scope never self-resumes | `src/api/services/tenant_data_wipe.py:59` |
+| `GET /api/live/status` gains `freshness: {state, newest_reading_at, age_seconds, is_stale, threshold_seconds}` | `src/api/services/live_freshness.py`; `LIVE_STALE_AFTER_SECONDS` default `180.0` at `src/config.py:1378` |
+
+### 0.2 The consequence this design had, recorded honestly
+
+§4–§6 made Go Live **manual and in-process only**. Scope state lived solely in
+`LiveRuntime`'s task map and `scope_control._suppressed_scopes`
+(`src/live/scope_control.py:31`), both of which die with the uvicorn process.
+The result, which this document did not anticipate:
+
+> **Every Railway redeploy silently returned every scope to idle, with no resume
+> and no signal.** `tenant_2/gh_A` was consequently silent for 27 days before
+> anyone noticed. A production audit on **2026-10-16** found that **zero
+> `source='live'` rows had ever been written, in any tenant.**
+
+That is a direct cost of the decision recorded here, not a footnote. §10 row 5
+("API restarts with a viewer connected → reconciler restarts generation") was
+the design's answer to restart survival, and because the reconciler was never
+built, nothing replaced it until `028`. §2.5 correctly identified that the
+in-process set "does not survive an API restart — a suppressed scope silently
+un-suppresses"; the symmetric failure — a *resumed* scope silently re-suppresses
+— was not written down, and it is the one that bit.
+
+**Interval note.** `9c14dc3` landed 2026-09-16 and the audit ran 2026-10-16, a
+30-day span; the 27-day figure is the audit's own and presumably dates from a
+later redeploy rather than from the commit.
+
+### 0.3 Operational constraint: the API must run as a single replica
+
+> **The API service must be deployed with exactly one replica.** This is a
+> decision taken on 2026-10-17, not an open bug awaiting a fix: the defect below
+> is **known, understood, and deliberately not being fixed**. Scaling the API to
+> two or more replicas multiplies the persisted live row rate by the replica
+> count, with **no error, no log line and no alert** when it happens.
+
+From backend's analysis of `f9b2378`, recorded here because no other document
+owns it.
+
+**Why the database does not deduplicate the extra writes.** `PersistenceBatcher`
+inserts both `SensorReading` and `RawReading` under
+`on_conflict_do_nothing(index_elements=_CONFLICT_COLS)`
+(`src/live/persistence.py:384`, `:391`), where `_CONFLICT_COLS` is
+`["tenant_id", "greenhouse_id", "timestamp"]` (`:113`). That drops a row only
+when all three key columns match an existing one — and two replicas never agree
+on `timestamp`:
+
+* `ChannelMerger` stamps a bucket with the **first raw reading to land in it**,
+  not with a floored bucket boundary. `self._bucket_ts[bucket_idx] =
+  reading.timestamp` runs only on the branch that creates the bucket
+  (`src/live/merge.py:222`, under `if bucket is None:` at `:219`), and
+  `_emit_bucket` reads it straight back out as the event timestamp (`:266`).
+* That raw timestamp is microsecond-precision wall clock in production:
+  `MockScadaSource.stream` takes `datetime.now(timezone.utc)` on every tick
+  (`src/live/sources/mock.py:169`). The deterministic `start_time` branch just
+  above it (`:164-167`) is a seeded test/replay path — `mock_factory.py` never
+  sets that param — so a deployed replica always takes the wall-clock branch.
+
+Each replica runs its own generator and so observes its own first reading for
+the same logical bucket. The emitted timestamps differ, the primary keys differ,
+nothing collides, and nothing is dropped. **N replicas → N× the persisted row
+rate, silently.**
+
+**Why `028` made this worse.** Before boot resume the invariant was enforced by
+accident of the request path: a multi-replica deploy still required an operator
+to click Go Live, and that single HTTP request was routed to exactly one
+replica, so only that replica started a connector. Nothing in the code enforced
+it — the load balancer did, as a side effect of there being exactly one
+triggering request. Since `f9b2378` **every replica reads the same
+`live_scope_state` rows at boot and self-resumes**, so every replica generates.
+The accident is gone and nothing replaced it.
+
+**The candidate fix, and why it is not being taken now.** Floor the bucket
+timestamp in `_emit_bucket`: emit the bucket boundary
+(`bucket_idx * self._emit_interval`, the inverse of the index computed at
+`src/live/merge.py:209`) instead of the first reading's timestamp. Every replica
+would then produce an identical primary key for the same logical bucket, and
+`ON CONFLICT DO NOTHING` would deduplicate them for free — no new
+infrastructure, no new process, a handful of lines. **The caveat, and the reason
+it is deferred, is that it changes the timestamps that get persisted.** Live
+rows would land on exact bucket boundaries rather than on the arrival instant of
+whichever reading happened to open the bucket, which shifts future live rows
+relative to the client CSV's 5-minute grid and makes already-stored rows
+inconsistent with newly-written ones. That is a data-shape change requiring its
+own analysis, not a local refactor.
+
+The other two remedies are the ones §5.4 already names, and neither was built:
+
+| Option | Cost |
+|---|---|
+| Floor the bucket timestamp in `_emit_bucket` | Smallest change; **changes persisted timestamps** — deferred for that reason |
+| Per-scope Redis leader lock (`live:generator:{t}:{gh}`, §5.4) | Requires the Redis coordination layer of §5.2, which was never built |
+| Relocate connectors to `src/workers/` | A new process, deploy target and restart/health surface |
+
+§5.4's conclusion ("the invariant is kept for now, but designed away") is now
+wrong in both halves: it was not designed away, and boot resume has made keeping
+it harder. Until one of the three options above lands, **single replica is a
+hard deployment requirement for the API service**, load-bearing in a way it was
+not before `028`.
+
+### 0.4 Dangling reference
+
+§2.5, §5.4 and §11 cite `docs/live_scada_connectors.md` §8 as the record of the
+single-worker invariant and of the scale-out options.
+**That file does not exist** — not in the working tree and not anywhere in git
+history (`git log --all -- docs/live_scada_connectors.md` is empty). The same
+citation appears in `src/live/scope_control.py:20`. The invariant is in fact
+documented only in that module docstring (`src/live/scope_control.py:1-23`) and
+in `src/live/hub.py`. Left in place rather than silently rewritten, so the
+missing file is findable; creating it is outside this ADR's scope.
 
 ---
 
@@ -19,15 +190,27 @@ Two requirements from the operator:
 2. **Live data must be generated only on demand** — when the operator clicks the
    *Live* button — and must **stop** when they are done.
 
-Today neither holds. Generation is unconditional from API startup, defaults ON
-into a **real tenant scope**, and persists synthetic white noise into the same
-tables the client CSV lands in.
+As of 2026-09-15 neither held. Generation was unconditional from API startup,
+defaulted ON into a **real tenant scope**, and persisted synthetic white noise
+into the same tables the client CSV lands in.
+
+> **Status of these requirements (2026-10-17).** Both are met, by `9c14dc3`
+> rather than by the design below: with `LIVE_AUTOSTART_ENABLED=false` an
+> unconfigured deploy spawns no connector task, so an upload cannot trigger
+> generation, and generation starts only on an explicit `POST /api/live/resume`.
+> What `9c14dc3` did *not* give them was durability across a restart — see §0.2.
 
 ---
 
-## 2. Current state (verified, with file:line)
+## 2. State as of 2026-09-15, before `9c14dc3` (verified then, with file:line)
 
-### 2.1 Generation starts unconditionally at API boot
+> **This section is history, not current state** (re-dated 2026-10-17). It
+> records the world the design below was reacting to. Every subsection is
+> annotated with what `9c14dc3` (2026-09-16) and `f9b2378` (2026-10-17) changed;
+> the line numbers are as of 2026-09-15 and most have since moved — e.g. the
+> `runtime.start()` call cited at `src/api/main.py:133` is now at `:142`.
+
+### 2.1 Generation starts unconditionally at API boot *(fixed 2026-09-16)*
 
 | Step | Location |
 |---|---|
@@ -42,7 +225,16 @@ tables the client CSV lands in.
 it and then iterates `stream()` forever. There is **no subscriber check, no
 scope gate, and no stop condition** other than task cancellation at shutdown.
 
-### 2.2 The defaults point at a real tenant
+> **Changed 2026-09-16 (`9c14dc3`).** `LiveRuntime.start()` no longer starts
+> every scope. With `LIVE_AUTOSTART_ENABLED=false` (the default,
+> `src/config.py:1345`) it starts only the persistence batcher and leaves every
+> scope idle (`src/live/runtime.py:119`); the per-scope merger and connector
+> tasks are spawned by `start_scope` and cancelled by `stop_scope`
+> (`:170`, `:187`). The mock stream loop itself is unchanged — it still has no
+> internal gate; it simply is not running. Since 2026-10-17 (`f9b2378`) the set
+> of scopes started at boot is the stored-`live` set, not the empty set.
+
+### 2.2 The defaults point at a real tenant *(still true — see §9.1)*
 
 | Config | File:line | Current default | Effect |
 |---|---|---|---|
@@ -59,7 +251,15 @@ four connectors per scope — `mock_climate`, `mock_co2`, `mock_fertigation`,
 the signal is white noise around a slow sine — exactly the shape an LSTM-VAE
 cannot reconstruct, which is why it dominated the anomaly counts.
 
-### 2.3 Persisted rows are indistinguishable at the row level
+> **Unchanged as of 2026-10-17.** `MOCK_SCADA_ENABLED` is still `True`
+> (`src/config.py:1337`) and `MOCK_SCADA_SCOPES` is still `"tenant_1:gh_A"`
+> (`:1338`). The §9.1 flips were never made; `LIVE_AUTOSTART_ENABLED=false` was
+> judged to subsume them, since a configured-but-idle scope generates nothing.
+> The residual risk is that the *name* of the shipped demo scope is still a real
+> tenant, so a single `POST /api/live/resume` against `tenant_1/gh_A` is all it
+> takes — and since `028` that choice now survives a redeploy. See §9.1.
+
+### 2.3 Persisted rows are indistinguishable at the row level *(still true)*
 
 `PersistenceBatcher` writes both `SensorReading` and `RawReading` with
 `source="live"` (`src/live/persistence.py:168`, `:198`). The measured production
@@ -67,7 +267,49 @@ outcome: ordinary days had exactly 288 rows (client CSV, 5-min cadence);
 2026-09-14/15 carried 11,119 and 19,394 extra live rows, and **96.7 % of all
 flagged anomalies originated from them**.
 
-### 2.4 The *Live* button does not control generation
+> **Still true at the row level** (`src/live/persistence.py` writes `source="live"`
+> for every vendor; the §9.3 `"live:mock"` tagging was never built).
+>
+> **Which database these row counts came from: production.** Resolved
+> 2026-10-17; the earlier revision of this annotation had left it open. The
+> figures were recorded by the same session that wrote this ADR, in
+> `AGENT_MEMORY.md`, committed by `d34d2f5` (2026-09-15) — the very commit that
+> added this document. That entry states the source of the data in its own
+> words:
+>
+> > "Prod evidence: ordinary days had exactly 288 rows (client CSV, 5-min,
+> > `source="Timestamp"`); 2026-09-14/15 had 11,119 and 19,394 EXTRA rows at ~2s
+> > cadence, `source="live"`. **96.7% of flagged anomalies came from live rows.**
+> > The client CSV was clean: 105,120 timestamps, every gap exactly 300.0s."
+> > — `AGENT_MEMORY.md:601-604`
+>
+> and opens, four paragraphs earlier, "Verified against prod: not a detection
+> regression" (`:586`). These are therefore **production** numbers — not a local
+> SQLite dev database and not a seeded test fixture. Both cited lines entered the
+> file in `d34d2f5`; line numbers are as of `ebd0852`.
+>
+> **This also resolves the apparent conflict with the 2026-10-16 audit** (§0.2),
+> which found no `source='live'` rows in any tenant. The same memory entry
+> records the containment that closes the gap — "user set
+> `MOCK_SCADA_ENABLED=false` and purged `source='live'` rows via
+> `DELETE /upload/live-data` (`wipe_live_demo_data`)" (`:608-609`) — and
+> `d34d2f5`'s commit message gives the backfill's motivation as "with the live
+> mock rows purged, the Anomaly page had almost nothing left to show even though
+> 105,120 real readings were present". A later, independent entry corroborates
+> it in passing: "Verified against prod (post mock-data purge)" (`:507`). The
+> rows were in production on 2026-09-14/15 and were deleted on 2026-09-15,
+> thirty-one days before the audit ran.
+>
+> **One correction to how that audit is stated, here and in §0.2.** A
+> point-in-time count cannot establish that zero live rows *had ever been
+> written* — only that none were **present** on 2026-10-16. `wipe_live_demo_data`
+> issues ordinary `DELETE`s (`src/api/services/tenant_data_wipe.py:214`) and
+> leaves no tombstone, so purged rows are invisible to precisely that query. Read
+> as "none present", the audit and the counts above are consistent and always
+> were; it was the "had ever been written" phrasing that made them look
+> irreconcilable.
+
+### 2.4 The *Live* button does not control generation *(fixed 2026-09-16)*
 
 | Endpoint | File:line | What it actually does |
 |---|---|---|
@@ -81,7 +323,20 @@ flips a `live` URL param, re-anchors the chart window, and calls
 `web/features/monitoring/hooks/useLiveReadings.ts:85-210` purely as a reader.
 **Nothing in the browser can start or stop a connector.**
 
-### 2.5 `scope_control` is a suppression gate, not a lifecycle switch
+> **Changed 2026-09-16 (`9c14dc3`).** `POST /api/live/resume`
+> (`src/api/routes/live.py:198`) now calls `runtime.start_scope` and
+> `POST /api/live/pause` (`:280`) calls `runtime.stop_scope`, so the browser
+> does start and stop connectors — just via these two endpoints rather than via
+> the §6 session API, which was never built. `/api/live/events` is still a
+> read-only subscriber that starts nothing, as §6.5 intended.
+>
+> `/resume` also no longer claims success it cannot deliver: on a scope with no
+> source wired up it returns `resumed: false, scope_status: "not_configured"`
+> (documented `:219-222`, implemented `:235-241`; 2026-09-17). `/pause` records
+> `paused` in every case including
+> `not_configured`, because pause is the safe direction (`:302-306`).
+
+### 2.5 `scope_control` is a suppression gate, not a lifecycle switch *(partly superseded)*
 
 `src/live/scope_control.py:31` is a **module-level in-process `set`**. Its own
 docstring (`:12-22`) records the consequences:
@@ -95,6 +350,20 @@ Suppression is also only a *publish/persist* mute: `on_reading`
 (`src/live/runtime_builder.py:168-186`) returns early, but the connector keeps
 spinning and the merger keeps bucketing. CPU and vendor API calls continue.
 **It must not be naively repurposed as the start/stop mechanism.**
+
+> **Where this stands at 2026-10-17.** The module survives; `scope_control` is
+> still the publish/persist mute used after *Clear all data*, and `/resume` still
+> falls back to it when no `LiveRuntime` is on `app.state`
+> (`src/api/routes/live.py:257-277`, which reports `scope_status: "unmanaged"`
+> rather than guessing). Start/stop proper moved to
+> `LiveRuntime.start_scope` / `stop_scope`, so the warning above was heeded.
+>
+> Two of the three bullets are now obsolete for the *operator's* choice, which
+> since `028` lives in `live_scope_state`: it starts empty rather than
+> permissive (generation is OFF by default, not ON), and it survives an API
+> restart. The first bullet — invisibility across uvicorn workers — still holds
+> for `scope_control` itself, and §0.3 records that boot resume has made the
+> single-worker invariant harder to keep rather than easier.
 
 ---
 
@@ -113,7 +382,25 @@ spinning and the merger keeps bucketing. CPU and vendor API calls continue.
 
 ---
 
-## 4. Proposed state machine
+## 4. Proposed state machine — **not built** (noted 2026-10-17)
+
+> Nothing in §4 exists in the code. There is no six-state machine, no
+> `ScopeSupervisor`, no reconciler loop and no `LIVE_RECONCILE_INTERVAL_SECONDS`.
+> What shipped is a two-state model — a scope is either running tasks or it is
+> not (`LiveRuntime.is_scope_active`, `src/live/runtime.py:278`) — driven
+> directly by `/resume` and `/pause` rather than by a reconciler observing
+> viewer leases.
+>
+> Two ideas from §4 did survive, in `9c14dc3`: §4.1's rule that **a scope's
+> connectors start and stop as a unit** (that is exactly what `_scope_tasks`
+> and `start_scope`/`stop_scope` implement, for the bucket-timing reason given
+> below), and §4.4's point that `/api/live/status` must consult the scope
+> registry rather than the merger map — `is_scope_configured`
+> (`src/live/runtime.py:292`, over `configured_scopes` at `:282`) is that
+> registry lookup, and it is what makes
+> the `not_configured` and `paused` answers honest. §4.4's *lazy connector
+> construction* was not adopted: connectors are still built eagerly in
+> `build_scopes_from_config` and merely left unstarted.
 
 ### 4.1 Per-scope generation state
 
@@ -226,6 +513,36 @@ Postgres was rejected for a second reason: the reconciler would poll it every
 risk (`AGENT_MEMORY.md` — the 023 incident). A safety fix should not require a
 schema change.
 
+> ### 5.1a Correction — this rejection was wrong (2026-10-17)
+>
+> **Postgres is what shipped**, as the `live_scope_state` table in migration
+> `028`. Redis was never used for scope state at all. The reasoning above fails
+> on a distinction this document did not draw:
+>
+> * **"Ephemeral data does not belong in the system of record"** conflates two
+>   different things. *Viewer leases* are ephemeral and Redis would indeed be
+>   right for them. *The operator's desired state* — "I pressed Go Live on this
+>   greenhouse" — is not ephemeral; it is a deliberate configuration choice that
+>   must outlive both the browser and the process. Putting it behind a Redis TTL
+>   would have reproduced the very defect §0.2 describes, just with a longer
+>   fuse. `LiveScopeState`'s docstring (`src/db/models.py:896-899`) draws the
+>   line this ADR missed: desired state, not observed state.
+> * **The polling cost never materialised**, because the reconciler was never
+>   built. The table is read once, at boot
+>   (`src/api/services/live_boot_resume.py`), and written only when an operator
+>   hits `/resume` or `/pause` or runs a wipe. That is a handful of queries per
+>   deploy, not one per scope per 5 s.
+> * **The migration risk was real and was handled, not avoided.** `028`
+>   deliberately inserts no rows, so an empty table means every scope idle and
+>   the `LIVE_AUTOSTART_ENABLED=false` semantics carry over unchanged. A deploy
+>   where `028` has not yet run degrades to exactly the pre-`028` behaviour:
+>   `/resume` returns `desired_state_persisted: false` and the scope streams
+>   until the next restart only (`src/api/routes/live.py:228-230`).
+>
+> The table above is left as written. It is the record of a judgement that
+> turned out to be wrong, and the reason it was wrong — treating operator intent
+> as session state — is the useful part.
+
 ### 5.2 Key layout
 
 | Key | Type | TTL | Contents |
@@ -267,6 +584,33 @@ the viewer gate only to its `on_demand` members.
 > flip `LIVE_REAL_SOURCE_LIFECYCLE` to `on_demand` and accept the gaps.
 
 ### 5.4 Multi-worker: the invariant is **kept for now, but designed away**
+
+> **Correction (2026-10-17): the invariant is kept, *not* designed away, and
+> `f9b2378` has weakened it.** Neither the Redis coordination state nor the
+> `live:generator` lease was ever built, so none of the "designed away" half of
+> this section exists. Worse, boot resume removed the accident that had been
+> protecting a multi-replica deploy: previously Go Live required an operator
+> click, and that one HTTP request landed on exactly one replica, so one replica
+> generated. Now every replica self-resumes at boot from the same
+> `live_scope_state` rows.
+>
+> The obvious defence does not work. `ON CONFLICT DO NOTHING`
+> (`src/live/persistence.py:384`, `:391`) would dedupe the replicas only if they
+> produced identical primary keys, and they do not: `ChannelMerger._emit_bucket`
+> (`src/live/merge.py:257`) stamps the event with the **first raw reading's
+> timestamp** for that bucket (`:222`, read back at `:266`) rather than with a
+> floored bucket boundary, and two replicas observe different first readings.
+> **N replicas means N× the row rate, silently.**
+>
+> Not fixed. The remedies are the two this section already names — a Redis
+> leader lock, or relocating connectors to `src/workers/`. A third, cheaper
+> option this section did not consider: floor the bucket timestamp to the bucket
+> boundary in `_emit_bucket`, which would make `ON CONFLICT DO NOTHING` do the
+> deduplication for free. That changes the timestamps of persisted live rows, so
+> it is not free of consequences, but it is the smallest of the three.
+>
+> Until one of them lands, **single-worker remains a hard operational
+> requirement**, and it is now load-bearing in a way it was not before.
 
 **Recommendation: do not ship the multi-worker change with this fix.**
 
@@ -320,7 +664,41 @@ harm this design exists to prevent.
 
 ---
 
-## 6. API contract
+## 6. API contract — **session endpoints never built** (noted 2026-10-17)
+
+> `POST /api/live/sessions`, its heartbeat and release (§6.1–§6.3), and the
+> `session_id` parameter on `/events` (§6.5) do not exist. The live API at
+> `f9b2378` is four endpoints: `GET /status` (`src/api/routes/live.py:101`),
+> `POST /resume` (`:198`), `POST /pause` (`:280`) and `GET /events` (`:350`).
+> §6.6 predicted `/resume` would be deprecated and deleted; instead it became
+> the primary control, which is the opposite outcome.
+>
+> `GET /status` did change, but along a different axis than §6.4 proposed — no
+> `generation_state` / `viewers` / `refusal_reason`. What it gained is:
+>
+> * **`greenhouse_status: "paused"`** (`:46`) for a configured-but-idle scope.
+>   This is §6.4's `"idle"` value under a different name, and it fixes exactly
+>   the bug §6.4 identified: a stopped scope has no merger, so deriving status
+>   from `source_statuses()` would have reported `"no_source"` and sent the
+>   operator off to reconfigure `LIVE_SOURCES_JSON` for a scope that is fine.
+>   The route consults `is_scope_configured` (`src/live/runtime.py:292`), which
+>   is the registry lookup §4.4 insisted on.
+> * **`freshness: {state, newest_reading_at, age_seconds, is_stale,
+>   threshold_seconds}`** (`:185-193`, built by
+>   `src/api/services/live_freshness.py`), added 2026-10-17 in `f9b2378`. This
+>   answers a question the 2026-09-15 design never asked — *is the feed I
+>   believe is live actually delivering data?* — and it is the direct lesson of
+>   §0.2: a scope can report itself live and have been silent for weeks.
+>   `freshness.state` is deliberately narrower than `greenhouse_status`: it
+>   describes the connectors only (`live` / `paused` / `not_configured`).
+>   Threshold `LIVE_STALE_AFTER_SECONDS`, default `180.0`
+>   (`src/config.py:1378`). A `live` scope with no rows at all counts as stale,
+>   which is the case §0.2 would have caught
+>   (`live_freshness.py:122-134`).
+>
+> §6.5's security rule — never treat a bare `session_id` as authorisation — was
+> never needed, because sessions were never introduced. `/resume` and `/pause`
+> both call `enforce_tenant_access` on the tenant in the query string.
 
 All endpoints live on the existing router (`prefix="/api/live"`,
 `src/api/routes/live.py:33`) and use the existing auth pattern
@@ -459,7 +837,20 @@ nothing left for it to un-suppress.
 
 ---
 
-## 7. Guardrail: refuse mock generation into a scope holding client data
+## 7. Guardrail: refuse mock generation into a scope holding client data — **never built** (noted 2026-10-17)
+
+> No part of §7 exists. There is no client-data check on `/resume`, no `409
+> scope_has_client_data`, and neither `LIVE_ALLOW_MOCK_OVER_CLIENT_DATA` nor
+> `acknowledge_mixing`. An operator can still point Go Live at a scope holding
+> an uploaded CSV, and since `028` that choice now persists across restarts —
+> which makes the gap wider than it was, not narrower.
+>
+> What substitutes for it is weaker and indirect: with
+> `LIVE_AUTOSTART_ENABLED=false`, mixing requires a deliberate `/resume` rather
+> than happening by default. That addresses the accident, not the mistake.
+> §7 remains the open item with the clearest remaining value, and §7.1's
+> "`source IS NULL` counts as client data" is still the right default if anyone
+> picks it up.
 
 **Yes — hard refuse.** This is the single check that most directly satisfies
 requirement 1. Uploading a CSV cannot generate live data; and once a CSV is in a
@@ -537,7 +928,24 @@ upload path is a nice-to-have (delete the guardrail key in `upload_csv` /
 
 ---
 
-## 8. Frontend contract the *Live* button must honour
+## 8. Frontend contract the *Live* button must honour — **superseded** (noted 2026-10-17)
+
+> There are no sessions, so there is no heartbeat, no `sessionStorage` lease, no
+> `sendBeacon` release and no `sessionId` gate on `useLiveReadings`. The shipped
+> contract is the two-call one: `LiveToggle` calls `resumeLiveScope` on and
+> `pauseLiveScope` off (`web/features/monitoring/api/live.ts:191`, `:204`;
+> `LiveToggle.tsx:72`, `:99`).
+>
+> §8.1's "critical inversion" — call the backend first, flip the toggle only on
+> success — was **not** adopted: `setLive(true)` still runs before
+> `resumeLiveScope` (`LiveToggle.tsx:89` then `:99`), with a rollback to
+> `setLive(false)` on failure (`:106`). Pause is likewise fire-and-tolerate
+> (`:68-72`). Given that the backend now reports `not_configured` honestly
+> (§2.4), the UI has the information §8.1 wanted; it just applies it as a
+> rollback rather than as a precondition.
+>
+> §8.6's `stale` indicator is the one item §8 anticipated correctly — the
+> `freshness` block added in `f9b2378` (§6) is what feeds it.
 
 Target files: `web/features/monitoring/components/LiveToggle.tsx`,
 `web/features/monitoring/hooks/useLiveReadings.ts`,
@@ -621,7 +1029,41 @@ connect). The existing `LiveBadge` / `transport` / `stale` indicators stay.
 
 ---
 
-## 9. Config and default changes
+## 9. Config and default changes — **mostly not made** (noted 2026-10-17)
+
+> Of the thirteen config changes below, **one landed and it is not on either
+> list**: `LIVE_AUTOSTART_ENABLED` (default `False`, `src/config.py:1345`),
+> added by `9c14dc3`. One more arrived later: `LIVE_STALE_AFTER_SECONDS`
+> (default `180.0`, `:1378`), added by `f9b2378` for §6's freshness block.
+>
+> Everything in §9.1 and §9.2 is otherwise **unchanged or absent** — verified at
+> `f9b2378`:
+>
+> | Proposed | Actual |
+> |---|---|
+> | `MOCK_SCADA_ENABLED` → `False` | still `True` (`src/config.py:1337`) |
+> | `MOCK_SCADA_SCOPES` → `""` | still `"tenant_1:gh_A"` (`:1338`) |
+> | `LIVE_PERSIST_ENABLED` unchanged `True` | still `True` (`:1361`) — correct by accident |
+> | `MOCK_SCADA_PERSIST_ENABLED` | does not exist |
+> | `LIVE_ALLOW_MOCK_OVER_CLIENT_DATA` | does not exist |
+> | `LIVE_SESSION_TTL_SECONDS`, `LIVE_SESSION_HEARTBEAT_SECONDS`, `LIVE_RECONCILE_INTERVAL_SECONDS`, `LIVE_REDIS_GRACE_SECONDS`, `LIVE_GENERATOR_LEASE_SECONDS`, `LIVE_GUARDRAIL_CACHE_SECONDS`, `LIVE_MAX_START_ATTEMPTS` | none exist |
+> | `LIVE_REAL_SOURCE_LIFECYCLE` | does not exist; §5.3's per-kind lifecycle was not built |
+> | §9.3 `source="live:mock"` tagging | not done — `PersistenceBatcher` still writes `source="live"` for every vendor |
+>
+> **Why the §9.1 flips were skipped, and what it costs.** Stopping the tasks
+> outright made the defaults look harmless: a configured scope that never starts
+> generates nothing regardless of what `MOCK_SCADA_SCOPES` says. But the shipped
+> default still *names a real tenant* as the mock scope, so one `/resume`
+> against `tenant_1/gh_A` writes synthetic rows into it — and since `028` that
+> choice survives a redeploy. §9.1 is therefore **still open**, and the
+> `demo_tenant` rename in §9.4 ("part of the fix, not an optional extra") is
+> still unmade.
+>
+> §9.2's claim that `MOCK_SCADA_PERSIST_ENABLED` was "the single
+> highest-value new knob" was wrong in hindsight: the knob that actually solved
+> requirement 1 was `LIVE_AUTOSTART_ENABLED`, which stops the generator rather
+> than discarding its output — strictly better, because it also stops the CPU
+> and the vendor API calls §2.5 complained about.
 
 ### 9.1 Changed defaults
 
@@ -677,7 +1119,30 @@ is part of the fix, not an optional extra.
 
 ---
 
-## 10. Failure modes
+## 10. Failure modes — **analysis of a system that was not built** (noted 2026-10-17)
+
+> Rows 1–4, 9, 10 and 12–14 concern sessions, leases and Redis coordination,
+> none of which exist. The table is retained as the reasoning behind the design,
+> not as a description of current behaviour.
+>
+> Two rows are worth re-reading against what happened:
+>
+> * **Row 5, "API restarts with a viewer connected → reconciler restarts
+>   generation, ≤ 1 tick."** This was the design's whole answer to restart
+>   survival, and it was never implemented. Nothing replaced it for a month;
+>   §0.2 is the result. Since `f9b2378` the answer is boot resume from
+>   `live_scope_state`, which is *better* than row 5 in one respect — it does
+>   not require a viewer to be connected, so a redeploy at 3am restores the feed
+>   — and worse in another, per §0.3.
+> * **Row 15, "two API workers → only one generates."** Not true today; see
+>   §0.3. The lease that row depends on was never built.
+>
+> The failure mode that actually occurred appears nowhere in this table: *the
+> operator turned Live on, a redeploy turned it off, and nothing said so.* The
+> table reasons carefully about clients vanishing and never about the **server**
+> forgetting — understandable for a design whose state lived in Redis, and the
+> precise gap that made the in-process implementation dangerous. The freshness
+> block added in `f9b2378` (§6) exists to make this class of failure visible.
 
 | # | Scenario | Behaviour | Bound |
 |---|---|---|---|
@@ -699,7 +1164,25 @@ is part of the fix, not an optional extra.
 
 ---
 
-## 11. Phased migration plan
+## 11. Phased migration plan — **not followed** (noted 2026-10-17)
+
+> None of the five phases ran as written. What happened instead:
+>
+> | Phase | Outcome |
+> |---|---|
+> | 1 — safe defaults + provenance | **Not done.** Defaults unchanged, `live:mock` tagging unbuilt (§9). Its goal was met a different way, by `9c14dc3`. |
+> | 2 — Redis sessions, registry, reconciler | **Not done.** No session store, no `ScopeSupervisor`, no `LIVE_ON_DEMAND_ENABLED`. The `// TODO(architect): remove LIVE_ON_DEMAND_ENABLED — 2026-10-15` below is therefore a TODO for a flag that was never created; it is now a month past its date and should be read as dead text. |
+> | 3 — frontend honours sessions | **Not done** (§8). |
+> | 4 — remove the old path | **Not done**, and partly reversed: `/resume` became the primary control instead of a deprecated no-op, and `scope_control`'s module-level set still exists. |
+> | 5 — multi-worker | **Not done**, and §0.3 records that `f9b2378` made it harder. |
+>
+> **Unplanned work that did ship:** `9c14dc3` (2026-09-16), the
+> `not_configured` honesty fixes (2026-09-17), and durable scope state plus
+> freshness reporting in `f9b2378` (2026-10-17, migration `028`).
+>
+> The plan's own premise held up, though — "each phase is independently
+> shippable" is exactly why the cheap first increment could be lifted out and
+> shipped the next day without the rest. The cost of stopping there was §0.2.
 
 Each phase is independently shippable and independently revertable.
 
@@ -779,3 +1262,26 @@ the release; route change does not release. All five `web/` gates green
    gentler on flaky networks; a shorter one stops generation sooner after a
    crash. 90 s bounds worst-case orphan generation to ~95 s, i.e. ~48 mock
    readings per source rather than the ~19,000 rows observed.
+
+> **Status of these questions (2026-10-17).** Questions 1 and 2 were never put
+> to the operator and are moot as asked: §5.3's per-kind lifecycle and
+> `MOCK_SCADA_PERSIST_ENABLED` do not exist, so there is no setting to confirm.
+> Question 3 is moot outright — there are no sessions and no TTL.
+>
+> The questions that replace them, as of this revision:
+>
+> 1. **Move the demo off `tenant_1`** (§9.1, §9.4). Still the cheapest
+>    outstanding safety improvement, and `028` has raised its value by making a
+>    mistaken `/resume` durable.
+> 2. **Build §7's client-data guardrail**, or decide explicitly not to.
+> 3. **Pick a fix for §0.3 before anyone raises the API replica count above 1.**
+>    The decision recorded in §0.3 is to live with the constraint rather than fix
+>    it, so this is a question only for whoever next wants to scale the API out.
+>    Flooring the bucket timestamp in `_emit_bucket` is the cheap one, at the
+>    cost of changing persisted timestamps.
+> 4. ~~**Reconcile §2.3's row counts with the 2026-10-16 audit.**~~ **Closed
+>    2026-10-17.** The counts are production figures (`AGENT_MEMORY.md:601-604`,
+>    committed by `d34d2f5` alongside this ADR), and the rows were purged on
+>    2026-09-15 via `wipe_live_demo_data`, thirty-one days before the audit. The
+>    two measurements never conflicted; only the audit's "had ever been written"
+>    phrasing did. See §2.3.

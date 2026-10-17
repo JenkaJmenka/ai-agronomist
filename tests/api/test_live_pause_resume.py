@@ -71,7 +71,12 @@ class TestPauseResumeRoundTrip:
             params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
         )
         assert resp.status_code == 200
-        assert resp.json() == {
+        body = resp.json()
+        # desired_state_persisted is popped, not asserted on: it reports
+        # whether migration 028's table was reachable, which is a property
+        # of the harness DB, not of the scope-gate behaviour under test.
+        assert isinstance(body.pop("desired_state_persisted"), bool)
+        assert body == {
             "paused": True,
             "scope_status": "unmanaged",
             "tenant_id": _TENANT,
@@ -84,7 +89,9 @@ class TestPauseResumeRoundTrip:
             params={"tenant_id": _TENANT, "greenhouse_id": _GREENHOUSE},
         )
         assert resp.status_code == 200
-        assert resp.json() == {
+        body = resp.json()
+        assert isinstance(body.pop("desired_state_persisted"), bool)
+        assert body == {
             "resumed": True,
             "scope_status": "unmanaged",
             "tenant_id": _TENANT,
@@ -185,7 +192,9 @@ class TestPauseResumeRoundTrip:
             params={"tenant_id": _TENANT, "greenhouse_id": _UNCONFIGURED_GREENHOUSE},
         )
         assert resp.status_code == 200
-        assert resp.json() == {
+        body = resp.json()
+        assert isinstance(body.pop("desired_state_persisted"), bool)
+        assert body == {
             "paused": True,
             "scope_status": "not_configured",
             "tenant_id": _TENANT,

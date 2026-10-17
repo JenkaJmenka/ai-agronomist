@@ -53,19 +53,21 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3725 passed, 22 skipped, 3 xfailed, 0 failed
+### Current baseline — 3785 passed, 22 skipped, 3 xfailed, 0 failed
 
-Measured 2026-10-16 by the orchestrator on branch `task-5-leftovers-round2` at
-merge commit `ad9f9aa`, full suite in the foreground, 346.29s:
-`./venv/bin/python -m pytest tests/ -q`. That branch is the Task 5 leftovers
-round 2+3 work (BACKLOG-2/-5, ADR-012, doc corrections) and is **open as a PR,
-not yet merged** — until it lands, `origin/main` at `6119302` still measures
-`3721/22/3/0`, which is the figure to brief agents working off main.
+Measured 2026-10-17 by the orchestrator on `fix/live-feed-survives-redeploy`,
+the merge of `origin/main` (`b100b77`, i.e. PRs #80 and #81) into the live-feed
+work, full suite in the foreground, 357.27s:
+`./venv/bin/python -m pytest tests/ -q`. That branch is PR #82, open at the time
+of writing; `origin/main` itself measures `3725/22/3/0` until it lands.
 
-The +4 is BACKLOG-5's `TestRollingDeployCarryCompat`, which pins that a
-`StuckCarry` payload serialized before `recovery_channels` was removed still
-deserializes after it. Net test churn on that branch: one test renamed, one
-assertion retired, four added.
+How the figure is built, since three PRs landed in two days and the arithmetic
+is the only way to tell a real regression from a merge artefact:
+`3721` on `6119302` → `+4` from #80 (BACKLOG-5's `TestRollingDeployCarryCompat`,
+pinning that a `StuckCarry` payload serialized before `recovery_channels` was
+removed still deserializes after it) → `3725` → `+60` from #82 (27 live-scope
+service tests, 33 boot/freshness acceptance tests) → `3785`. #81 is hook and
+docs only and adds none.
 
 **This line is the baseline. Numbers in `AGENT_MEMORY.md` are dated snapshots,
 not baselines** — update this line when the figure changes, and date it.
@@ -390,6 +392,38 @@ changes to it stay with the orchestrator. Verify any new negation with
 failure and is not.
 
 ---
+
+## Deployment constraint — the API runs as a SINGLE replica
+
+Do not scale `ai-agronomist-api` beyond one replica, and do not propose it as a
+performance fix. Recorded 2026-10-17; see `ADR-009` §0.3 for the full account.
+
+Live readings are deduplicated only by `ON CONFLICT (tenant_id, greenhouse_id,
+timestamp) DO NOTHING` (`src/live/persistence.py`). That guard does not work
+across replicas, because the timestamp is not a stable function of the bucket:
+`ChannelMerger._emit_bucket` stamps the event with the **first raw reading's
+timestamp in the bucket** (`src/live/merge.py:222`, `:266`), and the mock source
+uses microsecond-precision `datetime.now(timezone.utc)`
+(`src/live/sources/mock.py:169`). Two replicas therefore emit *different*
+timestamps for the same logical bucket and both rows insert — N replicas means
+N× the row rate, silently, with no error anywhere.
+
+Migration `028` (boot resume) made this worse rather than better. Before it, a
+multi-replica deploy still required an operator to press Go Live, and that HTTP
+request landed on exactly one replica, so only one started streaming — the
+invariant was enforced by accident of the request path. Now every replica
+self-resumes at boot and nothing enforces it.
+
+The cheapest candidate fix is to floor the bucket timestamp in `_emit_bucket`,
+which would make `ON CONFLICT DO NOTHING` deduplicate replicas for free — but it
+changes persisted timestamps, so it is deliberately not done. The alternatives
+are a Redis leader lock around boot resume, or moving the connectors into
+`src/workers/` with a single instance. Tracked in `AGENT_MEMORY.md` under
+BACKLOG-7.
+
+`src/live/scope_control.py:1-23` documents the related in-process constraint:
+`_suppressed_scopes` is per-worker, so suppress/resume on one worker is
+invisible to the others.
 
 ## Standard pipeline
 

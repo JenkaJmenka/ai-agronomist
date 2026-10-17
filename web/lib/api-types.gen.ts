@@ -1064,15 +1064,37 @@ export interface paths {
         };
         /**
          * Live Source Status
-         * @description Return current health status of all live data sources for a scope.
+         * @description Return current health + freshness of all live data sources for a scope.
          *
          *     Response shape (always HTTP 200):
          *     ::
          *
          *         {
          *           "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
-         *           "sources": [...]
+         *           "sources": [...],
+         *           "freshness": {
+         *             "state": "live" | "paused" | "not_configured",
+         *             "newest_reading_at": "2026-10-16T09:00:00+00:00" | null,
+         *             "age_seconds": 42.0 | null,
+         *             "is_stale": false,
+         *             "threshold_seconds": 180.0
+         *           }
          *         }
+         *
+         *     ``freshness`` lives here rather than on a new endpoint because this route
+         *     is already the one place a caller asks "what is this scope doing", it
+         *     already resolves the runtime and a DB session, and a staleness badge
+         *     renders next to the status it qualifies — a second endpoint would make
+         *     the UI do two round-trips to draw one indicator. ``sources`` and
+         *     ``greenhouse_status`` are unchanged, so existing consumers keep working.
+         *
+         *     ``freshness.state`` is deliberately narrower than ``greenhouse_status``:
+         *     it describes the connectors only (live / paused / not_configured) and
+         *     never the registry states, so a caller can reason about liveness without
+         *     first excluding ``not_registered``. ``is_stale`` is true only for a
+         *     ``live`` scope — including a live scope that has never written a row at
+         *     all. See :mod:`src.api.services.live_freshness` for the age/clock rules
+         *     (ages are not clamped: future-dated readings give a negative age).
          *
          *     The ``greenhouse_status`` discriminator lets callers tell apart the
          *     empty-source states that previously all returned ``{"sources": []}``
@@ -1129,6 +1151,14 @@ export interface paths {
          *       ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever
          *       flow; ``resumed`` is False here so a green Go Live toggle doesn't lie
          *       to the operator.
+         *
+         *     Except in the ``not_configured`` case, the choice is recorded in
+         *     ``live_scope_state`` so the API resumes this scope after a restart.
+         *     ``not_configured`` is excluded on purpose: storing ``live`` for a scope
+         *     with no source would leave a row that can only ever produce a boot
+         *     warning. ``desired_state_persisted`` reports whether that write
+         *     succeeded — it is False on a deploy where migration 028 has not run, and
+         *     the scope then streams until the next restart only.
          */
         post: operations["resume_live_scope_endpoint_api_live_resume_post"];
         delete?: never;
@@ -1164,6 +1194,12 @@ export interface paths {
          *     * ``not_running``    — the scope was already idle (idempotent no-op).
          *     * ``not_configured`` — this tenant/greenhouse has no source wired up;
          *       there was nothing to stop.
+         *
+         *     Unlike /resume, ``paused`` is recorded in ``live_scope_state`` in **every**
+         *     case including ``not_configured``: pause is the safe direction, and an
+         *     operator who turns a scope off must not find it streaming again after the
+         *     next redeploy. ``desired_state_persisted`` reports whether that write
+         *     succeeded.
          */
         post: operations["pause_live_scope_endpoint_api_live_pause_post"];
         delete?: never;
@@ -3121,6 +3157,80 @@ export interface components {
              * @description Timestamp of the most recent event
              */
             last_event_at?: string | null;
+        };
+        /**
+         * LiveFreshness
+         * @description Is data actually arriving for this scope — distinct from "is Go Live on".
+         *
+         *     See :mod:`src.api.services.live_freshness` for the age/clock rules.
+         */
+        LiveFreshness: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "live" | "paused" | "not_configured";
+            /**
+             * Newest Reading At
+             * @description ISO-8601 timestamp of the newest persisted row across both reading tables, or null when the scope has never written one.
+             */
+            newest_reading_at: string | null;
+            /**
+             * Age Seconds
+             * @description now - newest_reading_at, in seconds. Null when there are no rows. Deliberately NOT clamped to zero and therefore signed: readings in this system are routinely future-dated, so a negative age is a normal value meaning 'the newest row is in the future'. A negative age is never stale.
+             */
+            age_seconds: number | null;
+            /**
+             * Is Stale
+             * @description True only for a 'live' scope — including a live scope that has never written a row at all. A paused or unconfigured scope is off, not broken.
+             */
+            is_stale: boolean;
+            /**
+             * Threshold Seconds
+             * @description Age above which a live scope is considered stale.
+             */
+            threshold_seconds: number;
+        };
+        /**
+         * LiveSourceStatus
+         * @description Health of one data source within a scope.
+         *
+         *     Mirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is
+         *     the same closed set already pinned by ``SourceStatusEvent`` in
+         *     ``src/live/events.py`` — that module is the only producer of these values.
+         */
+        LiveSourceStatus: {
+            /** Source Id */
+            source_id: string;
+            /** Vendor */
+            vendor: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "online" | "degraded" | "offline";
+            /**
+             * Last Seen
+             * @description ISO-8601 timestamp of the last reading, or null if never seen.
+             */
+            last_seen: string | null;
+        };
+        /**
+         * LiveStatusResponse
+         * @description Body of ``GET /api/live/status`` (always HTTP 200).
+         */
+        LiveStatusResponse: {
+            /**
+             * Greenhouse Status
+             * @enum {string}
+             */
+            greenhouse_status: "not_registered" | "no_source" | "live" | "paused";
+            /**
+             * Sources
+             * @description Always present, so consumers that only read 'sources' keep working.
+             */
+            sources: components["schemas"]["LiveSourceStatus"][];
+            freshness: components["schemas"]["LiveFreshness"];
         };
         /**
          * MarkAnomalyIntegratedRequest
@@ -5769,7 +5879,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LiveStatusResponse"];
                 };
             };
             /** @description Validation Error */

@@ -1335,7 +1335,16 @@ JOB_EVENTS_MAX_SECONDS: float = float(os.environ.get("JOB_EVENTS_MAX_SECONDS", "
 # === Live Monitoring (SSE) ===
 # Mock SCADA data source for development and testing.
 MOCK_SCADA_ENABLED: bool = _env_flag("MOCK_SCADA_ENABLED", True)
-MOCK_SCADA_SCOPES: str = os.environ.get("MOCK_SCADA_SCOPES", "tenant_1:gh_A")
+# Opt-in by design: empty means no mock scope exists, so a zero-config deploy
+# generates nothing. The previous default, "tenant_1:gh_A", named a REAL
+# tenant holding a customer CSV upload, and it has already caused one
+# incident: on 2026-09-14/15 the mock feed wrote 11,119 and 19,394 synthetic
+# rows at ~2s cadence into that scope, and 96.7% of flagged anomalies came
+# from them (purged via wipe_live_demo_data on 2026-09-15). Since migration
+# 028 a /resume against such a scope also survives a redeploy, so the blast
+# radius grew. An operator who wants mock data must now name the scope
+# explicitly, e.g. MOCK_SCADA_SCOPES="demo_tenant:gh_demo".
+MOCK_SCADA_SCOPES: str = os.environ.get("MOCK_SCADA_SCOPES", "")
 MOCK_SCADA_INTERVAL_SECONDS: float = float(os.environ.get("MOCK_SCADA_INTERVAL_SECONDS", "2.0"))
 MOCK_SCADA_ANOMALY_RATE: float = float(os.environ.get("MOCK_SCADA_ANOMALY_RATE", "0.02"))
 
@@ -1362,6 +1371,22 @@ LIVE_PERSIST_ENABLED: bool = _env_flag("LIVE_PERSIST_ENABLED", True)
 
 # Flush cadence for the live-to-DB persistence writer.
 LIVE_PERSIST_FLUSH_SECONDS: float = float(os.environ.get("LIVE_PERSIST_FLUSH_SECONDS", "10.0"))
+
+# How old the newest persisted row for a *live* scope may get before
+# GET /api/live/status reports that scope as stale.
+#
+# Default 180 s = 18x the persistence flush cadence (10 s) and 90x the mock
+# poll interval (2 s), so an ordinary flush cycle, a connector reconnect, or
+# a supervised() back-off restart never trips it — only a feed that has
+# genuinely stopped writing does.  Raise it for slow real SCADA vendors whose
+# poll interval approaches this value.
+#
+# A live scope with no rows at all is also stale: "Go Live is on and nothing
+# has ever been written" is precisely the production failure this signal
+# exists to surface.
+LIVE_STALE_AFTER_SECONDS: float = float(
+    os.environ.get("LIVE_STALE_AFTER_SECONDS", "180.0")
+)
 
 # Anomaly threshold for the live scoring path.
 #

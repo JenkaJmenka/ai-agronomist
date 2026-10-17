@@ -6042,3 +6042,39 @@ would cost roughly double.
 
 No fix attempted in round 2. Deliberately recorded with the measurement method,
 not just the number — see the dated-snapshot rule at the top of this file.
+
+### BACKLOG-7 — the API cannot run more than one replica (live row duplication)
+
+Recorded 2026-10-17 alongside the `028` boot-resume fix. **Decision: do not fix
+now.** Documented as an operational constraint in `CLAUDE.md` ("Deployment
+constraint — the API runs as a SINGLE replica") and `ADR-009` §0.3.
+
+Live readings are deduplicated only by `ON CONFLICT (tenant_id, greenhouse_id,
+timestamp) DO NOTHING` in `src/live/persistence.py`. That is not replica-safe,
+because the timestamp is not a stable function of the bucket:
+`ChannelMerger._emit_bucket` stamps the event with the **first raw reading's
+timestamp in the bucket** (`src/live/merge.py:222`, `:266`), and
+`MockScadaSource.stream` uses microsecond-precision `datetime.now(timezone.utc)`
+(`src/live/sources/mock.py:169`). Two replicas emit *different* timestamps for
+the same logical bucket, both rows insert, and the row rate multiplies by N with
+no error raised anywhere.
+
+**Migration `028` made this worse, not better.** Before boot resume, a
+multi-replica deploy still needed an operator to press Go Live, and that HTTP
+request landed on exactly one replica — so only one streamed. The single-worker
+invariant was enforced by accident of the request path. Now every replica
+self-resumes at boot and nothing enforces it.
+
+Candidate fixes, cheapest first:
+
+1. **Floor the bucket timestamp in `_emit_bucket`** — then `ON CONFLICT DO
+   NOTHING` deduplicates replicas for free. Caveat, and the reason it was not
+   done: it changes persisted timestamps.
+2. A Redis leader lock around boot resume.
+3. Move the connectors into `src/workers/` with a single instance.
+
+Related: `src/live/scope_control.py:1-23` records that `_suppressed_scopes` is
+per-worker, so suppress/resume on one worker is invisible to the others — the
+same class of problem, already documented, and the reason single-worker was
+already a stated invariant before `028` strengthened the need for it.
+

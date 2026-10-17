@@ -21,24 +21,29 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.services import readings_service
+from src.api.services.live_freshness import build_scope_freshness
 from src.api.services.live_hub_provider import LiveHub, get_live_hub
+from src.api.schemas.live import (
+    GH_STATUS_LIVE,
+    GH_STATUS_NO_SOURCE,
+    GH_STATUS_NOT_REGISTERED,
+    GH_STATUS_PAUSED,
+    LiveFreshness,
+    LiveStatusResponse,
+)
+from src.api.services.live_scope_state_service import (
+    DesiredScopeState,
+    store_desired_state,
+)
 from src.config import LIVE_HEARTBEAT_SECONDS, LIVE_MAX_STREAM_SECONDS
 from src.db.session import get_db
 
 router = APIRouter(prefix="/api/live", tags=["Live"])
-
-# Discriminated values for the greenhouse_status field in /api/live/status.
-# These constants let callers pattern-match on a well-known vocabulary instead
-# of inferring state from the empty-sources list (the previous silent failure).
-_GH_STATUS_NOT_REGISTERED = "not_registered"
-_GH_STATUS_NO_SOURCE = "no_source"
-_GH_STATUS_LIVE = "live"
-_GH_STATUS_PAUSED = "paused"
 
 _SSE_HEADERS: dict[str, str] = {
     "Cache-Control": "no-store",
@@ -93,23 +98,45 @@ async def _stream_events(
             break
 
 
-@router.get("/status")
+@router.get("/status", response_model=LiveStatusResponse)
 async def live_source_status(
     request: Request,
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
     auth_tenant: Optional[str] = Depends(require_api_key),
     db: AsyncSession = Depends(get_db),
-) -> Any:
-    """Return current health status of all live data sources for a scope.
+) -> LiveStatusResponse:
+    """Return current health + freshness of all live data sources for a scope.
 
     Response shape (always HTTP 200):
     ::
 
         {
           "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
-          "sources": [...]
+          "sources": [...],
+          "freshness": {
+            "state": "live" | "paused" | "not_configured",
+            "newest_reading_at": "2026-10-16T09:00:00+00:00" | null,
+            "age_seconds": 42.0 | null,
+            "is_stale": false,
+            "threshold_seconds": 180.0
+          }
         }
+
+    ``freshness`` lives here rather than on a new endpoint because this route
+    is already the one place a caller asks "what is this scope doing", it
+    already resolves the runtime and a DB session, and a staleness badge
+    renders next to the status it qualifies — a second endpoint would make
+    the UI do two round-trips to draw one indicator. ``sources`` and
+    ``greenhouse_status`` are unchanged, so existing consumers keep working.
+
+    ``freshness.state`` is deliberately narrower than ``greenhouse_status``:
+    it describes the connectors only (live / paused / not_configured) and
+    never the registry states, so a caller can reason about liveness without
+    first excluding ``not_registered``. ``is_stale`` is true only for a
+    ``live`` scope — including a live scope that has never written a row at
+    all. See :mod:`src.api.services.live_freshness` for the age/clock rules
+    (ages are not clamped: future-dated readings give a negative age).
 
     The ``greenhouse_status`` discriminator lets callers tell apart the
     empty-source states that previously all returned ``{"sources": []}``
@@ -143,20 +170,28 @@ async def live_source_status(
         # in the readings-service fallback mode, where we can't tell, so
         # default to the pre-existing "live" behavior.
         if runtime is not None and not runtime.is_scope_active(tenant_id, greenhouse_id):
-            greenhouse_status = _GH_STATUS_PAUSED
+            greenhouse_status = GH_STATUS_PAUSED
         else:
-            greenhouse_status = _GH_STATUS_LIVE
+            greenhouse_status = GH_STATUS_LIVE
     else:
         # Distinguish "greenhouse unknown" from "greenhouse known but no source".
         exists = await readings_service.greenhouse_exists(
             db, tenant_id=tenant_id, greenhouse_id=greenhouse_id
         )
         greenhouse_status = (
-            _GH_STATUS_NO_SOURCE if exists else _GH_STATUS_NOT_REGISTERED
+            GH_STATUS_NO_SOURCE if exists else GH_STATUS_NOT_REGISTERED
         )
 
-    return JSONResponse(
-        content={"greenhouse_status": greenhouse_status, "sources": sources}
+    freshness = await build_scope_freshness(
+        db, runtime=runtime, tenant_id=tenant_id, greenhouse_id=greenhouse_id
+    )
+
+    # ``to_dict`` stays the single definition of the freshness JSON shape;
+    # the model validates that projection rather than restating it.
+    return LiveStatusResponse(
+        greenhouse_status=greenhouse_status,
+        sources=sources,
+        freshness=LiveFreshness(**freshness.to_dict()),
     )
 
 
@@ -166,6 +201,7 @@ async def resume_live_scope_endpoint(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
     auth_tenant: Optional[str] = Depends(require_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Explicitly start the scope's connectors and re-enable persistence.
 
@@ -184,6 +220,14 @@ async def resume_live_scope_endpoint(
       ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever
       flow; ``resumed`` is False here so a green Go Live toggle doesn't lie
       to the operator.
+
+    Except in the ``not_configured`` case, the choice is recorded in
+    ``live_scope_state`` so the API resumes this scope after a restart.
+    ``not_configured`` is excluded on purpose: storing ``live`` for a scope
+    with no source would leave a row that can only ever produce a boot
+    warning. ``desired_state_persisted`` reports whether that write
+    succeeded — it is False on a deploy where migration 028 has not run, and
+    the scope then streams until the next restart only.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
     runtime = getattr(request.app.state, "live_runtime", None)
@@ -196,9 +240,16 @@ async def resume_live_scope_endpoint(
                 "greenhouse_id": greenhouse_id,
             }
         started = await runtime.start_scope(tenant_id, greenhouse_id)
+        persisted = await store_desired_state(
+            db,
+            tenant_id=tenant_id,
+            greenhouse_id=greenhouse_id,
+            desired_state=DesiredScopeState.LIVE,
+        )
         return {
             "resumed": True,
             "scope_status": "started" if started else "already_running",
+            "desired_state_persisted": persisted,
             "tenant_id": tenant_id,
             "greenhouse_id": greenhouse_id,
         }
@@ -211,9 +262,16 @@ async def resume_live_scope_endpoint(
     from src.live.scope_control import resume_live_scope
 
     resume_live_scope(tenant_id, greenhouse_id)
+    persisted = await store_desired_state(
+        db,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        desired_state=DesiredScopeState.LIVE,
+    )
     return {
         "resumed": True,
         "scope_status": "unmanaged",
+        "desired_state_persisted": persisted,
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }
@@ -225,6 +283,7 @@ async def pause_live_scope_endpoint(
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
     auth_tenant: Optional[str] = Depends(require_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Explicitly stop the scope's connectors when the operator turns Go Live off.
 
@@ -242,14 +301,27 @@ async def pause_live_scope_endpoint(
     * ``not_running``    — the scope was already idle (idempotent no-op).
     * ``not_configured`` — this tenant/greenhouse has no source wired up;
       there was nothing to stop.
+
+    Unlike /resume, ``paused`` is recorded in ``live_scope_state`` in **every**
+    case including ``not_configured``: pause is the safe direction, and an
+    operator who turns a scope off must not find it streaming again after the
+    next redeploy. ``desired_state_persisted`` reports whether that write
+    succeeded.
     """
     enforce_tenant_access(auth_tenant, tenant_id)
     runtime = getattr(request.app.state, "live_runtime", None)
+    persisted = await store_desired_state(
+        db,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        desired_state=DesiredScopeState.PAUSED,
+    )
     if runtime is not None:
         if not runtime.is_scope_configured(tenant_id, greenhouse_id):
             return {
                 "paused": True,
                 "scope_status": "not_configured",
+                "desired_state_persisted": persisted,
                 "tenant_id": tenant_id,
                 "greenhouse_id": greenhouse_id,
             }
@@ -257,6 +329,7 @@ async def pause_live_scope_endpoint(
         return {
             "paused": True,
             "scope_status": "stopped" if stopped else "not_running",
+            "desired_state_persisted": persisted,
             "tenant_id": tenant_id,
             "greenhouse_id": greenhouse_id,
         }
@@ -268,6 +341,7 @@ async def pause_live_scope_endpoint(
     return {
         "paused": True,
         "scope_status": "unmanaged",
+        "desired_state_persisted": persisted,
         "tenant_id": tenant_id,
         "greenhouse_id": greenhouse_id,
     }

@@ -130,6 +130,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # are unavailable.  Same try/except pattern as the RabbitMQ init below.
     app.state.live_runtime = None
     try:
+        from src.api.services.live_boot_resume import (
+            log_boot_resume,
+            resume_persisted_live_scopes,
+        )
         from src.api.services.live_hub_provider import get_live_hub
         from src.live.runtime import LiveRuntime
 
@@ -137,7 +141,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         runtime = LiveRuntime.build_from_config(hub)
         await runtime.start()
         app.state.live_runtime = runtime
-        logger.info("Live runtime started.")
+        # Scope state is durable (migration 028): restart the scopes the
+        # operator had turned on, and name every bucket in one log line so a
+        # deployment that silently dropped a feed is visible in the logs.
+        #
+        # Nested try on purpose: the outer handler nulls app.state.live_runtime,
+        # which would be wrong here — the runtime is up and its tasks are
+        # running by this point. Only the *resume* failed (most likely an
+        # unmigrated live_scope_state table on a skewed deploy), and a live
+        # runtime with no resumed scope is exactly the pre-028 behaviour.
+        try:
+            log_boot_resume(await resume_persisted_live_scopes(runtime))
+        except Exception as resume_exc:
+            logger.error(
+                "Live runtime started, but boot resume failed — every scope "
+                "is idle until an operator presses Go Live: %s",
+                resume_exc,
+                exc_info=True,
+            )
     except Exception as exc:
         logger.warning(
             "Live runtime failed to start — live monitoring unavailable: %s", exc

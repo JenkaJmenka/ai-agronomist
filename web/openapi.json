@@ -4247,7 +4247,7 @@
           "Live"
         ],
         "summary": "Live Source Status",
-        "description": "Return current health status of all live data sources for a scope.\n\nResponse shape (always HTTP 200):\n::\n\n    {\n      \"greenhouse_status\": \"not_registered\" | \"no_source\" | \"live\" | \"paused\",\n      \"sources\": [...]\n    }\n\nThe ``greenhouse_status`` discriminator lets callers tell apart the\nempty-source states that previously all returned ``{\"sources\": []}``\nand were indistinguishable, plus a configured-but-idle state:\n\n* ``not_registered`` \u2014 no greenhouse record in the registry or any\n  readings table; the tenant needs to be provisioned.\n* ``no_source``      \u2014 greenhouse exists but the live runtime is not\n  watching it; use POST /api/readings/greenhouses to register and\n  configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.\n* ``paused``         \u2014 the scope is configured but its connectors are\n  not running (idle pending Go Live, or explicitly paused).\n* ``live``            \u2014 the runtime has an active scope for this\n  greenhouse (sources may still have ``last_seen: null`` while the\n  first ticks arrive).\n\nThe ``sources`` list is always present so existing consumers that only\nread ``sources`` continue to work without changes.",
+        "description": "Return current health + freshness of all live data sources for a scope.\n\nResponse shape (always HTTP 200):\n::\n\n    {\n      \"greenhouse_status\": \"not_registered\" | \"no_source\" | \"live\" | \"paused\",\n      \"sources\": [...],\n      \"freshness\": {\n        \"state\": \"live\" | \"paused\" | \"not_configured\",\n        \"newest_reading_at\": \"2026-10-16T09:00:00+00:00\" | null,\n        \"age_seconds\": 42.0 | null,\n        \"is_stale\": false,\n        \"threshold_seconds\": 180.0\n      }\n    }\n\n``freshness`` lives here rather than on a new endpoint because this route\nis already the one place a caller asks \"what is this scope doing\", it\nalready resolves the runtime and a DB session, and a staleness badge\nrenders next to the status it qualifies \u2014 a second endpoint would make\nthe UI do two round-trips to draw one indicator. ``sources`` and\n``greenhouse_status`` are unchanged, so existing consumers keep working.\n\n``freshness.state`` is deliberately narrower than ``greenhouse_status``:\nit describes the connectors only (live / paused / not_configured) and\nnever the registry states, so a caller can reason about liveness without\nfirst excluding ``not_registered``. ``is_stale`` is true only for a\n``live`` scope \u2014 including a live scope that has never written a row at\nall. See :mod:`src.api.services.live_freshness` for the age/clock rules\n(ages are not clamped: future-dated readings give a negative age).\n\nThe ``greenhouse_status`` discriminator lets callers tell apart the\nempty-source states that previously all returned ``{\"sources\": []}``\nand were indistinguishable, plus a configured-but-idle state:\n\n* ``not_registered`` \u2014 no greenhouse record in the registry or any\n  readings table; the tenant needs to be provisioned.\n* ``no_source``      \u2014 greenhouse exists but the live runtime is not\n  watching it; use POST /api/readings/greenhouses to register and\n  configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.\n* ``paused``         \u2014 the scope is configured but its connectors are\n  not running (idle pending Go Live, or explicitly paused).\n* ``live``            \u2014 the runtime has an active scope for this\n  greenhouse (sources may still have ``last_seen: null`` while the\n  first ticks arrive).\n\nThe ``sources`` list is always present so existing consumers that only\nread ``sources`` continue to work without changes.",
         "operationId": "live_source_status_api_live_status_get",
         "parameters": [
           {
@@ -4309,7 +4309,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Live Source Status Api Live Status Get"
+                  "$ref": "#/components/schemas/LiveStatusResponse"
                 }
               }
             }
@@ -4333,7 +4333,7 @@
           "Live"
         ],
         "summary": "Resume Live Scope Endpoint",
-        "description": "Explicitly start the scope's connectors and re-enable persistence.\n\nCalled when the operator turns Go Live on \u2014 not on every SSE reconnect,\nwhich would immediately re-seed the wiped database. Spawns the merger\nand connector tasks for this scope (idempotent) so idle scopes don't\nstream until this is called.\n\n``resumed`` means exactly one thing: live data will flow for this scope\nfrom now on. ``scope_status`` explains why:\n\n* ``started``         \u2014 the scope was idle; its tasks were just spawned.\n* ``already_running`` \u2014 the scope was already streaming (idempotent\n  no-op call) \u2014 a success, not a failure.\n* ``not_configured``  \u2014 this tenant/greenhouse has no source wired up in\n  ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever\n  flow; ``resumed`` is False here so a green Go Live toggle doesn't lie\n  to the operator.",
+        "description": "Explicitly start the scope's connectors and re-enable persistence.\n\nCalled when the operator turns Go Live on \u2014 not on every SSE reconnect,\nwhich would immediately re-seed the wiped database. Spawns the merger\nand connector tasks for this scope (idempotent) so idle scopes don't\nstream until this is called.\n\n``resumed`` means exactly one thing: live data will flow for this scope\nfrom now on. ``scope_status`` explains why:\n\n* ``started``         \u2014 the scope was idle; its tasks were just spawned.\n* ``already_running`` \u2014 the scope was already streaming (idempotent\n  no-op call) \u2014 a success, not a failure.\n* ``not_configured``  \u2014 this tenant/greenhouse has no source wired up in\n  ``MOCK_SCADA_SCOPES`` / ``LIVE_SOURCES_JSON``, so no data will ever\n  flow; ``resumed`` is False here so a green Go Live toggle doesn't lie\n  to the operator.\n\nExcept in the ``not_configured`` case, the choice is recorded in\n``live_scope_state`` so the API resumes this scope after a restart.\n``not_configured`` is excluded on purpose: storing ``live`` for a scope\nwith no source would leave a row that can only ever produce a boot\nwarning. ``desired_state_persisted`` reports whether that write\nsucceeded \u2014 it is False on a deploy where migration 028 has not run, and\nthe scope then streams until the next restart only.",
         "operationId": "resume_live_scope_endpoint_api_live_resume_post",
         "parameters": [
           {
@@ -4421,7 +4421,7 @@
           "Live"
         ],
         "summary": "Pause Live Scope Endpoint",
-        "description": "Explicitly stop the scope's connectors when the operator turns Go Live off.\n\nMutes persistence and cancels the merger + connector tasks for this\nscope so historical windows show only uploaded data and no mock/SCADA\nreading is generated at all \u2014 mirrors /resume for the opposite\ntransition.\n\nUnlike /resume, ``paused`` is always True: nothing streams for this\nscope once the call returns, whether it was running, already idle, or\nnever configured \u2014 there's no \"wrong\" outcome to flag. ``scope_status``\nrecords which case it was, for diagnostics only:\n\n* ``stopped``        \u2014 the scope was running; its tasks were cancelled.\n* ``not_running``    \u2014 the scope was already idle (idempotent no-op).\n* ``not_configured`` \u2014 this tenant/greenhouse has no source wired up;\n  there was nothing to stop.",
+        "description": "Explicitly stop the scope's connectors when the operator turns Go Live off.\n\nMutes persistence and cancels the merger + connector tasks for this\nscope so historical windows show only uploaded data and no mock/SCADA\nreading is generated at all \u2014 mirrors /resume for the opposite\ntransition.\n\nUnlike /resume, ``paused`` is always True: nothing streams for this\nscope once the call returns, whether it was running, already idle, or\nnever configured \u2014 there's no \"wrong\" outcome to flag. ``scope_status``\nrecords which case it was, for diagnostics only:\n\n* ``stopped``        \u2014 the scope was running; its tasks were cancelled.\n* ``not_running``    \u2014 the scope was already idle (idempotent no-op).\n* ``not_configured`` \u2014 this tenant/greenhouse has no source wired up;\n  there was nothing to stop.\n\nUnlike /resume, ``paused`` is recorded in ``live_scope_state`` in **every**\ncase including ``not_configured``: pause is the safe direction, and an\noperator who turns a scope off must not find it streaming again after the\nnext redeploy. ``desired_state_persisted`` reports whether that write\nsucceeded.",
         "operationId": "pause_live_scope_endpoint_api_live_pause_post",
         "parameters": [
           {
@@ -9891,6 +9891,138 @@
         ],
         "title": "LearningSummaryResponse",
         "description": "Aggregated learning-log summary for a tenant."
+      },
+      "LiveFreshness": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "live",
+              "paused",
+              "not_configured"
+            ],
+            "title": "State"
+          },
+          "newest_reading_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newest Reading At",
+            "description": "ISO-8601 timestamp of the newest persisted row across both reading tables, or null when the scope has never written one."
+          },
+          "age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Seconds",
+            "description": "now - newest_reading_at, in seconds. Null when there are no rows. Deliberately NOT clamped to zero and therefore signed: readings in this system are routinely future-dated, so a negative age is a normal value meaning 'the newest row is in the future'. A negative age is never stale."
+          },
+          "is_stale": {
+            "type": "boolean",
+            "title": "Is Stale",
+            "description": "True only for a 'live' scope \u2014 including a live scope that has never written a row at all. A paused or unconfigured scope is off, not broken."
+          },
+          "threshold_seconds": {
+            "type": "number",
+            "title": "Threshold Seconds",
+            "description": "Age above which a live scope is considered stale."
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "newest_reading_at",
+          "age_seconds",
+          "is_stale",
+          "threshold_seconds"
+        ],
+        "title": "LiveFreshness",
+        "description": "Is data actually arriving for this scope \u2014 distinct from \"is Go Live on\".\n\nSee :mod:`src.api.services.live_freshness` for the age/clock rules."
+      },
+      "LiveSourceStatus": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "vendor": {
+            "type": "string",
+            "title": "Vendor"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "online",
+              "degraded",
+              "offline"
+            ],
+            "title": "Status"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen",
+            "description": "ISO-8601 timestamp of the last reading, or null if never seen."
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_id",
+          "vendor",
+          "status",
+          "last_seen"
+        ],
+        "title": "LiveSourceStatus",
+        "description": "Health of one data source within a scope.\n\nMirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is\nthe same closed set already pinned by ``SourceStatusEvent`` in\n``src/live/events.py`` \u2014 that module is the only producer of these values."
+      },
+      "LiveStatusResponse": {
+        "properties": {
+          "greenhouse_status": {
+            "type": "string",
+            "enum": [
+              "not_registered",
+              "no_source",
+              "live",
+              "paused"
+            ],
+            "title": "Greenhouse Status"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/LiveSourceStatus"
+            },
+            "type": "array",
+            "title": "Sources",
+            "description": "Always present, so consumers that only read 'sources' keep working."
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/LiveFreshness"
+          }
+        },
+        "type": "object",
+        "required": [
+          "greenhouse_status",
+          "sources",
+          "freshness"
+        ],
+        "title": "LiveStatusResponse",
+        "description": "Body of ``GET /api/live/status`` (always HTTP 200)."
       },
       "MarkAnomalyIntegratedRequest": {
         "properties": {

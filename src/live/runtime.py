@@ -279,6 +279,16 @@ class LiveRuntime:
         """Whether a scope's merger + connector tasks are currently running."""
         return bool(self._scope_tasks.get((tenant_id, greenhouse_id)))
 
+    def configured_scopes(self) -> list[tuple[str, str]]:
+        """Every ``(tenant_id, greenhouse_id)`` this runtime has sources for.
+
+        Boot resume uses this to split stored-live scopes into the ones it can
+        actually start and the ones that dropped out of ``MOCK_SCADA_SCOPES`` /
+        ``LIVE_SOURCES_JSON``, and to name the configured-but-idle remainder in
+        the startup log.
+        """
+        return list(self._scopes_by_key)
+
     def is_scope_configured(self, tenant_id: str, greenhouse_id: str) -> bool:
         """Whether this runtime has a source wired up for tenant/greenhouse.
 

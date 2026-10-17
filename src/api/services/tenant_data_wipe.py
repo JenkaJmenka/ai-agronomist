@@ -11,6 +11,12 @@ Two entry points, matching the two routes in ``src/api/routes/upload.py``:
 
 Both mute live mock/SCADA publish + DB persistence for the scope first —
 otherwise mock SCADA immediately re-seeds the tables that were just wiped.
+
+A wipe also writes ``desired_state='paused'`` to ``live_scope_state``, so the
+mute survives a redeploy. Without that, muting is in-process only: the next
+API restart would read a stale ``live`` row, resume the scope, and re-seed
+the data the operator just cleared — the exact outcome the in-process mute
+exists to prevent. **A wipe always wins over a prior Go Live.**
 """
 
 from __future__ import annotations
@@ -22,6 +28,10 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.cache_invalidation import invalidate_response_cache
+from src.api.services.live_scope_state_service import (
+    DesiredScopeState,
+    store_desired_state,
+)
 from src.db.models import (
     Incident,
     IncidentAction,
@@ -37,6 +47,32 @@ logger = logging.getLogger(__name__)
 # source column value for live SCADA rows in both SensorReading and RawReading
 # (written by src/live/persistence.py; see migration 017).
 LIVE_RAW_SOURCE = "live"
+
+
+async def _pause_live_scope(
+    db: AsyncSession,
+    live_runtime: Any,
+    tenant_id: str,
+    greenhouse_id: str,
+    context: str,
+) -> bool:
+    """Mute the scope in-process AND record ``paused`` as its desired state.
+
+    Must be called **before** the wipe's own DELETEs: a failed desired-state
+    upsert rolls the session back, and ordering it first means the rollback
+    can only ever discard this one statement rather than the deletes.
+
+    Returns whether the in-process mute took effect; the durable write is
+    best-effort and only logged, because a wipe must still clear the data on
+    a deploy where migration 028 has not run.
+    """
+    await store_desired_state(
+        db,
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        desired_state=DesiredScopeState.PAUSED,
+    )
+    return _suppress_live_persistence(live_runtime, tenant_id, greenhouse_id, context)
 
 
 def _suppress_live_persistence(
@@ -95,8 +131,8 @@ async def wipe_tenant_data(
 ) -> dict:
     """Delete all greenhouse-scoped data for a tenant/greenhouse (full wipe)."""
     # Mute live pipeline first so mock SCADA cannot write during/after the wipe.
-    live_persistence_suppressed = _suppress_live_persistence(
-        live_runtime, tenant_id, greenhouse_id, "clear_tenant_data"
+    live_persistence_suppressed = await _pause_live_scope(
+        db, live_runtime, tenant_id, greenhouse_id, "clear_tenant_data"
     )
 
     raw_result = await db.execute(
@@ -182,8 +218,8 @@ async def wipe_live_demo_data(
     greenhouse_id: str,
 ) -> dict:
     """Delete Go Live / mock SCADA persisted rows only."""
-    live_persistence_suppressed = _suppress_live_persistence(
-        live_runtime, tenant_id, greenhouse_id, "remove_live_demo_data"
+    live_persistence_suppressed = await _pause_live_scope(
+        db, live_runtime, tenant_id, greenhouse_id, "remove_live_demo_data"
     )
 
     live_raw_filter = [
