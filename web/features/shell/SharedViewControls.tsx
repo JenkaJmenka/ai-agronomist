@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 
 import { DateRangeControls } from "@/components/ui/DateRangeControls";
+import { LiveFreshnessBadge } from "@/features/monitoring/components/LiveFreshnessBadge";
 import { LiveToggle } from "@/features/monitoring/components/LiveToggle";
 import { SetpointsPanel } from "@/features/monitoring/components/SetpointsPanel";
 import type { SetpointRange, Setpoints } from "@/features/monitoring/hooks/useSetpoints";
@@ -45,6 +46,7 @@ export function SharedViewControls({
         onReset={onResetSetpoints}
       />
       <LiveToggle pageId={pageId} />
+      <LiveFreshnessBadge />
       {trailing}
       <DateRangeControls pageId={pageId} />
     </div>

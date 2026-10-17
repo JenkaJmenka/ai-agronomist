@@ -14,9 +14,13 @@ import { LiveToggle } from "@/features/monitoring/components/LiveToggle";
 
 const setLiveMock = vi.fn().mockResolvedValue(new URLSearchParams());
 const setRangeMock = vi.fn().mockResolvedValue(new URLSearchParams());
+// Controllable per test (default off) — the no-green-while-stale rule only
+// matters while `live` reads true, which the original hardcoded `false`
+// could never exercise.
+const liveQueryStateMock = vi.fn().mockReturnValue([false, setLiveMock]);
 
 vi.mock("nuqs", () => ({
-  useQueryState: () => [false, setLiveMock],
+  useQueryState: () => liveQueryStateMock(),
   parseAsBoolean: { withDefault: () => undefined },
 }));
 
@@ -41,13 +45,26 @@ vi.mock("@/features/monitoring/api/readings", () => ({
   fetchReadingsBounds: (...args: unknown[]) => fetchReadingsBoundsMock(...args),
 }));
 
+// useLiveStatus pulls in react-query; stubbed here (and in its own hook
+// tests) rather than wrapping every render in a QueryClientProvider. Default
+// freshness is "paused, not stale" so existing assertions about the toggle's
+// resume/pause flow are unaffected by the no-green-while-stale rule.
+const useLiveStatusMock = vi.fn().mockReturnValue({
+  freshness: { state: "paused", is_stale: false },
+});
+vi.mock("@/features/monitoring/hooks/useLiveStatus", () => ({
+  useLiveStatus: () => useLiveStatusMock(),
+}));
+
 beforeEach(() => {
   setLiveMock.mockClear();
   setRangeMock.mockClear();
   resumeLiveScopeMock.mockReset();
   pauseLiveScopeMock.mockReset();
   fetchReadingsBoundsMock.mockReset();
+  liveQueryStateMock.mockReturnValue([false, setLiveMock]);
   useScopeMock.mockReturnValue({ tenant: "tenant_1", gh: "gh_A" });
+  useLiveStatusMock.mockReturnValue({ freshness: { state: "paused", is_stale: false } });
 });
 
 afterEach(cleanup);
@@ -207,5 +224,57 @@ describe("LiveToggle — reacts to resume's scope_status", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("live-not-configured")).not.toBeInTheDocument(),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No green Go Live toggle while stale (live.py:183-186 applies the same
+// standard to `resumed` for an unconfigured scope: a verdict that reads
+// "on"/"success" must not lie to the operator about data actually arriving).
+// ---------------------------------------------------------------------------
+
+describe("LiveToggle — no green toggle while stale", () => {
+  it("renders the primary (accent) variant when live and fresh", () => {
+    liveQueryStateMock.mockReturnValue([true, setLiveMock]);
+    useLiveStatusMock.mockReturnValue({ freshness: { state: "live", is_stale: false } });
+
+    render(<LiveToggle pageId="monitoring" />);
+
+    const button = screen.getByTestId("live-toggle");
+    expect(button).toHaveAttribute("data-live", "true");
+    expect(button).toHaveAttribute("data-stale", "false");
+    expect(button.className).toContain("bg-accent");
+  });
+
+  it("falls back to the secondary variant when live but stale", () => {
+    liveQueryStateMock.mockReturnValue([true, setLiveMock]);
+    useLiveStatusMock.mockReturnValue({ freshness: { state: "live", is_stale: true } });
+
+    render(<LiveToggle pageId="monitoring" />);
+
+    const button = screen.getByTestId("live-toggle");
+    expect(button).toHaveAttribute("data-live", "true");
+    expect(button).toHaveAttribute("data-stale", "true");
+    expect(button.className).not.toContain("bg-accent");
+  });
+
+  it("does not report stale when the toggle itself is off, even if freshness lags behind", () => {
+    liveQueryStateMock.mockReturnValue([false, setLiveMock]);
+    useLiveStatusMock.mockReturnValue({ freshness: { state: "live", is_stale: true } });
+
+    render(<LiveToggle pageId="monitoring" />);
+
+    expect(screen.getByTestId("live-toggle")).toHaveAttribute("data-stale", "false");
+  });
+
+  it("treats a null freshness (loading / deploy-skew) as not stale", () => {
+    liveQueryStateMock.mockReturnValue([true, setLiveMock]);
+    useLiveStatusMock.mockReturnValue({ freshness: null });
+
+    render(<LiveToggle pageId="monitoring" />);
+
+    const button = screen.getByTestId("live-toggle");
+    expect(button).toHaveAttribute("data-stale", "false");
+    expect(button.className).toContain("bg-accent");
   });
 });
