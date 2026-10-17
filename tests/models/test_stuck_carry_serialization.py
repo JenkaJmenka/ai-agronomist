@@ -10,14 +10,18 @@ Invariants tested:
   - All datetime fields survive with UTC timezone preserved.
   - emitted_onsets round-trips as set of 2-tuples (not list of lists).
   - skip_channels round-trips as frozenset.
-  - completed_faults, recovery_channels, channels all reconstruct correctly.
+  - completed_faults and channels all reconstruct correctly.
   - An empty (default) StuckCarry round-trips cleanly.
   - A carry with partial / None datetime fields (last_frozen_dt=None) is safe.
+  - A payload serialised before a field removal still loads afterwards, on
+    both boundaries the carry crosses (see TestRollingDeployCarryCompat).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -26,6 +30,7 @@ from src.models.stuck_fault_detector import (
     FaultWindow,
     StuckCarry,
 )
+from src.mq.schemas import UPLOAD_PORTION_SCHEMA_VERSION, UploadPortionMessage
 
 
 def _utc(year, month, day, hour=0, minute=0, second=0) -> datetime:
@@ -70,17 +75,6 @@ def _make_full_carry() -> StuckCarry:
             ("humidity", "2026-12-15T11:05:00+00:00"),
         },
         skip_channels=frozenset({"co2", "light"}),
-        recovery_channels={
-            "humidity": FaultWindow(
-                channel="humidity",
-                onset_ts="2026-12-14T00:00:00+00:00",
-                onset_dt=_utc(2026, 12, 14),
-                release_ts="2026-12-15T10:55:00+00:00",
-                release_dt=_utc(2026, 12, 15, 10, 55),
-                last_frozen_ts="2026-12-15T10:50:00+00:00",
-                last_frozen_dt=_utc(2026, 12, 15, 10, 50),
-            )
-        },
         completed_faults=[
             FaultWindow(
                 channel="humidity",
@@ -135,11 +129,6 @@ def _assert_carry_equal(original: StuckCarry, restored: StuckCarry) -> None:
         assert os.onset_dt == rs.onset_dt
         assert rs.last_dt.tzinfo is not None
         assert os.last_dt == rs.last_dt
-
-    # recovery_channels
-    assert set(original.recovery_channels.keys()) == set(restored.recovery_channels.keys())
-    for ch in original.recovery_channels:
-        _assert_fw_equal(original.recovery_channels[ch], restored.recovery_channels[ch])
 
     # completed_faults
     assert len(original.completed_faults) == len(restored.completed_faults)
@@ -262,13 +251,17 @@ class TestStuckCarryRoundTrip:
         restored = StuckCarry.from_dict(carry.to_dict())
         _assert_carry_equal(carry, restored)
 
-    def test_post_release_carry_with_recovery_and_faults(self):
-        """Carry after the 12-18 fault released: non-empty recovery_channels AND
-        completed_faults with fully populated FaultWindows (including non-None
-        last_frozen_ts/dt) round-trip exactly through to_dict/from_dict.
+    def test_post_release_carry_with_four_faults_on_one_channel(self):
+        """Carry after the 12-18 fault released: four completed FaultWindows
+        for the SAME channel, plus a still-open freeze, round-trip exactly
+        through to_dict/from_dict with non-None last_frozen_ts/dt throughout.
 
-        Task 1c case 8: timezone-aware datetimes survive including in
-        recovery_channels and completed_faults.
+        One channel holding four released windows is precisely the state the
+        removed per-channel ``recovery_channels`` dict could not represent --
+        keyed by channel, it kept only the most recent release.  The list
+        keeps all four, and this pins that every one survives the round trip.
+
+        Task 1c case 8: timezone-aware datetimes survive in completed_faults.
         """
         carry = StuckCarry(
             channels={
@@ -292,17 +285,6 @@ class TestStuckCarryRoundTrip:
                 ("humidity", "2026-12-18T13:00:00+00:00"),
             },
             skip_channels=frozenset({"co2"}),
-            recovery_channels={
-                "humidity": FaultWindow(
-                    channel="humidity",
-                    onset_ts="2026-12-18T13:00:00+00:00",
-                    onset_dt=_utc(2026, 12, 18, 13, 0),
-                    release_ts="2026-12-25T08:55:00+00:00",
-                    release_dt=_utc(2026, 12, 25, 8, 55),
-                    last_frozen_ts="2026-12-25T08:50:00+00:00",
-                    last_frozen_dt=_utc(2026, 12, 25, 8, 50),
-                ),
-            },
             completed_faults=[
                 FaultWindow(
                     channel="humidity",
@@ -353,3 +335,109 @@ class TestStuckCarryRoundTrip:
             assert rfw.last_frozen_dt is not None, f"fault {i}: last_frozen_dt is None"
             assert rfw.last_frozen_dt.tzinfo is not None, f"fault {i}: not tz-aware"
             assert ofw.last_frozen_dt == rfw.last_frozen_dt
+
+
+# ---------------------------------------------------------------------------
+# Rolling-deploy compatibility
+# ---------------------------------------------------------------------------
+
+# Removed from StuckCarry in BACKLOG-5.  Named as a string here, not imported,
+# precisely because nothing in src/ refers to it any more.
+_REMOVED_FIELD = "recovery_channels"
+
+
+def _pre_removal_carry_payload() -> dict[str, Any]:
+    """Return the full carry as an OLD (pre-BACKLOG-5) worker serialised it.
+
+    The legacy ``recovery_channels`` block is rebuilt from the current
+    serialisation of a completed window rather than hand-written: the old
+    ``to_dict`` passed both through the same ``_fault_window`` helper and
+    keyed this one by channel, so this is the shape the old writer emitted
+    and it cannot drift from FaultWindow's real serialised form.
+    """
+    payload = _make_full_carry().to_dict()
+    released_window = payload["completed_faults"][-1]
+    payload[_REMOVED_FIELD] = {released_window["channel"]: dict(released_window)}
+    return payload
+
+
+def _portion_message(carry_state: dict[str, Any]) -> UploadPortionMessage:
+    """A portion message carrying *carry_state*, tagged with the live version."""
+    return UploadPortionMessage(
+        job_id="job-rolling-deploy",
+        tenant_id="tenant_1",
+        greenhouse_id="default",
+        portion_idx=1,
+        rows=[{"timestamp": "2026-12-25T09:00:00+00:00", "humidity": 91.24}],
+        adaptive_ranges=[[19.0, 31.0], [45.0, 85.0], [350.0, 550.0], [0.0, 1100.0]],
+        stuck_carry_state=carry_state,
+        schema_version=UPLOAD_PORTION_SCHEMA_VERSION,
+    )
+
+
+class TestRollingDeployCarryCompat:
+    """A carry serialised before a field removal must load after it.
+
+    During a rolling deploy both worker versions run at once, and the carry
+    crosses a process boundary twice — either side can hold a payload written
+    by the older version:
+
+      - the RabbitMQ portion message (``UploadPortionMessage.stuck_carry_state``)
+      - a persisted portion row read back at finalize, which is the longer
+        skew window: the row outlives the queue message by as long as the job
+        takes to complete.
+
+    ``from_dict`` survives the unknown key only because it builds ``cls(...)``
+    from explicitly named ``d.get(...)`` kwargs.  Refactoring that to
+    ``cls(**d)`` would turn every in-flight payload into a hard ``TypeError``,
+    and ``UPLOAD_PORTION_SCHEMA_VERSION`` would not catch it — it did not move
+    across the BACKLOG-5 removal.  These tests are the only guard.
+    """
+
+    def test_removed_key_is_ignored_and_surviving_state_round_trips(self):
+        """The removed key is dropped; every surviving field arrives intact."""
+        restored = StuckCarry.from_dict(_pre_removal_carry_payload())
+
+        assert not hasattr(restored, _REMOVED_FIELD)
+        _assert_carry_equal(_make_full_carry(), restored)
+
+    def test_pre_removal_payload_survives_the_portion_message(self):
+        """Boundary 1: the carry rides a RabbitMQ portion message."""
+        delivered = UploadPortionMessage.model_validate_json(
+            _portion_message(_pre_removal_carry_payload()).model_dump_json()
+        )
+
+        # The version gate cannot catch this: the message is tagged with the
+        # current schema version and still carries the removed key.
+        assert delivered.schema_version == UPLOAD_PORTION_SCHEMA_VERSION
+        assert _REMOVED_FIELD in delivered.stuck_carry_state
+
+        _assert_carry_equal(
+            _make_full_carry(), StuckCarry.from_dict(delivered.stuck_carry_state)
+        )
+
+    def test_pre_removal_payload_survives_a_persisted_portion_row(self):
+        """Boundary 2: the carry is stored in a portion row's JSON payload and
+        read back by a newer worker at finalize."""
+        stored_row = json.loads(
+            json.dumps({"stuck_carry_state": _pre_removal_carry_payload()})
+        )
+
+        assert _REMOVED_FIELD in stored_row["stuck_carry_state"]
+
+        _assert_carry_equal(
+            _make_full_carry(),
+            StuckCarry.from_dict(stored_row["stuck_carry_state"]),
+        )
+
+    def test_post_removal_payload_omits_the_key_and_loads_on_defaults(self):
+        """The other direction: a payload written after the removal has no
+        ``recovery_channels`` key at all and loads on the field defaults."""
+        payload = StuckCarry().to_dict()
+        assert _REMOVED_FIELD not in payload
+
+        restored = StuckCarry.from_dict(payload)
+        assert restored.channels == {}
+        assert restored.completed_faults == []
+        assert restored.skip_channels == frozenset()
+        assert restored.emitted_onsets == set()

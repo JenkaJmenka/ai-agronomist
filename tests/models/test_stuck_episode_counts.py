@@ -199,7 +199,6 @@ class TestDualGate:
         )
         assert alerts == []
         assert carry.completed_faults == []
-        assert carry.recovery_channels == {}
 
     async def test_fired_freeze_window_is_marked_fired(self) -> None:
         """The window of a fired freeze carries ``has_fired=True``."""
