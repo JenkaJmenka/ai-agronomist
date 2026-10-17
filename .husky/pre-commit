@@ -1,3 +1,201 @@
 #!/usr/bin/env sh
 # Fast gate: format/lint only staged web files (biome via lint-staged).
-pnpm exec lint-staged
+#
+# Why this is more than one line: node_modules/ is gitignored, so every git
+# worktree (including every .claude/worktrees/agent-*) lacks it, and the old
+# one-liner died there with
+#     ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "lint-staged" not found
+# Husky reports the failure and git aborts the commit, so the hook's breakage
+# silently became a human judgement call about --no-verify. That was the defect.
+#
+# Two separate pnpm projects are involved -- there is NO pnpm workspace:
+#   lint-staged    -> root project  (pnpm-lock.yaml,     node_modules/.bin)
+#   @biomejs/biome -> web project   (web/pnpm-lock.yaml, web/node_modules/.bin)
+# A worktree is missing both trees, so both have to be made resolvable.
+# `pnpm --dir web exec biome` does fall through to an ambient PATH entry
+# (verified: it prints 2.5.3 with only web/node_modules/.bin prepended), which
+# is why PATH alone is enough and the lint-staged task needs no rewriting.
+#
+# Strategy:
+#   main checkout -> run lint-staged exactly as before.
+#   worktree      -> borrow the main checkout's binaries via PATH, but only if
+#                    its lockfile entries match this worktree's (skew guard).
+#   neither works -> cannot lint: hard-fail iff a covered file is staged.
+#
+# Note husky resolves this script through core.hooksPath, which is an absolute
+# path into the MAIN checkout -- a worktree commit executes the main checkout's
+# copy of this file with cwd set to the worktree. Everything below is therefore
+# derived from `git rev-parse` (cwd), never from "$0".
+#
+# Husky runs hooks with `sh -e`, so any unchecked non-zero command aborts.
+
+set -u
+
+ROOT_BIN_SUBPATH='node_modules/.bin'
+WEB_BIN_SUBPATH='web/node_modules/.bin'
+ROOT_LOCKFILE='pnpm-lock.yaml'
+WEB_LOCKFILE='web/pnpm-lock.yaml'
+LINT_STAGED_PACKAGE='lint-staged'
+BIOME_PACKAGE='@biomejs/biome'
+
+to_absolute_dir() {
+  ( CDPATH= cd -- "$1" >/dev/null 2>&1 && pwd )
+}
+
+# The `<name>@<version>:` keys a pnpm lockfile carries in its `packages:` and
+# `snapshots:` sections. Any version bump moves them, which is all the skew
+# guard needs to see.
+lockfile_entries_for() {
+  lockfile_path="$1"
+  package_name="$2"
+  if [ ! -f "$lockfile_path" ]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  grep -F "$package_name@" "$lockfile_path" || true
+}
+
+has_lockfile_skew() {
+  worktree_lockfile="$1"
+  main_lockfile="$2"
+  package_name="$3"
+  if [ "$(lockfile_entries_for "$worktree_lockfile" "$package_name")" \
+     = "$(lockfile_entries_for "$main_lockfile" "$package_name")" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Shell approximation of the lint-staged globs declared in package.json, read at
+# runtime so it cannot drift from the real config. It is DELIBERATELY BROADER
+# than the real globs: micromatch is unavailable here (that is the whole problem
+# this file exists to work around), a false stop is cheap, and a false pass is
+# the thing being prevented. Only the literal prefix before the first wildcard
+# and the trailing {ext,ext,...} list are honoured; any negation such as
+# !(openapi|api-types.gen) is ignored, so a file the real glob excludes still
+# trips this gate.
+lint_staged_globs() {
+  package_json_path="$1"
+  [ -f "$package_json_path" ] || return 0
+  awk '
+    /"lint-staged"[ \t]*:[ \t]*\{/ { in_block = 1; next }
+    in_block && /^[ \t]*\}/ { in_block = 0 }
+    in_block && match($0, /^[ \t]*"[^"]+"[ \t]*:/) {
+      key = substr($0, RSTART, RLENGTH)
+      sub(/^[ \t]*"/, "", key)
+      sub(/"[ \t]*:$/, "", key)
+      print key
+    }
+  ' "$package_json_path"
+}
+
+is_covered_by_globs() {
+  candidate_path="$1"
+  candidate_extension="${candidate_path##*.}"
+  set -f # keep the glob words below from being pathname-expanded
+  for glob_pattern in $LINT_STAGED_GLOBS; do
+    literal_prefix="${glob_pattern%%[*?[{!]*}"
+    case "$candidate_path" in
+      "$literal_prefix"*) ;;
+      *) continue ;;
+    esac
+    case "$glob_pattern" in
+      *\{*\}*)
+        extension_list="${glob_pattern##*\{}"
+        extension_list="${extension_list%%\}*}"
+        ;;
+      *) extension_list="${glob_pattern##*.}" ;;
+    esac
+    saved_ifs="$IFS"
+    IFS=','
+    for extension in $extension_list; do
+      if [ "$extension" = "$candidate_extension" ]; then
+        IFS="$saved_ifs"
+        set +f
+        return 0
+      fi
+    done
+    IFS="$saved_ifs"
+  done
+  set +f
+  return 1
+}
+
+# Fallback D -- enforce the rule in code even though the linter cannot be run.
+block_if_covered_files_are_staged() {
+  reason="$1"
+  LINT_STAGED_GLOBS="$(lint_staged_globs package.json)"
+  if [ -z "$LINT_STAGED_GLOBS" ]; then
+    echo "pre-commit: BLOCKED -- no lint-staged globs found in package.json,"
+    echo "            so coverage cannot be determined ($reason)."
+    exit 1
+  fi
+
+  covered_staged_files=''
+  for staged_path in $(git diff --cached --name-only --diff-filter=ACMR); do
+    if is_covered_by_globs "$staged_path"; then
+      covered_staged_files="$covered_staged_files  $staged_path
+"
+    fi
+  done
+
+  if [ -z "$covered_staged_files" ]; then
+    echo "pre-commit: lint-staged unavailable ($reason); no covered files are" \
+         "staged, nothing to check."
+    exit 0
+  fi
+
+  echo "pre-commit: BLOCKED -- lint-staged cannot run here ($reason),"
+  echo "            and these staged files are covered by it:"
+  printf '%s' "$covered_staged_files"
+  echo "            (the match is deliberately broader than the real glob)"
+  echo
+  echo "Fix it one of these ways:"
+  echo "  * commit from the main checkout, or"
+  echo "  * install deps in this tree: pnpm install && pnpm --dir web install, or"
+  echo "  * lint by hand first:"
+  echo "      pnpm --dir web exec biome check --write <files>"
+  echo
+  echo "Do NOT reach for --no-verify: this gate fired because it had something"
+  echo "to check, not because it is broken."
+  exit 1
+}
+
+git_dir="$(to_absolute_dir "$(git rev-parse --git-dir)")"
+git_common_dir="$(to_absolute_dir "$(git rev-parse --git-common-dir)")"
+
+# Main checkout: both point at the same .git, so node_modules/ is present.
+if [ "$git_dir" = "$git_common_dir" ]; then
+  pnpm exec lint-staged
+  exit $?
+fi
+
+# --- worktree from here on --------------------------------------------------
+main_checkout="$(dirname "$git_common_dir")"
+main_root_bin="$main_checkout/$ROOT_BIN_SUBPATH"
+main_web_bin="$main_checkout/$WEB_BIN_SUBPATH"
+
+if [ ! -x "$main_root_bin/lint-staged" ]; then
+  block_if_covered_files_are_staged "no lint-staged binary in $main_root_bin"
+fi
+if [ ! -x "$main_web_bin/biome" ]; then
+  block_if_covered_files_are_staged "no biome binary in $main_web_bin"
+fi
+
+# Skew guard: borrowing binaries from a main checkout parked on another branch
+# could lint with the wrong biome, which is worse than not linting at all.
+if has_lockfile_skew "$ROOT_LOCKFILE" "$main_checkout/$ROOT_LOCKFILE" \
+    "$LINT_STAGED_PACKAGE"; then
+  block_if_covered_files_are_staged \
+    "$LINT_STAGED_PACKAGE differs between this worktree and $main_checkout"
+fi
+if has_lockfile_skew "$WEB_LOCKFILE" "$main_checkout/$WEB_LOCKFILE" \
+    "$BIOME_PACKAGE"; then
+  block_if_covered_files_are_staged \
+    "$BIOME_PACKAGE differs between this worktree and $main_checkout"
+fi
+
+# cwd stays the worktree, so lint-staged reads this worktree's index, this
+# worktree's package.json config and this worktree's web/biome.json.
+echo "pre-commit: worktree detected -- using binaries from $main_checkout"
+PATH="$main_root_bin:$main_web_bin:$PATH" lint-staged
