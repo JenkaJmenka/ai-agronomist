@@ -30,6 +30,12 @@ results/
 # the way it is, and are cited from commit messages and source comments.
 # Everything else under docs/ (working notes, review reports, plans) stays local.
 docs/*
+# docs/live_scada_connectors.md is the Priva / Hoogendoorn integration guide.
+# src/live/scope_control.py:20 and ADR-009 both cite its section 8 as the record
+# of the single-worker invariant, so it has to be readable from a clean clone.
+# It was written 2026-07-19 and silently ignored by docs/* until 2026-10-17:
+# AGENT_MEMORY.md:2045 recorded it as existing, which was true only locally.
+!docs/live_scada_connectors.md
 !docs/anomaly_framework_spec.md
 !docs/USER_GUIDE.md
 !docs/ANOMALY_CATALOG.md
