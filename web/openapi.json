@@ -4247,7 +4247,7 @@
           "Live"
         ],
         "summary": "Live Source Status",
-        "description": "Return current health + freshness of all live data sources for a scope.\n\nResponse shape (always HTTP 200):\n::\n\n    {\n      \"greenhouse_status\": \"not_registered\" | \"no_source\" | \"live\" | \"paused\",\n      \"sources\": [...],\n      \"freshness\": {\n        \"state\": \"live\" | \"paused\" | \"not_configured\",\n        \"newest_reading_at\": \"2026-10-16T09:00:00+00:00\" | null,\n        \"age_seconds\": 42.0 | null,\n        \"is_stale\": false,\n        \"threshold_seconds\": 180.0\n      }\n    }\n\n``freshness`` lives here rather than on a new endpoint because this route\nis already the one place a caller asks \"what is this scope doing\", it\nalready resolves the runtime and a DB session, and a staleness badge\nrenders next to the status it qualifies \u2014 a second endpoint would make\nthe UI do two round-trips to draw one indicator. ``sources`` and\n``greenhouse_status`` are unchanged, so existing consumers keep working.\n\n``freshness.state`` is deliberately narrower than ``greenhouse_status``:\nit describes the connectors only (live / paused / not_configured) and\nnever the registry states, so a caller can reason about liveness without\nfirst excluding ``not_registered``. ``is_stale`` is true only for a\n``live`` scope \u2014 including a live scope that has never written a row at\nall. See :mod:`src.api.services.live_freshness` for the age/clock rules\n(ages are not clamped: future-dated readings give a negative age).\n\nThe ``greenhouse_status`` discriminator lets callers tell apart the\nempty-source states that previously all returned ``{\"sources\": []}``\nand were indistinguishable, plus a configured-but-idle state:\n\n* ``not_registered`` \u2014 no greenhouse record in the registry or any\n  readings table; the tenant needs to be provisioned.\n* ``no_source``      \u2014 greenhouse exists but the live runtime is not\n  watching it; use POST /api/readings/greenhouses to register and\n  configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.\n* ``paused``         \u2014 the scope is configured but its connectors are\n  not running (idle pending Go Live, or explicitly paused).\n* ``live``            \u2014 the runtime has an active scope for this\n  greenhouse (sources may still have ``last_seen: null`` while the\n  first ticks arrive).\n\nThe ``sources`` list is always present so existing consumers that only\nread ``sources`` continue to work without changes.",
+        "description": "Return current health + freshness of all live data sources for a scope.\n\nResponse shape (always HTTP 200):\n::\n\n    {\n      \"greenhouse_status\": \"not_registered\" | \"no_source\" | \"live\" | \"paused\",\n      \"detector_state\": \"unknown\" | \"ready\" | \"missing\" | \"error\",\n      \"sources\": [...],\n      \"freshness\": {\n        \"state\": \"live\" | \"paused\" | \"not_configured\",\n        \"newest_reading_at\": \"2026-10-16T09:00:00+00:00\" | null,\n        \"age_seconds\": 42.0 | null,\n        \"is_stale\": false,\n        \"threshold_seconds\": 180.0\n      }\n    }\n\n``freshness`` lives here rather than on a new endpoint because this route\nis already the one place a caller asks \"what is this scope doing\", it\nalready resolves the runtime and a DB session, and a staleness badge\nrenders next to the status it qualifies \u2014 a second endpoint would make\nthe UI do two round-trips to draw one indicator. ``sources`` and\n``greenhouse_status`` are unchanged, so existing consumers keep working.\n\n``freshness.state`` is deliberately narrower than ``greenhouse_status``:\nit describes the connectors only (live / paused / not_configured) and\nnever the registry states, so a caller can reason about liveness without\nfirst excluding ``not_registered``. ``is_stale`` is true only for a\n``live`` scope \u2014 including a live scope that has never written a row at\nall. See :mod:`src.api.services.live_freshness` for the age/clock rules\n(ages are not clamped: future-dated readings give a negative age).\n\nThe ``greenhouse_status`` discriminator lets callers tell apart the\nempty-source states that previously all returned ``{\"sources\": []}``\nand were indistinguishable, plus a configured-but-idle state:\n\n* ``not_registered`` \u2014 no greenhouse record in the registry or any\n  readings table; the tenant needs to be provisioned.\n* ``no_source``      \u2014 greenhouse exists but the live runtime is not\n  watching it; use POST /api/readings/greenhouses to register and\n  configure LIVE_SOURCES_JSON / MOCK_SCADA_ENABLED for this scope.\n* ``paused``         \u2014 the scope is configured but its connectors are\n  not running (idle pending Go Live, or explicitly paused).\n* ``live``            \u2014 the runtime has an active scope for this\n  greenhouse (sources may still have ``last_seen: null`` while the\n  first ticks arrive).\n\nThe ``sources`` list is always present so existing consumers that only\nread ``sources`` continue to work without changes.",
         "operationId": "live_source_status_api_live_status_get",
         "parameters": [
           {
@@ -9964,7 +9964,8 @@
             "enum": [
               "online",
               "degraded",
-              "offline"
+              "offline",
+              "paused"
             ],
             "title": "Status"
           },
@@ -9989,7 +9990,7 @@
           "last_seen"
         ],
         "title": "LiveSourceStatus",
-        "description": "Health of one data source within a scope.\n\nMirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is\nthe same closed set already pinned by ``SourceStatusEvent`` in\n``src/live/events.py`` \u2014 that module is the only producer of these values."
+        "description": "Health of one data source within a scope.\n\nMirrors ``MergeBuffer.full_statuses`` entries, plus ``paused``.\n\n``online``/``degraded``/``offline`` come from ``SourceStatusEvent`` in\n``src/live/events.py``, which is the only producer of those three.\n``paused`` is added by ``LiveRuntime.source_statuses`` and never appears on\nthe SSE stream: a paused scope has no running merger to emit events. It\nexists because ``MergeBuffer`` seeds every source to ``online`` at\nconstruction and only updates it from inside the merger loop, so cancelling\na scope froze every source at ``online`` with a frozen ``last_seen`` \u2014 and\nan operator read the page as live."
       },
       "LiveStatusResponse": {
         "properties": {
@@ -10002,6 +10003,18 @@
               "paused"
             ],
             "title": "Greenhouse Status"
+          },
+          "detector_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "ready",
+              "missing",
+              "error"
+            ],
+            "title": "Detector State",
+            "description": "Whether this scope can score at all. 'ready' = a detector is loaded; 'missing' = no model is deployed for the tenant, so readings persist unscored (live, not analysed); 'error' = resolution is failing; 'unknown' = not yet attempted, or the scope has no scorer.",
+            "default": "unknown"
           },
           "sources": {
             "items": {

@@ -1481,6 +1481,27 @@ LIVE_HUB_BLOCK_MS: int = int(os.environ.get("LIVE_HUB_BLOCK_MS", "5000"))
 # and scoring pauses until the channel returns.
 LIVE_FORWARD_FILL_MAX_TICKS: int = int(os.environ.get("LIVE_FORWARD_FILL_MAX_TICKS", "5"))
 
+# --- Live detector resolution cadence ---
+# How long a resolved detector is reused before the live path re-resolves the
+# tenant's active model.  Five minutes is short enough that promoting a newly
+# trained model takes effect without a redeploy, and long enough that the
+# registry lookup plus torch.load cost is amortised over thousands of events
+# on a 2 s feed.
+LIVE_DETECTOR_REFRESH_SECONDS: float = float(
+    os.environ.get("LIVE_DETECTOR_REFRESH_SECONDS", "300.0")
+)
+
+# Back-off after a FAILED resolution (no active model, or the checkpoint will
+# not load), which is a separate interval from the success refresh above
+# because the retry rate was effectively unbounded: the resolver only stamps
+# its _resolved_at on success, so a tenant with no model re-ran the whole
+# lookup on EVERY event.  Measured on a 2 s mock feed: 23.7 failed resolutions
+# and 47.3 torch.load attempts per minute.  60 s brings that to ~1/min while
+# still surfacing a newly deployed model within a minute of deployment.
+LIVE_DETECTOR_MISSING_RETRY_SECONDS: float = float(
+    os.environ.get("LIVE_DETECTOR_MISSING_RETRY_SECONDS", "60.0")
+)
+
 # --- Demo mode: guaranteed anomaly injection ---
 # When enabled, the mock climate source (which carries ML-scored channels)
 # will schedule guaranteed episodes at random intervals to ensure the demo

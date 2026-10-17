@@ -5943,6 +5943,31 @@ outside the working dir, so worktree setup needs checking against that.
 
 ### BACKLOG-4 — no index covers `release_ts` for `_fetch_recovery_release_events`
 
+**CLOSED 2026-10-17 — no index added.** Prod check by the user, read-only via
+the Railway Data tab:
+
+```sql
+SELECT tenant_id, greenhouse_id, detector, count(*)
+FROM anomaly_episodes GROUP BY 1,2,3;   -- 0 rows
+```
+
+The table is **empty in production**, far under the ~200k-episode threshold the
+round-1 measurement set for the index to pay for itself, so the existing UNIQUE
+index suffices and a new one would be pure write cost.
+
+**Reopen when prod passes ~200k episodes**, using the index shape from the
+round-1 measurement below — keep `detector` as a **key column, not a partial
+predicate**, since the compound-label finding (`project_detector_label_compound`)
+means exact-match predicates on detector undercount.
+
+Why the table is empty is **expected, not a second defect** — see BACKLOG-8's
+note on the episode writer: `anomaly_episodes` is written only by
+`persist_stuck_fault_episodes` (`src/api/services/anomaly_episode_writer.py:183`),
+called only from the two upload paths (`src/api/services/cold_run_upload.py:28`,
+`src/workers/upload_consumer.py:20`), and only for stuck-fault freezes that
+actually fired. A year of tenant_1 uploads with no fired freeze legitimately
+yields zero rows.
+
 Found by the ADR-011 author while verifying Task 5, and confirmed against
 `src/db/models.py` and `alembic/versions/026_add_anomaly_episodes.py`.
 
@@ -6078,6 +6103,247 @@ per-worker, so suppress/resume on one worker is invisible to the others — the
 same class of problem, already documented, and the reason single-worker was
 already a stated invariant before `028` strengthened the need for it.
 
+### BACKLOG-8 — live-only tenants can never acquire a model
+
+Recorded 2026-10-17 from the live-detector diagnosis. **Decision: not in that
+PR** — that PR only makes the missing-model state honest ("live, not analysed").
+
+**DEPENDS ON BACKLOG-11.** Do not build the live-training trigger before the
+completeness defect there is fixed. BACKLOG-11 is latent only because no live
+tenant has a model; giving a live scope a model is precisely what arms it, and
+this item is the thing that gives live scopes models. Shipping BACKLOG-8 first
+would silently start dropping a third of flagged live anomalies.
+
+`grep -rn "train|cold_start" src/live/` returns **zero** triggers. Every
+training entry point is on the upload path:
+`src/api/services/upload_checkpoint.py:41` → `should_train_cold_start`
+→ `src/api/services/cold_start_training.py:58` `train_cold_start_from_csv`
+→ `:77` `put_checkpoint(db, f"cold_start/{tenant_id}")` → `ModelRegistry.register_model`.
+
+So a tenant whose data arrives only over the live feed has no path to a model,
+ever. `tenant_2` is exactly that tenant in production: it has no
+`model_version` rows at all (confirmed by the user's read-only prod query,
+while `tenant_1` and `smoke_test` both have a current deployment).
+
+Design questions to answer before building the live-training trigger:
+
+1. **Where it runs.** Not in the API process — the API is a single replica
+   (BACKLOG-7) and training is CPU-heavy; it belongs in `src/workers/`.
+2. **Minimum data before training.** The cold-start path already raises
+   `InsufficientDataError`; live needs an explicit row/timespan floor, since a
+   model trained on an hour of mock data is worse than no model.
+3. **How it interacts with seasonal baselines.** `src/config.py:1114` carries a
+   seasonal baseline/scaler and `:1228` a count below which a tenant is "too
+   new for diurnal baselines". A live-trained model must not be deployed while
+   the tenant is still under that floor.
+4. **Retraining cadence and the key collision in BACKLOG-9** — a live retrain
+   would overwrite the same `cold_start/<tenant>` artifact key.
+
+### BACKLOG-9 — every `model_version` row for a tenant points at the same artifact key
+
+Found by the user's read-only prod query on 2026-10-17 and confirmed against the
+code. **Decision: record, do not fix in the live-detector PR.**
+
+All four `tenant_1` `model_version` rows carry the **same**
+`checkpoint_path` — `db://model_artifacts/cold_start/tenant_1` — and all four
+have `status = 'active'`.
+
+Both halves are confirmed in code:
+
+- **One key per tenant.** `src/api/services/cold_start_training.py:77` stores
+  under `f"cold_start/{tenant_id}"`, and `put_checkpoint`
+  (`src/models/artifact_store.py:53-60`) is an **upsert**:
+  `on_conflict_do_update` overwrites `data`, `sha256` and `size_bytes` for an
+  existing key. Every retrain therefore replaces the bytes every prior version
+  row still points at.
+- **`status` is never demoted.** `ModelRegistry.register_model`
+  (`src/models/model_registry.py:30-36`) sets `status="active"` on each new
+  `ModelVersion` and only flips the previous **`ModelDeployment.is_current`**
+  to False (`:43-50`). The old `ModelVersion.status` is left `'active'`.
+
+Consequence: `rollback_model` (`src/models/model_registry.py:118`) would flip
+`is_current` to an older `model_version` row and then resolve that row's
+`checkpoint_path` — the same key — and so **silently load the current model's
+bytes**. A rollback appears to succeed and changes nothing. `status` is also
+useless for telling which version is live; only `is_current` means anything.
+
+Fix shape when picked up: make the artifact key version-scoped (e.g.
+`cold_start/<tenant>/<model_id>`, or append the sha) so each `model_version`
+pins immutable bytes, and demote the prior row's `status` in `register_model`.
+Note the artifact cache is already content-addressed on `sha256[:12]`
+(`artifact_store.py:103-105`), so distinct bytes already get distinct local
+paths — the collision is purely in the DB key.
+
+### BACKLOG-10 — `learning.py` still loads the dead `models/baseline.pt`
+
+Recorded 2026-10-17. **Folded into the live-detector PR by user decision**, so
+this entry is the record rather than an open item; reopen only if that fix is
+reverted.
+
+`src/api/routes/learning.py:64` `_load_base_model()` calls the filesystem
+baseline and raises `HTTPException(503, "Failed to initialize base model: ...")`
+on the missing file. It surfaced unprompted in the live-detector repro's stderr,
+which is how it was found — a third call site for the same dead literal
+alongside the live path and `src/api/services/upload_checkpoint.py:36/:60`.
+
+### BACKLOG-11 — a flagged live event can be dropped from `sensor_readings`
+
+Found by the orchestrator on 2026-10-17 while gating the live-detector PR's
+item 3, in answer to the user's question. **Decision: record, do not fix in
+that PR. The `live.persistence` WARNING stays at WARNING — do not demote it,
+because it is the only present-day signal that buckets are incomplete.**
+
+**Latent in production today, and only latent by accident.** No live tenant has
+a model (`tenant_2` has no `model_version` rows at all), so nothing live is
+scored, so nothing flagged is dropped. It arms the moment any tenant model
+reaches a live scope — via BACKLOG-8, or via someone simply uploading a CSV for
+a tenant that also has a live scope. BACKLOG-8 therefore depends on this item.
+
+#### The defect
+
+Scoring and persistence apply **different completeness criteria** to the same
+merged event:
+
+- `src/live/scoring.py:155-178` `_extract_vector` **forward-fills** from
+  `self._last_known`. It requires only that each canonical channel was seen at
+  some point (`_channels_seen`) and is not stale beyond
+  `LIVE_FORWARD_FILL_MAX_TICKS * emit_interval` (default 5 x 2.0s).
+- `src/live/persistence.py:120-122` `_event_to_row` requires all four canonical
+  keys present **in that event's own `channels` dict**, and returns `None`
+  otherwise (policy documented at `persistence.py:65-78`).
+
+So a bucket missing a canonical channel is still scored, can be flagged, and is
+then skipped from `sensor_readings`. The raw row IS still written
+(`persistence.py:357-359`), but `_fetch_minimal_flagged_rows`
+(`src/api/services/anomaly_group_queries.py:109-125`) selects exclusively from
+`SensorReading` and never reads `raw_readings` — so the episode service can
+never see those anomalies.
+
+#### Evidence — 240s measured run, 2026-10-17
+
+Real `LiveRuntime` + real `LiveScorer` + real `DetectorResolver`, mock scope
+`tenant_2/gh_A` started via `runtime.start_scope()` (the Go Live path at
+`src/api/routes/live.py:242`), with a real resolvable checkpoint seeded into
+`model_artifacts` under `cold_start/tenant_2`. `_event_to_row` instrumented to
+correlate score presence against canonical skip:
+
+```
+  67  scored=True   flagged=True   skipped=False
+  34  scored=True   flagged=True   skipped=True     <-- the defect
+  13  scored=False  flagged=False  skipped=False
+   6  scored=False  flagged=False  skipped=True
+```
+
+**34 of 101 scored events were flagged anomalous AND dropped from
+`sensor_readings`.** Sample scores 0.089-0.109 against `LIVE_ANOMALY_THRESHOLD`
+0.05. Skipped events were consistently missing canonical `co2`.
+
+**Two caveats on these numbers, both load-bearing:**
+
+1. The seeded model had **random weights**, so the *flag rate* is not
+   representative. The structural co-occurrence is the finding, not "34%".
+2. The ~1-in-3 skip rate is a **mock cadence artifact**: `mock_co2` is the only
+   source carrying canonical `co2` and polls at
+   `MOCK_SCADA_INTERVAL_SECONDS * 1.5` = 3.0s while `mock_climate` polls at
+   2.0s (`src/live/sources/mock_factory.py:56-73`). The cadences beat and
+   starve roughly every third bucket. This has NOT been measured against a real
+   vendor feed.
+
+#### Recorded direction (from the user, 2026-10-17)
+
+1. **Never persist forward-filled values into canonical columns.** The
+   `persistence.py:65-78` policy exists because a fabricated `0.0` CO2 is
+   indistinguishable from a real fault, and it is the same hazard class as
+   `project_imputed_channel_phantom_freeze` in the session memory.
+2. **Scoring and persistence must share ONE completeness criterion**, so an
+   event cannot be flagged without a `sensor_readings` row to carry the flag.
+3. **Separately, widen the merge window** to cover the slowest source's poll
+   interval, recovering most skipped buckets without imputing anything.
+
+#### Does widening the merge window fix real SCADA, or only the mock?
+
+**Only the mock, and it should not be mistaken for the general fix.**
+
+For the mock the mismatch is 2.0s vs 3.0s, so a window at/above 3.0s captures
+`co2` in every bucket at the cost of ~1s of added latency. That is a genuine
+fix for the mock.
+
+It does not generalise. The emit rate of a *complete canonical* row can never
+exceed the arrival rate of the **slowest canonical channel** — that is an
+information limit, not an implementation detail. With real mixed-cadence SCADA
+at 5-minute climate and 1-minute gas, the slowest canonical channel is climate
+at 5 minutes, so widening the window to cover it means canonical rows emit at
+best every 5 minutes, and the live view inherits a 5-minute latency floor.
+Note the asymmetry that makes this worse than it first looks: gas channels are
+NOT canonical (`CHANNEL_ORDER` is `["temperature","humidity","co2","light"]`
+from `SENSOR_NAMES`, `src/config.py:163`), so a fast gas feed does nothing to
+help canonical completeness while a slow climate feed caps it.
+
+So widening the window only moves along a freshness/completeness trade-off. The
+coherent long-run answers are to emit canonical rows at the slowest canonical
+channel's cadence and score on that same cadence (satisfying direction 2 at the
+slow rate), or to make the canonical representation sparse — nullable channel
+columns, or scoring state carried per channel — so a partial bucket can hold a
+flag honestly. Either is a schema-level decision; pick it deliberately rather
+than by tuning `LIVE_MERGE_GRACE_SECONDS`.
+
+### BACKLOG-12 — online learning has no base model to adapt from
+
+Found 2026-10-17 while removing the dead baseline; the 503 it caused appeared
+unprompted in the live-detector repro's stderr. **Decision: not fixed in that
+PR** — the route now fails fast with an accurate reason instead of a
+missing-file error, which is all that was in scope.
+
+`src/api/routes/learning.py` builds a process-wide singleton
+`OnlineLearningManager(base_model=_load_base_model())`. `_load_base_model`
+called `get_cached_detector(None)`, i.e. the filesystem baseline, so every
+online-learning request returned
+`503 Failed to initialize base model: ... models/baseline.pt ... No such file`.
+
+The design problem, not just the call: `_get_manager()` is a module-level
+singleton with **no tenant in scope**, so it cannot resolve a per-tenant
+deployment even though that is now the only way a model exists. Making online
+learning work means making the manager per-tenant (an `LRUDict` keyed by
+tenant, like `_drift_detectors` beside it already is) and resolving each
+tenant's active model through
+`detector_cache.resolve_tenant_checkpoint`. Until then the route is honestly
+unavailable rather than misleadingly broken.
+
+### BACKLOG-13 — two routes still assume a tenant always has a model
+
+Found 2026-10-17 by the test fallout from removing the dead baseline.
+**Decision: recorded, not fixed** — the behaviour is now correct and honest;
+what remains is a UX and labelling question, not a defect.
+
+Both of these resolve `checkpoint_path = None` for a tenant with no active
+deployment and used to ride the phantom baseline:
+
+- `src/api/routes/inference.py:72-82` (`POST /api/inference`) — sets
+  `checkpoint_path = None` *and* `model_id_used = "baseline_v1"`, then calls
+  `get_cached_detector(checkpoint_path)`. It now returns a clear 503. The
+  `"baseline_v1"` label is dead naming from when a baseline was presumed to
+  exist and should go.
+- `POST /api/inference/upload` — a first upload too small to cold-start train
+  (under 100 clean rows after Pass 1) now returns 400 naming the shortfall,
+  via `NoModelAvailableError`, instead of 503 "Failed to load model from
+  models/baseline.pt".
+
+Open question for product, which is why this is a backlog entry and not a fix:
+should `POST /api/inference` for a modelless tenant 503, or should it resolve
+through the same cold-start path the upload route uses? Routing it through
+`detector_cache.resolve_tenant_checkpoint` would at least make the two
+consistent and give one error vocabulary.
+
+**The part worth remembering.** This was invisible to 3785 tests because
+`tests/api/conftest.py` has an **autouse** fixture patching
+`AnomalyDetector._load_model`, so `AnomalyDetector(None)` set
+`self.checkpoint_path = "models/baseline.pt"` and nothing ever opened it. The
+suite patched out exactly the failure that broke production, and the fixture's
+docstring — "ensures API tests never depend on those files being present" —
+reads as prudent isolation. Thirty tests across four files went red the moment
+the real guard was added. That fixture now carries a comment saying so. When a
+whole-suite-green claim covers a path that is failing in production, suspect an
+autouse fixture before suspecting the production report.
 ## Live feed silent for 27 days — the corrected timeline (2026-10-17)
 
 Reconstructed while diagnosing why `tenant_2/gh_A` showed nothing. Three

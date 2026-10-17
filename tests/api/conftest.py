@@ -24,7 +24,7 @@ precedence over the conftest one.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import MODEL_CONFIG
 from src.db.models import Base
+from src.models.inference import AnomalyDetector
 from src.models.lstm_vae import LSTMVAE
 
 
@@ -51,6 +52,19 @@ def patch_noise_quiet():
         yield
 
 
+# A path that is never opened: _load_model is patched out below. It exists only
+# so AnomalyDetector's required-checkpoint guard is satisfied for the many api
+# tests that exercise pipeline behaviour through routes which still pass
+# checkpoint_path=None for a tenant with no active model.
+_TEST_STUB_CHECKPOINT = "models/__api_test_stub__.pt"
+
+_REAL_DETECTOR_INIT = AnomalyDetector.__init__
+
+
+def _init_with_stub_checkpoint(self, checkpoint_path=None):  # noqa: ANN001, ANN202
+    _REAL_DETECTOR_INIT(self, checkpoint_path or _TEST_STUB_CHECKPOINT)
+
+
 @pytest.fixture(autouse=True)
 def patch_model_load():
     """Return a fresh random-weight LSTMVAE when AnomalyDetector loads a model.
@@ -58,12 +72,64 @@ def patch_model_load():
     Production checkpoint files (models/checkpoints/*.pt, models/*_model.pt)
     are excluded from version control — they are training byproducts.  This
     fixture ensures API tests never depend on those files being present.
+
+    It ALSO substitutes a stub path for a ``None`` checkpoint. Read this before
+    trusting it: this autouse fixture is the reason a production outage was
+    invisible to the whole suite. ``AnomalyDetector(None)`` used to resolve to
+    ``models/baseline.pt`` — a file excluded from the image and present in no
+    environment — and patching ``_load_model`` meant the path was never opened,
+    so every api test passed while production returned 503 and the live feed
+    scored nothing.
+
+    ``AnomalyDetector`` now rejects a ``None`` checkpoint outright
+    (``MissingCheckpointError``), which is the real behaviour. Routes that still
+    pass ``None`` for a tenant with no active model therefore fail, by design —
+    tracked as BACKLOG-13. The tests covered by this fixture are about pipeline
+    behaviour, not model provisioning, so they get a stub rather than 30
+    rewrites. The missing-model path has its own explicit coverage in
+    ``tests/models/test_missing_checkpoint_contract.py``, which lives outside
+    ``tests/api/`` precisely so this fixture does not apply to it.
     """
-    with patch(
-        "src.models.inference.AnomalyDetector._load_model",
-        return_value=LSTMVAE(**MODEL_CONFIG).eval(),
+    with (
+        patch(
+            "src.models.inference.AnomalyDetector._load_model",
+            return_value=LSTMVAE(**MODEL_CONFIG).eval(),
+        ),
+        patch(
+            "src.models.inference.AnomalyDetector.__init__",
+            _init_with_stub_checkpoint,
+        ),
     ):
         yield
+
+
+@pytest.fixture
+def tenant_has_active_model():
+    """Make ``ModelRegistry.get_active_model`` report a deployed model.
+
+    Opt-in (not autouse): several upload tests use a 48-row CSV fixture, which
+    is below the 100 clean rows cold-start training needs, so they cannot train
+    a model from their own upload. They used to resolve
+    ``AnomalyDetector(None)`` -> ``models/baseline.pt`` and only passed because
+    ``patch_model_load`` above stopped anything reading that file.
+
+    Those tests are about the upload pipeline, not model provisioning, so they
+    get a tenant that already has a model — the realistic "returning tenant
+    uploads more data" path. Tests that DO cover provisioning must not use this.
+    """
+    stub = {
+        "model_id": "model_stub",
+        "customer_id": "stub_tenant",
+        "model_type": "stub",
+        "checkpoint_path": _TEST_STUB_CHECKPOINT,
+        "metrics": {},
+        "created_at": None,
+    }
+    with patch(
+        "src.models.model_registry.ModelRegistry.get_active_model",
+        new=AsyncMock(return_value=stub),
+    ):
+        yield stub
 
 
 @pytest_asyncio.fixture

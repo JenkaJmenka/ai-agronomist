@@ -58,23 +58,28 @@ def get_cached_detector(checkpoint_path: Optional[str]) -> AnomalyDetector:
         return detector
 
 
-async def resolve_tenant_detector(
+async def resolve_tenant_checkpoint(
     db: AsyncSession,
     tenant_id: str,
     explicit_checkpoint_path: Optional[str] = None,
-) -> ResolvedDetector:
-    """Resolve the model a tenant is actually running and return a detector.
+) -> Optional[str]:
+    """Resolve the checkpoint path a tenant is actually running.
 
     An *explicit_checkpoint_path*, when given, wins outright — but still goes
     through ``resolve_checkpoint`` so a caller may pass a ``db://`` artifact
     path, not only a local file. Otherwise the tenant's active
     ``ModelRegistry`` deployment is used.
 
-    Unlike ``AnomalyDetector(checkpoint_path=None)``, this never falls back to
-    a filesystem baseline: worker-trained checkpoints live in the DB artifact
-    store on deployments with no shared filesystem (and no baseline ships in
-    the container image at all — see Dockerfile), so a silent fallback here
-    would just relocate this class of bug rather than fix it.
+    Raises ``NoActiveModelError`` rather than returning ``None`` for "no model
+    deployed". There is no filesystem baseline to degrade to: worker-trained
+    checkpoints live in the DB artifact store on deployments with no shared
+    filesystem, and no baseline ships in the container image at all
+    (``.dockerignore`` excludes ``models/*.pt`` and ``models/checkpoints/``),
+    so a silent fallback would just relocate this class of bug.
+
+    Split out of :func:`resolve_tenant_detector` so the live path can await the
+    DB work here and then run the synchronous ``torch.load`` in a worker
+    thread, instead of blocking the event loop and stalling the live hub.
     """
     if explicit_checkpoint_path is not None:
         checkpoint_path: Optional[str] = explicit_checkpoint_path
@@ -89,13 +94,27 @@ async def resolve_tenant_detector(
         checkpoint_path = active["checkpoint_path"]
 
     try:
-        checkpoint_path = await resolve_checkpoint(db, checkpoint_path)
+        return await resolve_checkpoint(db, checkpoint_path)
     except FileNotFoundError as exc:
         raise NoActiveModelError(
             f"Model checkpoint for tenant {tenant_id!r} could not be resolved "
             f"({checkpoint_path!r}): {exc}"
         ) from exc
 
+
+async def resolve_tenant_detector(
+    db: AsyncSession,
+    tenant_id: str,
+    explicit_checkpoint_path: Optional[str] = None,
+) -> ResolvedDetector:
+    """Resolve the model a tenant is actually running and return a detector.
+
+    Thin wrapper over :func:`resolve_tenant_checkpoint` — see it for the
+    resolution order and why there is no baseline fallback.
+    """
+    checkpoint_path = await resolve_tenant_checkpoint(
+        db, tenant_id, explicit_checkpoint_path
+    )
     return ResolvedDetector(
         detector=get_cached_detector(checkpoint_path),
         checkpoint_path=checkpoint_path,

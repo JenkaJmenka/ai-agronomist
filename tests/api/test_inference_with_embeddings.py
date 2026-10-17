@@ -213,6 +213,14 @@ class TestBackwardCompatibility:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 
+@pytest.fixture(autouse=True)
+def _upload_tenant_has_model(tenant_has_active_model):
+    """This module's CSV fixtures are below the 100 clean rows cold-start
+    training needs, so their uploads cannot train a model. They exercise the
+    upload pipeline, not model provisioning — see the fixture docstring in
+    tests/api/conftest.py."""
+
+
 class TestCsvInferenceEmbeddings:
     @staticmethod
     def _csv_bytes() -> io.BytesIO:

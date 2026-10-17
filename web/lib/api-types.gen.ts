@@ -1071,6 +1071,7 @@ export interface paths {
          *
          *         {
          *           "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
+         *           "detector_state": "unknown" | "ready" | "missing" | "error",
          *           "sources": [...],
          *           "freshness": {
          *             "state": "live" | "paused" | "not_configured",
@@ -3195,9 +3196,16 @@ export interface components {
          * LiveSourceStatus
          * @description Health of one data source within a scope.
          *
-         *     Mirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is
-         *     the same closed set already pinned by ``SourceStatusEvent`` in
-         *     ``src/live/events.py`` — that module is the only producer of these values.
+         *     Mirrors ``MergeBuffer.full_statuses`` entries, plus ``paused``.
+         *
+         *     ``online``/``degraded``/``offline`` come from ``SourceStatusEvent`` in
+         *     ``src/live/events.py``, which is the only producer of those three.
+         *     ``paused`` is added by ``LiveRuntime.source_statuses`` and never appears on
+         *     the SSE stream: a paused scope has no running merger to emit events. It
+         *     exists because ``MergeBuffer`` seeds every source to ``online`` at
+         *     construction and only updates it from inside the merger loop, so cancelling
+         *     a scope froze every source at ``online`` with a frozen ``last_seen`` — and
+         *     an operator read the page as live.
          */
         LiveSourceStatus: {
             /** Source Id */
@@ -3208,7 +3216,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "online" | "degraded" | "offline";
+            status: "online" | "degraded" | "offline" | "paused";
             /**
              * Last Seen
              * @description ISO-8601 timestamp of the last reading, or null if never seen.
@@ -3225,6 +3233,13 @@ export interface components {
              * @enum {string}
              */
             greenhouse_status: "not_registered" | "no_source" | "live" | "paused";
+            /**
+             * Detector State
+             * @description Whether this scope can score at all. 'ready' = a detector is loaded; 'missing' = no model is deployed for the tenant, so readings persist unscored (live, not analysed); 'error' = resolution is failing; 'unknown' = not yet attempted, or the scope has no scorer.
+             * @default unknown
+             * @enum {string}
+             */
+            detector_state: "unknown" | "ready" | "missing" | "error";
             /**
              * Sources
              * @description Always present, so consumers that only read 'sources' keep working.

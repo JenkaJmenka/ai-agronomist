@@ -3,7 +3,21 @@ import numpy as np
 from typing import Optional, List, Tuple, Union
 from src.models.lstm_vae import LSTMVAE
 from src.config import DEVICE, MAX_OBSERVE_BATCH
-import glob
+
+
+class MissingCheckpointError(RuntimeError):
+    """Raised when an AnomalyDetector is constructed without a checkpoint path.
+
+    There is no filesystem baseline to fall back to: models are resolved from
+    the DB artifact store (``model_artifacts``), and ``.dockerignore`` excludes
+    ``models/*.pt`` from the image, so no checkpoint ships in any environment.
+    Callers must resolve a concrete path first — see
+    ``src.api.services.detector_cache.resolve_tenant_detector``.
+
+    Subclasses ``RuntimeError`` so callers that already handle the load-failure
+    ``RuntimeError`` from ``_load_model`` keep working unchanged.
+    """
+
 
 class AnomalyDetector:
     """
@@ -18,15 +32,18 @@ class AnomalyDetector:
         Initializes the AnomalyDetector.
         Args:
             checkpoint_path: Path to the specific model weights to load.
-                             If None, loads the latest baseline.
+                             Required — None raises MissingCheckpointError.
+        Raises:
+            MissingCheckpointError: if checkpoint_path is None.
         """
         if checkpoint_path is None:
-            # Fallback to latest baseline
-            checkpoints = sorted(glob.glob("models/checkpoints/epoch_*.pt"))
-            self.checkpoint_path = checkpoints[-1] if checkpoints else "models/baseline.pt"
-        else:
-            self.checkpoint_path = checkpoint_path
+            raise MissingCheckpointError(
+                "AnomalyDetector requires an explicit checkpoint_path; models are "
+                "resolved from the DB artifact store (model_artifacts). Resolve one "
+                "via src.api.services.detector_cache.resolve_tenant_detector."
+            )
 
+        self.checkpoint_path = checkpoint_path
         self.model = self._load_model()
 
     def _load_model(self) -> LSTMVAE:

@@ -6,6 +6,7 @@ import { Suspense } from "react";
 
 import { GreenhouseSelector } from "@/features/shell/GreenhouseSelector";
 import { NAV_SECTIONS } from "@/features/shell/nav";
+import { SignOutButton } from "@/features/shell/SignOutButton";
 import { ThemeToggle } from "@/features/shell/ThemeToggle";
 import { withDashboardQuery } from "@/lib/dashboardQuery";
 import { measureInteraction } from "@/lib/profiling";
@@ -53,7 +54,10 @@ export function Sidebar() {
     <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-bg-elevated">
       <div className="flex items-center justify-between px-4 py-4">
         <p className="text-sm font-bold text-accent">AI Agronomist</p>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <SignOutButton />
+        </div>
       </div>
       <Suspense>
         <NavLinks />

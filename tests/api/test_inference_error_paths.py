@@ -213,6 +213,14 @@ class TestInferenceFailureModes:
         registry_instance.get_active_model.assert_awaited_once_with("tenant_1")
 
 
+@pytest.fixture(autouse=True)
+def _upload_tenant_has_model(tenant_has_active_model):
+    """This module's CSV fixtures are below the 100 clean rows cold-start
+    training needs, so their uploads cannot train a model. They exercise the
+    upload pipeline, not model provisioning — see the fixture docstring in
+    tests/api/conftest.py."""
+
+
 class TestCsvUploadErrorPaths:
     def test_non_csv_extension_rejected_with_400(self, test_client):
         response = post_csv(test_client, make_csv_bytes(25), filename="seq.txt")

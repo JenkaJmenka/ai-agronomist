@@ -96,8 +96,19 @@ def patch_detector():
 
     _load_model is patched to return a fresh random-weight LSTMVAE (the actual
     weights don't matter because predict_batch_enriched is also mocked).
+
+    Also reports a deployed model for the tenant. This test ingests through
+    ``/api/upload`` (raw persistence, no training) and then calls
+    ``/api/inference``, which resolves the tenant's active model. With none
+    deployed, the route passed ``checkpoint_path=None`` to the detector, which
+    used to resolve ``models/baseline.pt`` — excluded from the image and
+    present in no environment — and only worked here because ``_load_model``
+    was patched. The detector now rejects a ``None`` checkpoint outright, so
+    the stub deployment makes explicit what this test always assumed: a tenant
+    that has a model. The upload -> inference -> dashboard path is the subject;
+    model provisioning is not.
     """
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
     from src.config import LATENT_DIM, MODEL_CONFIG
     from src.models.lstm_vae import LSTMVAE
 
@@ -109,9 +120,21 @@ def patch_detector():
         uncertainties = np.full(len(scores), 0.1, dtype=np.float32)
         return scores, embeddings, uncertainties
 
+    active_model = {
+        "model_id": "model_e2e_stub",
+        "customer_id": "tenant_e2e_corporate",
+        "model_type": "stub",
+        "checkpoint_path": "models/__e2e_test_stub__.pt",
+        "metrics": {},
+        "created_at": None,
+    }
+
     with patch(
         "src.models.inference.AnomalyDetector._load_model",
         return_value=LSTMVAE(**MODEL_CONFIG).eval(),
+    ), patch(
+        "src.models.model_registry.ModelRegistry.get_active_model",
+        new=AsyncMock(return_value=active_model),
     ), patch("src.models.inference.AnomalyDetector.predict_batch_enriched") as mock_enriched:
         mock_enriched.side_effect = enriched_side_effect
         yield mock_enriched

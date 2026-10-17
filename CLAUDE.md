@@ -303,7 +303,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
+| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `src/live/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/`, `.husky/`, `docs/deployment/`, `docs/runbooks/` |
@@ -334,6 +334,20 @@ backend-engineer's, assigned 2026-10-10. Only `alembic.ini` had a row, so the
 versions directory was uncovered -- found while renumbering the HNSW migration
 on `worktree-hnsw-vector-index`. Migrations are database schema and
 backend-engineer already owns `src/db/`, so they belong together.
+
+`src/live/` is backend-engineer's, assigned 2026-10-17. It had no row at all,
+which stalled the live-detector task: the fix for a live scope with no model
+spans `src/live/detector_resolver.py`, `persistence.py` and `scoring.py`, and
+every one of them fell outside every row. The reasoning is the same one that
+assigned `src/workers/` on 2026-10-06 — it is API-adjacent service code that
+already imports only backend-owned modules (`src/api/services/`, `src/db/`) —
+so the two belong together.
+
+Note the asymmetry that made the gap easy to miss, and that still holds: the
+live path's *scoring* ends in `src/models/inference.py`, which is
+**ml-engineer's**. A live task that changes detector loading therefore needs
+both agents, and `src/config.py` constants for live behaviour are ml-engineer's
+to add. Do not let a backend agent reach into either.
 
 `docs/runbooks/` is devops-lead's, assigned 2026-10-10, with the same
 cross-agent exception as `docs/handoff/`: the domain agent may revise the step
