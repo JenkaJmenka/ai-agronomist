@@ -33,7 +33,19 @@ enforces the same set including the §1.2 perf budgets in `test/e2e/perf.spec.ts
 
 Local Git hooks (repo root, after `corepack pnpm install` once):
 
-- **pre-commit** — `lint-staged` runs biome `--write` on staged `web/**/*.{ts,tsx,js,jsx,json}`
+- **pre-commit** — `lint-staged` runs biome `--write` on staged
+  `web/**/*.{ts,tsx,js,jsx,json}`, excluding by basename `openapi.{ts,tsx,js,jsx,json}`
+  and `api-types.gen.{ts,tsx,js,jsx,json}` anywhere under `web/` (committed output
+  must equal `gen:api:refresh` output exactly; see `.github/workflows/openapi-drift.yml`).
+  That basename exclusion is broader than the two generated files it targets — a
+  non-generated file that happened to share one of those basenames would also skip
+  the pre-commit reformat. It would still be linted in CI: `web-ci.yml:57-58` runs
+  `pnpm lint` (`biome check .`), scoped by `biome.json`'s `files.includes`
+  (`app/**`, `components/**`, `features/**`, `lib/**`, `test/**`, `proxy.ts`,
+  `proxy.test.ts`), which has no basename-wide negation for `openapi` or
+  `api-types.gen` — only the literal `lib/api-types.gen.ts` path is negated.
+  Verified by adding a biome violation to a throwaway `lib/openapi.ts` and to a
+  throwaway `features/_probe/openapi.json`: `pnpm lint` flagged both.
 - **pre-push** — `pnpm lint` + `typecheck` + `test` inside `web/` (e2e remains CI-only)
 
 Do not use `--no-verify` unless explicitly requested. Agent skill:

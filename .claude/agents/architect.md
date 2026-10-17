@@ -4,7 +4,9 @@ description: System design, data models, API contracts, architecture decisions. 
 tools:
   - Read
   - Write
+  - Edit
   - Glob
+  - Grep
 max_turns: 20
 model: claude-fable-5
 ---

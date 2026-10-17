@@ -5869,6 +5869,41 @@ Pinned, not fixed, by
 `tests/api/test_recovery_tag_fixture_a.py::TestTheTwoViewsOfThePipe1Event`.
 `ADR-011` links here under known limitations.
 
+**REFRAMED 2026-10-15 (measured, round 1).** This is **not a storage gap**.
+`build_anomaly_metadata_by_timestamp` (`src/api/services/cold_run_upload.py:109`)
+already collects every channel that fired at each timestamp, and `csv_persist`
+writes the complete set to `raw_readings.data["anomaly_columns"]`
+(`csv_persist.py:152` and `:387`). Measured on fixture A: **17 of 17 collided
+timestamps already carry the full channel list**. Example, 2026-12-16 09:25 —
+`anomaly_columns: ["measured_hd", "measured_pipe_1_temp"]` while
+`sensor_readings.trigger_channel` holds `measured_hd` alone.
+
+The loss is in the **query path**, not the database: episode grouping reads only
+`sensor_readings` via `_fetch_minimal_flagged_rows`
+(`anomaly_group_queries.py:110-127`), which selects no JSON column. Caveat that
+decides the design — the JSON carries channel **names only**, no per-channel
+`score`, `z_score`, `severity` or `value`, so it can rebuild episode *spans* but
+not `peak_score`.
+
+Measured frequency, fixture A (`run_cold_run_upload`, chunk_size=500, 7 chunks,
+no hand-built `StuckCarry`): 89 flagged timestamps, distribution `{1: 72, 2: 17}`
+— never 3 or more. 17 timestamps (19.1%) lose a channel. Episode-level, the
+number that matters: **6 of 10 statistical episodes damaged** (4 intact, 5
+truncated, 1 split). Fixture B: 0 hits, 0 collisions — a true null, contributing
+no evidence either way. Production traffic is NOT measured; the harness's
+`mock_detector` yields zero LSTM hits.
+
+Two brief premises that did not survive measurement: episodes do not *vanish*
+(matching detection to query on `(channel, start_ts)` says 2 vanish; by span
+overlap none do — start-truncation moves the key, and the query view actually
+holds **more** episodes, 15 vs 14, because the collapse *splits* one); and the
+0.806/0.693 figures are episode peaks, not per-row scores — the winner is chosen
+by `anomaly_rank_key` (severity > tier > |z|), not canonical score.
+
+Decision 2026-10-15: **2b** (extend the existing `anomaly_columns` JSON) as the
+zero-migration interim, **option 1** (secondary hits table) as the planned fix.
+Recorded in `ADR-012`. Implementing 2b is a separate task.
+
 ### BACKLOG-2 — exclude generated OpenAPI artifacts from lint-staged
 
 **This reverses the recommendation in the earlier follow-up entry above**
@@ -5935,17 +5970,78 @@ which is ml-engineer's and was deliberately untouched by Task 5.
 
 1. **The field is no longer read by episode grouping.** Task 5 removed the
    same-channel recovery path from `src/models/episode_grouper.py`, so nothing
-   in `src/api/` consumes `recovery_channels` any more. Its one remaining
+   in `src/api/` consumes `recovery_channels` any more. ~~Its one remaining
    reader is the statistical detector's baseline purge, which is why the field
-   is still live and was NOT removed.
+   is still live and was NOT removed.~~ **CORRECTED 2026-10-15: that reader
+   does not exist.** It was `_purge_fault_from_stat_carry`, deleted in
+   `7347f86` (2026-09-22) and replaced by `_exclude_faults_from_baseline`
+   (`src/api/services/upload_portions.py:476`), which reads `completed_faults`,
+   `channels` and `emitted_onsets`. This entry took the claim from the field's
+   own docstring and recorded it as a verified reader; it was never checked.
+   Both this entry and `ADR-011`'s claim were introduced by the same commit,
+   `9b49aa2` (2026-10-15) — three weeks, and 107 commits
+   (`git rev-list --count 7347f86..9b49aa2`), after the reader was deleted.
+   The field is **dead state** — written at `stuck_fault_detector.py:1064` and
+   serialized, read by nothing.
 2. **Its docstring is now false.** It still says the field is used "by episode
    grouping to tag recovery alerts". Episode grouping does not read it, and
    tagging no longer happens there at all — `is_recovery` is set query-time in
    `src/api/services/anomaly_episode_service.py`.
 
-So the field stays, the docstring must change, and anyone auditing dead state
-should know the baseline purge is the reason it survives. Recorded as the
-residual follow-up in `ADR-011`.
+So the docstring must change, and the field can go. Recorded as the residual
+follow-up in `ADR-011`.
+
+**Settled 2026-10-15 (ml-engineer, verified by the orchestrator).** Dead,
+by three independent routes: no reader in `src/`; the claimed purge deleted in
+`7347f86`; and a runtime `__getattribute__` trap over the full suite recording
+5675 accesses from exactly 6 sites — `to_dict` serialization, the single write,
+and 4 test assertions. The write site binds the *same* `FaultWindow` object to
+`completed_faults` on the next line (`:1064-1065`), so the field is redundant,
+not merely unread, and holds strictly less: it is channel-keyed and overwrites,
+so a channel that freezes twice retains only the second window.
+
+The docstring fix is applied. Removal is NOT applied: it needs a paired
+qa-engineer change, since with the field gone the full suite is
+`6 failed, 3715 passed` and all six failures are in `tests/` (qa-engineer's) —
+`test_stuck_carry_serialization.py` (5) and `test_stuck_episode_counts.py:202`.
+Nothing else in 3721 tests moves. Patch held at
+`scratchpad/backlog5-remove-recovery-channels.patch`, awaiting user approval.
+
+**Lesson, the reason this entry is corrected rather than overwritten:** a
+docstring is not a citation. This entry asserted a live reader on the strength
+of the docstring that was itself the thing under audit, and the claim then
+survived into `ADR-011` and a task brief. The field was already dead three
+weeks before Task 5 touched anything.
+
+### BACKLOG-6 — recovery tagging is O(episodes × releases), and it dominates
+
+Found while measuring BACKLOG-4 (round 1, 2026-10-15); unrelated to the index
+question and two orders of magnitude larger.
+
+`_apply_cross_channel_recovery_tags` (`src/api/services/anomaly_episode_service.py`)
+runs a linear `any()` over the entire release list once per episode. At FULL
+RANGE, `_fetch_recovery_release_events` returns essentially every released
+stuck-fault row the tenant has ever had, so the cost is Python, not SQL.
+
+Measured with asyncpg against a throwaway local Postgres 16.14 cluster seeded
+demo-heavy (80% of rows in `demo`/`default`), `ANOMALY_EPISODE_MAX=200`, via
+`scratchpad/backlog4/python_side.py`:
+
+| rows | window | fetched | fetch | tagging |
+|---|---|---|---|---|
+| 200k | full | 75,971 | 30.9 ms | **490 ms** |
+| 2M | full | 759,739 | 395 ms | **5,077 ms** |
+
+**No index fixes this**, and every candidate index made FULL RANGE *slower* by
+removing the sequential scan's parallelism. The fix belongs in the query or the
+Python — bucket `releases` by channel/time instead of scanning linearly, or
+bound the fetch. Note the timings are noisy by nature: `any()` short-circuits,
+so cost depends on where the first match falls; the 30d window is cheap only
+because its matches sit at the head of the list, and a late-starting episode
+would cost roughly double.
+
+No fix attempted in round 2. Deliberately recorded with the measurement method,
+not just the number — see the dated-snapshot rule at the top of this file.
 
 ### BACKLOG-7 — the API cannot run more than one replica (live row duplication)
 

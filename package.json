@@ -13,7 +13,7 @@
     "lint-staged": "^15.5.2"
   },
   "lint-staged": {
-    "web/**/*.{ts,tsx,js,jsx,json}": [
+    "web/**/!(openapi|api-types.gen).{ts,tsx,js,jsx,json}": [
       "pnpm --dir web exec biome check --write --files-ignore-unknown=true --no-errors-on-unmatched"
     ]
   }

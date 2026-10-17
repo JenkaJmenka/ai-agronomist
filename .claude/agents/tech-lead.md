@@ -4,7 +4,9 @@ description: Refactoring, optimization, technical debt reduction, performance im
 tools:
   - Read
   - Write
+  - Edit
   - Glob
+  - Grep
 max_turns: 20
 model: claude-fable-5
 ---
