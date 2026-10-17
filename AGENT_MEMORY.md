@@ -6108,6 +6108,12 @@ already a stated invariant before `028` strengthened the need for it.
 Recorded 2026-10-17 from the live-detector diagnosis. **Decision: not in that
 PR** — that PR only makes the missing-model state honest ("live, not analysed").
 
+**DEPENDS ON BACKLOG-11.** Do not build the live-training trigger before the
+completeness defect there is fixed. BACKLOG-11 is latent only because no live
+tenant has a model; giving a live scope a model is precisely what arms it, and
+this item is the thing that gives live scopes models. Shipping BACKLOG-8 first
+would silently start dropping a third of flagged live anomalies.
+
 `grep -rn "train|cold_start" src/live/` returns **zero** triggers. Every
 training entry point is on the upload path:
 `src/api/services/upload_checkpoint.py:41` → `should_train_cold_start`
@@ -6179,3 +6185,104 @@ baseline and raises `HTTPException(503, "Failed to initialize base model: ...")`
 on the missing file. It surfaced unprompted in the live-detector repro's stderr,
 which is how it was found — a third call site for the same dead literal
 alongside the live path and `src/api/services/upload_checkpoint.py:36/:60`.
+
+### BACKLOG-11 — a flagged live event can be dropped from `sensor_readings`
+
+Found by the orchestrator on 2026-10-17 while gating the live-detector PR's
+item 3, in answer to the user's question. **Decision: record, do not fix in
+that PR. The `live.persistence` WARNING stays at WARNING — do not demote it,
+because it is the only present-day signal that buckets are incomplete.**
+
+**Latent in production today, and only latent by accident.** No live tenant has
+a model (`tenant_2` has no `model_version` rows at all), so nothing live is
+scored, so nothing flagged is dropped. It arms the moment any tenant model
+reaches a live scope — via BACKLOG-8, or via someone simply uploading a CSV for
+a tenant that also has a live scope. BACKLOG-8 therefore depends on this item.
+
+## The defect
+
+Scoring and persistence apply **different completeness criteria** to the same
+merged event:
+
+- `src/live/scoring.py:155-178` `_extract_vector` **forward-fills** from
+  `self._last_known`. It requires only that each canonical channel was seen at
+  some point (`_channels_seen`) and is not stale beyond
+  `LIVE_FORWARD_FILL_MAX_TICKS * emit_interval` (default 5 x 2.0s).
+- `src/live/persistence.py:120-122` `_event_to_row` requires all four canonical
+  keys present **in that event's own `channels` dict**, and returns `None`
+  otherwise (policy documented at `persistence.py:65-78`).
+
+So a bucket missing a canonical channel is still scored, can be flagged, and is
+then skipped from `sensor_readings`. The raw row IS still written
+(`persistence.py:357-359`), but `_fetch_minimal_flagged_rows`
+(`src/api/services/anomaly_group_queries.py:109-125`) selects exclusively from
+`SensorReading` and never reads `raw_readings` — so the episode service can
+never see those anomalies.
+
+## Evidence — 240s measured run, 2026-10-17
+
+Real `LiveRuntime` + real `LiveScorer` + real `DetectorResolver`, mock scope
+`tenant_2/gh_A` started via `runtime.start_scope()` (the Go Live path at
+`src/api/routes/live.py:242`), with a real resolvable checkpoint seeded into
+`model_artifacts` under `cold_start/tenant_2`. `_event_to_row` instrumented to
+correlate score presence against canonical skip:
+
+```
+  67  scored=True   flagged=True   skipped=False
+  34  scored=True   flagged=True   skipped=True     <-- the defect
+  13  scored=False  flagged=False  skipped=False
+   6  scored=False  flagged=False  skipped=True
+```
+
+**34 of 101 scored events were flagged anomalous AND dropped from
+`sensor_readings`.** Sample scores 0.089-0.109 against `LIVE_ANOMALY_THRESHOLD`
+0.05. Skipped events were consistently missing canonical `co2`.
+
+**Two caveats on these numbers, both load-bearing:**
+
+1. The seeded model had **random weights**, so the *flag rate* is not
+   representative. The structural co-occurrence is the finding, not "34%".
+2. The ~1-in-3 skip rate is a **mock cadence artifact**: `mock_co2` is the only
+   source carrying canonical `co2` and polls at
+   `MOCK_SCADA_INTERVAL_SECONDS * 1.5` = 3.0s while `mock_climate` polls at
+   2.0s (`src/live/sources/mock_factory.py:56-73`). The cadences beat and
+   starve roughly every third bucket. This has NOT been measured against a real
+   vendor feed.
+
+## Recorded direction (from the user, 2026-10-17)
+
+1. **Never persist forward-filled values into canonical columns.** The
+   `persistence.py:65-78` policy exists because a fabricated `0.0` CO2 is
+   indistinguishable from a real fault, and it is the same hazard class as
+   `project_imputed_channel_phantom_freeze` in the session memory.
+2. **Scoring and persistence must share ONE completeness criterion**, so an
+   event cannot be flagged without a `sensor_readings` row to carry the flag.
+3. **Separately, widen the merge window** to cover the slowest source's poll
+   interval, recovering most skipped buckets without imputing anything.
+
+## Does widening the merge window fix real SCADA, or only the mock?
+
+**Only the mock, and it should not be mistaken for the general fix.**
+
+For the mock the mismatch is 2.0s vs 3.0s, so a window at/above 3.0s captures
+`co2` in every bucket at the cost of ~1s of added latency. That is a genuine
+fix for the mock.
+
+It does not generalise. The emit rate of a *complete canonical* row can never
+exceed the arrival rate of the **slowest canonical channel** — that is an
+information limit, not an implementation detail. With real mixed-cadence SCADA
+at 5-minute climate and 1-minute gas, the slowest canonical channel is climate
+at 5 minutes, so widening the window to cover it means canonical rows emit at
+best every 5 minutes, and the live view inherits a 5-minute latency floor.
+Note the asymmetry that makes this worse than it first looks: gas channels are
+NOT canonical (`CHANNEL_ORDER` is `["temperature","humidity","co2","light"]`
+from `SENSOR_NAMES`, `src/config.py:163`), so a fast gas feed does nothing to
+help canonical completeness while a slow climate feed caps it.
+
+So widening the window only moves along a freshness/completeness trade-off. The
+coherent long-run answers are to emit canonical rows at the slowest canonical
+channel's cadence and score on that same cadence (satisfying direction 2 at the
+slow rate), or to make the canonical representation sparse — nullable channel
+columns, or scoring state carried per channel — so a partial bucket can hold a
+flag honestly. Either is a schema-level decision; pick it deliberately rather
+than by tuning `LIVE_MERGE_GRACE_SECONDS`.
