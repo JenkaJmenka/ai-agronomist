@@ -4309,7 +4309,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Live Source Status Api Live Status Get"
+                  "$ref": "#/components/schemas/LiveStatusResponse"
                 }
               }
             }
@@ -9891,6 +9891,138 @@
         ],
         "title": "LearningSummaryResponse",
         "description": "Aggregated learning-log summary for a tenant."
+      },
+      "LiveFreshness": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "live",
+              "paused",
+              "not_configured"
+            ],
+            "title": "State"
+          },
+          "newest_reading_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newest Reading At",
+            "description": "ISO-8601 timestamp of the newest persisted row across both reading tables, or null when the scope has never written one."
+          },
+          "age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Seconds",
+            "description": "now - newest_reading_at, in seconds. Null when there are no rows. Deliberately NOT clamped to zero and therefore signed: readings in this system are routinely future-dated, so a negative age is a normal value meaning 'the newest row is in the future'. A negative age is never stale."
+          },
+          "is_stale": {
+            "type": "boolean",
+            "title": "Is Stale",
+            "description": "True only for a 'live' scope \u2014 including a live scope that has never written a row at all. A paused or unconfigured scope is off, not broken."
+          },
+          "threshold_seconds": {
+            "type": "number",
+            "title": "Threshold Seconds",
+            "description": "Age above which a live scope is considered stale."
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "newest_reading_at",
+          "age_seconds",
+          "is_stale",
+          "threshold_seconds"
+        ],
+        "title": "LiveFreshness",
+        "description": "Is data actually arriving for this scope \u2014 distinct from \"is Go Live on\".\n\nSee :mod:`src.api.services.live_freshness` for the age/clock rules."
+      },
+      "LiveSourceStatus": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "vendor": {
+            "type": "string",
+            "title": "Vendor"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "online",
+              "degraded",
+              "offline"
+            ],
+            "title": "Status"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen",
+            "description": "ISO-8601 timestamp of the last reading, or null if never seen."
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_id",
+          "vendor",
+          "status",
+          "last_seen"
+        ],
+        "title": "LiveSourceStatus",
+        "description": "Health of one data source within a scope.\n\nMirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is\nthe same closed set already pinned by ``SourceStatusEvent`` in\n``src/live/events.py`` \u2014 that module is the only producer of these values."
+      },
+      "LiveStatusResponse": {
+        "properties": {
+          "greenhouse_status": {
+            "type": "string",
+            "enum": [
+              "not_registered",
+              "no_source",
+              "live",
+              "paused"
+            ],
+            "title": "Greenhouse Status"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/LiveSourceStatus"
+            },
+            "type": "array",
+            "title": "Sources",
+            "description": "Always present, so consumers that only read 'sources' keep working."
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/LiveFreshness"
+          }
+        },
+        "type": "object",
+        "required": [
+          "greenhouse_status",
+          "sources",
+          "freshness"
+        ],
+        "title": "LiveStatusResponse",
+        "description": "Body of ``GET /api/live/status`` (always HTTP 200)."
       },
       "MarkAnomalyIntegratedRequest": {
         "properties": {

@@ -21,13 +21,21 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
 from src.api.services import readings_service
 from src.api.services.live_freshness import build_scope_freshness
 from src.api.services.live_hub_provider import LiveHub, get_live_hub
+from src.api.schemas.live import (
+    GH_STATUS_LIVE,
+    GH_STATUS_NO_SOURCE,
+    GH_STATUS_NOT_REGISTERED,
+    GH_STATUS_PAUSED,
+    LiveFreshness,
+    LiveStatusResponse,
+)
 from src.api.services.live_scope_state_service import (
     DesiredScopeState,
     store_desired_state,
@@ -36,14 +44,6 @@ from src.config import LIVE_HEARTBEAT_SECONDS, LIVE_MAX_STREAM_SECONDS
 from src.db.session import get_db
 
 router = APIRouter(prefix="/api/live", tags=["Live"])
-
-# Discriminated values for the greenhouse_status field in /api/live/status.
-# These constants let callers pattern-match on a well-known vocabulary instead
-# of inferring state from the empty-sources list (the previous silent failure).
-_GH_STATUS_NOT_REGISTERED = "not_registered"
-_GH_STATUS_NO_SOURCE = "no_source"
-_GH_STATUS_LIVE = "live"
-_GH_STATUS_PAUSED = "paused"
 
 _SSE_HEADERS: dict[str, str] = {
     "Cache-Control": "no-store",
@@ -98,14 +98,14 @@ async def _stream_events(
             break
 
 
-@router.get("/status")
+@router.get("/status", response_model=LiveStatusResponse)
 async def live_source_status(
     request: Request,
     tenant_id: str = Query(..., min_length=1),
     greenhouse_id: str = Query(default="default"),
     auth_tenant: Optional[str] = Depends(require_api_key),
     db: AsyncSession = Depends(get_db),
-) -> Any:
+) -> LiveStatusResponse:
     """Return current health + freshness of all live data sources for a scope.
 
     Response shape (always HTTP 200):
@@ -170,28 +170,28 @@ async def live_source_status(
         # in the readings-service fallback mode, where we can't tell, so
         # default to the pre-existing "live" behavior.
         if runtime is not None and not runtime.is_scope_active(tenant_id, greenhouse_id):
-            greenhouse_status = _GH_STATUS_PAUSED
+            greenhouse_status = GH_STATUS_PAUSED
         else:
-            greenhouse_status = _GH_STATUS_LIVE
+            greenhouse_status = GH_STATUS_LIVE
     else:
         # Distinguish "greenhouse unknown" from "greenhouse known but no source".
         exists = await readings_service.greenhouse_exists(
             db, tenant_id=tenant_id, greenhouse_id=greenhouse_id
         )
         greenhouse_status = (
-            _GH_STATUS_NO_SOURCE if exists else _GH_STATUS_NOT_REGISTERED
+            GH_STATUS_NO_SOURCE if exists else GH_STATUS_NOT_REGISTERED
         )
 
     freshness = await build_scope_freshness(
         db, runtime=runtime, tenant_id=tenant_id, greenhouse_id=greenhouse_id
     )
 
-    return JSONResponse(
-        content={
-            "greenhouse_status": greenhouse_status,
-            "sources": sources,
-            "freshness": freshness.to_dict(),
-        }
+    # ``to_dict`` stays the single definition of the freshness JSON shape;
+    # the model validates that projection rather than restating it.
+    return LiveStatusResponse(
+        greenhouse_status=greenhouse_status,
+        sources=sources,
+        freshness=LiveFreshness(**freshness.to_dict()),
     )
 
 

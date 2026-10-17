@@ -40,17 +40,17 @@ from typing import Any, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Scope states reported by the freshness block. Imported from the response
+# schema so the vocabulary this module *produces* and the ``Literal`` the API
+# *declares* cannot drift apart.
+from src.api.schemas.live import (
+    SCOPE_STATE_LIVE,
+    SCOPE_STATE_NOT_CONFIGURED,
+    SCOPE_STATE_PAUSED,
+)
 from src.api.services.csv_persist import normalize_persist_timestamp
 from src.config import LIVE_STALE_AFTER_SECONDS
 from src.db.models import RawReading, SensorReading
-
-# Scope states reported by the freshness block. These are about the
-# *connectors*, and are intentionally narrower than the sibling
-# ``greenhouse_status`` field, which also covers registry states
-# (``not_registered`` / ``no_source``) that say nothing about liveness.
-SCOPE_STATE_LIVE = "live"
-SCOPE_STATE_PAUSED = "paused"
-SCOPE_STATE_NOT_CONFIGURED = "not_configured"
 
 
 @dataclass(frozen=True)

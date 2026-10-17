@@ -9,6 +9,7 @@
 import { z } from "zod";
 
 import type { SensorRow } from "@/features/monitoring/api/readings";
+import type { components } from "@/lib/api-types.gen";
 
 // ---------------------------------------------------------------------------
 // reading
@@ -120,14 +121,36 @@ export type ResetEvent = z.infer<typeof resetEventSchema>;
 // ---------------------------------------------------------------------------
 
 /**
+ * The response shapes as FastAPI actually declares them, pulled from the
+ * committed OpenAPI snapshot. `openapi-drift.yml` rebuilds `api-types.gen.ts`
+ * from `src/` on every PR and fails on any difference, so these aliases make
+ * the backend contract a compile-time input to the Zod schemas below rather
+ * than something a human has to keep in step by hand.
+ */
+type GeneratedFreshness = components["schemas"]["LiveFreshness"];
+type GeneratedStatusResponse = components["schemas"]["LiveStatusResponse"];
+
+/** Mutual assignability: `never` (and so a type error at the use site) if A and B differ. */
+type IsExactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+
+/**
  * Connector-only verdict for a scope (narrower than `greenhouse_status`,
  * which also covers registry states like `not_registered`/`no_source` that
  * say nothing about liveness). See `src/api/services/live_freshness.py`.
  */
-export const FRESHNESS_STATE_VALUES = ["live", "paused", "not_configured"] as const;
+export const FRESHNESS_STATE_VALUES = [
+  "live",
+  "paused",
+  "not_configured",
+] as const satisfies readonly GeneratedFreshness["state"][];
 export type FreshnessState = (typeof FRESHNESS_STATE_VALUES)[number];
 
-export const GREENHOUSE_STATUS_VALUES = ["not_registered", "no_source", "live", "paused"] as const;
+export const GREENHOUSE_STATUS_VALUES = [
+  "not_registered",
+  "no_source",
+  "live",
+  "paused",
+] as const satisfies readonly GeneratedStatusResponse["greenhouse_status"][];
 export type GreenhouseStatus = (typeof GREENHOUSE_STATUS_VALUES)[number];
 
 /**
@@ -153,6 +176,20 @@ export const freshnessSchema = z.object({
 export type Freshness = z.infer<typeof freshnessSchema>;
 
 /**
+ * Compile-time proof that `freshnessSchema` and the generated OpenAPI type
+ * describe the *same* object. Drift in either direction — a field added,
+ * removed, renamed, or retyped on the Pydantic model — makes `IsExactly`
+ * resolve to `never` and fails `pnpm typecheck`.
+ *
+ * The schema stays hand-written rather than being replaced outright by the
+ * generated type because the runtime still needs a parser: the generated file
+ * is types-only, and this response crosses the BFF proxy, so it is untrusted
+ * input that must be validated at the boundary. This assertion gives the
+ * generated type the final say over its shape without giving up the parse.
+ */
+export const FRESHNESS_SCHEMA_MATCHES_OPENAPI: IsExactly<Freshness, GeneratedFreshness> = true;
+
+/**
  * Shape returned by `GET /api/live/status`.
  *
  * Contract 2: `{ sources: [{ source_id, vendor, status, last_seen? }] }`.
@@ -171,6 +208,25 @@ export const statusResponseSchema = z.object({
 });
 
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
+
+/**
+ * One-directional on purpose. `statusResponseSchema` cannot be an exact match
+ * for the generated type, and should not be: `greenhouse_status`/`freshness`
+ * are optional and `sources` is `.passthrough()` specifically so a rolling
+ * deploy where the API is older than this bundle still parses. That tolerance
+ * is a deliberate superset of the contract, so exact equality would be the
+ * wrong assertion.
+ *
+ * What is still worth proving is the direction that matters: anything the API
+ * can legitimately send must be accepted. If the backend adds a required field
+ * or narrows an existing one incompatibly, this fails `pnpm typecheck` instead
+ * of surfacing as a runtime `.parse()` throw in the dashboard.
+ */
+export const STATUS_SCHEMA_ACCEPTS_OPENAPI: GeneratedStatusResponse extends z.input<
+  typeof statusResponseSchema
+>
+  ? true
+  : never = true;
 
 /** Fetch + zod-parse `GET /api/bff/live/status` for one tenant/greenhouse scope. */
 export async function fetchLiveStatus(params: {
