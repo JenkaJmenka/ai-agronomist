@@ -6078,3 +6078,46 @@ per-worker, so suppress/resume on one worker is invisible to the others — the
 same class of problem, already documented, and the reason single-worker was
 already a stated invariant before `028` strengthened the need for it.
 
+## Live feed silent for 27 days — the corrected timeline (2026-10-17)
+
+Reconstructed while diagnosing why `tenant_2/gh_A` showed nothing. Three
+successive theories were wrong before the record settled it, so the sequence is
+recorded here in full rather than as a conclusion.
+
+| when | what |
+|---|---|
+| **2026-09-14/15** | The mock SCADA feed ran against `tenant_1:gh_A` — **the `MOCK_SCADA_SCOPES` default at the time**, and a real tenant holding a 105,120-timestamp customer CSV. It wrote **11,119 and 19,394 rows** at ~2s cadence; **96.7% of flagged anomalies came from them** (`:601-604`). |
+| **2026-09-15** | Contained: `MOCK_SCADA_ENABLED=false`, and the rows purged via `DELETE /upload/live-data` (`wipe_live_demo_data`). `ADR-009` written the same day. |
+| **2026-09-16** | `9c14dc3` lands — connectors stop entirely for an idle scope, Go Live becomes manual (`LIVE_AUTOSTART_ENABLED`, default False). **This commit is the remedy for the incident above**, not an abstract design improvement. |
+| later | Mock re-enabled with the scope moved to `tenant_2:gh_A`, a throwaway tenant. |
+| **2026-09-19** | Last row of any kind: a synthetic co2 injection (104 rows) run to verify `ed32943`, that day's co2-isolation fix. |
+| **2026-09-19 → 10-16** | Silent. Every Railway redeploy returned all scopes to idle, because scope state lived only in `LiveRuntime`'s in-process task map. Nothing alerted. |
+| **2026-10-17** | PR #82: desired state persisted (migration `028`), resumed at boot, staleness surfaced, and `MOCK_SCADA_SCOPES` made opt-in so the 09-14 incident cannot recur by default. |
+
+**The lesson, which cost three wrong diagnoses: a point-in-time count cannot
+prove something never happened.** A production audit on 2026-10-16 found zero
+`source='live'` rows and this was written up — by me, repeatedly — as "no live
+rows have ever been written". It only ever established that **none were
+present**. `wipe_live_demo_data` issues plain `DELETE`s and leaves no tombstone,
+so purged rows are invisible to exactly that query. The correct reading made the
+audit and `ADR-009` §2.3's 11,119/19,394 figures consistent; the over-claim had
+them contradicting each other and sent two rounds of investigation after a
+phantom.
+
+Two further corrections from the same episode, both of which were stated
+confidently before being checked:
+
+- **The "+1 year shifted data running through 2026-12-31" belongs to
+  `tenant_1/gh_A`**, a 104,921-row CSV upload — not to `tenant_2/gh_A`, which
+  has only ever held 104 synthetic rows. Several theories reasoned about the
+  wrong tenant's data.
+- **There is no time-shifting replay anywhere in `src/`.** "Replay" in this
+  codebase means SSE event replay from a Redis stream (`src/live/hub.py`). The
+  mock *synthesizes* from the fractional UTC hour and stamps wall-clock `now`
+  (`src/live/sources/mock.py:169`, `:181`); its loop is `while
+  self._is_connected:` over a generator, so it cannot run out, stop or wrap.
+
+Related: [[project_future_dated_readings]] — the instinct that readings run
+*ahead* of wall clock is usually right in this repo, which is part of why the
+27-days-*behind* finding was initially read backwards.
+
