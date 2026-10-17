@@ -5943,6 +5943,31 @@ outside the working dir, so worktree setup needs checking against that.
 
 ### BACKLOG-4 — no index covers `release_ts` for `_fetch_recovery_release_events`
 
+**CLOSED 2026-10-17 — no index added.** Prod check by the user, read-only via
+the Railway Data tab:
+
+```sql
+SELECT tenant_id, greenhouse_id, detector, count(*)
+FROM anomaly_episodes GROUP BY 1,2,3;   -- 0 rows
+```
+
+The table is **empty in production**, far under the ~200k-episode threshold the
+round-1 measurement set for the index to pay for itself, so the existing UNIQUE
+index suffices and a new one would be pure write cost.
+
+**Reopen when prod passes ~200k episodes**, using the index shape from the
+round-1 measurement below — keep `detector` as a **key column, not a partial
+predicate**, since the compound-label finding (`project_detector_label_compound`)
+means exact-match predicates on detector undercount.
+
+Why the table is empty is **expected, not a second defect** — see BACKLOG-8's
+note on the episode writer: `anomaly_episodes` is written only by
+`persist_stuck_fault_episodes` (`src/api/services/anomaly_episode_writer.py:183`),
+called only from the two upload paths (`src/api/services/cold_run_upload.py:28`,
+`src/workers/upload_consumer.py:20`), and only for stuck-fault freezes that
+actually fired. A year of tenant_1 uploads with no fired freeze legitimately
+yields zero rows.
+
 Found by the ADR-011 author while verifying Task 5, and confirmed against
 `src/db/models.py` and `alembic/versions/026_add_anomaly_episodes.py`.
 
@@ -6078,3 +6103,79 @@ per-worker, so suppress/resume on one worker is invisible to the others — the
 same class of problem, already documented, and the reason single-worker was
 already a stated invariant before `028` strengthened the need for it.
 
+### BACKLOG-8 — live-only tenants can never acquire a model
+
+Recorded 2026-10-17 from the live-detector diagnosis. **Decision: not in that
+PR** — that PR only makes the missing-model state honest ("live, not analysed").
+
+`grep -rn "train|cold_start" src/live/` returns **zero** triggers. Every
+training entry point is on the upload path:
+`src/api/services/upload_checkpoint.py:41` → `should_train_cold_start`
+→ `src/api/services/cold_start_training.py:58` `train_cold_start_from_csv`
+→ `:77` `put_checkpoint(db, f"cold_start/{tenant_id}")` → `ModelRegistry.register_model`.
+
+So a tenant whose data arrives only over the live feed has no path to a model,
+ever. `tenant_2` is exactly that tenant in production: it has no
+`model_version` rows at all (confirmed by the user's read-only prod query,
+while `tenant_1` and `smoke_test` both have a current deployment).
+
+Design questions to answer before building the live-training trigger:
+
+1. **Where it runs.** Not in the API process — the API is a single replica
+   (BACKLOG-7) and training is CPU-heavy; it belongs in `src/workers/`.
+2. **Minimum data before training.** The cold-start path already raises
+   `InsufficientDataError`; live needs an explicit row/timespan floor, since a
+   model trained on an hour of mock data is worse than no model.
+3. **How it interacts with seasonal baselines.** `src/config.py:1114` carries a
+   seasonal baseline/scaler and `:1228` a count below which a tenant is "too
+   new for diurnal baselines". A live-trained model must not be deployed while
+   the tenant is still under that floor.
+4. **Retraining cadence and the key collision in BACKLOG-9** — a live retrain
+   would overwrite the same `cold_start/<tenant>` artifact key.
+
+### BACKLOG-9 — every `model_version` row for a tenant points at the same artifact key
+
+Found by the user's read-only prod query on 2026-10-17 and confirmed against the
+code. **Decision: record, do not fix in the live-detector PR.**
+
+All four `tenant_1` `model_version` rows carry the **same**
+`checkpoint_path` — `db://model_artifacts/cold_start/tenant_1` — and all four
+have `status = 'active'`.
+
+Both halves are confirmed in code:
+
+- **One key per tenant.** `src/api/services/cold_start_training.py:77` stores
+  under `f"cold_start/{tenant_id}"`, and `put_checkpoint`
+  (`src/models/artifact_store.py:53-60`) is an **upsert**:
+  `on_conflict_do_update` overwrites `data`, `sha256` and `size_bytes` for an
+  existing key. Every retrain therefore replaces the bytes every prior version
+  row still points at.
+- **`status` is never demoted.** `ModelRegistry.register_model`
+  (`src/models/model_registry.py:30-36`) sets `status="active"` on each new
+  `ModelVersion` and only flips the previous **`ModelDeployment.is_current`**
+  to False (`:43-50`). The old `ModelVersion.status` is left `'active'`.
+
+Consequence: `rollback_model` (`src/models/model_registry.py:118`) would flip
+`is_current` to an older `model_version` row and then resolve that row's
+`checkpoint_path` — the same key — and so **silently load the current model's
+bytes**. A rollback appears to succeed and changes nothing. `status` is also
+useless for telling which version is live; only `is_current` means anything.
+
+Fix shape when picked up: make the artifact key version-scoped (e.g.
+`cold_start/<tenant>/<model_id>`, or append the sha) so each `model_version`
+pins immutable bytes, and demote the prior row's `status` in `register_model`.
+Note the artifact cache is already content-addressed on `sha256[:12]`
+(`artifact_store.py:103-105`), so distinct bytes already get distinct local
+paths — the collision is purely in the DB key.
+
+### BACKLOG-10 — `learning.py` still loads the dead `models/baseline.pt`
+
+Recorded 2026-10-17. **Folded into the live-detector PR by user decision**, so
+this entry is the record rather than an open item; reopen only if that fix is
+reverted.
+
+`src/api/routes/learning.py:64` `_load_base_model()` calls the filesystem
+baseline and raises `HTTPException(503, "Failed to initialize base model: ...")`
+on the missing file. It surfaced unprompted in the live-detector repro's stderr,
+which is how it was found — a third call site for the same dead literal
+alongside the live path and `src/api/services/upload_checkpoint.py:36/:60`.
