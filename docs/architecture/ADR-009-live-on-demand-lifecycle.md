@@ -82,8 +82,10 @@ The result, which this document did not anticipate:
 
 > **Every Railway redeploy silently returned every scope to idle, with no resume
 > and no signal.** `tenant_2/gh_A` was consequently silent for 27 days before
-> anyone noticed. A production audit on **2026-10-16** found that **zero
-> `source='live'` rows had ever been written, in any tenant.**
+> anyone noticed. A production audit on **2026-10-16** found **zero
+> `source='live'` rows present, in any tenant** — present on that date, which is
+> not the same as never written: rows were written on 2026-09-14/15 and purged
+> before the audit ran. §2.3 carries the reconciliation.
 
 That is a direct cost of the decision recorded here, not a footnote. §10 row 5
 ("API restarts with a viewer connected → reconciler restarts generation") was
@@ -234,12 +236,12 @@ scope gate, and no stop condition** other than task cancellation at shutdown.
 > internal gate; it simply is not running. Since 2026-10-17 (`f9b2378`) the set
 > of scopes started at boot is the stored-`live` set, not the empty set.
 
-### 2.2 The defaults point at a real tenant *(still true — see §9.1)*
+### 2.2 The defaults point at a real tenant *(true when written; the scope default was fixed by PR #82 — see the note below and §9.1)*
 
 | Config | File:line | Current default | Effect |
 |---|---|---|---|
 | `MOCK_SCADA_ENABLED` | `src/config.py:1156` | `True` | Mock runs with zero configuration |
-| `MOCK_SCADA_SCOPES` | `src/config.py:1157` | `"tenant_1:gh_A"` | A **real** tenant scope |
+| `MOCK_SCADA_SCOPES` | `src/config.py:1347` | `""` (since PR #82) | No mock scope at all unless an operator names one. Was `"tenant_1:gh_A"` — a **real** tenant — until #82; that historical default is the one behind the §2.3 incident |
 | `MOCK_SCADA_INTERVAL_SECONDS` | `src/config.py:1158` | `2.0` | 4 sources × 0.5 Hz per scope |
 | `LIVE_PERSIST_ENABLED` | `src/config.py:1175` | `True` | Every merged bucket is written to the DB |
 | `MOCK_SCADA_DEMO_MODE` | `src/config.py:1244` | `True` | Guaranteed anomaly episodes every 60–120 s |
@@ -251,13 +253,21 @@ four connectors per scope — `mock_climate`, `mock_co2`, `mock_fertigation`,
 the signal is white noise around a slow sine — exactly the shape an LSTM-VAE
 cannot reconstruct, which is why it dominated the anomaly counts.
 
-> **Unchanged as of 2026-10-17.** `MOCK_SCADA_ENABLED` is still `True`
-> (`src/config.py:1337`) and `MOCK_SCADA_SCOPES` is still `"tenant_1:gh_A"`
-> (`:1338`). The §9.1 flips were never made; `LIVE_AUTOSTART_ENABLED=false` was
-> judged to subsume them, since a configured-but-idle scope generates nothing.
-> The residual risk is that the *name* of the shipped demo scope is still a real
-> tenant, so a single `POST /api/live/resume` against `tenant_1/gh_A` is all it
-> takes — and since `028` that choice now survives a redeploy. See §9.1.
+> **Updated 2026-10-17 (PR #82).** `MOCK_SCADA_SCOPES` now defaults to `""`
+> (`src/config.py:1347`) — mock scopes are **opt-in**, and a zero-config deploy
+> names no scope at all. `MOCK_SCADA_ENABLED` is still `True`
+> (`src/config.py:1337`), so only half of the §9.1 flips has been made;
+> `LIVE_AUTOSTART_ENABLED=false` was judged to subsume the rest, since a
+> configured-but-idle scope generates nothing.
+>
+> **The old default is history worth keeping, not just a stale value.** Until
+> #82 the shipped default was `"tenant_1:gh_A"`, a real tenant, and that is how
+> mock rows reached the tenant holding the customer CSV on 2026-09-14/15 — the
+> incident recorded in §0 and §2.3. With the default empty, a
+> `POST /api/live/resume` against `tenant_1/gh_A` is no longer one step away
+> from the shipped configuration: an operator must first name that scope in
+> `MOCK_SCADA_SCOPES`. If one does, the choice survives a redeploy since `028`,
+> which is why the `demo_tenant` rename in §9.4 still matters. See §9.1.
 
 ### 2.3 Persisted rows are indistinguishable at the row level *(still true)*
 
@@ -1036,13 +1046,14 @@ connect). The existing `LiveBadge` / `transport` / `stale` indicators stay.
 > added by `9c14dc3`. One more arrived later: `LIVE_STALE_AFTER_SECONDS`
 > (default `180.0`, `:1378`), added by `f9b2378` for §6's freshness block.
 >
-> Everything in §9.1 and §9.2 is otherwise **unchanged or absent** — verified at
-> `f9b2378`:
+> One §9.1 default has since shipped: `MOCK_SCADA_SCOPES` → `""` in PR #82
+> (row 2 below). Everything else in §9.1 and §9.2 is **unchanged or absent** —
+> verified at `f9b2378`, and the `MOCK_SCADA_SCOPES` row re-verified at `cfd11e0`:
 >
 > | Proposed | Actual |
 > |---|---|
 > | `MOCK_SCADA_ENABLED` → `False` | still `True` (`src/config.py:1337`) |
-> | `MOCK_SCADA_SCOPES` → `""` | still `"tenant_1:gh_A"` (`:1338`) |
+> | `MOCK_SCADA_SCOPES` → `""` | **done — shipped in PR #82**; now `""` (`src/config.py:1347`), was `"tenant_1:gh_A"` |
 > | `LIVE_PERSIST_ENABLED` unchanged `True` | still `True` (`:1361`) — correct by accident |
 > | `MOCK_SCADA_PERSIST_ENABLED` | does not exist |
 > | `LIVE_ALLOW_MOCK_OVER_CLIENT_DATA` | does not exist |
@@ -1050,14 +1061,16 @@ connect). The existing `LiveBadge` / `transport` / `stale` indicators stay.
 > | `LIVE_REAL_SOURCE_LIFECYCLE` | does not exist; §5.3's per-kind lifecycle was not built |
 > | §9.3 `source="live:mock"` tagging | not done — `PersistenceBatcher` still writes `source="live"` for every vendor |
 >
-> **Why the §9.1 flips were skipped, and what it costs.** Stopping the tasks
-> outright made the defaults look harmless: a configured scope that never starts
-> generates nothing regardless of what `MOCK_SCADA_SCOPES` says. But the shipped
-> default still *names a real tenant* as the mock scope, so one `/resume`
-> against `tenant_1/gh_A` writes synthetic rows into it — and since `028` that
-> choice survives a redeploy. §9.1 is therefore **still open**, and the
-> `demo_tenant` rename in §9.4 ("part of the fix, not an optional extra") is
-> still unmade.
+> **Why the §9.1 flips were skipped, and what changed since.** Stopping the
+> tasks outright made the defaults look harmless: a configured scope that never
+> starts generates nothing regardless of what `MOCK_SCADA_SCOPES` says. That
+> reasoning left the shipped default *naming a real tenant*, which is how
+> synthetic rows reached `tenant_1` on 2026-09-14/15 (§2.3), so PR #82 made the
+> scope list opt-in — the default is now `""` and no scope is named out of the
+> box. §9.1 is **partly open**: `MOCK_SCADA_ENABLED` is still `True`, and the
+> `demo_tenant` rename in §9.4 ("part of the fix, not an optional extra") still
+> matters for any deployment that does name a scope, because since `028` a
+> `/resume` choice survives a redeploy.
 >
 > §9.2's claim that `MOCK_SCADA_PERSIST_ENABLED` was "the single
 > highest-value new knob" was wrong in hindsight: the knob that actually solved
@@ -1070,7 +1083,7 @@ connect). The existing `LiveBadge` / `transport` / `stale` indicators stay.
 | Config | File:line | Now | Proposed | Why |
 |---|---|---|---|---|
 | `MOCK_SCADA_ENABLED` | `src/config.py:1156` | `True` | **`False`** | A zero-config deploy must generate nothing |
-| `MOCK_SCADA_SCOPES` | `src/config.py:1157` | `"tenant_1:gh_A"` | **`""`** | The current default is a **real tenant**. Empty means no mock scope exists; an operator must name one |
+| `MOCK_SCADA_SCOPES` | `src/config.py:1347` | `""` — **done, shipped in PR #82** | **`""`** | Proposed because the then-current default, `"tenant_1:gh_A"`, was a **real tenant** (§2.3). Empty means no mock scope exists; an operator must name one |
 | `LIVE_PERSIST_ENABLED` | `src/config.py:1175` | `True` | **`True` (unchanged)** | Real measured data must still be persisted; provenance now decides — see next row |
 
 ### 9.2 New config
