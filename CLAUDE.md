@@ -359,6 +359,38 @@ failure and is not.
 
 ---
 
+## Deployment constraint — the API runs as a SINGLE replica
+
+Do not scale `ai-agronomist-api` beyond one replica, and do not propose it as a
+performance fix. Recorded 2026-10-17; see `ADR-009` §0.3 for the full account.
+
+Live readings are deduplicated only by `ON CONFLICT (tenant_id, greenhouse_id,
+timestamp) DO NOTHING` (`src/live/persistence.py`). That guard does not work
+across replicas, because the timestamp is not a stable function of the bucket:
+`ChannelMerger._emit_bucket` stamps the event with the **first raw reading's
+timestamp in the bucket** (`src/live/merge.py:222`, `:266`), and the mock source
+uses microsecond-precision `datetime.now(timezone.utc)`
+(`src/live/sources/mock.py:169`). Two replicas therefore emit *different*
+timestamps for the same logical bucket and both rows insert — N replicas means
+N× the row rate, silently, with no error anywhere.
+
+Migration `028` (boot resume) made this worse rather than better. Before it, a
+multi-replica deploy still required an operator to press Go Live, and that HTTP
+request landed on exactly one replica, so only one started streaming — the
+invariant was enforced by accident of the request path. Now every replica
+self-resumes at boot and nothing enforces it.
+
+The cheapest candidate fix is to floor the bucket timestamp in `_emit_bucket`,
+which would make `ON CONFLICT DO NOTHING` deduplicate replicas for free — but it
+changes persisted timestamps, so it is deliberately not done. The alternatives
+are a Redis leader lock around boot resume, or moving the connectors into
+`src/workers/` with a single instance. Tracked in `AGENT_MEMORY.md` under
+BACKLOG-7.
+
+`src/live/scope_control.py:1-23` documents the related in-process constraint:
+`_suppressed_scopes` is per-worker, so suppress/resume on one worker is
+invisible to the others.
+
 ## Standard pipeline
 
 ```
