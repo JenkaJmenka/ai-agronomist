@@ -97,26 +97,77 @@ un-suppresses"; the symmetric failure — a *resumed* scope silently re-suppress
 30-day span; the 27-day figure is the audit's own and presumably dates from a
 later redeploy rather than from the commit.
 
-### 0.3 Open defect: boot resume weakens the single-worker invariant
+### 0.3 Operational constraint: the API must run as a single replica
+
+> **The API service must be deployed with exactly one replica.** This is a
+> decision taken on 2026-10-17, not an open bug awaiting a fix: the defect below
+> is **known, understood, and deliberately not being fixed**. Scaling the API to
+> two or more replicas multiplies the persisted live row rate by the replica
+> count, with **no error, no log line and no alert** when it happens.
 
 From backend's analysis of `f9b2378`, recorded here because no other document
-owns it. **Not fixed.**
+owns it.
 
-Before boot resume, a multi-replica deploy still required an operator click, and
-that HTTP request landed on exactly one replica — so in practice one replica
-generated. Now **every replica self-resumes at boot**, and nothing arbitrates.
+**Why the database does not deduplicate the extra writes.** `PersistenceBatcher`
+inserts both `SensorReading` and `RawReading` under
+`on_conflict_do_nothing(index_elements=_CONFLICT_COLS)`
+(`src/live/persistence.py:384`, `:391`), where `_CONFLICT_COLS` is
+`["tenant_id", "greenhouse_id", "timestamp"]` (`:113`). That drops a row only
+when all three key columns match an existing one — and two replicas never agree
+on `timestamp`:
 
-`ON CONFLICT DO NOTHING` (`src/live/persistence.py:384`, `:391`) does **not**
-dedupe the replicas' writes, because `ChannelMerger._emit_bucket` stamps the
-event with the **first raw reading's timestamp** (`src/live/merge.py:222`, read
-back at `:266`) rather than with a floored bucket boundary. Two replicas see
-different first readings, so they produce different primary keys for the same
-logical bucket. N replicas means N× the row rate, silently.
+* `ChannelMerger` stamps a bucket with the **first raw reading to land in it**,
+  not with a floored bucket boundary. `self._bucket_ts[bucket_idx] =
+  reading.timestamp` runs only on the branch that creates the bucket
+  (`src/live/merge.py:222`, under `if bucket is None:` at `:219`), and
+  `_emit_bucket` reads it straight back out as the event timestamp (`:266`).
+* That raw timestamp is microsecond-precision wall clock in production:
+  `MockScadaSource.stream` takes `datetime.now(timezone.utc)` on every tick
+  (`src/live/sources/mock.py:169`). The deterministic `start_time` branch just
+  above it (`:164-167`) is a seeded test/replay path — `mock_factory.py` never
+  sets that param — so a deployed replica always takes the wall-clock branch.
 
-The mitigations are the ones §5.4 already names — a Redis leader lock, or moving
-connectors into `src/workers/` — and neither was built. §5.4's conclusion ("the
-invariant is kept for now, but designed away") is now wrong in both halves: it
-was not designed away, and boot resume has made keeping it harder.
+Each replica runs its own generator and so observes its own first reading for
+the same logical bucket. The emitted timestamps differ, the primary keys differ,
+nothing collides, and nothing is dropped. **N replicas → N× the persisted row
+rate, silently.**
+
+**Why `028` made this worse.** Before boot resume the invariant was enforced by
+accident of the request path: a multi-replica deploy still required an operator
+to click Go Live, and that single HTTP request was routed to exactly one
+replica, so only that replica started a connector. Nothing in the code enforced
+it — the load balancer did, as a side effect of there being exactly one
+triggering request. Since `f9b2378` **every replica reads the same
+`live_scope_state` rows at boot and self-resumes**, so every replica generates.
+The accident is gone and nothing replaced it.
+
+**The candidate fix, and why it is not being taken now.** Floor the bucket
+timestamp in `_emit_bucket`: emit the bucket boundary
+(`bucket_idx * self._emit_interval`, the inverse of the index computed at
+`src/live/merge.py:209`) instead of the first reading's timestamp. Every replica
+would then produce an identical primary key for the same logical bucket, and
+`ON CONFLICT DO NOTHING` would deduplicate them for free — no new
+infrastructure, no new process, a handful of lines. **The caveat, and the reason
+it is deferred, is that it changes the timestamps that get persisted.** Live
+rows would land on exact bucket boundaries rather than on the arrival instant of
+whichever reading happened to open the bucket, which shifts future live rows
+relative to the client CSV's 5-minute grid and makes already-stored rows
+inconsistent with newly-written ones. That is a data-shape change requiring its
+own analysis, not a local refactor.
+
+The other two remedies are the ones §5.4 already names, and neither was built:
+
+| Option | Cost |
+|---|---|
+| Floor the bucket timestamp in `_emit_bucket` | Smallest change; **changes persisted timestamps** — deferred for that reason |
+| Per-scope Redis leader lock (`live:generator:{t}:{gh}`, §5.4) | Requires the Redis coordination layer of §5.2, which was never built |
+| Relocate connectors to `src/workers/` | A new process, deploy target and restart/health surface |
+
+§5.4's conclusion ("the invariant is kept for now, but designed away") is now
+wrong in both halves: it was not designed away, and boot resume has made keeping
+it harder. Until one of the three options above lands, **single replica is a
+hard deployment requirement for the API service**, load-bearing in a way it was
+not before `028`.
 
 ### 0.4 Dangling reference
 
@@ -219,13 +270,44 @@ flagged anomalies originated from them**.
 > **Still true at the row level** (`src/live/persistence.py` writes `source="live"`
 > for every vendor; the §9.3 `"live:mock"` tagging was never built).
 >
-> **But the row counts above are not reconcilable with the 2026-10-16 audit**,
-> which found zero `source='live'` rows in any tenant (§0.2). Both cannot
-> describe the same table at the same time. The likely explanation is that the
-> 2026-09-14/15 rows were removed by a *Clear all data* / `wipe_live_demo_data`
-> run between the two measurements, but that has not been confirmed, and this
-> ADR should not pretend it has been. Flagged 2026-10-17; whoever next audits
-> live provenance should settle it.
+> **Which database these row counts came from: production.** Resolved
+> 2026-10-17; the earlier revision of this annotation had left it open. The
+> figures were recorded by the same session that wrote this ADR, in
+> `AGENT_MEMORY.md`, committed by `d34d2f5` (2026-09-15) — the very commit that
+> added this document. That entry states the source of the data in its own
+> words:
+>
+> > "Prod evidence: ordinary days had exactly 288 rows (client CSV, 5-min,
+> > `source="Timestamp"`); 2026-09-14/15 had 11,119 and 19,394 EXTRA rows at ~2s
+> > cadence, `source="live"`. **96.7% of flagged anomalies came from live rows.**
+> > The client CSV was clean: 105,120 timestamps, every gap exactly 300.0s."
+> > — `AGENT_MEMORY.md:601-604`
+>
+> and opens, four paragraphs earlier, "Verified against prod: not a detection
+> regression" (`:586`). These are therefore **production** numbers — not a local
+> SQLite dev database and not a seeded test fixture. Both cited lines entered the
+> file in `d34d2f5`; line numbers are as of `ebd0852`.
+>
+> **This also resolves the apparent conflict with the 2026-10-16 audit** (§0.2),
+> which found no `source='live'` rows in any tenant. The same memory entry
+> records the containment that closes the gap — "user set
+> `MOCK_SCADA_ENABLED=false` and purged `source='live'` rows via
+> `DELETE /upload/live-data` (`wipe_live_demo_data`)" (`:608-609`) — and
+> `d34d2f5`'s commit message gives the backfill's motivation as "with the live
+> mock rows purged, the Anomaly page had almost nothing left to show even though
+> 105,120 real readings were present". A later, independent entry corroborates
+> it in passing: "Verified against prod (post mock-data purge)" (`:507`). The
+> rows were in production on 2026-09-14/15 and were deleted on 2026-09-15,
+> thirty-one days before the audit ran.
+>
+> **One correction to how that audit is stated, here and in §0.2.** A
+> point-in-time count cannot establish that zero live rows *had ever been
+> written* — only that none were **present** on 2026-10-16. `wipe_live_demo_data`
+> issues ordinary `DELETE`s (`src/api/services/tenant_data_wipe.py:214`) and
+> leaves no tombstone, so purged rows are invisible to precisely that query. Read
+> as "none present", the audit and the counts above are consistent and always
+> were; it was the "had ever been written" phrasing that made them look
+> irreconcilable.
 
 ### 2.4 The *Live* button does not control generation *(fixed 2026-09-16)*
 
@@ -1192,7 +1274,14 @@ the release; route change does not release. All five `web/` gates green
 >    outstanding safety improvement, and `028` has raised its value by making a
 >    mistaken `/resume` durable.
 > 2. **Build §7's client-data guardrail**, or decide explicitly not to.
-> 3. **Pick a fix for §0.3** before anyone raises `--workers` above 1. Flooring
->    the bucket timestamp in `_emit_bucket` is the cheap one.
-> 4. **Reconcile §2.3's row counts with the 2026-10-16 audit** — two
->    measurements of the same table that cannot both be right.
+> 3. **Pick a fix for §0.3 before anyone raises the API replica count above 1.**
+>    The decision recorded in §0.3 is to live with the constraint rather than fix
+>    it, so this is a question only for whoever next wants to scale the API out.
+>    Flooring the bucket timestamp in `_emit_bucket` is the cheap one, at the
+>    cost of changing persisted timestamps.
+> 4. ~~**Reconcile §2.3's row counts with the 2026-10-16 audit.**~~ **Closed
+>    2026-10-17.** The counts are production figures (`AGENT_MEMORY.md:601-604`,
+>    committed by `d34d2f5` alongside this ADR), and the rows were purged on
+>    2026-09-15 via `wipe_live_demo_data`, thirty-one days before the audit. The
+>    two measurements never conflicted; only the audit's "had ever been written"
+>    phrasing did. See §2.3.
