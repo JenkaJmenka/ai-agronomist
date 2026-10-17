@@ -66,6 +66,11 @@ def build_scopes_from_config(
     if MOCK_SCADA_ENABLED:
         for raw_scope in MOCK_SCADA_SCOPES.split(","):
             raw_scope = raw_scope.strip()
+            if not raw_scope:
+                # MOCK_SCADA_SCOPES is empty by default (opt-in), and
+                # "".split(",") yields [""] — skip silently rather than
+                # warning about a malformed entry the operator never wrote.
+                continue
             if ":" not in raw_scope:
                 logger.warning("Invalid MOCK_SCADA_SCOPES entry %r — skipping", raw_scope)
                 continue

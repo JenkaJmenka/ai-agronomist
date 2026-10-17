@@ -3159,6 +3159,80 @@ export interface components {
             last_event_at?: string | null;
         };
         /**
+         * LiveFreshness
+         * @description Is data actually arriving for this scope — distinct from "is Go Live on".
+         *
+         *     See :mod:`src.api.services.live_freshness` for the age/clock rules.
+         */
+        LiveFreshness: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "live" | "paused" | "not_configured";
+            /**
+             * Newest Reading At
+             * @description ISO-8601 timestamp of the newest persisted row across both reading tables, or null when the scope has never written one.
+             */
+            newest_reading_at: string | null;
+            /**
+             * Age Seconds
+             * @description now - newest_reading_at, in seconds. Null when there are no rows. Deliberately NOT clamped to zero and therefore signed: readings in this system are routinely future-dated, so a negative age is a normal value meaning 'the newest row is in the future'. A negative age is never stale.
+             */
+            age_seconds: number | null;
+            /**
+             * Is Stale
+             * @description True only for a 'live' scope — including a live scope that has never written a row at all. A paused or unconfigured scope is off, not broken.
+             */
+            is_stale: boolean;
+            /**
+             * Threshold Seconds
+             * @description Age above which a live scope is considered stale.
+             */
+            threshold_seconds: number;
+        };
+        /**
+         * LiveSourceStatus
+         * @description Health of one data source within a scope.
+         *
+         *     Mirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is
+         *     the same closed set already pinned by ``SourceStatusEvent`` in
+         *     ``src/live/events.py`` — that module is the only producer of these values.
+         */
+        LiveSourceStatus: {
+            /** Source Id */
+            source_id: string;
+            /** Vendor */
+            vendor: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "online" | "degraded" | "offline";
+            /**
+             * Last Seen
+             * @description ISO-8601 timestamp of the last reading, or null if never seen.
+             */
+            last_seen: string | null;
+        };
+        /**
+         * LiveStatusResponse
+         * @description Body of ``GET /api/live/status`` (always HTTP 200).
+         */
+        LiveStatusResponse: {
+            /**
+             * Greenhouse Status
+             * @enum {string}
+             */
+            greenhouse_status: "not_registered" | "no_source" | "live" | "paused";
+            /**
+             * Sources
+             * @description Always present, so consumers that only read 'sources' keep working.
+             */
+            sources: components["schemas"]["LiveSourceStatus"][];
+            freshness: components["schemas"]["LiveFreshness"];
+        };
+        /**
          * MarkAnomalyIntegratedRequest
          * @description Request body for POST /api/feedback/mark-anomaly.
          */
@@ -5805,7 +5879,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LiveStatusResponse"];
                 };
             };
             /** @description Validation Error */
