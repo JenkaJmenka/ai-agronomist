@@ -50,18 +50,49 @@ SCOPE_STATE_NOT_CONFIGURED = "not_configured"
 
 FreshnessState = Literal["live", "paused", "not_configured"]
 
+# Why a scope may not be scoring. "missing" is a provisioning state (no model
+# deployed for the tenant) and resolves by deploying one; "error" means the
+# lookup itself is broken and is an incident. A live scope that is not scoring
+# must never read as healthy — see src/live/detector_resolver.py.
+DETECTOR_STATE_UNKNOWN = "unknown"
+DETECTOR_STATE_READY = "ready"
+DETECTOR_STATE_MISSING = "missing"
+DETECTOR_STATE_ERROR = "error"
+
+DetectorState = Literal["unknown", "ready", "missing", "error"]
+
+# Runtime-checkable form of the Literal above. The status route duck-types the
+# live runtime (it is None in readings-service fallback mode, and a stand-in in
+# tests), so it validates the value it gets back rather than trusting it — the
+# route's contract is "always HTTP 200 with a valid body".
+DETECTOR_STATES: frozenset[str] = frozenset(
+    {
+        DETECTOR_STATE_UNKNOWN,
+        DETECTOR_STATE_READY,
+        DETECTOR_STATE_MISSING,
+        DETECTOR_STATE_ERROR,
+    }
+)
+
 
 class LiveSourceStatus(BaseModel):
     """Health of one data source within a scope.
 
-    Mirrors ``MergeBuffer.full_statuses`` entries. The ``status`` vocabulary is
-    the same closed set already pinned by ``SourceStatusEvent`` in
-    ``src/live/events.py`` — that module is the only producer of these values.
+    Mirrors ``MergeBuffer.full_statuses`` entries, plus ``paused``.
+
+    ``online``/``degraded``/``offline`` come from ``SourceStatusEvent`` in
+    ``src/live/events.py``, which is the only producer of those three.
+    ``paused`` is added by ``LiveRuntime.source_statuses`` and never appears on
+    the SSE stream: a paused scope has no running merger to emit events. It
+    exists because ``MergeBuffer`` seeds every source to ``online`` at
+    construction and only updates it from inside the merger loop, so cancelling
+    a scope froze every source at ``online`` with a frozen ``last_seen`` — and
+    an operator read the page as live.
     """
 
     source_id: str
     vendor: str
-    status: Literal["online", "degraded", "offline"]
+    status: Literal["online", "degraded", "offline", "paused"]
     # Required-but-nullable: the producer always emits the key, so the schema
     # says so. Marking it optional would understate the contract.
     last_seen: Optional[str] = Field(
@@ -113,6 +144,16 @@ class LiveStatusResponse(BaseModel):
     """Body of ``GET /api/live/status`` (always HTTP 200)."""
 
     greenhouse_status: GreenhouseStatus
+    detector_state: DetectorState = Field(
+        default=DETECTOR_STATE_UNKNOWN,
+        description=(
+            "Whether this scope can score at all. 'ready' = a detector is "
+            "loaded; 'missing' = no model is deployed for the tenant, so "
+            "readings persist unscored (live, not analysed); 'error' = "
+            "resolution is failing; 'unknown' = not yet attempted, or the "
+            "scope has no scorer."
+        ),
+    )
     sources: List[LiveSourceStatus] = Field(
         ...,
         description=(

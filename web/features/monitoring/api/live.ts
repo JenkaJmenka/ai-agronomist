@@ -79,11 +79,28 @@ export type AnomalyDetailEvent = z.infer<typeof anomalyDetailEventSchema>;
 // source-status
 // ---------------------------------------------------------------------------
 
+/**
+ * `online`/`degraded`/`offline` come from the merger's own health sweep.
+ * `paused` is added by `LiveRuntime.source_statuses` for a scope whose tasks
+ * are not running and never appears on the SSE stream (a paused scope has no
+ * merger to emit events). It exists because the merger seeds every source to
+ * `online` at construction and only revises it from inside its loop, so a
+ * paused scope used to report every source `online` with a `last_seen` frozen
+ * at the pause — which an operator read as a healthy live feed.
+ */
+export const SOURCE_STATUS_VALUES = [
+  "online",
+  "degraded",
+  "offline",
+  "paused",
+] as const satisfies readonly components["schemas"]["LiveSourceStatus"]["status"][];
+export type SourceStatusValue = (typeof SOURCE_STATUS_VALUES)[number];
+
 export const sourceStatusEventSchema = z
   .object({
     source_id: z.string(),
     vendor: z.string(),
-    status: z.enum(["online", "degraded", "offline"]),
+    status: z.enum(SOURCE_STATUS_VALUES),
     last_seen: z.string().nullable().optional(),
   })
   .passthrough();
@@ -201,8 +218,24 @@ export const FRESHNESS_SCHEMA_MATCHES_OPENAPI: IsExactly<Freshness, GeneratedFre
  * rolling-deploy won't send them yet. Treat their absence as "no new
  * information" — never as "idle" or "not stale".
  */
+/**
+ * Whether the scope can score at all. A live scope with no deployed model
+ * persists readings but analyses nothing, and must not render as healthy:
+ * `missing` is a provisioning state (deploy a model), `error` means resolution
+ * itself is failing. See `src/live/detector_resolver.py`.
+ */
+export const DETECTOR_STATE_VALUES = [
+  "unknown",
+  "ready",
+  "missing",
+  "error",
+] as const satisfies readonly GeneratedStatusResponse["detector_state"][];
+export type DetectorState = (typeof DETECTOR_STATE_VALUES)[number];
+
 export const statusResponseSchema = z.object({
   greenhouse_status: z.enum(GREENHOUSE_STATUS_VALUES).optional(),
+  /** Optional for the same deploy-skew reason as the fields above. */
+  detector_state: z.enum(DETECTOR_STATE_VALUES).optional(),
   sources: z.array(sourceStatusEventSchema),
   freshness: freshnessSchema.optional(),
 });

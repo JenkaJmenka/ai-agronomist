@@ -29,6 +29,8 @@ from src.api.services import readings_service
 from src.api.services.live_freshness import build_scope_freshness
 from src.api.services.live_hub_provider import LiveHub, get_live_hub
 from src.api.schemas.live import (
+    DETECTOR_STATE_UNKNOWN,
+    DETECTOR_STATES,
     GH_STATUS_LIVE,
     GH_STATUS_NO_SOURCE,
     GH_STATUS_NOT_REGISTERED,
@@ -113,6 +115,7 @@ async def live_source_status(
 
         {
           "greenhouse_status": "not_registered" | "no_source" | "live" | "paused",
+          "detector_state": "unknown" | "ready" | "missing" | "error",
           "sources": [...],
           "freshness": {
             "state": "live" | "paused" | "not_configured",
@@ -182,6 +185,14 @@ async def live_source_status(
             GH_STATUS_NO_SOURCE if exists else GH_STATUS_NOT_REGISTERED
         )
 
+    detector_state = (
+        runtime.detector_state(tenant_id, greenhouse_id)
+        if runtime is not None
+        else DETECTOR_STATE_UNKNOWN
+    )
+    if detector_state not in DETECTOR_STATES:
+        detector_state = DETECTOR_STATE_UNKNOWN
+
     freshness = await build_scope_freshness(
         db, runtime=runtime, tenant_id=tenant_id, greenhouse_id=greenhouse_id
     )
@@ -190,6 +201,7 @@ async def live_source_status(
     # the model validates that projection rather than restating it.
     return LiveStatusResponse(
         greenhouse_status=greenhouse_status,
+        detector_state=detector_state,
         sources=sources,
         freshness=LiveFreshness(**freshness.to_dict()),
     )

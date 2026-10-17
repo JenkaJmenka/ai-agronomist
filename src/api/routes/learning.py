@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
 from src.config import MAX_HISTORY_LIMIT
-from src.api.routes.inference import get_cached_detector
 from src.api.schemas.learning import (
     ActiveModelVersionResponse,
     DriftStateResponse,
@@ -54,17 +53,27 @@ _drift_detectors: LRUDict = LRUDict(max_size=100)
 
 
 def _load_base_model() -> LSTMVAE:
+    """Load the base LSTM-VAE that online learning adapts from.
+
+    There is no shared base model to load. This asked ``get_cached_detector``
+    for the filesystem baseline, which resolved to ``models/baseline.pt`` — a
+    path excluded from the image by ``.dockerignore`` and present in no
+    environment — so every call raised and this route returned a 503 reading
+    "Failed to initialize base model: ... No such file or directory".
+
+    The manager is a process-wide singleton with no tenant in scope, so it
+    cannot resolve a per-tenant deployment here; making online learning
+    per-tenant is tracked as BACKLOG-12. Until then this fails fast with an
+    accurate explanation instead of a missing-file error.
     """
-    Load the pretrained base LSTM-VAE through the same cached checkpoint
-    mechanism the inference routes use (latest baseline checkpoint).
-    """
-    try:
-        return get_cached_detector(None).model
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to initialize base model: {exc}",
-        )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=(
+            "Online learning is unavailable: it requires a shared base model, "
+            "and this deployment resolves models per tenant from the database "
+            "artifact store with no shared baseline. Tracked as BACKLOG-12."
+        ),
+    )
 
 
 def _get_manager() -> OnlineLearningManager:

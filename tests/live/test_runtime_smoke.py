@@ -185,7 +185,9 @@ async def test_source_statuses_returns_list(hub: LiveHub) -> None:
         assert "vendor" in entry, "source_statuses() must include 'vendor' (N6 fix)"
         assert "status" in entry
         assert "last_seen" in entry
-        assert entry["status"] in {"online", "degraded", "offline"}
+        # "paused" included: this scope was never started via start_scope, and
+        # an idle scope must not report the merger's seeded "online".
+        assert entry["status"] in {"online", "degraded", "offline", "paused"}
 
     await runtime.stop()
 

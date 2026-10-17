@@ -18,6 +18,14 @@ from src.db.session import get_db
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "greenhouse_connext.csv"
 
+@pytest.fixture(autouse=True)
+def _upload_tenant_has_model(tenant_has_active_model):
+    """The CSV fixture here has 48 clean rows — below the 100 cold-start
+    training needs — so this module's uploads cannot train their own model.
+    They exercise the upload pipeline, not provisioning; see the fixture's
+    docstring in tests/api/conftest.py for why this is now explicit."""
+
+
 
 @pytest.fixture(autouse=True)
 def _disable_live_runtime():

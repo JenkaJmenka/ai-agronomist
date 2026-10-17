@@ -307,8 +307,31 @@ class LiveRuntime:
         ``last_seen`` (ISO-8601 string or ``None`` if no reading has arrived
         yet).  Returns ``[]`` when the scope is unknown (runtime not configured
         for that tenant/greenhouse pair).
+
+        A source of a scope whose tasks are NOT running reports ``paused``,
+        never ``online``.  ``MergeBuffer`` seeds every source to ``online`` at
+        construction and only revises it from inside the merger loop
+        (``_sweep_health``), so a stopped scope otherwise reports every source
+        ``online`` forever with a ``last_seen`` frozen at the moment it was
+        paused — which an operator reads as a healthy live feed.  The health
+        values are left untouched so that resuming restores the real ones.
         """
         merger = self._mergers.get((tenant_id, greenhouse_id))
         if merger is None:
             return []
-        return merger.full_statuses()
+        statuses = merger.full_statuses()
+        if self.is_scope_active(tenant_id, greenhouse_id):
+            return statuses
+        return [{**entry, "status": "paused"} for entry in statuses]
+
+    def detector_state(self, tenant_id: str, greenhouse_id: str) -> str:
+        """``detector_state`` for ``/api/live/status``: can this scope score?
+
+        ``unknown`` when the scope is unconfigured or has no scorer (the
+        passthrough path), otherwise whatever the scope's resolver reports.
+        """
+        from src.live.detector_resolver import DETECTOR_STATE_UNKNOWN
+
+        scope = self._scopes_by_key.get((tenant_id, greenhouse_id))
+        resolver = getattr(getattr(scope, "scorer", None), "detector_state", None)
+        return resolver if isinstance(resolver, str) else DETECTOR_STATE_UNKNOWN

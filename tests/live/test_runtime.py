@@ -372,7 +372,11 @@ class TestSourceStatuses:
             assert "vendor" in entry, "source_statuses() must include 'vendor' (N6 fix)"
             assert "status" in entry
             assert "last_seen" in entry
-            assert entry["status"] in {"online", "degraded", "offline"}
+            # "paused" included: runtime.start() does NOT start a scope's
+            # connectors (that is Go Live / start_scope), and a scope whose
+            # tasks are not running reports "paused" rather than the merger's
+            # seeded "online" — see LiveRuntime.source_statuses.
+            assert entry["status"] in {"online", "degraded", "offline", "paused"}
         await runtime.stop()
 
     @pytest.mark.asyncio

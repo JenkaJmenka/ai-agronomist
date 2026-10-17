@@ -88,19 +88,28 @@ def learning_client(
 # ---------------------------------------------------------------------------
 
 
-def test_load_base_model_raises_503_when_checkpoint_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_load_base_model_raises_503_with_an_accurate_reason() -> None:
+    """Online learning has no shared base model, and now says so.
+
+    This used to patch ``get_cached_detector`` to raise and assert the message
+    was propagated. In production nothing needed to be patched: the real call
+    was ``get_cached_detector(None)``, which resolved ``models/baseline.pt`` —
+    excluded from the image by ``.dockerignore`` — so the route always returned
+    503 reading "No such file or directory". The failure is now explicit and
+    explains itself; making online learning per-tenant is BACKLOG-12.
+    """
     from fastapi import HTTPException
 
-    def broken_loader(_arg):
-        raise RuntimeError("no checkpoint on disk")
-
-    monkeypatch.setattr(learning_module, "get_cached_detector", broken_loader)
     with pytest.raises(HTTPException) as exc_info:
         learning_module._load_base_model()
+
     assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-    assert "no checkpoint on disk" in exc_info.value.detail
+    detail = exc_info.value.detail
+    assert "shared base model" in detail
+    assert "BACKLOG-12" in detail
+    assert "baseline.pt" not in detail, (
+        "the 503 must no longer blame a missing file that never existed"
+    )
 
 
 # ---------------------------------------------------------------------------

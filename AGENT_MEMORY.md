@@ -6286,3 +6286,61 @@ slow rate), or to make the canonical representation sparse — nullable channel
 columns, or scoring state carried per channel — so a partial bucket can hold a
 flag honestly. Either is a schema-level decision; pick it deliberately rather
 than by tuning `LIVE_MERGE_GRACE_SECONDS`.
+
+### BACKLOG-12 — online learning has no base model to adapt from
+
+Found 2026-10-17 while removing the dead baseline; the 503 it caused appeared
+unprompted in the live-detector repro's stderr. **Decision: not fixed in that
+PR** — the route now fails fast with an accurate reason instead of a
+missing-file error, which is all that was in scope.
+
+`src/api/routes/learning.py` builds a process-wide singleton
+`OnlineLearningManager(base_model=_load_base_model())`. `_load_base_model`
+called `get_cached_detector(None)`, i.e. the filesystem baseline, so every
+online-learning request returned
+`503 Failed to initialize base model: ... models/baseline.pt ... No such file`.
+
+The design problem, not just the call: `_get_manager()` is a module-level
+singleton with **no tenant in scope**, so it cannot resolve a per-tenant
+deployment even though that is now the only way a model exists. Making online
+learning work means making the manager per-tenant (an `LRUDict` keyed by
+tenant, like `_drift_detectors` beside it already is) and resolving each
+tenant's active model through
+`detector_cache.resolve_tenant_checkpoint`. Until then the route is honestly
+unavailable rather than misleadingly broken.
+
+### BACKLOG-13 — two routes still assume a tenant always has a model
+
+Found 2026-10-17 by the test fallout from removing the dead baseline.
+**Decision: recorded, not fixed** — the behaviour is now correct and honest;
+what remains is a UX and labelling question, not a defect.
+
+Both of these resolve `checkpoint_path = None` for a tenant with no active
+deployment and used to ride the phantom baseline:
+
+- `src/api/routes/inference.py:72-82` (`POST /api/inference`) — sets
+  `checkpoint_path = None` *and* `model_id_used = "baseline_v1"`, then calls
+  `get_cached_detector(checkpoint_path)`. It now returns a clear 503. The
+  `"baseline_v1"` label is dead naming from when a baseline was presumed to
+  exist and should go.
+- `POST /api/inference/upload` — a first upload too small to cold-start train
+  (under 100 clean rows after Pass 1) now returns 400 naming the shortfall,
+  via `NoModelAvailableError`, instead of 503 "Failed to load model from
+  models/baseline.pt".
+
+Open question for product, which is why this is a backlog entry and not a fix:
+should `POST /api/inference` for a modelless tenant 503, or should it resolve
+through the same cold-start path the upload route uses? Routing it through
+`detector_cache.resolve_tenant_checkpoint` would at least make the two
+consistent and give one error vocabulary.
+
+**The part worth remembering.** This was invisible to 3785 tests because
+`tests/api/conftest.py` has an **autouse** fixture patching
+`AnomalyDetector._load_model`, so `AnomalyDetector(None)` set
+`self.checkpoint_path = "models/baseline.pt"` and nothing ever opened it. The
+suite patched out exactly the failure that broke production, and the fixture's
+docstring — "ensures API tests never depend on those files being present" —
+reads as prudent isolation. Thirty tests across four files went red the moment
+the real guard was added. That fixture now carries a comment saying so. When a
+whole-suite-green claim covers a path that is failing in production, suspect an
+autouse fixture before suspecting the production report.

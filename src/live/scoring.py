@@ -100,6 +100,15 @@ class LiveScorer:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def detector_state(self) -> str:
+        """The scope's detector state, surfaced on ``/api/live/status``.
+
+        Delegates to the resolver so there is one source of truth; see
+        ``src/live/detector_resolver.py`` for the vocabulary.
+        """
+        return self._resolver.state
+
     async def score(self, event: LiveReadingEvent) -> LiveReadingEvent:
         """Score *event*; returns a copy with ``anomaly_score`` set once warm."""
         vector = self._extract_vector(event)

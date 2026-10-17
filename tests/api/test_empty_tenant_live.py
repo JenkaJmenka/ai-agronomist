@@ -287,6 +287,65 @@ class TestLiveStatusDiscrimination:
                 delattr(app.state, "live_runtime")
 
     @pytest.mark.asyncio
+    async def test_detector_state_reports_missing_so_scope_is_not_healthy(
+        self, async_client: AsyncClient
+    ) -> None:
+        """A live scope with no model must say so, not look fine.
+
+        This is the operator-visible half of the no-detector fix: readings keep
+        persisting, but the UI must be able to render "live, not analysed".
+        """
+        mock_runtime = MagicMock()
+        mock_runtime.source_statuses.return_value = [
+            {
+                "source_id": "climate",
+                "vendor": "mock",
+                "status": "online",
+                "last_seen": None,
+            }
+        ]
+        mock_runtime.detector_state.return_value = "missing"
+        app.state.live_runtime = mock_runtime
+        try:
+            data = await _get_status(async_client, _TENANT, _GREENHOUSE)
+            assert data["greenhouse_status"] == "live"
+            assert data["detector_state"] == "missing", (
+                "a live scope with no deployed model must report "
+                "detector_state='missing'"
+            )
+        finally:
+            if hasattr(app.state, "live_runtime"):
+                delattr(app.state, "live_runtime")
+
+    @pytest.mark.asyncio
+    async def test_detector_state_defaults_to_unknown_without_a_runtime(
+        self, async_client: AsyncClient
+    ) -> None:
+        """No runtime (readings-service fallback) → 'unknown', still HTTP 200."""
+        data = await _get_status(async_client, "no-such-tenant", "no-such-gh")
+        assert data["detector_state"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_detector_state_coerces_an_unrecognised_value(
+        self, async_client: AsyncClient
+    ) -> None:
+        """The route duck-types the runtime, so it validates what it gets back.
+
+        /api/live/status promises HTTP 200 with a valid body; a runtime that
+        does not implement detector_state must not turn that into a 500.
+        """
+        mock_runtime = MagicMock()
+        mock_runtime.source_statuses.return_value = []
+        mock_runtime.detector_state.return_value = "not-a-real-state"
+        app.state.live_runtime = mock_runtime
+        try:
+            data = await _get_status(async_client, _TENANT, _GREENHOUSE)
+            assert data["detector_state"] == "unknown"
+        finally:
+            if hasattr(app.state, "live_runtime"):
+                delattr(app.state, "live_runtime")
+
+    @pytest.mark.asyncio
     async def test_sources_field_always_present(self, async_client: AsyncClient) -> None:
         """'sources' key is always in the response regardless of state."""
         data = await _get_status(async_client, "no-such-tenant", "no-such-gh")
@@ -308,45 +367,143 @@ class TestLiveStatusDiscrimination:
 # ---------------------------------------------------------------------------
 
 
+class _NullSession:
+    """Async-CM stand-in for AsyncSessionLocal() in resolver unit tests."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _null_session_factory():
+    return _NullSession()
+
+
 class TestLiveIngestionWithZeroReadings:
     """Verify live ingestion path makes no assumptions about prior data."""
 
     @pytest.mark.asyncio
-    async def test_detector_resolver_falls_back_to_baseline_without_prior_data(
+    async def test_detector_resolver_reports_missing_without_prior_data(
         self,
     ) -> None:
-        """DetectorResolver resolves to the baseline detector when no tenant checkpoint.
+        """A tenant with no deployed model resolves to None, not a baseline.
 
-        This confirms that live scoring can start for a demo tenant that has
-        never had data uploaded — the baseline detector handles new tenants.
+        This test previously asserted the opposite — that resolve() falls back
+        to ``loader(None)``, "the baseline detector handles new tenants". That
+        premise was false in every environment: ``loader(None)`` builds
+        ``AnomalyDetector(None)``, which resolved to ``models/baseline.pt``, a
+        path excluded from the image by ``.dockerignore`` and present nowhere.
+        The test passed only because it injected a mock loader, so it encoded
+        the bug it was meant to guard against.
+
+        Correct behaviour: no detector, state ``missing``, and live ingestion
+        still starts — the scorer persists readings unscored.
         """
-        from src.live.detector_resolver import DetectorResolver
+        from src.api.services.detector_cache import NoActiveModelError
+        from src.live.detector_resolver import (
+            DETECTOR_STATE_MISSING,
+            DetectorResolver,
+        )
 
-        # Inject a session factory that raises (no active model for this tenant)
-        # and a loader that records the checkpoint argument passed to it.
-        baseline_calls: list[str | None] = []
+        loader_calls: list[str | None] = []
 
         def loader(cp: str | None):
-            baseline_calls.append(cp)
-            return MagicMock()  # non-None → resolve() returns it
+            loader_calls.append(cp)
+            return MagicMock()
 
-        def failing_session_factory():
-            raise Exception("no DB / no active model for demo tenant")
+        async def no_active_model(session, tenant_id):  # noqa: ANN001
+            raise NoActiveModelError(f"no active model for {tenant_id}")
 
         resolver = DetectorResolver(
             "demo_tenant",
-            session_factory=failing_session_factory,
+            session_factory=_null_session_factory,
+            checkpoint_resolver=no_active_model,
             detector_loader=loader,
         )
 
         result = await resolver.resolve()
 
-        # The fallback path calls loader(None) — None means "use baseline checkpoint".
-        assert baseline_calls == [None], (
-            "DetectorResolver must fall back to baseline(None) for tenants "
-            "with no uploaded data — live ingestion must start without prior history"
+        assert result is None, (
+            "resolve() must return None when no model is deployed — there is "
+            "no filesystem baseline to fall back to"
         )
-        assert result is not None, "resolver must return a detector, not None"
+        assert loader_calls == [], (
+            "the detector loader must never be called with None: that is the "
+            "dead models/baseline.pt path"
+        )
+        assert resolver.state == DETECTOR_STATE_MISSING
+
+    @pytest.mark.asyncio
+    async def test_detector_resolver_does_not_retry_on_every_event(self) -> None:
+        """A missing model is negative-cached, not re-resolved per event.
+
+        Before this, resolve() stamped ``_resolved_at`` only on success, so a
+        scope with no model re-ran the registry lookup and another torch.load
+        for every single event — measured at 23.7 resolutions/min and 47.3
+        torch.load attempts/min on a 2s feed.
+        """
+        from src.api.services.detector_cache import NoActiveModelError
+        from src.live.detector_resolver import DetectorResolver
+
+        attempts: list[str] = []
+
+        async def no_active_model(session, tenant_id):  # noqa: ANN001
+            attempts.append(tenant_id)
+            raise NoActiveModelError("none")
+
+        resolver = DetectorResolver(
+            "demo_tenant",
+            session_factory=_null_session_factory,
+            checkpoint_resolver=no_active_model,
+            detector_loader=lambda cp: MagicMock(),
+        )
+
+        for _ in range(25):
+            assert await resolver.resolve() is None
+
+        assert len(attempts) == 1, (
+            f"expected one resolution attempt inside the retry window, got "
+            f"{len(attempts)} — the negative cache is not holding"
+        )
+
+    @pytest.mark.asyncio
+    async def test_detector_resolver_logs_once_per_state_change(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The missing-model warning is emitted once per scope, not per event."""
+        import logging
+
+        from src.api.services.detector_cache import NoActiveModelError
+        from src.live.detector_resolver import DetectorResolver
+
+        async def no_active_model(session, tenant_id):  # noqa: ANN001
+            raise NoActiveModelError("none")
+
+        resolver = DetectorResolver(
+            "demo_tenant",
+            session_factory=_null_session_factory,
+            checkpoint_resolver=no_active_model,
+            detector_loader=lambda cp: MagicMock(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="src.live.detector_resolver"):
+            for _ in range(10):
+                await resolver.resolve()
+            # Defeat the negative cache so resolution is genuinely re-attempted
+            # while the state stays 'missing'.
+            for _ in range(10):
+                resolver._attempted_at = 0.0
+                await resolver.resolve()
+
+        missing_warnings = [
+            r for r in caplog.records if "No detector deployed" in r.getMessage()
+        ]
+        assert len(missing_warnings) == 1, (
+            f"expected exactly one missing-detector warning per scope, got "
+            f"{len(missing_warnings)}"
+        )
 
     @pytest.mark.asyncio
     async def test_live_scorer_warm_up_needs_only_live_data(self) -> None:
@@ -371,10 +528,7 @@ class TestLiveIngestionWithZeroReadings:
         async def null_resolve(self):  # noqa: ANN001
             return None
 
-        resolver = DetectorResolver.__new__(DetectorResolver)
-        resolver._tenant_id = "demo_tenant"
-        resolver._detector = None
-        resolver._resolved_at = 0.0
+        resolver = DetectorResolver("demo_tenant")
 
         import unittest.mock as mock
 
