@@ -116,8 +116,41 @@ export const resetEventSchema = z
 export type ResetEvent = z.infer<typeof resetEventSchema>;
 
 // ---------------------------------------------------------------------------
-// GET /api/bff/live/status response  (CONTRACT 2)
+// GET /api/bff/live/status response  (CONTRACT 2 + freshness)
 // ---------------------------------------------------------------------------
+
+/**
+ * Connector-only verdict for a scope (narrower than `greenhouse_status`,
+ * which also covers registry states like `not_registered`/`no_source` that
+ * say nothing about liveness). See `src/api/services/live_freshness.py`.
+ */
+export const FRESHNESS_STATE_VALUES = ["live", "paused", "not_configured"] as const;
+export type FreshnessState = (typeof FRESHNESS_STATE_VALUES)[number];
+
+export const GREENHOUSE_STATUS_VALUES = ["not_registered", "no_source", "live", "paused"] as const;
+export type GreenhouseStatus = (typeof GREENHOUSE_STATUS_VALUES)[number];
+
+/**
+ * Is data actually arriving for this scope — distinct from "is Go Live on".
+ * A production audit found zero `source='live'` rows ever written for any
+ * tenant while the scope-control toggle happily reported "live", so this
+ * block answers the question that actually matters to an operator.
+ *
+ * `age_seconds` is never clamped: readings are routinely future-dated here,
+ * so a negative age is a normal, meaningful value, not an error state.
+ * `is_stale` is true only for a `live` scope, including one that has never
+ * written a row at all (`newest_reading_at: null`) — a paused/unconfigured
+ * scope is off, not broken.
+ */
+export const freshnessSchema = z.object({
+  state: z.enum(FRESHNESS_STATE_VALUES),
+  newest_reading_at: z.string().nullable(),
+  age_seconds: z.number().nullable(),
+  is_stale: z.boolean(),
+  threshold_seconds: z.number(),
+});
+
+export type Freshness = z.infer<typeof freshnessSchema>;
 
 /**
  * Shape returned by `GET /api/live/status`.
@@ -125,12 +158,32 @@ export type ResetEvent = z.infer<typeof resetEventSchema>;
  * Contract 2: `{ sources: [{ source_id, vendor, status, last_seen? }] }`.
  * `last_seen` is nullable/optional so the schema stays tolerant across backend
  * deploy windows where the field may temporarily be absent (N6 fix).
+ *
+ * `greenhouse_status` and `freshness` are both optional for the same
+ * deploy-skew reason as `scope_status` below: an older API instance mid
+ * rolling-deploy won't send them yet. Treat their absence as "no new
+ * information" — never as "idle" or "not stale".
  */
 export const statusResponseSchema = z.object({
+  greenhouse_status: z.enum(GREENHOUSE_STATUS_VALUES).optional(),
   sources: z.array(sourceStatusEventSchema),
+  freshness: freshnessSchema.optional(),
 });
 
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
+
+/** Fetch + zod-parse `GET /api/bff/live/status` for one tenant/greenhouse scope. */
+export async function fetchLiveStatus(params: {
+  tenant: string;
+  gh: string;
+}): Promise<StatusResponse> {
+  const query = new URLSearchParams({ tenant_id: params.tenant, greenhouse_id: params.gh });
+  const res = await fetch(`/api/bff/live/status?${query}`);
+  if (!res.ok) {
+    throw new Error(`Live status request failed (${res.status})`);
+  }
+  return statusResponseSchema.parse(await res.json());
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/bff/live/{resume,pause}  (live scope control)

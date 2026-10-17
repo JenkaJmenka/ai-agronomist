@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { type SourceStatus, statusResponseSchema } from "@/features/monitoring/api/live";
+import { fetchLiveStatus, type SourceStatus } from "@/features/monitoring/api/live";
 import type { LiveTransport } from "@/features/monitoring/hooks/useLiveReadings";
 import { useScope } from "@/lib/useScope";
 
@@ -27,17 +27,12 @@ function useInitialSources(enabled: boolean): SourceStatus[] {
 
   const query = useQuery({
     queryKey: ["live-status", tenant, gh],
-    queryFn: async () => {
-      const params = new URLSearchParams({ tenant_id: tenant, greenhouse_id: gh });
-      const res = await fetch(`/api/bff/live/status?${params}`);
-      if (!res.ok) throw new Error(`Live status request failed (${res.status})`);
-      return statusResponseSchema.parse(await res.json()).sources;
-    },
+    queryFn: () => fetchLiveStatus({ tenant, gh }),
     enabled,
     staleTime: 30_000,
   });
 
-  return query.data ?? [];
+  return query.data?.sources ?? [];
 }
 
 /**

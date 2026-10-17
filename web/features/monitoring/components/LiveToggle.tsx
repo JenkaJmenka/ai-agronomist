@@ -6,6 +6,7 @@ import { rememberChartBaseline } from "@/components/charts/chartBaseline";
 import { Button } from "@/components/ui/Button";
 import { pauseLiveScope, resumeLiveScope } from "@/features/monitoring/api/live";
 import { fetchReadingsBounds } from "@/features/monitoring/api/readings";
+import { useLiveStatus } from "@/features/monitoring/hooks/useLiveStatus";
 import { rememberBoundsMax } from "@/features/monitoring/lib/boundsCache";
 import {
   DEFAULT_PERIOD_ID,
@@ -50,6 +51,11 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   const { tenant, gh } = useScope();
   const scopeKey = `${pageId}:${tenant}:${gh}`;
   const [notConfigured, setNotConfigured] = useState(false);
+  const { freshness } = useLiveStatus();
+  // No green Go Live toggle while stale — same standard the backend already
+  // applies to `resumed` for an unconfigured scope (live.py:183-186): a
+  // toggle that reads "on" must not lie about data actually arriving.
+  const isLiveButStale = live && freshness?.state === "live" && freshness.is_stale;
 
   // The not_configured verdict is per-scope — it must not outlive the scope
   // it was about. LiveToggle does not remount when tenant/gh change (the URL
@@ -131,16 +137,21 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Button
-        variant={live ? "primary" : "secondary"}
+        variant={live && !isLiveButStale ? "primary" : "secondary"}
         size="sm"
         onClick={() => void handleClick()}
         aria-pressed={live}
         data-testid="live-toggle"
         data-live={live ? "true" : "false"}
+        data-stale={isLiveButStale ? "true" : "false"}
       >
         <span
           className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-            live ? "animate-pulse bg-green-400" : "bg-text-muted"
+            isLiveButStale
+              ? "bg-sev-critical"
+              : live
+                ? "animate-pulse bg-green-400"
+                : "bg-text-muted"
           }`}
           aria-hidden="true"
         />
