@@ -53,7 +53,7 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3785 passed, 22 skipped, 3 xfailed, 0 failed
+### Current baseline — 3805 passed, 22 skipped, 3 xfailed, 0 failed
 
 Measured 2026-10-17 by the orchestrator on `fix/live-feed-survives-redeploy`,
 the merge of `origin/main` (`b100b77`, i.e. PRs #80 and #81) into the live-feed
@@ -68,6 +68,22 @@ pinning that a `StuckCarry` payload serialized before `recovery_channels` was
 removed still deserializes after it) → `3725` → `+60` from #82 (27 live-scope
 service tests, 33 boot/freshness acceptance tests) → `3785`. #81 is hook and
 docs only and adds none.
+
+Updated 2026-10-17 on `main` at `39feecf` — the merge of #82, #83 and #84 —
+full suite in the foreground, 361.62s: `./venv/bin/python -m pytest tests/ -q`.
+The arithmetic continues: `3785` after #82 → `+20` across #83 (post-82 cleanup)
+and #84 (live detector-no-model fix) → `3805`. The figure was measured before
+any wipe/source-collision work began, so it is the clean pre-task baseline for
+that branch.
+
+Worth keeping with it: this figure reached the file *before* anyone had measured
+it on `39feecf`, as an uncommitted edit crediting a run to "the orchestrator"
+that no orchestrator session had performed, timed to 361.52s, and matching a
+number a task brief had already asserted while the file still said `3785`. It
+was then measured independently and is right. Keep the two steps apart anyway:
+a figure that matches a brief is not thereby verified, and the rule against
+tuning an expected value toward a number is not satisfied by the number later
+turning out to be correct.
 
 **This line is the baseline. Numbers in `AGENT_MEMORY.md` are dated snapshots,
 not baselines** — update this line when the figure changes, and date it.
@@ -303,7 +319,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 |-------|-----------|
 | architect | `docs/architecture/` |
 | ml-engineer | `src/models/`, `src/config.py` |
-| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `src/live/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
+| backend-engineer | `src/api/`, `src/db/`, `src/workers/`, `src/live/`, `src/vendors/`, `docs/handoff/`, `alembic/`, `alembic.ini`, `requirements*.txt`, root `README.md`, root-level `*.md` docs |
 | qa-engineer | `tests/`, `docs/coverage/` |
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/`, `.husky/`, `docs/deployment/`, `docs/runbooks/` |
@@ -434,6 +450,37 @@ changes persisted timestamps, so it is deliberately not done. The alternatives
 are a Redis leader lock around boot resume, or moving the connectors into
 `src/workers/` with a single instance. Tracked in `AGENT_MEMORY.md` under
 BACKLOG-7.
+
+`src/vendors/` is backend-engineer's, assigned 2026-10-17. It had no row, which
+stalled the wipe/source-collision task: the fix for `raw_readings.source` carrying
+two meanings starts at `src/vendors/csv_adapter.py:406`/`:445`, where the CSV
+timestamp column's *header string* is written into a column the wipe
+(`src/api/services/tenant_data_wipe.py:49`) reads as provenance
+(`LIVE_RAW_SOURCE = "live"`). A CSV whose timestamp column is headed
+`live:timestamp` would therefore lose its whole upload to a live-data wipe, in
+both tables.
+
+Get the trigger right, because the obvious version of it is wrong: a header of
+just `live` is **not** enough. `ts_candidates` (`csv_adapter.py:419-424`) only
+considers a column whose lowercased header contains `timestamp`, `datetime`,
+`date` or `time`, so a bare `live` never becomes a timestamp candidate and never
+reaches `source` at all. The wipe's exact-match arm (`source == 'live'`) is
+therefore **unreachable from a CSV header**; only the `LIKE 'live:%'` arm is, via
+a header such as `live:timestamp` — which carries the `timestamp` keyword, lacks
+the `update`/`created` exclusions, and is stored verbatim because
+`parse_raw_rows` reads `chunk.columns` before any header cleaning. An acceptance
+test written against a bare `live` header proves nothing and passes for the wrong
+reason. The reasoning is the one that assigned `src/workers/` on
+2026-10-06 and `src/live/` on 2026-10-17 — it is ingestion service code on the
+upload path, already imports only backend-owned modules, and the fix is
+inseparable from the wipe change in `src/api/services/` — so they belong together.
+
+Note the asymmetry, which is the mirror image of the `src/live/` one: the CSV
+path's *sensor-column and light-unit shaping* also lives in `csv_adapter.py`
+(`infer_light_unit`, `LUX_TO_W_PER_M2`), and its constants are **ml-engineer's**
+in `src/config.py`. A vendors task that changes unit conversion therefore needs
+both agents; one that only changes provenance tagging does not. `src/dashboard/`
+remains unowned — assign it before editing, do not infer it from this row.
 
 `src/live/scope_control.py:1-23` documents the related in-process constraint:
 `_suppressed_scopes` is per-worker, so suppress/resume on one worker is
