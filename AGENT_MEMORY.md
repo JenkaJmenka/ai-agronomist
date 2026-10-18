@@ -6174,6 +6174,28 @@ Note the artifact cache is already content-addressed on `sha256[:12]`
 (`artifact_store.py:103-105`), so distinct bytes already get distinct local
 paths — the collision is purely in the DB key.
 
+**Addendum, 2026-10-18 — `updated_at` is not a "weights last written" signal.**
+The user's read-only prod query found `cold_start/tenant_1` with
+`created_at = updated_at = 2026-09-14 17:15:59 UTC` (258,513 B, sha
+`21a881b11d59...`) although `model_version` records retrains on **09-16 and
+10-06**. The alarming reading — that the later retrains never wrote weights, so
+prod serves 09-14 bytes under a 10-06 threshold — is **not** what happened.
+
+`put_checkpoint`'s upsert (`src/models/artifact_store.py:56-59`) lists only
+`data`, `sha256` and `size_bytes` in `on_conflict_do_update(set_=...)`.
+`ModelArtifact.updated_at` does carry `onupdate=func.now()`
+(`src/db/models.py:573`), but that is an **ORM-level** hook: it fires for ORM
+UPDATEs, not for a Core `insert().on_conflict_do_update()`. Migration 015 adds
+only `server_default=sa.func.now()` — no `server_onupdate`, no trigger. So a
+retrain overwrites the bytes and leaves `updated_at` frozen at insert time, and
+`created_at == updated_at` is precisely what this code produces.
+
+Two consequences. `updated_at` on `model_artifacts` is useless for auditing when
+weights last changed — do not read a stale value as a failed write. And the DB
+alone cannot positively confirm a given retrain *did* write; there is simply no
+evidence that it did not. Add `updated_at` to the `set_` clause when BACKLOG-9 is
+picked up: it is a one-line addition to the same statement the key fix touches.
+
 ### BACKLOG-10 — `learning.py` still loads the dead `models/baseline.pt`
 
 Recorded 2026-10-17. **Folded into the live-detector PR by user decision**, so
@@ -6344,6 +6366,51 @@ reads as prudent isolation. Thirty tests across four files went red the moment
 the real guard was added. That fixture now carries a comment saying so. When a
 whole-suite-green claim covers a path that is failing in production, suspect an
 autouse fixture before suspecting the production report.
+### BACKLOG-14 — cold-start pass 1 flags half the training corpus as anomalous
+
+Found by the user's read-only prod query on 2026-10-18. **Investigate before the
+PDF report feature ships** (user directive).
+
+All four `tenant_1` cold-start `model_version` rows record an identical pass-1
+split: `pass1_clean_rows` **51,917** and `pass1_anomaly_rows` **53,004** —
+104,921 rows in total, so **50.5% of the corpus was flagged anomalous** and the
+model trained on the remaining 49.5%.
+
+Why it matters: a detector that calls half of normal greenhouse history
+anomalous is either mis-thresholded at pass 1 or fed a corpus whose distribution
+it was never calibrated for. Either way the trained model inherits it — it
+learned "normal" from a 49.5% subset selected by the very criterion under
+suspicion. Any customer-facing report quoting anomaly rates would quote this.
+
+That all four rows carry the *same* counts is itself a clue: the 09-16 and 10-06
+retrains saw exactly the split 09-14 saw, so the input corpus did not grow
+between them.
+
+Not to be confused with the threshold spread recorded directly below: that is a
+*training* non-determinism, this is a *data/labelling* problem at pass 1.
+
+### Training is non-deterministic — four runs on identical data, thresholds 0.0614-0.0650
+
+Found by the user's read-only prod query on 2026-10-18, alongside BACKLOG-14.
+
+The four `tenant_1` cold-start `model_version` rows carry
+`calibration_threshold` **0.06291, 0.06140, 0.06493, 0.06501** (09-14, 09-14,
+09-16, 10-06) — a spread of **3.6e-3** — while every one reports the same pass-1
+split (51,917 / 53,004), i.e. the same input data. (`smoke_test`'s single row
+sits far off at 0.17704 and is a different corpus.)
+
+This is the figure that settled Task 1e Phase 2's scope. Removing the
+`reparameterize` sampling noise from inference shifts a calibrated threshold by
+~1e-4 — **an order of magnitude less than retraining the same data already moves
+it**. So the fix needed no recalibration of any stored threshold and no
+re-anchoring of the 406 persisted scores; the user approved it on exactly that
+basis.
+
+The spread's own cause is uninvestigated. Candidates: weight init, dataloader
+shuffling, dropout during training, and the pass-1 split being recomputed per
+run. Worth knowing before anyone treats a stored `calibration_threshold` as
+reproducible, or reads a change in one as meaningful.
+
 ## Live feed silent for 27 days — the corrected timeline (2026-10-17)
 
 Reconstructed while diagnosing why `tenant_2/gh_A` showed nothing. Three
