@@ -6387,3 +6387,55 @@ Related: [[project_future_dated_readings]] — the instinct that readings run
 *ahead* of wall clock is usually right in this repo, which is part of why the
 27-days-*behind* finding was initially read backwards.
 
+
+## The wipe/source collision — get the trigger right (Orchestrator, 2026-10-18)
+
+`raw_readings.source` carries two incompatible meanings, and a live-data wipe
+can destroy a CSV upload because of it. `src/vendors/csv_adapter.py:406`/`:445`
+writes the CSV **timestamp column's header string** into `source`;
+`src/api/services/tenant_data_wipe.py:49` reads the same column as provenance
+(`LIVE_RAW_SOURCE = "live"`). `wipe_live_demo_data` collects the timestamps of
+raw rows whose source looks live, then deletes `sensor_readings` rows with
+`source IS NULL` at those timestamps — so a colliding upload is lost in **both**
+tables.
+
+**The trigger is narrower than it first appears, and the obvious version of it
+is wrong.** A header of just `live` cannot reach `source` at all: `ts_candidates`
+(`csv_adapter.py:419-424`) only considers a column whose lowercased header
+contains `timestamp`, `datetime`, `date` or `time`. So:
+
+- the wipe's exact-match arm, `source == 'live'`, is **unreachable from a CSV
+  header**;
+- only the `LIKE 'live:%'` arm is reachable, via a header such as
+  `live:timestamp` — it carries the `timestamp` keyword, escapes the
+  `update`/`created` exclusions, and is stored **verbatim**, because
+  `parse_raw_rows` reads `chunk.columns` before any header cleaning.
+
+An acceptance test written against a bare `live` header therefore proves
+nothing and passes for the wrong reason. This correction arrived from a parallel
+review *after* the first brief had already been written and committed around the
+bare-`live` claim — the claim was plausible, repeated in three places, and
+checking `ts_candidates` took one `sed`. Check the filter before trusting the
+headline.
+
+Two related facts established while scoping the fix:
+
+- **The fallback branch may already be dead in prod.** It sits behind
+  `if live_timestamps:` (`tenant_data_wipe.py:250`), so in a scope with no
+  live-tagged raw rows it is never even built. Migration 017 and the wipe
+  service both landed **2026-07-24** (`5922db9`), before the 2026-09-15 purge
+  recorded above — which ran `wipe_live_demo_data` itself, fallback included.
+  The only population it can still catch is pre-07-24 live rows that 017's
+  `anomaly_type='live'` backfill missed.
+- **`SensorReading.source` must stay NULL for a plain CSV upload.** ADR-010's
+  approved rule (`src/db/provenance.py:49-52`) documents exactly that, and
+  migrations 017/025 depend on it, so the new upload provenance marker goes on
+  `RawReading.source` only.
+
+A trap worth not re-deriving: `src/dashboard/views/1_Active_Monitoring/2_Climate_Data.py:252`
+renders a `"Source"` column, but it comes from `anomaly_events.py`'s own
+literals (`"persisted_score"`, `"reading"`, `"incident"`) — **not**
+`RawReading.source`. Two separate agents spent time on it.
+
+Related: [[project_adapter_drops_null_rows]] (the other csv_adapter behaviour
+that silently reshapes uploaded data), [[project_synthetic_marker_migration_023_overwrite]].
