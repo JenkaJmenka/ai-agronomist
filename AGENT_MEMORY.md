@@ -6439,3 +6439,42 @@ literals (`"persisted_score"`, `"reading"`, `"incident"`) — **not**
 
 Related: [[project_adapter_drops_null_rows]] (the other csv_adapter behaviour
 that silently reshapes uploaded data), [[project_synthetic_marker_migration_023_overwrite]].
+
+## BACKLOG-14 — dead raw-readings query in the unowned dashboard tree (Orchestrator, 2026-10-18)
+
+Found while auditing the wipe/source-collision fix: `query_raw_readings`
+(`src/dashboard/components/charts.py:230`) fetches `raw_readings` rows including
+`source`, and **is never invoked to fetch anything** — zero call sites pass it
+arguments, anywhere in `src/` or `tests/`.
+
+**Decision: recorded, not removed.** It is not a free deletion, and the precise
+shape matters:
+
+- Two live references remain, both `.clear()` on its Streamlit cache:
+  `clear_raw_cache()` (`:168`) and `clear_sensor_cache()` (`:178`). Deleting the
+  function naively breaks both.
+- `clear_raw_cache()` has **no callers either**, so it is dead alongside it.
+- `clear_sensor_cache()` is very much alive — 11 call sites — so its
+  `query_raw_readings.clear()` line has to go, not the whole function.
+
+So the removal is: `query_raw_readings`, `clear_raw_cache`, and the one
+`.clear()` line inside `clear_sensor_cache`. Three edits, not one.
+
+**It cannot be actioned yet: `src/dashboard/` has no owner.** It is absent from
+the file-ownership table in `CLAUDE.md`, and this task deliberately did not
+widen anyone's scope to cover it. Assign an owner before touching it. The same
+gap was noted when `src/vendors/` was assigned on 2026-10-17 — `src/vendors/`
+got a row, `src/dashboard/` did not.
+
+Two corrections to how this was first reported, both worth keeping because the
+wrong version is the one that would get grepped for:
+
+- The path is `src/dashboard/components/charts.py`, **not** `src/dashboard/charts.py`.
+- The function is `query_raw_readings`, **not** `query_raw_rows`.
+- "No callers anywhere" was too strong. Two `.clear()` references exist; what is
+  true is that it is never *invoked to fetch data*. The distinction is the whole
+  difference between a one-line delete and a three-edit one.
+
+Related: [[project_adapter_drops_null_rows]], and the `2_Climate_Data.py:252`
+`"Source"` column trap recorded in the entry above — both are dashboard-tree
+traps found while working on `RawReading.source`.
