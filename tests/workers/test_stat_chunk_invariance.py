@@ -13,8 +13,7 @@ Pins:
   d. native_july_clearsky.csv at every size: zero stuck alerts, no
      detected_severity rows; statistical hit set identical across sizes.
   e. Async: at 50-row and 500-row portions the async path's statistical
-     hit set and stuck alerts equal sync's.  LSTM is out of scope (known
-     reparameterize noise, task 1e).
+     hit set, stuck alerts, and LSTM counts equal sync's.
 """
 
 from __future__ import annotations
@@ -389,22 +388,34 @@ class TestAsyncParity:
         assert [a["detected_ts"] for a in async_alerts] == [a["detected_ts"] for a in sync_alerts]
 
     @pytest.mark.asyncio
-    async def test_lstm_count_only(self):
-        """LSTM counts are not asserted equal (known reparameterize noise, task 1e).
-        Just record the counts for the report."""
+    async def test_lstm_alerts_match_sync_async(self):
+        """LSTM alerts are identical between sync and async.
+
+        The reparameterize guard (task 1e) makes LSTM inference deterministic,
+        so sync and async pipelines must produce identical LSTM alerts --
+        same timestamps, same scores, same count.
+        """
         sync_resp = await _run_sync_cached(FIXTURE_A, 50)
         async_result, _ = await _run_async_pipeline(FIXTURE_A, 50)
 
-        sync_lstm = len([
-            h for h in sync_resp.high_anomalies
-            if h.detector and h.detector.startswith("lstm")
-        ])
-        async_lstm = len([
-            h for h in async_result.get("high_anomalies", [])
-            if h.get("detector", "").startswith("lstm")
-        ])
-        # Just print, do not assert equality
-        print(f"\nLSTM count: sync={sync_lstm}, async={async_lstm} (not asserted equal)")
+        sync_lstm = sorted(
+            [
+                (h.timestamp, h.score)
+                for h in sync_resp.high_anomalies
+                if h.detector and h.detector.startswith("lstm")
+            ]
+        )
+        async_lstm = sorted(
+            [
+                (h["timestamp"], h["score"])
+                for h in async_result.get("high_anomalies", [])
+                if h.get("detector", "").startswith("lstm")
+            ]
+        )
+        assert sync_lstm == async_lstm, (
+            f"LSTM alerts differ: sync={sync_lstm}, async={async_lstm}"
+        )
+
 
     @pytest.mark.asyncio
     async def test_async_with_real_checkpoint(self):
