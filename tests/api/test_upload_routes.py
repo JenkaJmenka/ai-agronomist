@@ -319,6 +319,24 @@ class TestRemoveSyntheticAnomalies:
 
 class TestRemoveLiveDemoData:
     async def test_removes_live_keeps_csv_and_inject(self, test_client, test_database):
+        """Only a ``source='live'`` SensorReading is wiped; CSV and inject stay.
+
+        Seeded SensorReadings, by the ``source`` the wipe keys off:
+          8  CSV upload rows   — source NULL (an upload sends no source)
+          4  inject rows       — "synthetic:context" x3, "synthetic:humidity_drop"
+          1  live row          — source "live"
+          1  untagged row      — source NULL, at a timestamp a live RawReading holds
+          -- 14 total
+
+        ``wipe_live_demo_data`` matches ``source == 'live'`` and nothing else,
+        so exactly 1 of those 14 is deleted.  This assertion read ``== 2``
+        before: the wipe also had a fallback matching ``source IS NULL`` rows
+        sharing a timestamp with a live RawReading, which caught the untagged
+        row — and would equally have caught any of the 8 CSV rows whose
+        timestamp coincided with a live one.  The RawReading side is unchanged
+        at 2: both seeded live raws match, while the CSV raws now carry the
+        fixed "csv" marker.
+        """
         test_client.post(
             "/api/upload",
             files={"file": ("data.csv", io.BytesIO(_csv_bytes(8)), "text/csv")},
@@ -357,8 +375,10 @@ class TestRemoveLiveDemoData:
                 data={"temperature": 23.0, "humidity": 55.0, "co2": 410.0, "light": 480.0},
             )
         )
-        # Pre-tag live SensorReading: untagged row (source=None, anomaly_type=None)
-        # sharing a timestamp with a live RawReading — deleted by timestamp fallback.
+        # Untagged SensorReading (source=None, anomaly_type=None) sharing a
+        # timestamp with a live RawReading. The deleted timestamp fallback used
+        # to wipe this row; it must now survive, because source IS NULL is the
+        # state a plain CSV upload's rows are in too (ADR-010).
         test_database.add(
             SensorReading(
                 tenant_id=TENANT,
@@ -392,11 +412,11 @@ class TestRemoveLiveDemoData:
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
         assert body["cleared_live"] is True
-        assert body["deleted_sensor"] == 2
-        assert body["deleted_raw"] == 2
+        assert body["deleted_sensor"] == 1  # the one source='live' row, nothing else
+        assert body["deleted_raw"] == 2  # both live raws; CSV raws carry "csv"
         assert body["live_persistence_suppressed"] is True
-        assert await _count(test_database, SensorReading) == 12
-        assert await _count(test_database, RawReading) == 12
+        assert await _count(test_database, SensorReading) == 13  # 14 - 1
+        assert await _count(test_database, RawReading) == 12  # 14 - 2
         live_left = await test_database.execute(
             select(func.count(SensorReading.id)).where(
                 SensorReading.tenant_id == TENANT,
@@ -404,6 +424,13 @@ class TestRemoveLiveDemoData:
             )
         )
         assert live_left.scalar() == 0
+        untagged_left = await test_database.execute(
+            select(func.count(SensorReading.id)).where(
+                SensorReading.tenant_id == TENANT,
+                SensorReading.timestamp == legacy_ts,
+            )
+        )
+        assert untagged_left.scalar() == 1, "the untagged row must survive the wipe"
 
     async def test_removes_only_target_greenhouse(self, test_client, test_database):
         other_gh = "gh-other"

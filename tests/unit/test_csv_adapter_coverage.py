@@ -15,6 +15,7 @@ import pytest
 import pandas as pd
 from unittest.mock import patch
 
+from src.config import CSV_UPLOAD_RAW_SOURCE
 from src.vendors.csv_adapter import (
     CSVAdapter,
     _detect_csv_properties,
@@ -219,8 +220,17 @@ class TestParseRawRows:
         assert not result_df.empty
         assert len(col_names) >= 3
 
-    def test_source_column_populated(self) -> None:
-        """Result df includes 'source' column identifying which ts column was used."""
+    def test_source_column_carries_the_fixed_csv_marker_not_the_header(self) -> None:
+        """``source`` is the fixed CSV provenance marker, never the ts header.
+
+        This assertion used to read ``== "datetime"``: the column carried the
+        name of whichever CSV column supplied the timestamp.  That made a
+        user-controlled header string land in ``RawReading.source``, the same
+        column ``wipe_live_demo_data`` reads as provenance, so a header like
+        ``live:timestamp`` got a whole upload deleted by a live-data wipe.
+        ``parse_raw_rows`` now writes ``CSV_UPLOAD_RAW_SOURCE`` regardless of
+        the file's headers — see its docstring in ``src/config.py``.
+        """
         chunk = pd.DataFrame({
             "datetime": ["2026-06-09T12:00:00"],
             "temperature": [22.5],
@@ -228,7 +238,28 @@ class TestParseRawRows:
         result_df, _ = parse_raw_rows(chunk)
         assert not result_df.empty
         assert "source" in result_df.columns
-        assert result_df["source"].iloc[0] == "datetime"
+        assert result_df["source"].iloc[0] == CSV_UPLOAD_RAW_SOURCE
+
+    def test_source_marker_is_identical_for_every_timestamp_header(self) -> None:
+        """Two files whose ts columns are headed differently agree on ``source``.
+
+        The behaviour that makes collision with a reserved marker structurally
+        impossible rather than merely unlikely: the value no longer varies
+        with the input at all.
+        """
+        datetime_headed = pd.DataFrame({
+            "datetime": ["2026-06-09T12:00:00"],
+            "temperature": [22.5],
+        })
+        reserved_marker_headed = pd.DataFrame({
+            "live:timestamp": ["2026-06-09T12:00:00"],
+            "temperature": [22.5],
+        })
+        from_datetime, _ = parse_raw_rows(datetime_headed)
+        from_reserved, _ = parse_raw_rows(reserved_marker_headed)
+
+        assert list(from_datetime["source"]) == list(from_reserved["source"])
+        assert set(from_reserved["source"]) == {CSV_UPLOAD_RAW_SOURCE}
 
 
 # ---------------------------------------------------------------------------
