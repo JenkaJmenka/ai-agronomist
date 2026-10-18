@@ -32,8 +32,20 @@ live_raw_filter = [
 raw_result = await db.execute(delete(RawReading).where(*live_raw_filter))
 ```
 
-Any existing `RawReading` row whose `source` happens to equal `'live'` or
-start with `'live:'` — because that was the CSV's timestamp-column header,
+**Correction against an earlier draft of this document:** the exact-match
+arm (`source == 'live'`) is NOT reachable from a CSV header at all.
+`ts_candidates` (`src/vendors/csv_adapter.py:426-431` as of this branch; `:419-424` pre-item-1) only considers a
+column whose lowercased header contains `timestamp`, `datetime`, `date` or
+`time`; a bare header of `live` contains none of those and is never even
+inspected as a timestamp column, so it can never become `source`'s value in
+the first place. Only the `LIKE 'live:%'` arm is reachable — via a header
+such as `live:timestamp` (contains `timestamp`, clears the `update`/`created`
+exclusions) stored **verbatim**, because `parse_raw_rows` reads
+`chunk.columns` before any header-cleaning. `live:timestamp` is the realistic
+exploit header, not `live`.
+
+Any existing `RawReading` row whose `source` starts with `'live:'` —
+because that was the CSV's timestamp-column header (e.g. `live:timestamp`),
 written before item 1 shipped — still matches this filter and is still
 deleted by a live-data wipe. Item 1 stops the bleeding for new uploads; it
 does not retag what is already in the table. The backfill below is what
@@ -132,9 +144,10 @@ schema change behind it.
 ## What breaks while old header values remain (i.e., if nobody runs the backfill)
 
 - **`wipe_live_demo_data`'s `RawReading` filter** (see "Why old rows still
-  matter" above) — the only path with a real, measurable blast radius. A
-  row whose header happened to be `'live'` or start with `'live:'` is deleted
-  by any live-data wipe on that scope, exactly like a real live row would be.
+  matter" above) — the only path with a real, measurable blast radius. A row
+  whose header happened to start with `'live:'` (e.g. `live:timestamp` — a
+  bare `live` header is unreachable, see the correction above) is deleted by
+  any live-data wipe on that scope, exactly like a real live row would be.
 - **`gas_anomalies.py:_source_is_real`** — `or_(col.is_(None), ~col.like('synthetic:%'))`.
   Any non-`synthetic:`-prefixed value, including an old header string like
   `"Timestamp"`, passes as "real" — identical to what `'csv'` would do. No

@@ -1454,14 +1454,18 @@ def synthetic_source(anomaly_type: str | None) -> str:
 # instead held the CSV's own timestamp-column header string (e.g.
 # "Timestamp", "datetime") -- user-controlled text that could collide with
 # the "live" / "live:<...>" marker src/live/persistence.py writes, or with
-# this module's own "synthetic:<...>" prefix above. A header literally named
-# "live" wiped a whole tenant's upload via wipe_live_demo_data (see
-# docs/handoff/ source-column-collision writeup). Nothing in src/ or tests/
-# reads the header string itself -- it was only ever carried through to this
-# column -- so the fix drops that tracking entirely rather than relocating
-# it: a fixed literal is now written on every CSV upload regardless of the
-# file's own column headers, which is what makes collision with a reserved
-# prefix structurally impossible rather than merely unlikely.
+# this module's own "synthetic:<...>" prefix above. Only the "live:<...>"
+# prefix form is actually reachable from a CSV header (a bare "live" header
+# contains none of the "timestamp"/"datetime"/"date"/"time" substrings
+# csv_adapter.py's ts_candidates detection requires, so it is never even
+# read as a timestamp column) -- a header such as "live:timestamp" wiped a
+# whole tenant's upload via wipe_live_demo_data (see docs/handoff/
+# source_column_collision_backfill.md). Nothing in src/ or tests/ reads the
+# header string itself -- it was only ever carried through to this column --
+# so the fix drops that tracking entirely rather than relocating it: a fixed
+# literal is now written on every CSV upload regardless of the file's own
+# column headers, which is what makes collision with a reserved prefix
+# structurally impossible rather than merely unlikely.
 CSV_UPLOAD_RAW_SOURCE: str = "csv"
 
 
