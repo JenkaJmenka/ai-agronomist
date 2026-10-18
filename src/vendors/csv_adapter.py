@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from src.config import (
+    CSV_UPLOAD_RAW_SOURCE,
     LIGHT_CANONICAL_UNIT,
     LIGHT_LUX_TO_W_PER_M2 as LUX_TO_W_PER_M2,
     LIGHT_PPFD_TO_W_PER_M2 as PPFD_UMOL_TO_W_PER_M2,
@@ -403,7 +404,13 @@ def parse_raw_rows(
 
     Returns (result_df, col_names) where result_df has:
       - timestamp: UTC datetime
-      - source: str (which timestamp column provided the timestamp)
+      - source: str, always ``CSV_UPLOAD_RAW_SOURCE`` -- a fixed provenance
+        marker, NOT the name of the CSV column that supplied the timestamp.
+        (Older versions of this function wrote that column name here; it
+        collided with the "live" / "synthetic:<...>" markers used elsewhere
+        on the same RawReading.source column, so the per-row tracking was
+        dropped rather than relocated -- see CSV_UPLOAD_RAW_SOURCE's
+        docstring in src/config.py.)
       - one column per detected numeric sensor
 
     Drops rows with no parseable timestamp. Gas / climate-extra aliases are
@@ -423,11 +430,13 @@ def parse_raw_rows(
         and "created" not in c.lower()
     ]
 
-    # Build a unified timestamp series — try each candidate, fill gaps
+    # Build a unified timestamp series — try each candidate, fill gaps.
+    # Which candidate column supplied a given row's timestamp is not tracked
+    # (and used to be, into a per-row "source" series) -- nothing reads that
+    # information; see CSV_UPLOAD_RAW_SOURCE in src/config.py for why.
     ts_series: pd.Series = pd.Series(
         pd.NaT, index=chunk.index, dtype="datetime64[ns, UTC]"
     )
-    source_series: pd.Series = pd.Series("", index=chunk.index, dtype=str)
 
     for col in ts_candidates:
         mask = ts_series.isna() & chunk[col].notna() & (chunk[col].astype(str).str.strip() != "")
@@ -442,14 +451,12 @@ def parse_raw_rows(
                 utc=True,
             )
             ts_series[mask] = parsed
-            source_series[mask] = col
         except Exception:
             pass
 
     # Attach unified timestamp; drop rows with no parseable timestamp
     work = chunk.copy()
     work["_timestamp"] = ts_series
-    work["_source"] = source_series
     work = work.dropna(subset=["_timestamp"]).reset_index(drop=True)
 
     if work.empty:
@@ -460,7 +467,9 @@ def parse_raw_rows(
 
     result_data: Dict[str, list] = {
         "timestamp": list(work["_timestamp"]),
-        "source": list(work["_source"]),
+        # Fixed provenance marker, not the timestamp column's header -- see
+        # CSV_UPLOAD_RAW_SOURCE's docstring in src/config.py.
+        "source": [CSV_UPLOAD_RAW_SOURCE] * len(work),
     }
     col_names: List[str] = []
     # Track which light source unit was detected (recorded in df.attrs).
