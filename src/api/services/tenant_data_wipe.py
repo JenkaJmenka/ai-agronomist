@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.cache_invalidation import invalidate_response_cache
@@ -230,36 +230,26 @@ async def wipe_live_demo_data(
             RawReading.source.like(f"{LIVE_RAW_SOURCE}:%"),
         ),
     ]
-    ts_result = await db.execute(select(RawReading.timestamp).where(*live_raw_filter))
-    live_timestamps = [row[0] for row in ts_result.fetchall()]
 
-    # Primary filter: SensorReading rows tagged source='live' by PersistenceBatcher
-    # (migration 017 backfills pre-existing anomaly_type='live' rows to this column).
-    # Fallback: pre-tag rows (source=None) that share a timestamp with a live
-    # RawReading. No anomaly_type guard here (ADR-010): inject rows written by
-    # the current (post-fix) inject_synthetic_anomalies carry a "synthetic:<type>"
-    # source of their own, which excludes them from this source.is_(None) branch
-    # -- an anomaly_type=NULL check would instead leak a pre-tag live row that
-    # later gains a real detector label. This does NOT hold for every synthetic
-    # row: a legacy row injected before the source marker existed, or one
-    # injected after migration 025 ran but before this fix shipped, still has
-    # source IS NULL and so falls into this fallback branch alongside real
-    # pre-tag live rows -- see migration 025's "Known residual" note and
-    # ADR-010 for the backfill/ordering story.
-    sensor_match = SensorReading.source == LIVE_RAW_SOURCE
-    if live_timestamps:
-        sensor_match = or_(
-            sensor_match,
-            and_(
-                SensorReading.timestamp.in_(live_timestamps),
-                SensorReading.source.is_(None),
-            ),
-        )
+    # Only match SensorReading rows explicitly tagged source='live' by
+    # PersistenceBatcher (migration 017 backfills pre-existing
+    # anomaly_type='live' rows to this column). There used to be a second,
+    # fallback clause here matching source IS NULL rows sharing a timestamp
+    # with a live RawReading, as a proxy for "this untagged row is a
+    # pre-tag live row". It is deleted, not narrowed: source IS NULL is not
+    # a safe live-row proxy -- migration 017 and this wipe both landed in
+    # the same commit (5922db9), so a live row written after that point was
+    # already tagged, and source IS NULL on a real upload is exactly the
+    # state the source-column-collision fix leaves plain CSV rows in
+    # (src/config.py's CSV_UPLOAD_RAW_SOURCE docstring). Keeping the
+    # fallback would delete a real CSV upload's SensorReading rows whenever
+    # their timestamps happened to coincide with any live RawReading in the
+    # same scope.
     sensor_result = await db.execute(
         delete(SensorReading).where(
             SensorReading.tenant_id == tenant_id,
             SensorReading.greenhouse_id == greenhouse_id,
-            sensor_match,
+            SensorReading.source == LIVE_RAW_SOURCE,
         )
     )
 
