@@ -65,6 +65,11 @@ class TestByteIdenticalScores:
         alerts_a = lstm_alerts_from_response(resp_a)
         alerts_b = lstm_alerts_from_response(resp_b)
 
+        assert len(alerts_a) > 0, (
+            f"No LSTM alerts on the dec fixture: the identity assertions "
+            f"below pass vacuously when both runs are empty "
+            f"(run_a={len(alerts_a)}, run_b={len(alerts_b)})"
+        )
         assert len(alerts_a) == len(alerts_b), (
             f"Alert counts differ: {len(alerts_a)} vs {len(alerts_b)}"
         )
@@ -121,6 +126,11 @@ class TestSyncAsyncParity:
         sync_alerts = lstm_alerts_from_response(sync_resp)
         async_alerts = lstm_alerts_from_dict(async_result)
 
+        assert len(sync_alerts) > 0, (
+            f"No LSTM alerts on the dec fixture: the parity assertions below "
+            f"pass vacuously when both pipelines are empty "
+            f"(sync={len(sync_alerts)}, async={len(async_alerts)})"
+        )
         assert len(sync_alerts) == len(async_alerts), (
             f"LSTM alert count mismatch: sync={len(sync_alerts)}, "
             f"async={len(async_alerts)}"
@@ -147,6 +157,11 @@ class TestSyncAsyncParity:
         sync_alerts = lstm_alerts_from_response(sync_resp)
         async_alerts = lstm_alerts_from_dict(async_result)
 
+        assert len(sync_alerts) > 0, (
+            f"No LSTM alerts on the july fixture: the parity assertions below "
+            f"pass vacuously when both pipelines are empty "
+            f"(sync={len(sync_alerts)}, async={len(async_alerts)})"
+        )
         assert len(sync_alerts) == len(async_alerts), (
             f"LSTM alert count mismatch: sync={len(sync_alerts)}, "
             f"async={len(async_alerts)}"
