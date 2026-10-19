@@ -6478,3 +6478,32 @@ wrong version is the one that would get grepped for:
 Related: [[project_adapter_drops_null_rows]], and the `2_Climate_Data.py:252`
 `"Source"` column trap recorded in the entry above — both are dashboard-tree
 traps found while working on `RawReading.source`.
+
+## Third one-off model substitution — both final reviewers on Opus (Orchestrator, 2026-10-19)
+
+`CLAUDE.md` pins architect and tech-lead to `claude-fable-5` for final reviews
+(user directive). On the wipe/source-collision task both agents died on dispatch
+with `You're out of usage credits ... Fable 5.1`. Re-dispatched both on Opus
+**with the user's explicit approval**, asked for rather than assumed — rule 6
+forbids autonomous fallback decisions, and a model assignment carrying "user
+directive" is exactly the kind that may not be quietly swapped.
+
+Third such substitution, after the two on 2026-10-15. The pattern is now
+established enough to state as a default: **when a Fable agent is credit-blocked,
+stop and ask; do not substitute silently.** The ask costs one turn; a silent
+swap costs the user's ability to trust that the model table means anything.
+
+Worth recording about the outcome, because it bears on whether the directive is
+load-bearing: the Opus reviews were **not** a degraded substitute. Between them
+they found three defects nobody had briefed — a backfill `UPDATE` that would have
+destroyed prod provenance, a silent-data-loss path behind a 200, and a false
+producer attribution that inverted the architecture of the bug. Two of the three
+came from grep-verified tree reading rather than from reasoning over the brief.
+Opus is a sound reviewer here; the directive is about consistency, not capability.
+
+Also learned, mechanically: both reviewers' reports **truncated mid-section**, twice
+each. The tails held the most load-bearing content both times — the architect's
+`'live:%'`-has-no-writer finding and its answer to the one question gating the
+PR were both past the cut. Ask for the remainder explicitly, naming the sections
+still missing and telling the agent not to repeat what arrived; a review that
+looks complete because it ends with a verdict may not be.
