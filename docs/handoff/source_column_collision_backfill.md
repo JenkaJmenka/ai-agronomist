@@ -100,6 +100,12 @@ Extending this table when a new writer appears, rather than adding another
 one-off `NOT LIKE` clause to a single statement, is what keeps the
 measurement and the backfill from disagreeing with each other again.
 
+This still fails open for a marker added after this document is written:
+a sixth writer that is never added to this table is swept into `'csv'` by
+Statement 1 below the same way `'live-backfill'` almost was. Adding a new
+writer must extend this table and every predicate below in the same change,
+not just add the writer itself.
+
 ## Measurement — SELECT only
 
 Counts every `raw_readings.source` value that is not one of the five known
@@ -207,20 +213,24 @@ UPDATE raw_readings SET source = 'csv' WHERE source LIKE 'live:%';
 
 Justification for treating every `'live:%'` row as CSV pollution rather than
 a real live row, verified against the current codebase: `src/live/persistence.py:168`
-and `:198` are the only two writes of `raw_readings.source = "live"`
-anywhere in `src/`, and both write the bare literal `"live"` — neither ever
-writes a `'live:'`-prefixed value. The only other `'live:'` string in `src/`
-is `src/live/hub.py:43`'s Redis stream key, an unrelated namespace. Nothing
-in the current codebase writes `'live:<...>'` to this column, so every
-existing `'live:%'` row is CSV-header pollution by construction, not a real
-live row this statement would be wrong to retag.
+and `:198` are the only two writers of the `'live'` marker anywhere in
+`src/`, and both write the bare literal `"live"` — neither one, nor anything
+else in `src/`, ever writes a `'live:'`-prefixed value. The only other
+`'live:'` string in `src/` is `src/live/hub.py:43`'s Redis stream key, an
+unrelated namespace. `'live:<...>'` has no writer at all in the current
+codebase: the CSV header path item 1 fixes is the only producer of that
+pattern that has ever existed. `wipe_live_demo_data`'s `LIKE 'live:%'` arm
+(see "Why old rows still matter" above) was therefore only ever matching
+this bug, never a real live row — which is what makes this statement
+provably safe rather than merely plausible.
 
-Measured against the architect review's prod snapshot (reported to this
-branch, not independently re-run here per this task's no-prod-access
-constraint): **zero** rows match `source LIKE 'live:%'` today. Recorded here
-2026-10-19 so a future reader knows this statement was a no-op when written,
-not that the gap never existed — it closes the one real risk this document
-names, at zero present cost.
+Measured by the user, read-only against production, 2026-10-18:
+`tenant_2/gh_A` had 471 rows with `source = 'live'` (timestamps spanning
+2026-10-17 18:22–19:56 UTC) and **zero** rows anywhere matching
+`source LIKE 'live:%'`. Not independently re-run by this task (no
+production access). Recorded here so a future reader knows this statement
+was a no-op when written, not that the gap never existed — it closes the
+one real risk this document names, at zero present cost.
 
 Not proposed as a migration, either statement: a migration's `upgrade()`
 runs unconditionally on every deploy, including against tenants an operator
