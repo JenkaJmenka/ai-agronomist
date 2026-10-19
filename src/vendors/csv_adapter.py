@@ -431,9 +431,6 @@ def parse_raw_rows(
     ]
 
     # Build a unified timestamp series — try each candidate, fill gaps.
-    # Which candidate column supplied a given row's timestamp is not tracked
-    # (and used to be, into a per-row "source" series) -- nothing reads that
-    # information; see CSV_UPLOAD_RAW_SOURCE in src/config.py for why.
     ts_series: pd.Series = pd.Series(
         pd.NaT, index=chunk.index, dtype="datetime64[ns, UTC]"
     )
