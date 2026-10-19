@@ -449,7 +449,16 @@ class RawReading(Base):
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     greenhouse_id: Mapped[str] = mapped_column(String(255), nullable=False, default="default")
     timestamp: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    # Which sensor system produced this row (e.g. column name used as timestamp source)
+    # Provenance marker, NOT a sensor-system identifier: "live" (the bare
+    # literal; written by src/live/persistence.py), "live:<...>" (no writer
+    # in this codebase -- see below), "synthetic:<...>"
+    # (src.config.synthetic_source, ADR-010), or "csv"
+    # (src.config.CSV_UPLOAD_RAW_SOURCE) for a plain upload.
+    # Until the source-column-collision fix, a CSV upload instead wrote the
+    # CSV's own timestamp-column header string here (e.g. "Timestamp"), which
+    # could collide with the "live"/"synthetic:" markers above -- see
+    # docs/handoff/source_column_collision_backfill.md and
+    # CSV_UPLOAD_RAW_SOURCE's docstring in src/config.py.
     source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # clean_col_name → float value for all detected numeric sensor columns
     data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)

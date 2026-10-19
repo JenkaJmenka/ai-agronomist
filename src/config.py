@@ -1449,6 +1449,31 @@ def synthetic_source(anomaly_type: str | None) -> str:
     return f"{SYNTHETIC_SOURCE_PREFIX}{anomaly_type or 'context'}"
 
 
+# Fixed provenance marker written to RawReading.source for every row that
+# came through a plain CSV upload. Before this constant existed, the column
+# instead held the CSV's own timestamp-column header string (e.g.
+# "Timestamp", "datetime") -- user-controlled text that could collide with
+# the "live" marker src/live/persistence.py writes (the bare literal only --
+# neither persistence.py nor anything else in src/ ever writes a
+# "live:<...>"-prefixed value), or with this module's own
+# "synthetic:<...>" prefix above. Only the "live:<...>" prefix form is
+# actually reachable from a CSV header (a bare "live" header contains none
+# of the "timestamp"/"datetime"/"date"/"time" substrings csv_adapter.py's
+# ts_candidates detection requires, so it is never even read as a timestamp
+# column) -- a header such as "live:timestamp" wiped a whole tenant's
+# upload via wipe_live_demo_data (see docs/handoff/
+# source_column_collision_backfill.md). This CSV header path was the only
+# producer of "live:<...>" that has ever existed; wipe_live_demo_data's
+# LIKE 'live:%' arm was therefore only ever matching this bug, never a
+# real live row. Nothing in src/ or tests/ reads the header string itself
+# -- it was only ever carried through to this column -- so the fix drops
+# that tracking entirely rather than relocating it: a fixed literal is now
+# written on every CSV upload regardless of the file's own column headers,
+# which is what makes collision with a reserved prefix structurally
+# impossible rather than merely unlikely.
+CSV_UPLOAD_RAW_SOURCE: str = "csv"
+
+
 # inject_synthetic_anomalies() tuning constants
 # (src/api/services/synthetic_anomalies.py).
 SYNTHETIC_SAMPLE_SIZE: int = 500  # recent RawReadings sampled to learn column ranges

@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from src.config import SYNTHETIC_SOURCE_PREFIX
-from src.db.models import SensorReading
+from src.db.models import RawReading, SensorReading
 from src.db.upsert import bulk_upsert_rows
 from tests.unit._bulk_upsert_fixtures import BASE_TS, session  # noqa: F401
 
@@ -192,4 +192,38 @@ class TestProvenanceResetCondition:
         )
         assert row.trigger_channel == self.EXISTING_TRIGGER_CHANNEL, (
             "an omitted provenance column still keeps its existing value"
+        )
+
+
+class TestProvenanceTrackedOptIn:
+    """``PROVENANCE_TRACKED`` is a correctness dependency, not a free choice.
+
+    ``src/db/models.py`` declares the flag on ``SensorReading`` and on nothing
+    else, so ``bulk_upsert_rows`` short-circuits ``auto_case_cols`` to ``{}``
+    for ``RawReading`` (``src/db/upsert.py``) and the CSV upload's
+    ``source='csv'`` marker is written by the plain ``update_cols`` path.
+
+    Flipping the flag on for ``RawReading`` "for symmetry" would silently stop
+    that marker being written on re-upload.  ``provenance.case_cols_for`` adds
+    ``"source"`` to ``case_cols`` **unconditionally**, and a column in
+    ``merged_case_cols`` reaches the SET clause even when the caller never
+    named it; ``_source``'s CASE is ``WHEN existing.source IS NOT NULL THEN
+    excluded.source ELSE existing.source``, so an existing row whose source is
+    still NULL -- every row uploaded before the collision fix -- keeps NULL
+    forever.  That is exactly the self-healing re-upload path
+    ``docs/handoff/source_column_collision_backfill.md`` leans on.
+
+    Recorded here because a handoff doc is the only other place it is written
+    down, and docs do not fail a test run.
+    """
+
+    def test_should_not_opt_raw_reading_into_the_provenance_case_rule(self) -> None:
+        """``RawReading`` must stay opted OUT; ``SensorReading`` stays opted in."""
+        assert not getattr(RawReading, "PROVENANCE_TRACKED", False), (
+            "opting RawReading in would route source through provenance._source, "
+            "whose ELSE branch preserves NULL and would stop the 'csv' marker "
+            "being written on re-upload of a pre-fix row"
+        )
+        assert getattr(SensorReading, "PROVENANCE_TRACKED", False) is True, (
+            "SensorReading is the one model ADR-010's reset rule applies to"
         )
