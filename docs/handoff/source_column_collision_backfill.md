@@ -14,7 +14,19 @@ Neither item touches **existing** rows. This document is the measurement and
 the proposed backfill for those — SELECT-only SQL plus reviewable `UPDATE`
 text. Nothing here has been run against any database, local or remote.
 
-## Why old rows still matter after items 1 and 2
+**Side benefit of item 1, not previously reported:** `RawReading.source` is
+`String(64)` (`src/db/models.py:459`). Before item 1, a CSV whose
+timestamp-column header exceeded 64 characters wrote that header string
+verbatim into `source`, which raised `StringDataRightTruncation` on
+Postgres while the identical upload succeeded on SQLite (SQLite does not
+enforce `VARCHAR` length). The fixed `'csv'` literal item 1 writes instead is
+three characters, permanently under the limit, so this latent 500 cannot
+recur on any future upload. No test added for this: asserting it would
+require Postgres-only truncation behavior that SQLite cannot reproduce, so
+the assertion would be skipped locally or pass vacuously everywhere this
+suite actually runs.
+
+## Why old rows still matter
 
 `wipe_live_demo_data`'s `RawReading` delete clause is unchanged by this
 branch and is not a bug — it is the correct, provenance-based filter:
@@ -51,11 +63,47 @@ deleted by a live-data wipe. Item 1 stops the bleeding for new uploads; it
 does not retag what is already in the table. The backfill below is what
 closes that gap for old rows.
 
+**A fourth writer, found by grep against the measurement predicate below,
+not by this reasoning:** `scripts/backfill_live_raw_readings.py:75` inserts
+`'live-backfill' AS source` for `RawReading` rows it backfills from
+`sensor_readings`. That value does not match the wipe filter above
+(`'live-backfill'` is neither `== 'live'` nor `LIKE 'live:%'`), so it is not
+a wipe-risk the way a `'live:%'` header is — but it is a real, intentional
+provenance marker, not pollution, and the measurement and backfill below
+must not treat it as the latter. See the whitelist in the next section.
+
+**Pre-existing, not this branch's problem:** the same wipe filter also does
+not match `'live-backfill'`, so those rows are already un-wipeable by the
+live-wipe path — recorded 2026-07-24, `AGENT_MEMORY.md:2059`. Not fixed
+here.
+
+## Known `raw_readings.source` markers (complete as of this branch)
+
+Every intentional writer of `raw_readings.source`, confirmed by grep across
+`src/` and `scripts/`:
+
+| Marker | Shape | Writer |
+| --- | --- | --- |
+| `'live'` | exact | `src/live/persistence.py:168,198` |
+| `'live:<...>'` | prefix `'live:%'` | **not written by current code** — legacy CSV-header pollution only, see above |
+| `'synthetic:<...>'` | prefix `'synthetic:%'` | `src/config.py` `synthetic_source()` (ADR-010) |
+| `'live-backfill'` | exact | `scripts/backfill_live_raw_readings.py:75` |
+| `'csv'` | exact | `src/config.py` `CSV_UPLOAD_RAW_SOURCE` — the fixed literal item 1 writes for every new upload |
+
+This table is the single whitelist every statement below uses. A value that
+is not one of these five shapes is pollution — a stale CSV
+timestamp-column header predating item 1. An earlier draft of this document
+excluded only three of these five shapes from the measurement and backfill
+predicates (missing `'live-backfill'` and `'csv'` itself), which misread
+every `'live-backfill'` row as pollution and would have overwritten it.
+Extending this table when a new writer appears, rather than adding another
+one-off `NOT LIKE` clause to a single statement, is what keeps the
+measurement and the backfill from disagreeing with each other again.
+
 ## Measurement — SELECT only
 
-Counts every `raw_readings.source` value that is not one of the three
-reserved provenance markers (`'live'`, `'live:%'`, `'synthetic:%'`) and is not
-`NULL`, grouped per tenant/greenhouse/value:
+Counts every `raw_readings.source` value that is not one of the five known
+markers above and is not `NULL`, grouped per tenant/greenhouse/value:
 
 ```sql
 SELECT
@@ -67,7 +115,7 @@ SELECT
     MAX(timestamp)      AS latest_ts
 FROM raw_readings
 WHERE source IS NOT NULL
-  AND source <> 'live'
+  AND source NOT IN ('live', 'csv', 'live-backfill')
   AND source NOT LIKE 'live:%'
   AND source NOT LIKE 'synthetic:%'
 GROUP BY tenant_id, greenhouse_id, source
@@ -83,7 +131,7 @@ SELECT
     COUNT(DISTINCT source)      AS distinct_header_values
 FROM raw_readings
 WHERE source IS NOT NULL
-  AND source <> 'live'
+  AND source NOT IN ('live', 'csv', 'live-backfill')
   AND source NOT LIKE 'live:%'
   AND source NOT LIKE 'synthetic:%'
 GROUP BY tenant_id
@@ -112,11 +160,20 @@ branch fixes is not hypothetical.
 
 ## Proposed backfill — reviewable text only, NOT executed, NOT a migration
 
+Two separate statements, not one. The first retags ordinary CSV-header
+pollution using the whitelist above and, deliberately, does **not** touch
+`'live:%'` rows. The second closes the `'live:%'` gap on its own, with its
+own justification — folding it into the first statement as one more
+exclusion is exactly the shape of mistake that produced the whitelist
+section above.
+
+### Statement 1 — retag CSV-header pollution
+
 ```sql
 UPDATE raw_readings
 SET source = 'csv'
 WHERE source IS NOT NULL
-  AND source <> 'live'
+  AND source NOT IN ('live', 'csv', 'live-backfill')
   AND source NOT LIKE 'live:%'
   AND source NOT LIKE 'synthetic:%';
 ```
@@ -135,11 +192,41 @@ matching timestamp candidate column, so `source` was always a non-empty
 header string, never `NULL` or empty string. `NULL` therefore is not a state
 this backfill needs to touch, and is left alone.
 
-Not proposed as a migration: a migration's `upgrade()` runs unconditionally
-on every deploy, including against tenants an operator has not reviewed. An
-ad-hoc, manually-run `UPDATE` after reviewing the measurement queries' output
-per-tenant is the appropriate level of ceremony for a data correction with no
-schema change behind it.
+### Statement 2 — retag `'live:%'` rows
+
+This is the dangerous case "Why old rows still matter" describes above: a
+row whose `source` starts with `'live:'` because a CSV header like
+`live:timestamp` landed there verbatim before item 1 shipped. Statement 1
+excludes this pattern on purpose, matching the wipe filter's own reserved
+prefix — but excluded here does not mean left in place. It is a separate,
+independently-justified statement, not a gap this document leaves open:
+
+```sql
+UPDATE raw_readings SET source = 'csv' WHERE source LIKE 'live:%';
+```
+
+Justification for treating every `'live:%'` row as CSV pollution rather than
+a real live row, verified against the current codebase: `src/live/persistence.py:168`
+and `:198` are the only two writes of `raw_readings.source = "live"`
+anywhere in `src/`, and both write the bare literal `"live"` — neither ever
+writes a `'live:'`-prefixed value. The only other `'live:'` string in `src/`
+is `src/live/hub.py:43`'s Redis stream key, an unrelated namespace. Nothing
+in the current codebase writes `'live:<...>'` to this column, so every
+existing `'live:%'` row is CSV-header pollution by construction, not a real
+live row this statement would be wrong to retag.
+
+Measured against the architect review's prod snapshot (reported to this
+branch, not independently re-run here per this task's no-prod-access
+constraint): **zero** rows match `source LIKE 'live:%'` today. Recorded here
+2026-10-19 so a future reader knows this statement was a no-op when written,
+not that the gap never existed — it closes the one real risk this document
+names, at zero present cost.
+
+Not proposed as a migration, either statement: a migration's `upgrade()`
+runs unconditionally on every deploy, including against tenants an operator
+has not reviewed. An ad-hoc, manually-run `UPDATE` after reviewing the
+measurement queries' output per-tenant is the appropriate level of ceremony
+for a data correction with no schema change behind it.
 
 ## What breaks while old header values remain (i.e., if nobody runs the backfill)
 
