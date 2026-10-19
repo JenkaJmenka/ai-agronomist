@@ -53,7 +53,7 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3805 passed, 22 skipped, 3 xfailed, 0 failed
+### Current baseline — 3829 passed, 22 skipped, 3 xfailed, 0 failed
 
 Measured 2026-10-17 by the orchestrator on `fix/live-feed-survives-redeploy`,
 the merge of `origin/main` (`b100b77`, i.e. PRs #80 and #81) into the live-feed
@@ -75,6 +75,21 @@ The arithmetic continues: `3785` after #82 → `+20` across #83 (post-82 cleanup
 and #84 (live detector-no-model fix) → `3805`. The figure was measured before
 any wipe/source-collision work began, so it is the clean pre-task baseline for
 that branch.
+
+Updated 2026-10-19 on `fix/source-column-collision` at `3ef36d0`, rebased onto
+`origin/main` (`9b95bba`, i.e. PR #86), full suite in the foreground, 369.57s:
+`./venv/bin/python -m pytest tests/ -q`. The arithmetic continues: `3805` on
+`39feecf` → `+14` from #86 (deterministic LSTM-VAE inference tests) → `3819` on
+`main` → `+10` from this branch (1 csv_adapter marker invariant, 3 live-collision
+acceptance, 3 live-provenance acceptance, 2 synthetic-collision acceptance, 1
+`PROVENANCE_TRACKED` opt-out pin) → `3829`.
+
+Note the `3819` intermediate was **not** read from this file — #86 landed without
+updating this line, so the figure was corroborated rather than copied: this
+branch adds exactly `+10` (independently measured as `3815` against a `3805`
+base before the rebase), so a rebased total of `3829` confirms `3819` for `main`.
+Prefer that kind of cross-check to trusting an unrecorded number; it costs one
+subtraction and it is how a merge artefact gets told from a regression.
 
 Worth keeping with it: this figure reached the file *before* anyone had measured
 it on `39feecf`, as an uncommitted edit crediting a run to "the orchestrator"
