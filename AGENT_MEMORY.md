@@ -6440,7 +6440,13 @@ literals (`"persisted_score"`, `"reading"`, `"incident"`) — **not**
 Related: [[project_adapter_drops_null_rows]] (the other csv_adapter behaviour
 that silently reshapes uploaded data), [[project_synthetic_marker_migration_023_overwrite]].
 
-## BACKLOG-14 — dead raw-readings query in the unowned dashboard tree (Orchestrator, 2026-10-18)
+## BACKLOG-15 — dead raw-readings query in the unowned dashboard tree (Orchestrator, 2026-10-18)
+
+Renumbered from BACKLOG-14 on 2026-10-19: BACKLOG-14 belongs to Session 1
+(cold-start Pass 1 flagging 50.5% of the corpus), which claimed the number
+concurrently. The commit that first recorded this entry (`3e3af3c`) still says
+"BACKLOG-14" in its message — it was not amended, because another session had
+already branched from it.
 
 Found while auditing the wipe/source-collision fix: `query_raw_readings`
 (`src/dashboard/components/charts.py:230`) fetches `raw_readings` rows including
