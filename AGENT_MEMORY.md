@@ -6734,9 +6734,16 @@ above, whose third instance this gap is the reason nobody caught.
 
 Found 2026-10-19 while diagnosing the CI flake in
 `tests/live/test_detector_state_and_paused_sources.py::TestScopeWithResolvableModelScores::test_anomalous_input_scores_above_normal_input`
-(fixed on `fix/live-scorer-test-flake`). The test was the symptom; this is the
-production defect behind it. **Record only — not fixed, and not to be fixed
-without a decision on which signal to add.**
+(fixed on `fix/live-scorer-test-flake`). **Record only — not fixed, and not to
+be fixed without a decision on which signal to add.**
+
+**Corrected 2026-10-19, same day, by the orchestrator that wrote it.** The first
+version of this entry claimed this guard was the cause of that flake. It is not
+— see BACKLOG-19 for the actual cause, a race on the shared cached detector. The
+guard below is a real latent gap and worth keeping as an entry on its own merits,
+but nothing has ever been observed to reach it in this codebase. How the wrong
+version came to be written is recorded at the end, because the mistake is more
+instructive than the entry.
 
 `LiveScorer.score` (`src/live/scoring.py:141-147`) checks
 `math.isfinite(scaled_score)` and, when the score is `inf` or `NaN`, logs a
@@ -6756,13 +6763,28 @@ SEQ_LEN`), and no deployed model (`resolver.resolve()` → `None`). All four pat
 produce the same row. A log line is the only difference, and nothing counts,
 surfaces or alerts on it.
 
-Why it matters more than it looks: a non-finite reconstruction error is most
-likely precisely when the input is **extreme** — the reconstruction blows up on
-a far out-of-range window. So the failure mode drops the readings most likely to
-be real anomalies, and does it quietly. The flaky test demonstrated the overflow
-is reachable in practice, not merely theoretical: untrained weights plus a
-temperature of 95 °C (≈7.5 after `normalize_data` against the 20–30 °C range)
-overflowed float32 often enough to fail roughly half of today's CI runs.
+Why it matters anyway: if a non-finite score ever does arise it is likeliest
+when the input is **extreme**, so the failure mode would quietly drop the
+readings most likely to be real anomalies.
+
+**But `inf` cannot reach this guard, and that is the correction.**
+`forward_pass_sync` (`src/live/attribution.py:49`) ends with
+
+```python
+scaled = float(np.clip(raw_score / ANOMALY_SCALING_FACTOR, 0.0, 1.0))
+```
+
+so an `inf` reconstruction error **clips to a perfectly finite `1.0`** and scores
+as a maximal anomaly, which is the right outcome. Only `NaN` survives
+`np.clip` and reaches `math.isfinite`. And NaN is hard to produce here: the model
+is loaded in `eval()` mode (`src/models/inference.py:60`), where `reparameterize`
+returns `mu` (PR #86) and every LSTM activation is bounded by tanh/sigmoid.
+
+Measured, not argued: across ~1000 runs at 95 °C and 45 °C inputs the guard
+**never fired once**, and the 95 °C score was exactly `1.0` every time
+(min = max = 1.0). So this entry describes an unreached path. Keep it for the
+reason in the paragraph above — a NaN would be silent — and not because anything
+has been seen to trip it.
 
 Three candidate signals, none implemented, cheapest first:
 
@@ -6784,7 +6806,30 @@ case being equally silent.
 
 Related: [[project_live_monitoring_stack]], [[project_sqlite_postgres_nan_gap]]
 (the same non-finite-float hazard, one layer down, where SQLite accepts NaN into
-a JSON column and Postgres 500s).
+a JSON column and Postgres 500s), and BACKLOG-19, which is the defect this entry
+was mistakenly describing.
+
+### How the wrong version got written, since the process failure is the lesson
+
+The orchestrator diagnosed the flake by reading `LiveScorer.score`, found the
+`isfinite` guard, saw the test's 95 °C input, and inferred a float32 overflow.
+It never opened `forward_pass_sync`, one call deeper, where the `np.clip` makes
+that inference impossible. It then **briefed an agent with the conclusion**, and
+wrote it into this file and into a commit message before any measurement existed.
+
+The agent was told to verify rather than accept the brief, measured the guard
+never firing, and produced the real mechanism instead. That is the only reason
+this entry is being corrected hours rather than months later, and it is exactly
+the behaviour `CLAUDE.md` asks of agents — "report the difference, never tune
+toward a briefed number". The rule has a corollary this episode establishes:
+
+**A briefed diagnosis is a hypothesis, and the orchestrator's own hypotheses are
+the ones least likely to be challenged.** Write the mechanism down only after a
+measurement, cite the specific line that proves it, and when a diagnosis spans
+two functions, read both before briefing anyone. Compare the
+`project_imputed_channel_phantom_freeze` entry, where an orchestrator harness
+that skipped pipeline setup invented an episode that reached a commit message —
+same failure, different layer.
 
 ## BACKLOG-18 — CI never runs the CPU torch wheel it claims to (Orchestrator, 2026-10-19)
 
@@ -6848,3 +6893,119 @@ workflow exercises the CPU wheel, so a fix that only corrects the comment's
 intent in one file leaves the other silently on the default build. See
 [[project_api_migration_deploy_skew]] for why a CI/prod environment difference
 here is not merely cosmetic.
+
+## BACKLOG-19 — enrichment mutates the shared detector while scoring reads it (Orchestrator, 2026-10-19)
+
+The real cause of the CI flake that BACKLOG-17 was mistakenly written about.
+Found by qa-engineer on 2026-10-19, against a brief that asserted the wrong
+mechanism; the agent measured instead of accommodating it. **Record only — the
+test was taken off the race on `fix/live-scorer-test-flake`, the production
+defect is NOT fixed.** Owner when it is: backend-engineer (`src/live/`,
+`src/api/services/`).
+
+A live anomaly episode makes **enrichment mutate the shared cached detector in
+place while the hot scoring path has a forward pass in flight**, and the
+exception is swallowed. The chain, every link verified by reading the source:
+
+1. `LiveScorer._handle_episode` spawns enrichment when a score crosses
+   `LIVE_ANOMALY_THRESHOLD` (`src/config.py:1400`, default **0.05**) —
+   `scoring.py:211`, `self._enrichment.spawn(...)`.
+2. `EnrichmentRunner._run_enrichment` (`src/live/enrichment.py:96`) →
+   `ComprehensiveInferencePipeline.run` (`src/api/services/comprehensive_pipeline.py:582`)
+   → `_get_cached_components` (`:545`), which constructs
+   `AnomalyAttributor(self.detector.model)` — **the shared cached detector's
+   model**, not a copy.
+3. `AnomalyAttributor.__init__` (`src/models/anomaly_attributor.py:79`) calls
+   `self.model.to(self.device)` and `self.model.eval()` **in place**. Its own
+   docstring documents this: "``model`` is mutated in place ... Callers sharing
+   the model with a training pipeline must expect this."
+4. `RNNBase._apply` (`torch/nn/modules/rnn.py:297-298`) sets
+   `self._flat_weight_refs = []` *before* `super()._apply(fn)` and only restores
+   it afterwards via `_init_flat_weights()`.
+5. Meanwhile the scoring forward pass runs in `asyncio.to_thread`
+   (`scoring.py:131`) and reaches `_weights_have_changed` (`rnn.py:368`), which
+   zips `_flat_weight_refs` against `_flat_weights_names` with **`strict=True`**
+   — an empty ref list against 4 names raises
+   `ValueError: zip() argument 2 is longer than argument 1`.
+6. `LiveScorer.score` catches it, logs `Forward pass failed`, and returns the
+   event **unscored** (`scoring.py:132-139`).
+
+**Four race windows per enrichment spawn** — one per `nn.LSTM` submodule;
+measured at 160 `_apply` calls over 40 runs.
+
+The production consequence is BACKLOG-17's consequence arrived at by a different
+route: the reading persists with `anomaly_score` NULL, indistinguishable from the
+three benign unscored cases. It is worse than BACKLOG-17 in one respect — it
+triggers **because** an episode is in progress, i.e. precisely when the readings
+matter most, and unlike the non-finite guard it is **observed**, not latent.
+
+Measured rates, from two independent machines-worth of sampling, both local:
+
+| what was run | rate |
+|---|---|
+| the test as it stood on `main` (95 °C), 200 seeds — qa-engineer | **5/200 (2.5%)** |
+| same logic at the 45 °C input now used, 200 seeds — qa-engineer | 3/200 (1.5%) |
+| same harness at 95 °C, two runs of one seed band — qa-engineer | 6/200, then 4/200 |
+| whole class, 240 isolated runs — orchestrator, independently | **8/240 (3.3%)** |
+| the single test alone, 60 isolated runs — orchestrator | **0/60** |
+
+**Positive identification, and the link to the CI failure.** A reproduction was
+captured locally with the warning visible (run 7 of 80):
+
+```
+assert normal.anomaly_score is not None
+E   AssertionError: assert None is not None
+E    +  where None = LiveReadingEvent(seq='', timestamp=datetime.datetime(2026, 10, 17, 12, 0, 40, ...
+WARNING  src.live.scoring:scoring.py:136 Forward pass failed for tenant_detstate/gh_A
+ValueError: zip() argument 2 is longer than argument 1
+```
+
+Two things to take from it. The failing event is the **in-range** one
+(`12:00:40` = base + 2×`SEQ_LEN` seconds, i.e. `normal`), not the out-of-range
+one — which is what rules out the overflow story in BACKLOG-17 on its own. And
+that timestamp is **byte-identical to the one in the CI failure's repr** on
+`55dc174` and PR #88, so the CI red and this local reproduction are the same
+event and the same mechanism, not two flakes that look alike. The swallowed
+`ValueError` is only visible because `logger.warning` leaves a trace; without
+captured logs the failure reads as a bare `None`.
+
+The rate **wanders between roughly 1.5% and 3% across identical seed bands**,
+because it is a timing race rather than a function of the weights. Note the
+0/60: a small local sample proves nothing here, and reading it as "does not
+reproduce" would have been wrong — 8/240 followed on the same machine. Quote a
+range, never a single rate.
+
+Why it stayed hidden: the in-range 22.5 °C window scores **0.044–0.162**, which
+crosses the 0.05 threshold on nearly every seed, so enrichment spawned during the
+*normal* phase of a test nobody thought involved enrichment at all. The sibling
+test `test_scores_appear_once_the_window_is_warm` is structurally exposed to the
+same race and measured 0/200, because it only asserts on the final event of 23 —
+the race has to land on exactly that one to break it.
+
+Candidate fixes, none implemented, and the choice is a real design decision:
+
+1. **Give enrichment its own model instance** (deep-copy, or load a second
+   detector for the enrichment path). Removes the sharing rather than
+   synchronising it. Costs memory per scope and a second `torch.load`.
+2. **Lock around the forward pass and the attributor construction.** Cheap in
+   lines, but it puts a mutex on the hot scoring path and the enrichment call is
+   not short.
+3. **Stop mutating in `AnomalyAttributor.__init__`** — require the caller to
+   hand in a model already on the right device in eval mode. Fixes the whole
+   class of problem at the source and the docstring already warns about it, but
+   it touches every caller, including the sync upload path.
+
+Prefer (1) unless memory is tight; (3) is the right end state and the larger
+change. Do NOT "fix" this by raising `LIVE_ANOMALY_THRESHOLD` so enrichment
+spawns less — that hides the race behind a detection threshold.
+
+Note the test-side mitigation already shipped is **not** a fix: the scorer tests
+now pass `enrichment=_NoEnrichment()` through the pre-existing DI seam
+(`scoring.py:55,68`), so they no longer race. That makes the suite honest about
+scoring and leaves this defect **unexercised by any test** — a fix will need its
+own regression test, and the stub is the reason nothing will go red until then.
+
+Related: BACKLOG-17 (the same silent-unscored outcome, different and unreached
+cause), [[project_live_monitoring_stack]], and
+[[project_imputed_channel_phantom_freeze]] for the other orchestrator diagnosis
+that reached a commit message before a measurement did.
