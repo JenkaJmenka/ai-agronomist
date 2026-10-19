@@ -17,8 +17,9 @@ Plus the positive case: a scope WITH a resolvable checkpoint actually scores.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import pytest
 import pytest_asyncio
@@ -50,6 +51,23 @@ from src.live.sources.mock import MockScadaSource
 
 _TENANT = "tenant_detstate"
 _GH = "gh_A"
+
+# The checkpoint below is built from freshly initialised weights, so without a
+# seed every run scores against a different model. Pinned (to the repo's usual
+# 42, also src.config.RANDOM_SEED) so the scores these tests compare are
+# reproducible rather than whatever global RNG state the process happened to
+# be in. Seeded under fork_rng so the global stream is left untouched for
+# every test that runs after this module.
+_CHECKPOINT_SEED = 42
+
+# A steady in-range reading: TEMP_RANGE is 20-30 C, so this normalises to 0.25.
+_NORMAL_TEMP_C = 22.5
+# Clearly anomalous against the 20-30 C range (normalises to 2.5) yet a reading
+# a real sensor genuinely reports: a greenhouse with failed ventilation on a hot
+# day reaches it. Deliberately not a value chosen for how badly the model
+# reconstructs it -- an input far enough out of range to overflow float32 would
+# make the comparison below a property of the overflow, not of the scorer.
+_ANOMALOUS_TEMP_C = 45.0
 
 
 def _mock_config(poll_interval: float = 0.02) -> SourceConfig:
@@ -163,7 +181,11 @@ class TestRuntimeDetectorState:
 
 
 def _write_checkpoint(path: str) -> str:
-    """A real, loadable LSTM-VAE checkpoint in the shape inference.py expects."""
+    """A real, loadable LSTM-VAE checkpoint in the shape inference.py expects.
+
+    Weights are untrained but seeded with ``_CHECKPOINT_SEED``, so every run
+    scores against the same model.
+    """
     from src.models.lstm_vae import LSTMVAE
 
     cfg = dict(
@@ -174,7 +196,9 @@ def _write_checkpoint(path: str) -> str:
         beta=BETA,
         dropout=DROPOUT_RATE,
     )
-    model = LSTMVAE(**cfg)
+    with torch.random.fork_rng():
+        torch.manual_seed(_CHECKPOINT_SEED)
+        model = LSTMVAE(**cfg)
     torch.save({"model_config": cfg, "model_state_dict": model.state_dict()}, path)
     return path
 
@@ -195,6 +219,36 @@ def _event(ts: datetime, *, temperature: float) -> LiveReadingEvent:
     )
 
 
+class _NoEnrichment:
+    """No-op stand-in for ``EnrichmentRunner`` via the ``enrichment=`` DI seam.
+
+    Enrichment is not under test here, and it must not run: it mutates the
+    detector these tests are scoring with, concurrently with the scoring pass.
+    ``EnrichmentRunner._run_enrichment`` builds an ``AnomalyAttributor``, whose
+    ``__init__`` calls ``model.to(device)`` on the **shared** cached detector
+    (``src/models/anomaly_attributor.py:79``). ``RNNBase._apply`` blanks
+    ``_flat_weight_refs`` for the duration of that call
+    (``torch/nn/modules/rnn.py:298``), so a forward pass running at the same
+    time in ``asyncio.to_thread`` reaches ``_weights_have_changed`` with an
+    empty ref list and raises ``ValueError: zip() argument 2 is longer than
+    argument 1``. ``LiveScorer.score`` logs "Forward pass failed" and returns
+    the event **unscored**, which the assertions below then see as
+    ``anomaly_score is None``.
+
+    Both tests in this class cross ``LIVE_ANOMALY_THRESHOLD`` even on the
+    in-range window, so the real runner would spawn enrichment on every run and
+    the race was lost in roughly 2 % of them -- measured at 3/200 seeds, versus
+    0/400 with this stub. The production defect is reported separately; the
+    tests here are about scoring, so they take the seam.
+    """
+
+    def spawn(self, window_array: Any, anomaly_seq: str) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
 class TestScopeWithResolvableModelScores:
     """A live scope whose model resolves must actually score its readings."""
 
@@ -211,7 +265,11 @@ class TestScopeWithResolvableModelScores:
             checkpoint_resolver=resolve_checkpoint_path,
         )
         return LiveScorer(
-            tenant_id=_TENANT, greenhouse_id=_GH, hub=hub, resolver=resolver
+            tenant_id=_TENANT,
+            greenhouse_id=_GH,
+            hub=hub,
+            resolver=resolver,
+            enrichment=_NoEnrichment(),
         )
 
     @pytest.mark.asyncio
@@ -224,7 +282,10 @@ class TestScopeWithResolvableModelScores:
             scores: list[Optional[float]] = []
             for i in range(SEQ_LEN + 3):
                 scored = await scorer.score(
-                    _event(base + timedelta(seconds=2 * i), temperature=22.5)
+                    _event(
+                        base + timedelta(seconds=2 * i),
+                        temperature=_NORMAL_TEMP_C,
+                    )
                 )
                 scores.append(scored.anomaly_score)
 
@@ -244,8 +305,8 @@ class TestScopeWithResolvableModelScores:
     @pytest.mark.asyncio
     async def test_anomalous_input_scores_above_normal_input(self, tmp_path) -> None:
         """Relative, not absolute: the checkpoint's weights are untrained, so a
-        threshold assertion would be meaningless, but a far out-of-range
-        reading must still reconstruct worse than an in-range one."""
+        threshold assertion would be meaningless, but an out-of-range reading
+        must still reconstruct worse than an in-range one."""
         redis = FakeRedis()
         hub = LiveHub(redis_client=redis, block_ms=50)
         scorer = self._scorer(tmp_path, hub)
@@ -253,22 +314,39 @@ class TestScopeWithResolvableModelScores:
             base = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
             for i in range(SEQ_LEN):
                 await scorer.score(
-                    _event(base + timedelta(seconds=2 * i), temperature=22.5)
+                    _event(
+                        base + timedelta(seconds=2 * i),
+                        temperature=_NORMAL_TEMP_C,
+                    )
                 )
             normal = await scorer.score(
-                _event(base + timedelta(seconds=2 * SEQ_LEN), temperature=22.5)
+                _event(
+                    base + timedelta(seconds=2 * SEQ_LEN),
+                    temperature=_NORMAL_TEMP_C,
+                )
             )
-            # Drive the window well out of the 20-30C sensor range.
+            # Drive the window out of the 20-30C sensor range.
             for i in range(SEQ_LEN):
                 spiked = await scorer.score(
                     _event(
                         base + timedelta(seconds=2 * (SEQ_LEN + 1 + i)),
-                        temperature=95.0,
+                        temperature=_ANOMALOUS_TEMP_C,
                     )
                 )
 
-            assert normal.anomaly_score is not None
-            assert spiked.anomaly_score is not None
+            # Finiteness first, and explicitly: an unscored event (None) or an
+            # overflowed one (inf/NaN) must fail here, naming the cause, rather
+            # than reaching the comparison below as a bare "None is not None".
+            assert normal.anomaly_score is not None, (
+                "the in-range window must be scored once warm"
+            )
+            assert spiked.anomaly_score is not None, (
+                "the out-of-range window must be scored, not dropped as "
+                "non-finite -- see LiveScorer.score's isfinite guard"
+            )
+            assert math.isfinite(normal.anomaly_score), normal.anomaly_score
+            assert math.isfinite(spiked.anomaly_score), spiked.anomaly_score
+
             assert spiked.anomaly_score > normal.anomaly_score, (
                 f"out-of-range window should score higher: "
                 f"{spiked.anomaly_score} vs {normal.anomaly_score}"
