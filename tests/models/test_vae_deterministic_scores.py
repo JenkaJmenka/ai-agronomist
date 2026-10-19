@@ -39,6 +39,11 @@ class TestByteIdenticalScores:
         scores_a = np.array(resp_a.anomaly_scores, dtype=np.float64)
         scores_b = np.array(resp_b.anomaly_scores, dtype=np.float64)
 
+        assert len(scores_a) > 0, (
+            f"No scores on the dec fixture: np.array_equal returns True "
+            f"for two empty arrays, so the comparison below passes vacuously "
+            f"(run_a={len(scores_a)}, run_b={len(scores_b)})"
+        )
         assert np.array_equal(scores_a, scores_b), (
             f"Scores differ: max_diff={np.max(np.abs(scores_a - scores_b))}"
         )
@@ -91,6 +96,11 @@ class TestByteIdenticalScores:
         scores_a = np.array(resp_a.anomaly_scores, dtype=np.float64)
         scores_b = np.array(resp_b.anomaly_scores, dtype=np.float64)
 
+        assert len(scores_a) > 0, (
+            f"No scores on the july fixture: np.array_equal returns True "
+            f"for two empty arrays, so the comparison below passes vacuously "
+            f"(run_a={len(scores_a)}, run_b={len(scores_b)})"
+        )
         assert np.array_equal(scores_a, scores_b), (
             f"Scores differ: max_diff={np.max(np.abs(scores_a - scores_b))}"
         )
@@ -190,6 +200,11 @@ class TestSyncAsyncParity:
             async_result.get("anomaly_scores", []), dtype=np.float64
         )
 
+        assert len(sync_scores) > 0, (
+            f"No scores on the dec fixture: np.array_equal returns True for "
+            f"two empty arrays, so the comparison below passes vacuously "
+            f"(sync={len(sync_scores)}, async={len(async_scores)})"
+        )
         assert np.array_equal(sync_scores, async_scores), (
             f"Anomaly score arrays differ: max_diff="
             f"{np.max(np.abs(sync_scores - async_scores))}"

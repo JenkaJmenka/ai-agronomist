@@ -389,14 +389,39 @@ class TestAsyncParity:
 
     @pytest.mark.asyncio
     async def test_lstm_alerts_match_sync_async(self):
-        """LSTM alerts are identical between sync and async.
+        """LSTM alerts are identical between sync and async, and non-empty.
 
         The reparameterize guard (task 1e) makes LSTM inference deterministic,
         so sync and async pipelines must produce identical LSTM alerts --
         same timestamps, same scores, same count.
+
+        Both sides run the real epoch-72 checkpoint.  With _mock_detector()
+        this test measured zero LSTM alerts on both sides -- its constant 0.05
+        clears no threshold -- so the equality held for any behaviour, and a
+        constant score has no sampling noise for the guard to be deterministic
+        about.  The sync run is local and uncached on purpose: _run_sync_cached
+        keys on (fixture, chunk_size) only, so a real detector behind it would
+        leak into every other test sharing that key.
         """
-        sync_resp = await _run_sync_cached(FIXTURE_A, 50)
-        async_result, _ = await _run_async_pipeline(FIXTURE_A, 50)
+        if not CHECKPOINT_PATH.is_file():
+            pytest.skip(f"Real checkpoint not found: {CHECKPOINT_PATH}")
+        from src.models.inference import AnomalyDetector
+
+        det = AnomalyDetector(str(CHECKPOINT_PATH))
+
+        adapter = CSVAdapter({"filepath": str(FIXTURE_A)})
+        adapter.connect()
+        sync_resp, _ = await run_cold_run_upload(
+            tmp_path=str(FIXTURE_A),
+            adapter=adapter,
+            detector=det,
+            tenant_id=TENANT,
+            greenhouse_id=GH_ID,
+            chunk_size=50,
+        )
+        async_result, _ = await _run_async_pipeline(
+            FIXTURE_A, 50, detector_override=det
+        )
 
         sync_lstm = sorted(
             [
@@ -411,6 +436,11 @@ class TestAsyncParity:
                 for h in async_result.get("high_anomalies", [])
                 if h.get("detector", "").startswith("lstm")
             ]
+        )
+        assert len(sync_lstm) > 0, (
+            f"No LSTM alerts on either side: the equality assertion below "
+            f"passes vacuously when both are empty "
+            f"(sync={len(sync_lstm)}, async={len(async_lstm)})"
         )
         assert sync_lstm == async_lstm, (
             f"LSTM alerts differ: sync={sync_lstm}, async={async_lstm}"
