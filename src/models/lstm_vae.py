@@ -101,13 +101,20 @@ class LSTMVAE(nn.Module):
         """
         Applies the reparameterization trick: z = mu + std * epsilon, where epsilon ~ N(0, 1).
 
+        In training mode, samples from the latent distribution to enable
+        gradient flow through the KL divergence term.  At inference
+        (``self.training is False``), returns ``mu`` directly so that
+        scoring is deterministic across calls.
+
         Args:
             mu: Mean of the latent distribution.
             logvar: Log variance of the latent distribution.
 
         Returns:
-            Sampled latent vector z.
+            Sampled latent vector z (training) or the mean mu (inference).
         """
+        if not self.training:
+            return mu
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
