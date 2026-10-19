@@ -6673,3 +6673,59 @@ ignores, reached through a broad `except` that downgrades the failure to a
 warning.** Local suites pass, prod loses data quietly. Prior instances:
 [[project_sqlite_postgres_nan_gap]] (SQLite JSON accepts NaN, prod Postgres
 500s), and migration behaviour in [[project_alembic_migration_hazards]].
+
+## BACKLOG-16 — the Postgres CI job runs only marked tests (Orchestrator, 2026-10-19)
+
+**Decision: recorded, not fixed.** Found while verifying PR #85; the fix is a CI
+change with a real cost and should be chosen deliberately.
+
+`.github/workflows/postgres-tests.yml:109` runs `pytest -m postgres -v tests/`.
+Only tests carrying `@pytest.mark.postgres` ever execute against real Postgres.
+An unmarked test that touches the database runs **exclusively on SQLite**, in CI
+and locally, forever — and nothing warns you.
+
+**Why this is worth a number rather than a shrug.** SQLite-permissive /
+Postgres-strict divergence has now reached production **three times** in this
+repo: the NaN-in-JSON gap ([[project_sqlite_postgres_nan_gap]]), the
+`String(64)` truncation retired by PR #85, and migration behaviour
+([[project_alembic_migration_hazards]]). The one CI job that could catch the
+class is scoped so it mostly doesn't.
+
+**The evidence, from PR #85 itself.** `tests/api/_live_wipe_fixtures.py`'s
+`naive_upload_timestamps` strips `tzinfo` because SQLite returns naive
+datetimes. The assertion it feeds
+(`test_live_wipe_source_collision_acceptance.py`, the timestamp-equality check)
+is the one that keeps the headline acceptance test **non-vacuous**. On Postgres,
+`DateTime(timezone=True)` returns *aware* datetimes, that list equality is
+`False`, and the test fails. The test is unmarked, so it has never run on
+Postgres and never will by default.
+
+All three CI checks passed green on that PR. **A green badge did not mean the
+suite's strongest assertion works on the production database** — it meant that
+assertion never ran there. That is the shape of the gap: invisible from CI
+status, invisible from coverage percentage, visible only by reading the
+workflow's `-m` flag.
+
+Two candidate fixes, neither implemented:
+
+1. **Run the full suite against Postgres in CI**, in addition to the marked
+   subset. Highest confidence, and it would have caught all three historical
+   instances. Costs a second full-suite run (~12 min on CI today) and will
+   surface a backlog of latent naive/aware and type-strictness failures on
+   first run — that backlog is the point, but it needs budgeting, not
+   discovering mid-PR.
+2. **Lint for the missing marker**: fail CI when a test imports a DB fixture
+   (`db_session`, an `AsyncSession`, `Base.metadata`) without
+   `@pytest.mark.postgres`. Cheap and fast, catches the omission at authoring
+   time rather than at failure time. But it enforces a habit rather than
+   verifying behaviour: a marked test that is wrong about Postgres still
+   passes, and the rule needs an explicit opt-out for genuinely
+   SQLite-only tests.
+
+Prefer (1) if the budget exists, since (2) cannot catch a test that is marked
+and still SQLite-shaped. They compose: (2) stops the bleeding, (1) proves the
+fix.
+
+Related: [[project_sqlite_postgres_nan_gap]],
+[[project_alembic_migration_hazards]], and the Postgres-divergence pattern entry
+above, whose third instance this gap is the reason nobody caught.
