@@ -1232,7 +1232,7 @@ class TestRegression:
         print(f"\n--- Alert count report (Fixture A, mock detector) ---")
         print(f"Sync:  statistical={sync_stat}, lstm={sync_lstm}, stuck={sync_stuck}")
         print(f"Async: statistical={async_stat}, lstm={async_lstm}, stuck={async_stuck}")
-        print(f"Note: with real epoch_0072 checkpoint, sync yields ~111 statistical, 4 lstm")
+        print(f"Note: with real epoch_0072 checkpoint, sync yields 102 statistical, 4 lstm")
         print(f"---")
 
         # Stuck counts must match (the whole point of this test suite)
