@@ -27,10 +27,9 @@ from tests.api._live_wipe_fixtures import (
     STEP,
     T0,
     TENANT,
-    add_live_rows,
+    add_one_live_sensor_row_and_one_live_raw_row,
     colliding_csv_bytes,
     live_wipe_client,  # noqa: F401 — re-exported for pytest fixture discovery
-    live_wipe_database,  # noqa: F401 — re-exported for pytest fixture discovery
     plain_csv_bytes,
     raw_rows,
     raw_sources,
@@ -66,24 +65,53 @@ class TestLiveWipeStillRemovesRealLiveRows:
     """The wipe keeps working for the data it exists to clear."""
 
     async def test_removes_rows_of_a_real_live_scope_from_both_tables(
-        self, live_wipe_client, live_wipe_database
+        self, live_wipe_client, db_session
     ):
-        """Both raw arms fire: ``source == 'live'`` and ``source LIKE 'live:%'``."""
-        add_live_rows(live_wipe_database, T0, raw_source=LIVE_SOURCE)
-        add_live_rows(live_wipe_database, T0 + STEP, raw_source=LIVE_PREFIXED_SOURCE)
-        await live_wipe_database.commit()
-        assert len(await raw_rows(live_wipe_database)) == 2
-        assert len(await sensor_rows(live_wipe_database)) == 2
+        """Both raw arms fire: ``source == 'live'`` and ``source LIKE 'live:%'``.
+
+        **The ``LIKE 'live:%'`` arm is retained defensively, not because any
+        real data depends on it.**  ``LIVE_PREFIXED_SOURCE`` (``"live:mock"``)
+        has no producer anywhere in the codebase: ``src/live/persistence.py``
+        writes the bare literal ``"live"`` in both places it sets the column,
+        and the CSV header path this suite exists to close was the only
+        producer of ``'live:%'`` that has ever existed — so that arm was only
+        ever matching the bug.  This test seeds the value by hand.
+
+        Whoever later removes or repurposes that arm should read this test as
+        coverage of a dead-but-declared contract, not as evidence that live
+        data would break.  Deleting the ``LIKE`` arm and this seeded row
+        together is a legitimate change; deleting the arm while leaving the
+        test is what would look like a regression.
+
+        Row counts: two calls to the seeding helper, each writing exactly one
+        ``SensorReading`` (``source`` always ``'live'``) plus exactly one
+        ``RawReading`` (``source`` as passed).  So the two raw rows split
+        across the wipe's two raw arms, while both sensor rows hit its single
+        exact-match clause.
+        """
+        add_one_live_sensor_row_and_one_live_raw_row(
+            db_session, T0, raw_source=LIVE_SOURCE
+        )
+        add_one_live_sensor_row_and_one_live_raw_row(
+            db_session, T0 + STEP, raw_source=LIVE_PREFIXED_SOURCE
+        )
+        await db_session.commit()
+        assert len(await raw_rows(db_session)) == 2  # one per helper call
+        assert len(await sensor_rows(db_session)) == 2  # one per helper call
 
         body = run_live_wipe(live_wipe_client)
 
-        assert body["deleted_raw"] == 2, "exact-match and LIKE arms must both match"
-        assert body["deleted_sensor"] == 2
-        assert await raw_rows(live_wipe_database) == []
-        assert await sensor_rows(live_wipe_database) == []
+        assert body["deleted_raw"] == 2, (
+            "one raw row from the exact-match arm, one from the LIKE arm"
+        )
+        assert body["deleted_sensor"] == 2, (
+            "both sensor rows carry source='live' regardless of raw_source"
+        )
+        assert await raw_rows(db_session) == []
+        assert await sensor_rows(db_session) == []
 
     async def test_removes_live_rows_but_leaves_a_colliding_upload_alone(
-        self, live_wipe_client, live_wipe_database
+        self, live_wipe_client, db_session
     ):
         """Live rows and a ``live:``-headed upload coexist; only the live rows go.
 
@@ -91,22 +119,22 @@ class TestLiveWipeStillRemovesRealLiveRows:
         of the upload's, whose header had made them look live.
         """
         upload_csv(live_wipe_client, colliding_csv_bytes())
-        add_live_rows(live_wipe_database, T0 - STEP)
-        await live_wipe_database.commit()
+        add_one_live_sensor_row_and_one_live_raw_row(db_session, T0 - STEP)
+        await db_session.commit()
 
         body = run_live_wipe(live_wipe_client)
 
         assert body["deleted_raw"] == 1
         assert body["deleted_sensor"] == 1
-        assert await raw_sources(live_wipe_database) == {CSV_UPLOAD_RAW_SOURCE}
-        assert len(await sensor_rows(live_wipe_database)) == ROW_COUNT
+        assert await raw_sources(db_session) == {CSV_UPLOAD_RAW_SOURCE}
+        assert len(await sensor_rows(db_session)) == ROW_COUNT
 
 
 class TestLiveWipeLeavesSyntheticRows:
     """Inject-test rows belong to ``DELETE /upload/inject-test-anomalies``."""
 
     async def test_synthetic_rows_survive_a_live_wipe_in_both_tables(
-        self, live_wipe_client, live_wipe_database
+        self, live_wipe_client, db_session
     ):
         """``synthetic:%`` rows are untouched while the live rows beside them go.
 
@@ -119,23 +147,23 @@ class TestLiveWipeLeavesSyntheticRows:
         """
         upload_csv(live_wipe_client, plain_csv_bytes())
         assert _inject_synthetic_rows(live_wipe_client)["injected"] == INJECTED_TOTAL
-        assert len(await synthetic_raw_rows(live_wipe_database)) == INJECTED_TOTAL
-        assert len(await synthetic_sensor_rows(live_wipe_database)) == INJECTED_TOTAL
+        assert len(await synthetic_raw_rows(db_session)) == INJECTED_TOTAL
+        assert len(await synthetic_sensor_rows(db_session)) == INJECTED_TOTAL
 
-        add_live_rows(live_wipe_database, T0 - STEP)
-        await live_wipe_database.commit()
+        add_one_live_sensor_row_and_one_live_raw_row(db_session, T0 - STEP)
+        await db_session.commit()
 
         body = run_live_wipe(live_wipe_client)
 
         assert body["deleted_raw"] == 1
         assert body["deleted_sensor"] == 1
-        assert len(await synthetic_raw_rows(live_wipe_database)) == INJECTED_TOTAL, (
+        assert len(await synthetic_raw_rows(db_session)) == INJECTED_TOTAL, (
             "a live wipe must not touch synthetic raw rows"
         )
-        assert len(await synthetic_sensor_rows(live_wipe_database)) == INJECTED_TOTAL, (
+        assert len(await synthetic_sensor_rows(db_session)) == INJECTED_TOTAL, (
             "a live wipe must not touch synthetic canonical rows"
         )
-        assert await raw_sources(live_wipe_database) <= {
+        assert await raw_sources(db_session) <= {
             CSV_UPLOAD_RAW_SOURCE,
             synthetic_source(INJECTED_TYPE),
             synthetic_source(None),
