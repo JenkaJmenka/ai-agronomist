@@ -6507,3 +6507,96 @@ each. The tails held the most load-bearing content both times — the architect'
 PR were both past the cut. Ask for the remainder explicitly, naming the sections
 still missing and telling the agent not to repeat what arrived; a review that
 looks complete because it ends with a verdict may not be.
+
+## The `source` marker namespace — four values, three homes, one phantom (Orchestrator, 2026-10-19)
+
+Anyone touching `raw_readings.source` or `sensor_readings.source` should not have
+to re-derive this. Established by grep during the wipe/source-collision review,
+and the reason that task shipped a doc with a data-destroying `UPDATE` in it: the
+fourth value was found by grep, never by reasoning.
+
+| value | form | written by | notes |
+|---|---|---|---|
+| `'live'` | exact | `src/live/persistence.py:168`, `:198` | bare literal, hand-typed; read at `src/api/services/tenant_data_wipe.py:49`. **Three copies, no shared constant.** |
+| `'live-backfill'` | exact | `scripts/backfill_live_raw_readings.py:75` | SQL literal, `raw_readings` only. **Not matched by `wipe_live_demo_data`** — already un-wipeable, pre-existing, see `AGENT_MEMORY.md:2059` (2026-07-24) |
+| `'synthetic:<type>'` | prefix | `src.config.synthetic_source` | ADR-010 |
+| `'csv'` | exact | `src.config.CSV_UPLOAD_RAW_SOURCE` | `raw_readings` only; **one writer, zero readers in `src/`** — nothing branches on it |
+| `'live:<...>'` | prefix | **nothing. ever.** | the phantom |
+
+**The phantom is the important row.** No code has ever written a
+`'live:'`-prefixed value to this column; the only other `'live:'` string in
+`src/` is `src/live/hub.py:43`'s unrelated Redis stream key. So the correct
+reading of the collision bug is not "a CSV header could impersonate a live
+marker" but: **the CSV header path was the only producer of `'live:%'` that has
+ever existed**, so `wipe_live_demo_data`'s `LIKE 'live:%'` arm was only ever
+matching the bug. That is what makes `UPDATE raw_readings SET source = 'csv'
+WHERE source LIKE 'live:%'` provably safe rather than merely plausible.
+
+Three comments in `src/` asserted `persistence.py` as the writer of
+`'live:<...>'` and were corrected on 2026-10-19 (`src/config.py`,
+`src/db/models.py`, and a test). A fixture value `LIVE_PREFIXED_SOURCE =
+"live:mock"` still exists with no producer.
+
+Why the `'csv'` value is bare while `'synthetic:'` is prefixed, since it looks
+inconsistent and is not: the colon is a **separator introducing a sub-value that
+varies**, not a reserved-namespace sigil. `synthetic:<anomaly_type>` has a
+payload; `'live'` and `'csv'` do not. `csv:` would advertise a variant axis that
+does not exist. Decision: keep `'csv'`, and if a sub-value is ever needed add
+`'csv:<...>'` beside it for the cost of one predicate.
+
+**Any predicate enumerating these markers fails open**, not closed: add a sixth
+value and a backfill that excludes only the known five will sweep it. Extend the
+predicate whenever a marker is added.
+
+Related: [[project_synthetic_marker_migration_023_overwrite]], and the
+`PROVENANCE_TRACKED` entry below.
+
+## `RawReading.PROVENANCE_TRACKED` is now a correctness dependency (Orchestrator, 2026-10-19)
+
+`src/db/models.py:42` declares `PROVENANCE_TRACKED = True` on `SensorReading`
+and nowhere else, so `src/db/upsert.py:98-101` short-circuits to `{}` for
+`RawReading`. Setting it `True` on `RawReading` "for symmetry" looks harmless and
+is not.
+
+`src/db/provenance.py:115` puts `"source"` into `case_cols` **unconditionally**,
+and a column in `merged_case_cols` reaches the `SET` clause even when the caller
+never named it in `update_cols`. So with the flag on, `_source`'s
+`else_=existing_col` branch preserves a NULL on an untagged existing raw row, and
+the `'csv'` marker **silently stops being written on re-upload** — the exact path
+the handoff doc leans on for self-healing.
+
+The asymmetry is deliberate and correct, because the two tables need *opposite*
+rules: `SensorReading.source` must be **cleared** by an upload (last real writer
+owns provenance), while `RawReading.source` must be **set** to `'csv'` by that
+same upload. One rule cannot do both; `PROVENANCE_TRACKED` is the declaration
+that picks which. Before 2026-10-19 that flag was a free choice. It is now load-bearing.
+
+## SQLite-permissive / Postgres-strict divergence behind a swallowing `except` (Orchestrator, 2026-10-19)
+
+Third instance of this pattern, and the first where the failure was **silent
+rather than loud**. Worth generalising now that it has recurred.
+
+`RawReading.source` is `String(64)` (`src/db/models.py:459`). Pre-2026-10-19 a
+CSV whose timestamp header exceeded 64 characters failed the raw insert on
+**Postgres only** — SQLite does not enforce declared length — and
+`src/api/routes/upload.py:188-196` catches `Exception`, emits
+`logger.warning`, calls `db.rollback()` and **does not re-raise**. The whole
+file's raw rows therefore vanished while the client received a 200.
+
+Two separate reviewers characterised this differently: one called it a latent
+500, the other silent data loss. The second is correct — verified by reading the
+handler. **When reviewers disagree about severity, read the error path yourself;
+the difference between a 500 and a silent 200 is the difference between an alert
+and a year of quiet corruption.**
+
+The fix retired it as a side effect (the written value is now a 3-character
+constant), and nobody had claimed it. No test is possible: asserting
+Postgres-only truncation cannot be reproduced on SQLite, so a test would either
+skip locally or pass vacuously. It is recorded in
+`docs/handoff/source_column_collision_backfill.md` instead.
+
+The pattern to watch for: **a declared-length or type constraint that SQLite
+ignores, reached through a broad `except` that downgrades the failure to a
+warning.** Local suites pass, prod loses data quietly. Prior instances:
+[[project_sqlite_postgres_nan_gap]] (SQLite JSON accepts NaN, prod Postgres
+500s), and migration behaviour in [[project_alembic_migration_hazards]].
