@@ -449,9 +449,11 @@ class RawReading(Base):
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     greenhouse_id: Mapped[str] = mapped_column(String(255), nullable=False, default="default")
     timestamp: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    # Provenance marker, NOT a sensor-system identifier: "live" / "live:<...>"
-    # (src/live/persistence.py), "synthetic:<...>" (src.config.synthetic_source,
-    # ADR-010), or "csv" (src.config.CSV_UPLOAD_RAW_SOURCE) for a plain upload.
+    # Provenance marker, NOT a sensor-system identifier: "live" (the bare
+    # literal; written by src/live/persistence.py), "live:<...>" (no writer
+    # in this codebase -- see below), "synthetic:<...>"
+    # (src.config.synthetic_source, ADR-010), or "csv"
+    # (src.config.CSV_UPLOAD_RAW_SOURCE) for a plain upload.
     # Until the source-column-collision fix, a CSV upload instead wrote the
     # CSV's own timestamp-column header string here (e.g. "Timestamp"), which
     # could collide with the "live"/"synthetic:" markers above -- see
