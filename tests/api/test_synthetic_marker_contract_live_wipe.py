@@ -45,7 +45,7 @@ from tests.api._marker_fixtures import (
 class _FakeLiveRuntime:
     """Stand-in for ``LiveRuntime``.
 
-    ``_suppress_live_persistence`` (``tenant_data_wipe.py:42-66``) swallows any
+    ``_suppress_live_persistence`` (``tenant_data_wipe.py:78-105``) swallows any
     exception from ``suppress_persistence`` and logs it, so a runtime missing
     the method would still let the wipe run — but with a misleading
     ``AttributeError`` traceback in the captured log.  Recording the calls

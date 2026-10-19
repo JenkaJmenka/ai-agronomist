@@ -402,7 +402,7 @@ class TestRemoveLiveDemoData:
         )
         await test_database.commit()
 
-        assert await _count(test_database, SensorReading) == 14  # 8 csv + 4 inject + 2 live
+        assert await _count(test_database, SensorReading) == 14  # 8 csv + 4 inject + 1 live + 1 untagged
         assert await _count(test_database, RawReading) == 14  # 8 csv + 4 inject + 2 live
 
         response = test_client.delete(
