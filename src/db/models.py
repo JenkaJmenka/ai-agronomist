@@ -454,8 +454,9 @@ class RawReading(Base):
     # ADR-010), or "csv" (src.config.CSV_UPLOAD_RAW_SOURCE) for a plain upload.
     # Until the source-column-collision fix, a CSV upload instead wrote the
     # CSV's own timestamp-column header string here (e.g. "Timestamp"), which
-    # could collide with the "live"/"synthetic:" markers below -- see
-    # docs/handoff/ and CSV_UPLOAD_RAW_SOURCE's docstring in src/config.py.
+    # could collide with the "live"/"synthetic:" markers above -- see
+    # docs/handoff/source_column_collision_backfill.md and
+    # CSV_UPLOAD_RAW_SOURCE's docstring in src/config.py.
     source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # clean_col_name → float value for all detected numeric sensor columns
     data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
