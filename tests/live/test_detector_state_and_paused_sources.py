@@ -237,9 +237,10 @@ class _NoEnrichment:
 
     Both tests in this class cross ``LIVE_ANOMALY_THRESHOLD`` even on the
     in-range window, so the real runner would spawn enrichment on every run and
-    the race was lost in roughly 2 % of them -- measured at 3/200 seeds, versus
-    0/400 with this stub. The production defect is reported separately; the
-    tests here are about scoring, so they take the seam.
+    the race was lost in roughly 2 % of them -- 5/200 seeds for this test as it
+    stood on ``main``, 3/200 for the same logic at the 45 C input now used,
+    versus 0/400 with this stub. The production defect is reported separately;
+    the tests here are about scoring, so they take the seam.
     """
 
     def spawn(self, window_array: Any, anomaly_seq: str) -> None:
