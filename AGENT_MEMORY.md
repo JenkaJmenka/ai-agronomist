@@ -6729,3 +6729,122 @@ fix.
 Related: [[project_sqlite_postgres_nan_gap]],
 [[project_alembic_migration_hazards]], and the Postgres-divergence pattern entry
 above, whose third instance this gap is the reason nobody caught.
+
+## BACKLOG-17 — a non-finite live score becomes an unscored reading, silently (Orchestrator, 2026-10-19)
+
+Found 2026-10-19 while diagnosing the CI flake in
+`tests/live/test_detector_state_and_paused_sources.py::TestScopeWithResolvableModelScores::test_anomalous_input_scores_above_normal_input`
+(fixed on `fix/live-scorer-test-flake`). The test was the symptom; this is the
+production defect behind it. **Record only — not fixed, and not to be fixed
+without a decision on which signal to add.**
+
+`LiveScorer.score` (`src/live/scoring.py:141-147`) checks
+`math.isfinite(scaled_score)` and, when the score is `inf` or `NaN`, logs a
+warning and returns the event **unscored**:
+
+```python
+if not math.isfinite(scaled_score):
+    logger.warning("Non-finite score for %s/%s: %r", ...)
+    return event
+```
+
+In production that is an anomaly dropped on the floor. The reading still
+persists, with `anomaly_score` NULL — **indistinguishable from the three benign
+reasons the same function returns unscored**: a channel never seen
+(`_extract_vector` → `None`), a window not yet full (`len(self._window) <
+SEQ_LEN`), and no deployed model (`resolver.resolve()` → `None`). All four paths
+produce the same row. A log line is the only difference, and nothing counts,
+surfaces or alerts on it.
+
+Why it matters more than it looks: a non-finite reconstruction error is most
+likely precisely when the input is **extreme** — the reconstruction blows up on
+a far out-of-range window. So the failure mode drops the readings most likely to
+be real anomalies, and does it quietly. The flaky test demonstrated the overflow
+is reachable in practice, not merely theoretical: untrained weights plus a
+temperature of 95 °C (≈7.5 after `normalize_data` against the 20–30 °C range)
+overflowed float32 often enough to fail roughly half of today's CI runs.
+
+Three candidate signals, none implemented, cheapest first:
+
+1. **A counter** of non-finite scores per scope, exposed on
+   `/api/live/status` next to `detector_state`. Cheap, and makes the condition
+   visible without changing any behaviour.
+2. **A distinct status/field value** so an unscored reading records *why* it was
+   unscored, separating overflow from the three benign causes. More invasive —
+   it touches what is persisted — but it is the only option that makes
+   historical rows diagnosable after the fact.
+3. **An alert** on a non-zero rate. Right end state, but it needs (1) first,
+   and a threshold nobody has a basis for yet.
+
+Prefer (1) now and (2) when the live schema is next touched. Note the detector
+resolver is deliberately fail-open for a *missing* model
+(`src/live/detector_resolver.py:112-117`, "Never raises") and that is correct —
+this entry is not an argument against that design, only against the overflow
+case being equally silent.
+
+Related: [[project_live_monitoring_stack]], [[project_sqlite_postgres_nan_gap]]
+(the same non-finite-float hazard, one layer down, where SQLite accepts NaN into
+a JSON column and Postgres 500s).
+
+## BACKLOG-18 — CI never runs the CPU torch wheel it claims to (Orchestrator, 2026-10-19)
+
+Found 2026-10-19 while checking whether dependency drift explained the live
+scorer flake. It did not, but this surfaced on the way. **Owner: devops-lead**
+(`.github/` is theirs). Record only — not fixed.
+
+`.github/workflows/backend-tests.yml:31-37` installs torch twice, and the second
+install undoes the first:
+
+```yaml
+# CPU-only torch, matching the Dockerfile: the default wheel pulls
+# ~2.5 GB of CUDA libraries this runner will never use.
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
+The first line is **unpinned**, so it resolves whatever is newest on the CPU
+index — today `torch 2.14.1+cpu`. `requirements.txt:27` then pins
+`torch>=2.0,<2.13`, so the third line **downgrades it to the generic `2.12.1`
+wheel from PyPI** — the default build, i.e. exactly the one the comment says it
+is avoiding.
+
+Verified across three runs, identical in each: `39240984696` (pass, `e0a34e5`),
+`39254397053` (fail, `55dc174`) and `39256061408` (fail, PR #88) all install
+`2.14.1+cpu` and then `2.12.1`. That identity is also what ruled dependency
+drift out as the flake's cause.
+
+Two consequences:
+
+- **CI does not test the wheel production runs.** The Dockerfile uses the CPU
+  build; CI ends up on the default build. Any behavioural difference between
+  them is invisible to CI, which is the whole thing the step was written to
+  prevent.
+- **~196 MB downloaded and discarded** on every run of this workflow, plus the
+  install time.
+
+Two candidate fixes:
+
+1. **Carry the constraint into the pre-install**:
+   `pip install "torch>=2.0,<2.13" --index-url https://download.pytorch.org/whl/cpu`.
+   Then `requirements.txt` is already satisfied and does not downgrade.
+   Smallest change, keeps the CPU index explicit. Note the constraint then
+   lives in two places and can skew — worth a comment pointing at
+   `requirements.txt:27`.
+2. **Drop the separate install** and give pip the CPU index for the
+   requirements install itself (`--extra-index-url`, or `PIP_INDEX_URL` in the
+   step env). One source of truth for the version, but `--extra-index-url`
+   resolution across two indexes is order-dependent and can silently pick the
+   PyPI build again.
+
+Prefer (1): it is explicit about which index serves torch, and the duplicated
+range is a comment's worth of risk against a resolution order nobody controls.
+
+`postgres-tests.yml` does **not** share the pattern — checked: it runs only
+`pip install -r requirements.txt` (`:36`), so it lands on the generic `2.12.1`
+wheel directly, with no misleading pre-install. Fixing `backend-tests.yml` alone
+is therefore enough to make that one honest, but note the asymmetry: neither
+workflow exercises the CPU wheel, so a fix that only corrects the comment's
+intent in one file leaves the other silently on the default build. See
+[[project_api_migration_deploy_skew]] for why a CI/prod environment difference
+here is not merely cosmetic.
