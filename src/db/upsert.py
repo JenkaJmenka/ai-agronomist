@@ -34,6 +34,26 @@ MAX_BIND_PARAMS = 30000
 ColumnUpdateExprBuilder = Callable[[ColumnElement, ColumnElement], ColumnElement]
 
 
+def dialect_insert(db: AsyncSession) -> Callable[..., Any]:
+    """Return the dialect-specific SQLAlchemy ``insert()`` constructor for *db*.
+
+    The one place other modules reach for the postgres/sqlite ``insert()``
+    split instead of re-deriving ``db.bind.dialect.name`` lookups of their
+    own -- e.g. ``src/api/services/synthetic_anomalies.py`` needs plain
+    ``ON CONFLICT DO NOTHING`` (not the ``DO UPDATE`` this module's
+    ``bulk_upsert_rows`` performs) and shares this lookup rather than
+    inventing a second one. Deliberately NOT shared with
+    ``src/live/persistence.py``, which keeps its own copy of the same
+    mapping -- that module is live-ingestion-specific and reaching into it
+    would drag live behaviour into unrelated callers.
+    """
+    dialect_name = db.bind.dialect.name
+    insert_fn = _DIALECT_INSERTS.get(dialect_name)
+    if insert_fn is None:
+        raise NotImplementedError(f"Unsupported dialect {dialect_name!r}")
+    return insert_fn
+
+
 def dedupe_rows_by_key(
     rows: list[dict[str, Any]],
     key_cols: Sequence[str] = READING_CONFLICT_COLS,
@@ -90,10 +110,7 @@ async def bulk_upsert_rows(
     if not rows:
         return 0
 
-    dialect_name = db.bind.dialect.name
-    insert_fn = _DIALECT_INSERTS.get(dialect_name)
-    if insert_fn is None:
-        raise NotImplementedError(f"Upsert not supported for dialect {dialect_name!r}")
+    insert_fn = dialect_insert(db)
 
     auto_case_cols: dict[str, ColumnUpdateExprBuilder] = (
         provenance.case_cols_for(model, preserve_when_null, update_cols)

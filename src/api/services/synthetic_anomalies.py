@@ -11,6 +11,17 @@ longer what removal keys off — see ``delete_synthetic_anomalies`` below and
 touches rows carrying the ``synthetic:`` source marker — real sensor data,
 including future real detections that will set ``anomaly_type`` once Task 3
 lands, is never deleted.
+
+Collision handling (PR #90 anchored the injection window to real replay data,
+so collisions with existing rows are now routine, not an edge case): the
+actual write happens in ``synthetic_anomaly_persistence.py`` via
+``ON CONFLICT (tenant_id, greenhouse_id, timestamp) DO NOTHING`` -- never
+``DO UPDATE``. ``SensorReading.PROVENANCE_TRACKED`` makes ``DO UPDATE`` apply
+the ADR-010 "last writer owns provenance" rule, which would let a synthetic
+row silently overwrite a real reading and relabel its source. ``DO NOTHING``
+makes that impossible by construction: a colliding row is skipped, the real
+data underneath is untouched, and the response payload below reports
+actually inserted counts, never requested ones.
 """
 
 from __future__ import annotations
@@ -40,6 +51,7 @@ from src.api.services.synthetic_anomaly_generators import (
     _resolve_raw_spike_cols,
     _type_config_for,
 )
+from src.api.services.synthetic_anomaly_persistence import normalize_ts, persist_injection_results
 from src.config import (
     SYNTHETIC_CANONICAL_STATS,
     SYNTHETIC_CONTEXT_SCORE_RANGE,
@@ -134,13 +146,28 @@ async def inject_synthetic_anomalies(
         anomaly_positions=anomaly_positions, drift_rank=drift_rank,
     )
     sensor_records, raw_records = _assemble_injected_rows(context, total)
-    await _persist_injection_results(db, sensor_records, raw_records)
+    inserted_sensor_timestamps, raw_inserted = await persist_injection_results(
+        db, sensor_records, raw_records
+    )
+    await invalidate_response_cache("inject_test_anomalies")
+
+    sensor_inserted = len(inserted_sensor_timestamps)
+    anomalies_inserted = sum(
+        1
+        for i in anomaly_positions
+        if normalize_ts(sensor_records[i].timestamp) in inserted_sensor_timestamps
+    )
 
     return {
-        "injected": len(sensor_records),
-        "raw_injected": len(raw_records),
-        "anomalies": n_anomalies,
-        "normal": n_normal,
+        # Rows actually written -- may be less than requested when a row's
+        # timestamp collided with an existing real reading and was skipped
+        # by ON CONFLICT DO NOTHING (see module docstring).
+        "injected": sensor_inserted,
+        "raw_injected": raw_inserted,
+        "requested": total,
+        "skipped_collisions": total - sensor_inserted,
+        "anomalies": anomalies_inserted,
+        "normal": sensor_inserted - anomalies_inserted,
         "anomaly_type": anomaly_type,
         "columns_used": list(col_stats.keys()),
         "tenant_id": tenant_id,
@@ -163,17 +190,6 @@ def _assemble_injected_rows(
         if raw_row is not None:
             raw_records.append(raw_row)
     return sensor_records, raw_records
-
-
-async def _persist_injection_results(
-    db: AsyncSession, sensor_records: list[SensorReading], raw_records: list[RawReading]
-) -> None:
-    """Write the injected rows and invalidate the cached readings/anomalies responses."""
-    db.add_all(sensor_records)
-    if raw_records:
-        db.add_all(raw_records)
-    await db.commit()
-    await invalidate_response_cache("inject_test_anomalies")
 
 
 async def delete_synthetic_anomalies(
