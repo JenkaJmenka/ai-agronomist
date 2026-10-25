@@ -165,6 +165,9 @@ export function injectTestAnomalies(params: {
   anomalyType: InjectAnomalyType;
   anomalyCount: number;
   normalCount: number;
+  /** ISO-8601; omit to fall back to the backend's wall-clock default window. */
+  windowStart?: string;
+  windowEnd?: string;
 }): Promise<InjectResult> {
   const body = new URLSearchParams({
     tenant_id: params.tenant,
@@ -173,6 +176,8 @@ export function injectTestAnomalies(params: {
     n_anomalies: String(params.anomalyCount),
     n_normal: String(params.normalCount),
   });
+  if (params.windowStart) body.set("window_start", params.windowStart);
+  if (params.windowEnd) body.set("window_end", params.windowEnd);
   return requestJson("/api/bff/upload/inject-test-anomalies", injectResultSchema, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },

@@ -4,6 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { useReadingsBounds } from "@/features/monitoring/hooks/useReadingsBounds";
 import {
   INJECT_ANOMALY_TYPES,
   INJECT_TYPE_LABELS,
@@ -13,6 +14,8 @@ import {
   type RemoveResult,
   removeTestAnomalies,
 } from "@/features/operations/api/operations";
+import { resolveInjectWindow } from "@/features/operations/lib/injectWindow";
+import { formatTimestamp } from "@/lib/formatTime";
 
 interface InjectAnomaliesPanelProps {
   readonly tenant: string;
@@ -26,8 +29,23 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
   const [normalCount, setNormalCount] = useState(96);
   const [removeType, setRemoveType] = useState<InjectAnomalyType | "">("");
 
+  const { maxTimestamp } = useReadingsBounds({ tenant, gh });
+
   const injectMutation = useMutation<InjectResult, Error>({
-    mutationFn: () => injectTestAnomalies({ tenant, gh, anomalyType, anomalyCount, normalCount }),
+    mutationFn: () => {
+      const { windowStart, windowEnd } = resolveInjectWindow({
+        maxTimestamp: maxTimestamp ? new Date(maxTimestamp) : null,
+      });
+      return injectTestAnomalies({
+        tenant,
+        gh,
+        anomalyType,
+        anomalyCount,
+        normalCount,
+        windowStart,
+        windowEnd,
+      });
+    },
   });
   const removeMutation = useMutation<RemoveResult, Error>({
     mutationFn: () => removeTestAnomalies({ tenant, gh, anomalyType: removeType || undefined }),
@@ -96,7 +114,9 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
       {injectMutation.data ? (
         <p role="status" className="text-sm text-sev-normal tabular-nums">
           Injected {injectMutation.data.injected} readings ({injectMutation.data.anomalies} ×{" "}
-          {INJECT_TYPE_LABELS[anomalyType]}) for {tenant}/{gh}.
+          {INJECT_TYPE_LABELS[anomalyType]}) for {tenant}/{gh}, window{" "}
+          {formatTimestamp(injectMutation.data.window_start)} to{" "}
+          {formatTimestamp(injectMutation.data.window_end)}.
         </p>
       ) : null}
 
