@@ -1,0 +1,61 @@
+name: 'Python deps (venv + CPU torch)'
+description: >
+  Creates and caches a venv with CPU-only torch and requirements.txt.
+  Shared cache key across backend-tests, openapi-drift, and postgres-tests
+  so all three workflows reuse one cache entry. Extra packages (e.g.
+  pytest-xdist) are installed after the restore step — pip is a no-op for
+  already-satisfied requirements, so the shared key stays valid.
+
+inputs:
+  extra-packages:
+    description: 'Space-separated extra pip packages to install on every run (including cache hits)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Restore venv cache
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: .venv
+        # Key shared by backend-tests, openapi-drift, and postgres-tests.
+        # Changing requirements*.txt or this action file invalidates the cache.
+        # Extra packages are excluded from the key so all three workflows hit
+        # the same entry; they install extras after the restore step.
+        key: venv-${{ runner.os }}-py3.11-${{ hashFiles('requirements*.txt', '.github/actions/python-deps/action.yml') }}
+
+    - name: Create venv and install dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        python -m venv .venv
+        .venv/bin/pip install --upgrade pip
+        # CPU-only torch: the default PyPI wheel pulls ~2.5 GB of CUDA libraries
+        # this runner never uses. Matches the Dockerfile. This also fixes
+        # postgres-tests.yml which previously omitted --index-url and pulled
+        # the full CUDA build on every run.
+        .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+        .venv/bin/pip install -r requirements.txt
+
+    - name: Install extra packages
+      if: inputs.extra-packages != ''
+      shell: bash
+      env:
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: |
+        # Runs on every invocation — cache hit or miss — so the caller always
+        # has these packages. pip skips already-satisfied requirements instantly.
+        # SC2086 disabled intentionally: word-splitting is wanted here so a
+        # space-separated list becomes separate arguments to pip.
+        # shellcheck disable=SC2086
+        .venv/bin/pip install $EXTRA_PACKAGES
+
+    - name: Add venv bin to PATH
+      shell: bash
+      run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
