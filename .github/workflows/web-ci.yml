@@ -30,7 +30,8 @@ concurrency:
   # (refs/pull/<n>/merge), so this is a no-op for that case - re-pushing to a
   # PR still cancels its own stale run, which is the behavior we want.
   group: web-ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  # See backend-tests.yml for the reasoning: never cancel push-to-main runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gates:
@@ -43,13 +44,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # corepack must be enabled BEFORE setup-node so that the pnpm store
+      # cache step (triggered by cache: pnpm) can resolve the pnpm binary.
+      - name: Enable corepack
+        run: corepack enable
+        working-directory: ${{ github.workspace }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      # pnpm version is pinned by web/package.json "packageManager".
-      - name: Enable corepack
-        run: corepack enable
+          # Caches the pnpm content store (~/.local/share/pnpm/store) keyed on
+          # the lockfile. On a hit, pnpm install just hard-links from the store
+          # instead of downloading packages (~30 s → a few seconds).
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -66,8 +74,32 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Resolve Playwright version for browser cache key
+        id: pw-version
+        # pnpm-lock.yaml v9 lists packages as '@playwright/test@X.Y.Z:'.
+        # Keying on the version (not the full lockfile hash) means the browser
+        # cache survives unrelated dependency updates.
+        run: |
+          v=$(grep -m1 '@playwright/test@' pnpm-lock.yaml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=${v:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        # On a cache hit only the system library dependencies are needed;
+        # the browser binaries are already in ~/.cache/ms-playwright.
+        # On a cache miss do a full install (browsers + system libs).
+        run: |
+          if [[ "${{ steps.pw-cache.outputs.cache-hit }}" == "true" ]]; then
+            pnpm exec playwright install-deps chromium
+          else
+            pnpm exec playwright install --with-deps chromium
+          fi
 
       # Includes test/e2e/perf.spec.ts — §1.2 budgets fail the build.
       - name: E2E + perf budgets (playwright)

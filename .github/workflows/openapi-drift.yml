@@ -6,9 +6,11 @@ name: openapi-drift
 # anyone re-running the generators — this job rebuilds both from scratch
 # and fails the build if the result doesn't match what's checked in.
 #
-# No path filter: a schema-affecting change can originate from any model or
-# route module under src/, not just src/api/, so this runs on every push and
-# pull request (matching backend-tests.yml and postgres-tests.yml).
+# No path filter at the workflow level: a schema-affecting change can
+# originate from any model or route module under src/, not just src/api/,
+# so this runs on every push and pull request. Path-based skipping is handled
+# by the changes job below, which is conservative (unknown → run) and does
+# NOT skip when web/openapi.json or web/lib/api-types.gen.ts are in the diff.
 
 on:
   push:
@@ -17,30 +19,63 @@ on:
 
 concurrency:
   group: openapi-drift-${{ github.ref }}
-  cancel-in-progress: true
+  # See backend-tests.yml for the reasoning: never cancel push-to-main runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine whether backend-relevant files changed
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          printf 'Changed files:\n%s\n' "$changed"
+          if [[ -z "$changed" ]]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          backend=false
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            # web/openapi.json and web/lib/api-types.gen.ts are the files this
+            # job checks for drift — changes to them always trigger the check.
+            if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
+              backend=true; break
+            elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
+              :
+            else
+              backend=true; break
+            fi
+          done <<< "$changed"
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+
   check:
     name: openapi.json / api-types.gen.ts drift check
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install Python dependencies
-        run: |
-          # CPU-only torch, matching backend-tests.yml: the default wheel
-          # pulls ~2.5 GB of CUDA libraries this job never exercises — it
-          # only needs to import src.api.main, not run any model.
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
+      - name: Set up Python and restore venv cache
+        uses: ./.github/actions/python-deps
 
       - uses: actions/setup-node@v4
         with:

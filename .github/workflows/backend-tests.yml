@@ -12,29 +12,78 @@ on:
 
 concurrency:
   group: backend-tests-${{ github.ref }}
-  cancel-in-progress: true
+  # cancel-in-progress is true only for pull_request events.
+  # Railway's "Wait for CI" treats a cancelled run as non-blocking when
+  # another run on the same commit passed — so cancelling a push-to-main
+  # run could let an untested commit deploy. Never cancel main-push runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history needed on pull_request to diff against the PR base.
+          # On push and schedule we exit immediately without diffing.
+          fetch-depth: 0
+
+      - name: Determine whether backend-relevant files changed
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            # push to main / schedule: always run the full suite
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Three-dot diff: files changed in this PR since the merge base.
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          printf 'Changed files:\n%s\n' "$changed"
+          # Conservative inverse semantics: run unless EVERY changed file is in
+          # the skip-list: web/** (except web/openapi.json and
+          # web/lib/api-types.gen.ts), docs/**, or *.md.
+          # Unknown / empty diff → run.
+          if [[ -z "$changed" ]]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          backend=false
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            # These two files are excluded from the skip-list so changes to the
+            # committed OpenAPI snapshot still trigger the backend checks.
+            if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
+              backend=true; break
+            elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
+              : # in skip-list — keep scanning
+            else
+              backend=true; break
+            fi
+          done <<< "$changed"
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+
   pytest:
     name: pytest (unit + integration)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python and restore venv cache
+        uses: ./.github/actions/python-deps
         with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          # CPU-only torch, matching the Dockerfile: the default wheel pulls
-          # ~2.5 GB of CUDA libraries this runner will never use.
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
+          # pytest-xdist is not in requirements.txt — install it here so the
+          # shared venv cache key (requirements*.txt hash) stays stable.
+          extra-packages: pytest-xdist
 
       - name: Run test suite
         env:
@@ -46,17 +95,46 @@ jobs:
           # sys.path so `import src...` resolves.
           # --ignore=tests/load: locust scenarios are driven by the locust CLI.
           # -p no:randomly keeps ordering deterministic.
-          python -m pytest tests/ --ignore=tests/load -q --timeout=300 -p no:randomly
+          # -n auto --dist loadfile: xdist parallel workers; loadfile keeps
+          # tests from the same module on the same worker (SQLite file-locking
+          # compatible — conftest.py gives each worker its own SQLite file).
+          # --junitxml: provides total-count data for the floor check below,
+          # replacing the old second --collect-only pass (~8 s saved per run).
+          python -m pytest tests/ \
+            --ignore=tests/load \
+            -q \
+            --timeout=300 \
+            -p no:randomly \
+            -n auto \
+            --dist loadfile \
+            --junitxml=junit.xml
 
       - name: Fail if the suite collected far fewer tests than expected
         run: |
           # Assert a floor on collection so a silent import/collection failure
-          # cannot pass for a green suite - the same class of false green this
-          # workflow exists to end. Bump the floor as the suite grows.
-          count=$(python -m pytest tests/ --ignore=tests/load --collect-only -q 2>/dev/null \
-            | grep -oE "[0-9]+ tests? collected" | grep -oE "^[0-9]+" | head -1)
-          echo "collected: ${count:-0} tests"
+          # cannot pass for a green suite — the same class of false green this
+          # workflow exists to end. Parse from the junitxml produced above
+          # (replaces the second --collect-only pass that cost ~8 s per run).
+          # Bump the floor as the suite grows.
+          count=$(python3 - << 'EOF'
+          import xml.etree.ElementTree as ET, sys
+          try:
+              tree = ET.parse("junit.xml")
+              root = tree.getroot()
+              # pytest may emit <testsuites><testsuite> or a bare <testsuite>
+              suite = root.find("testsuite") if root.tag == "testsuites" else root
+              if suite is None:
+                  suite = root
+              print(suite.get("tests", "0"))
+          except Exception as e:
+              print(f"0", file=sys.stderr)
+              print(f"Cannot parse junit.xml: {e}", file=sys.stderr)
+              print("0")
+          EOF
+          )
+          echo "Total tests from junitxml: ${count:-0}"
           if [ "${count:-0}" -lt 2500 ]; then
-            echo "Expected at least 2500 collected tests, got ${count:-0}"
+            echo "Expected at least 2500 tests, got ${count:-0}"
+            echo "This may indicate a silent import or collection failure."
             exit 1
           fi
