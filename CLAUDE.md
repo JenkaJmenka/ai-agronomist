@@ -53,7 +53,7 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3829 passed, 22 skipped, 3 xfailed, 0 failed
+### Current baseline — 3843 passed, 27 skipped, 3 xfailed, 0 failed
 
 Measured 2026-10-17 by the orchestrator on `fix/live-feed-survives-redeploy`,
 the merge of `origin/main` (`b100b77`, i.e. PRs #80 and #81) into the live-feed
@@ -99,6 +99,30 @@ was then measured independently and is right. Keep the two steps apart anyway:
 a figure that matches a brief is not thereby verified, and the rule against
 tuning an expected value toward a number is not satisfied by the number later
 turning out to be correct.
+
+Updated 2026-10-26 by the orchestrator on `main` at `88f8e76` — the merge of
+#90 and #91 — full suite in the foreground, 381.56s:
+`./venv/bin/python -m pytest tests/ -q`. The arithmetic: `3829` on `8fb0818`
+→ `+14` from #91's SQLite collision tests (6 collision, 5 boundaries, 3
+`dialect_insert`) → `3843`. #90 is frontend-only and adds no pytest cases, so
+`8fb0818` measures the same `3829/22/3/0` as the branch before it.
+
+**The skipped count moved 22 → 27, and that is expected, not a regression.**
+#91 added `tests/api/test_synthetic_injection_collision_postgres.py`, five
+`@pytest.mark.postgres` tests that skip whenever no live server is reachable —
+which is every local run, since this machine has no Postgres service up. They
+execute in CI's `pgvector` job (`postgres-tests.yml`, `pytest -m postgres`),
+which measured `32 passed, 3841 deselected` on #91 and has a step that fails
+the build if any postgres-marked test *skips* there. So a local `27 skipped`
+and a CI `32 passed` are the same fact seen from two sides. If you measure
+`22 skipped` locally, you have a Postgres server running, not a cleaner tree.
+
+Both ends of the `+14` were measured by the orchestrator on the same tree about
+twenty minutes apart, so unlike the `3829` figure below this delta is a real
+cross-check rather than a number that merely agrees with a prior one. Note
+`3829` itself coincidentally matched the previous baseline line exactly, having
+been measured on a different branch nine days earlier; that agreement proved
+nothing and was not treated as proof.
 
 **This line is the baseline. Numbers in `AGENT_MEMORY.md` are dated snapshots,
 not baselines** — update this line when the figure changes, and date it.
