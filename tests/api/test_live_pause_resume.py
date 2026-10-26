@@ -49,7 +49,12 @@ def _reset_auth_keys() -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_scope_gate() -> None:
+    # Clear both setup and teardown: under xdist a prior file on the same
+    # worker may have left app.state.live_runtime set, which changes the
+    # pause/resume response from "unmanaged" to "not_configured".
     clear_all_suppressed_scopes()
+    if hasattr(app.state, "live_runtime"):
+        delattr(app.state, "live_runtime")
     yield
     clear_all_suppressed_scopes()
     if hasattr(app.state, "live_runtime"):
