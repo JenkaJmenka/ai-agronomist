@@ -1,9 +1,8 @@
 import os
-import shutil
+
 import numpy as np
 import pytest
 import torch
-from unittest.mock import patch
 from src.config import MODEL_CONFIG
 from src.models.lstm_vae import LSTMVAE
 from src.models.online_learner import OnlineLearner, OnlineLearningManager

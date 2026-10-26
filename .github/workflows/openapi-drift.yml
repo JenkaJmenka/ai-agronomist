@@ -34,7 +34,9 @@ jobs:
           # Full history is only needed on pull_request to three-dot diff.
           # On push/schedule the composite action exits before diffing, so a
           # shallow clone of depth 1 is sufficient and faster.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          # String literals required: 0 is falsy in GitHub Actions expressions,
+          # so `cond && 0 || 1` evaluates to 1 for every event.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       - name: Detect backend changes
         id: detect
@@ -43,7 +45,11 @@ jobs:
   check:
     name: openapi.json / api-types.gen.ts drift check
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    # Run unless the changes job explicitly output 'false'.
+    # If changes failed (output is empty) we treat it as backend=true so the
+    # gate fails closed rather than open: a skipped job satisfies required
+    # status checks, allowing a broken commit through.
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
