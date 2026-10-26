@@ -115,6 +115,11 @@ const DISPLAY_CHANNEL_ALIASES: Readonly<Record<string, string>> = {
   humidity_deficit: "measured_hd",
 };
 
+/** Display channel name for a raw/detector sensor name (identity when unaliased). */
+export function toDisplayChannel(name: string): string {
+  return DISPLAY_CHANNEL_ALIASES[name] ?? name;
+}
+
 /**
  * Promote aliased raw columns onto canonical names and drop the aliases so
  * charts/tiles do not show duplicate mismatched series

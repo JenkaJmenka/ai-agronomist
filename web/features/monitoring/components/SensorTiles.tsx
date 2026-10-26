@@ -6,7 +6,12 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { SensorTile } from "@/features/monitoring/components/SensorTile";
 import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
-import { CHANNEL_META, getChannelStatus } from "@/features/monitoring/lib/channelMeta";
+import {
+  CHANNEL_META,
+  getChannelStatus,
+  hasSetpointRange,
+  type TileSetpointState,
+} from "@/features/monitoring/lib/channelMeta";
 
 interface SensorTilesProps {
   /** All available rows (historical + live combined). */
@@ -15,6 +20,8 @@ interface SensorTilesProps {
   readonly channels: string[];
   /** Effective setpoints (defaults merged with user overrides). */
   readonly setpoints: Setpoints;
+  /** Detector-flagged readings per channel in the current window (independent of setpoints). */
+  readonly anomalyCounts?: ReadonlyMap<string, number>;
   /** True when the live SSE stream is active. */
   readonly isLive: boolean;
   /** True when the stream hasn't delivered data for ≥30 s. */
@@ -45,6 +52,7 @@ export function SensorTiles({
   rows,
   channels,
   setpoints,
+  anomalyCounts,
   isLive,
   isStale,
   isLoading,
@@ -54,10 +62,15 @@ export function SensorTiles({
     () =>
       channels.map((ch) => {
         const value = getLatestValue(rows, ch);
-        const status = value !== null ? getChannelStatus(ch, value, setpoints) : ("ok" as const);
-        return { channel: ch, value, status };
+        // No range (or no value yet) → neutral, never green: "ok" must mean
+        // "measured and inside a range", not "nothing to compare against".
+        const status: TileSetpointState =
+          value === null || !hasSetpointRange(ch, setpoints)
+            ? "no_range"
+            : getChannelStatus(ch, value, setpoints);
+        return { channel: ch, value, status, anomalyCount: anomalyCounts?.get(ch) ?? 0 };
       }),
-    [rows, channels, setpoints],
+    [rows, channels, setpoints, anomalyCounts],
   );
 
   if (isLoading) {
@@ -81,13 +94,14 @@ export function SensorTiles({
 
   return (
     <div data-testid="sensor-tiles" className="flex flex-wrap gap-3">
-      {tileData.map(({ channel, value, status }) => (
+      {tileData.map(({ channel, value, status, anomalyCount }) => (
         <SensorTile
           key={channel}
           channel={channel}
           value={value}
           meta={CHANNEL_META[channel]}
           status={status}
+          anomalyCount={anomalyCount}
           isLive={isLive}
           isStale={isStale}
         />

@@ -14,7 +14,8 @@ afterEach(cleanup);
 interface TileOpts {
   channel?: string;
   value?: number | null;
-  status?: "ok" | "warning" | "critical";
+  status?: "ok" | "warning" | "critical" | "no_range";
+  anomalyCount?: number;
   isLive?: boolean;
   isStale?: boolean;
 }
@@ -23,6 +24,7 @@ function renderTile({
   channel = "temperature",
   value = 22.5,
   status = "ok",
+  anomalyCount = 0,
   isLive = false,
   isStale = false,
 }: TileOpts = {}) {
@@ -32,6 +34,7 @@ function renderTile({
       value={value}
       meta={CHANNEL_META[channel]}
       status={status}
+      anomalyCount={anomalyCount}
       isLive={isLive}
       isStale={isStale}
     />,
@@ -125,6 +128,36 @@ describe("SensorTile — status styles", () => {
     renderTile({ status: "critical" });
     const tile = screen.getByTestId("sensor-tile-temperature");
     expect(tile.className).toContain("bg-sev-critical");
+  });
+});
+
+describe("SensorTile — no range is neutral, never green", () => {
+  it("uses a neutral border for no_range", () => {
+    renderTile({ channel: "heating_temp", value: 45, status: "no_range" });
+    const tile = screen.getByTestId("sensor-tile-heating_temp");
+    expect(tile.className).toContain("border-l-border");
+    expect(tile.className).not.toContain("border-l-sev-normal");
+    expect(tile).toHaveAttribute("data-setpoint-state", "no_range");
+  });
+});
+
+describe("SensorTile — anomaly badge is independent of setpoint state", () => {
+  it("shows no badge when the detector flagged nothing", () => {
+    renderTile({ status: "critical", anomalyCount: 0 });
+    expect(screen.queryByTestId("sensor-tile-anomaly-temperature")).toBeNull();
+  });
+
+  it("shows the badge on an in-range tile the detector flagged", () => {
+    renderTile({ status: "ok", anomalyCount: 3 });
+    const tile = screen.getByTestId("sensor-tile-temperature");
+    expect(tile.className).toContain("border-l-sev-normal");
+    expect(screen.getByTestId("sensor-tile-anomaly-temperature")).toHaveTextContent("3 anomalies");
+    expect(tile).toHaveAttribute("data-anomaly-count", "3");
+  });
+
+  it("uses the singular for one anomaly", () => {
+    renderTile({ status: "no_range", anomalyCount: 1 });
+    expect(screen.getByTestId("sensor-tile-anomaly-temperature")).toHaveTextContent(/^1 anomaly$/);
   });
 });
 

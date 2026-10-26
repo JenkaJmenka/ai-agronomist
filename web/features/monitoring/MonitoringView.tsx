@@ -23,6 +23,7 @@ import { useLiveReadings } from "@/features/monitoring/hooks/useLiveReadings";
 import { useReadings } from "@/features/monitoring/hooks/useReadings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { shouldPaintAnomalyHighlight } from "@/features/monitoring/lib/anomalyHighlight";
+import { countAnomaliesByChannel } from "@/features/monitoring/lib/tileAnomalies";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { rowsForActiveWindow } from "@/lib/periodPresets";
 import { DEFAULT_SCORE_THRESHOLD } from "@/lib/severity";
@@ -249,6 +250,12 @@ function MonitoringBody({
     channelMatch,
   });
 
+  // Tile anomaly badges: detector attribution only, never setpoint state.
+  const anomalyCounts = useMemo(
+    () => countAnomaliesByChannel(affectedByTimestamp, channels),
+    [affectedByTimestamp, channels],
+  );
+
   const paintAnomalyHighlight = shouldPaintAnomalyHighlight({
     channelParam,
     pageChannels: channels,
@@ -328,6 +335,7 @@ function MonitoringBody({
             rows={tableRows}
             channels={channels}
             setpoints={setpoints}
+            anomalyCounts={anomalyCounts}
             isLive={live}
             isStale={stale}
             isLoading={false}
