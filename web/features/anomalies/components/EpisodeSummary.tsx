@@ -10,16 +10,20 @@ import {
   formatValueRange,
   movementArrow,
 } from "@/features/anomalies/lib/formatEpisode";
+import { toDisplayChannel } from "@/features/monitoring/api/readings";
+import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { formatSetpointContext } from "@/features/monitoring/lib/setpointContext";
 import { SEVERITY_ORDER, type Severity } from "@/lib/severity";
 
 function asSeverity(value: string): Severity | undefined {
   return value in SEVERITY_ORDER ? (value as Severity) : undefined;
 }
 
-/** One merged event: span, span length, channel movement, and trend. */
+/** One merged event: span, span length, channel movement, trend and setpoint context. */
 export function EpisodeSummary({
   episode,
   onZoomToSpan,
+  setpoints,
 }: {
   readonly episode: AnomalyEpisode;
   /**
@@ -28,11 +32,20 @@ export function EpisodeSummary({
    * only an explicit click on the button below does.
    */
   readonly onZoomToSpan?: () => void;
+  /** Effective setpoints for inline setpoint context alongside detector reasoning. */
+  readonly setpoints?: Setpoints;
 }) {
   const unit = channelUnit(episode.channel);
   const severity = asSeverity(episode.severity);
   const valueRange = formatValueRange(episode, unit);
   const isClipped = episode.is_truncated_start || episode.is_truncated_end;
+
+  // Map the episode channel through the same display aliases as tiles.
+  const displayChannel = toDisplayChannel(episode.channel);
+  const setpointLine =
+    setpoints && episode.peak_value !== null
+      ? formatSetpointContext(displayChannel, episode.peak_value, setpoints)
+      : null;
 
   return (
     <summary className="cursor-pointer px-4 py-2.5 text-sm" data-testid="episode-summary">
@@ -91,6 +104,12 @@ export function EpisodeSummary({
           </>
         ) : null}
       </div>
+      {setpointLine ? (
+        <div className="mt-1 text-xs text-text-muted">
+          <span className="font-medium text-text">Setpoint: </span>
+          <span data-testid="episode-setpoint-context">{setpointLine}</span>
+        </div>
+      ) : null}
     </summary>
   );
 }

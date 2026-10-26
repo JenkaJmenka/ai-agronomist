@@ -10,7 +10,9 @@ import {
 import { CHANNEL_META } from "@/features/monitoring/lib/channelMeta";
 
 const SETPOINTS = Object.fromEntries(
-  Object.entries(CHANNEL_META).map(([ch, meta]) => [ch, meta.optimal]),
+  Object.entries(CHANNEL_META).flatMap(([ch, meta]) =>
+    meta.optimal !== undefined ? [[ch, meta.optimal]] : [],
+  ),
 );
 
 function row(partial: Partial<SensorRow> & { timestamp: string }): SensorRow {

@@ -10,11 +10,13 @@ import { AnomalyTable } from "@/features/anomalies/components/AnomalyTable";
 import { EpisodeTable } from "@/features/anomalies/components/EpisodeTable";
 import { GroupedAnomalies } from "@/features/anomalies/components/GroupedAnomalies";
 import { ScoreTimeline } from "@/features/anomalies/components/ScoreTimeline";
+import { SetpointExcursionsSection } from "@/features/anomalies/components/SetpointExcursionsSection";
 import { ThresholdControl } from "@/features/anomalies/components/ThresholdControl";
 import { useAnomalies } from "@/features/anomalies/hooks/useAnomalies";
 import { useAnomalyCount } from "@/features/anomalies/hooks/useAnomalyCount";
 import { useEnrichedAnomalies } from "@/features/anomalies/hooks/useEnrichedAnomalies";
-import { discoverChannels } from "@/features/monitoring/api/readings";
+import { collapseSetpointExcursions } from "@/features/anomalies/lib/setpointExcursions";
+import { discoverChannels, toDisplayChannel } from "@/features/monitoring/api/readings";
 import { useSetpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { SharedViewControls } from "@/features/shell/SharedViewControls";
 import { useChartRangeSelect } from "@/lib/useChartRangeSelect";
@@ -88,6 +90,28 @@ function AnomaliesBody() {
   });
   const anomalyTotal = anomalyCountState.count;
   const tableAnomalies = enrichment.topRows ?? anomalies;
+
+  // Build the set of channels with detector anomalies in this window (from
+  // enrichment affected_sensors), for the setpoint excursion cross-reference.
+  const anomalyChannels = useMemo(() => {
+    const chSet = new Set<string>();
+    for (const detail of enrichment.byTimestamp.values()) {
+      for (const sensor of detail.affectedSensors) {
+        chSet.add(toDisplayChannel(sensor));
+      }
+    }
+    return chSet;
+  }, [enrichment.byTimestamp]);
+
+  // Collapse contiguous out-of-range readings into spans for the excursion
+  // section (computed only once readings are settled).
+  const excursionSpans = useMemo(
+    () =>
+      rows.length > 0 && !isRefetching
+        ? collapseSetpointExcursions(rows, channels, setpoints, anomalyChannels)
+        : [],
+    [rows, channels, setpoints, anomalyChannels, isRefetching],
+  );
 
   // Dim + debounced URL write for chart drag-select / scroll-zoom.
   const { isDimmed, onChartRangeSelect } = useChartRangeSelect({ isReadingsBusy: isRefetching });
@@ -205,6 +229,7 @@ function AnomaliesBody() {
                 windowStart={windowStart}
                 windowEnd={windowEnd}
                 threshold={threshold}
+                setpoints={setpoints}
                 onWindowSelect={onTableRowSelect}
                 anomalyCount={anomalyTotal}
                 fallback={
@@ -214,6 +239,8 @@ function AnomaliesBody() {
                     enrichment={enrichment.byTimestamp}
                     isEnrichmentLoading={enrichment.isLoading}
                     onWindowSelect={onTableRowSelect}
+                    setpoints={setpoints}
+                    readings={rows}
                   />
                 }
               />
@@ -224,6 +251,8 @@ function AnomaliesBody() {
                 enrichment={enrichment.byTimestamp}
                 isEnrichmentLoading={enrichment.isLoading}
                 onWindowSelect={onTableRowSelect}
+                setpoints={setpoints}
+                readings={rows}
               />
             )}
           </Card>
@@ -241,9 +270,14 @@ function AnomaliesBody() {
                 enrichment={enrichment.byTimestamp}
                 isEnrichmentLoading={enrichment.isLoading}
                 onWindowSelect={onTableRowSelect}
+                setpoints={setpoints}
+                readings={rows}
               />
             </Card>
           ) : null}
+          <Card>
+            <SetpointExcursionsSection spans={excursionSpans} />
+          </Card>
         </RefetchingBlock>
       ) : (
         <RefetchingBlock isRefetching={isDimmed}>
@@ -276,6 +310,7 @@ function AnomaliesBody() {
                 windowStart={windowStart}
                 windowEnd={windowEnd}
                 threshold={threshold}
+                setpoints={setpoints}
                 anomalyCount={anomalyTotal}
                 fallback={
                   <GroupedAnomalies
@@ -292,6 +327,9 @@ function AnomaliesBody() {
                 threshold={threshold}
               />
             )}
+          </Card>
+          <Card>
+            <SetpointExcursionsSection spans={excursionSpans} />
           </Card>
         </RefetchingBlock>
       )}

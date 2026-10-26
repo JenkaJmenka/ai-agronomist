@@ -12,6 +12,10 @@ import {
   hasSetpointRange,
   type TileSetpointState,
 } from "@/features/monitoring/lib/channelMeta";
+import {
+  formatSetpointHint,
+  getRelatedAnomalyChannel,
+} from "@/features/monitoring/lib/setpointContext";
 
 interface SensorTilesProps {
   /** All available rows (historical + live combined). */
@@ -47,6 +51,12 @@ function getLatestValue(rows: SensorRow[], channel: string): number | null {
  *
  * Tiles appear above the time-series chart so operators can read the current
  * greenhouse state at a glance without scrolling to the chart.
+ *
+ * Visual priority (see SensorTile):
+ *   1. Anomaly present → red (dominant signal)
+ *   2. Setpoint excursion, no anomaly → amber (quieter treatment)
+ *   3. In range, no anomaly → green
+ *   4. No range / no data → neutral
  */
 export function SensorTiles({
   rows,
@@ -57,6 +67,8 @@ export function SensorTiles({
   isStale,
   isLoading,
 }: SensorTilesProps) {
+  const effectiveCounts = anomalyCounts ?? (new Map() as ReadonlyMap<string, number>);
+
   // Pre-compute latest value + status per channel so stable memo deps.
   const tileData = useMemo(
     () =>
@@ -68,9 +80,23 @@ export function SensorTiles({
           value === null || !hasSetpointRange(ch, setpoints)
             ? "no_range"
             : getChannelStatus(ch, value, setpoints);
-        return { channel: ch, value, status, anomalyCount: anomalyCounts?.get(ch) ?? 0 };
+        const anomalyCount = effectiveCounts.get(ch) ?? 0;
+
+        // Setpoint hint and related-anomaly hint are only meaningful for
+        // tiles that are out of range AND have no detector anomaly.
+        const isExcursionNoAnomaly =
+          anomalyCount === 0 && (status === "warning" || status === "critical");
+
+        const setpointHint = isExcursionNoAnomaly ? formatSetpointHint(ch, value, setpoints) : null;
+
+        const relatedAnomalyChannel = isExcursionNoAnomaly
+          ? getRelatedAnomalyChannel(ch, effectiveCounts)
+          : null;
+
+        return { channel: ch, value, status, anomalyCount, setpointHint, relatedAnomalyChannel };
       }),
-    [rows, channels, setpoints, anomalyCounts],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, channels, setpoints, effectiveCounts],
   );
 
   if (isLoading) {
@@ -94,18 +120,22 @@ export function SensorTiles({
 
   return (
     <div data-testid="sensor-tiles" className="flex flex-wrap gap-3">
-      {tileData.map(({ channel, value, status, anomalyCount }) => (
-        <SensorTile
-          key={channel}
-          channel={channel}
-          value={value}
-          meta={CHANNEL_META[channel]}
-          status={status}
-          anomalyCount={anomalyCount}
-          isLive={isLive}
-          isStale={isStale}
-        />
-      ))}
+      {tileData.map(
+        ({ channel, value, status, anomalyCount, setpointHint, relatedAnomalyChannel }) => (
+          <SensorTile
+            key={channel}
+            channel={channel}
+            value={value}
+            meta={CHANNEL_META[channel]}
+            status={status}
+            anomalyCount={anomalyCount}
+            isLive={isLive}
+            isStale={isStale}
+            setpointHint={setpointHint}
+            relatedAnomalyChannel={relatedAnomalyChannel}
+          />
+        ),
+      )}
     </div>
   );
 }

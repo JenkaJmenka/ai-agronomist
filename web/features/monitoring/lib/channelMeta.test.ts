@@ -10,9 +10,13 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a setpoints map from CHANNEL_META defaults. */
+/** Build a setpoints map from CHANNEL_META defaults (channels with an optimal range only). */
 function defaultSetpoints(): Record<string, readonly [number, number]> {
-  return Object.fromEntries(Object.entries(CHANNEL_META).map(([ch, meta]) => [ch, meta.optimal]));
+  return Object.fromEntries(
+    Object.entries(CHANNEL_META).flatMap(([ch, meta]) =>
+      meta.optimal !== undefined ? [[ch, meta.optimal]] : [],
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -43,8 +47,9 @@ describe("CHANNEL_META", () => {
     }
   });
 
-  it("all optimal ranges have min < max", () => {
+  it("all configured optimal ranges have min < max", () => {
     for (const [ch, meta] of Object.entries(CHANNEL_META)) {
+      if (!meta.optimal) continue; // channels without a default range are valid
       const [min, max] = meta.optimal;
       expect(min, `${ch}: min must be less than max`).toBeLessThan(max);
     }

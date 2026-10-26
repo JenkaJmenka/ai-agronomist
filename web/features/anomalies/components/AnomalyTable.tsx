@@ -10,6 +10,10 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { MonitoringJumpLink } from "@/features/anomalies/components/MonitoringJumpLink";
 import type { AnomalyRow } from "@/features/anomalies/hooks/useAnomalies";
 import type { AnomalyEnrichment } from "@/features/anomalies/hooks/useEnrichedAnomalies";
+import type { SensorRow } from "@/features/monitoring/api/readings";
+import { toDisplayChannel } from "@/features/monitoring/api/readings";
+import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
+import { formatSetpointContext } from "@/features/monitoring/lib/setpointContext";
 import { FAULT_LABELS } from "@/lib/severity";
 import {
   type SelectionWindowHandler,
@@ -48,6 +52,16 @@ interface AnomalyTableProps {
    * zooms to the same span (click / ⌘·Ctrl-click / Shift-click).
    */
   readonly onWindowSelect?: SelectionWindowHandler;
+  /**
+   * Effective setpoints — when present, adds an inline setpoint context column
+   * showing whether each anomalous value was within or outside its range.
+   */
+  readonly setpoints?: Setpoints;
+  /**
+   * All readings rows for the current window — used to look up the sensor
+   * value at each anomaly timestamp for the setpoint-context column.
+   */
+  readonly readings?: readonly SensorRow[];
 }
 
 function faultLabel(faultType: string | null | undefined): string | null {
@@ -66,8 +80,18 @@ export function AnomalyTable({
   isEnrichmentLoading = false,
   mode = "top",
   onWindowSelect,
+  setpoints,
+  readings,
 }: AnomalyTableProps) {
   const { isSelected, handleRowClick } = useTimestampRowSelection(onWindowSelect);
+
+  // Index readings by timestamp for O(1) value lookup in the setpoint column.
+  const readingsByTs = useMemo(() => {
+    if (!readings || !setpoints) return null;
+    const map = new Map<string, SensorRow>();
+    for (const r of readings) map.set(r.timestamp, r);
+    return map;
+  }, [readings, setpoints]);
 
   const columns = useMemo<ColumnDef<AnomalyRow, unknown>[]>(
     () => [
@@ -133,6 +157,33 @@ export function AnomalyTable({
           );
         },
       },
+      ...(setpoints
+        ? [
+            {
+              header: "Setpoint",
+              id: "setpoint_context",
+              cell: (ctx: { row: { original: AnomalyRow } }) => {
+                const detail = enrichment?.get(ctx.row.original.timestamp);
+                const mainSensor = detail?.affectedSensors?.[0];
+                if (!mainSensor) return <span className="text-text-muted">—</span>;
+
+                const displayCh = toDisplayChannel(mainSensor);
+                const readingRow = readingsByTs?.get(ctx.row.original.timestamp);
+                const rawValue = readingRow?.[displayCh] ?? readingRow?.[mainSensor];
+                const sensorValue = typeof rawValue === "number" ? rawValue : null;
+
+                return (
+                  <span
+                    className="block text-xs text-text-muted"
+                    data-testid="anomaly-setpoint-context"
+                  >
+                    {formatSetpointContext(displayCh, sensorValue, setpoints)}
+                  </span>
+                );
+              },
+            } satisfies ColumnDef<AnomalyRow, unknown>,
+          ]
+        : []),
       {
         header: "Actions",
         id: "actions",
@@ -147,7 +198,7 @@ export function AnomalyTable({
         },
       },
     ],
-    [enrichment, isEnrichmentLoading],
+    [enrichment, isEnrichmentLoading, setpoints, readingsByTs],
   );
 
   const displayRows = useMemo(() => {
@@ -164,6 +215,17 @@ export function AnomalyTable({
   const exportRows = useMemo(() => {
     return displayRows.map((row) => {
       const detail = enrichment?.get(row.timestamp);
+      let setpointCtx = "";
+      if (setpoints) {
+        const mainSensor = detail?.affectedSensors?.[0];
+        if (mainSensor) {
+          const displayCh = toDisplayChannel(mainSensor);
+          const readingRow = readingsByTs?.get(row.timestamp);
+          const rawValue = readingRow?.[displayCh] ?? readingRow?.[mainSensor];
+          const sensorValue = typeof rawValue === "number" ? rawValue : null;
+          setpointCtx = formatSetpointContext(displayCh, sensorValue, setpoints);
+        }
+      }
       return [
         row.timestamp,
         row.score,
@@ -171,10 +233,20 @@ export function AnomalyTable({
         faultLabel(detail?.faultType) ?? "",
         detail?.reasoning ?? "",
         (detail?.affectedSensors ?? []).join(", "),
+        ...(setpoints ? [setpointCtx] : []),
       ];
     });
-  }, [displayRows, enrichment]);
+  }, [displayRows, enrichment, setpoints, readingsByTs]);
 
+  const baseHeaders = [
+    "timestamp",
+    "score",
+    "severity",
+    "fault_type",
+    "reasoning",
+    "sensors",
+  ] as const;
+  const exportHeaders = setpoints ? [...baseHeaders, "setpoint_context"] : baseHeaders;
   const exportFilename = mode === "all" ? "all-anomalies" : "top-anomalies";
   const exportTestId = mode === "all" ? "export-all-anomalies-csv" : "export-anomalies-csv";
 
@@ -194,7 +266,7 @@ export function AnomalyTable({
         )}
         <ExportCsvButton
           filename={exportFilename}
-          headers={["timestamp", "score", "severity", "fault_type", "reasoning", "sensors"]}
+          headers={exportHeaders}
           rows={exportRows}
           testId={exportTestId}
         />

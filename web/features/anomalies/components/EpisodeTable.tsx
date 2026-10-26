@@ -11,6 +11,7 @@ import { EpisodeSampleRow } from "@/features/anomalies/components/EpisodeSampleR
 import { EpisodeSummary } from "@/features/anomalies/components/EpisodeSummary";
 import { useAnomalyEpisodes } from "@/features/anomalies/hooks/useAnomalyEpisodes";
 import { fetchErrorHint } from "@/features/anomalies/lib/classifyFetchError";
+import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { windowFromSelectedTimestamps } from "@/lib/selectionWindow";
 import type { SelectionWindowHandler } from "@/lib/useTimestampRowSelection";
 
@@ -36,6 +37,11 @@ interface EpisodeTableProps {
    * drift apart from independent cache timing. Null while unresolved.
    */
   readonly anomalyCount: number | null;
+  /**
+   * Effective setpoints — passed through to EpisodeSummary and EpisodeSampleRow
+   * so they can show inline setpoint context alongside detector reasoning.
+   */
+  readonly setpoints?: Setpoints;
 }
 
 const EXPORT_HEADERS = [
@@ -93,6 +99,7 @@ export function EpisodeTable({
   onWindowSelect,
   fallback,
   anomalyCount,
+  setpoints,
 }: EpisodeTableProps) {
   const state = useAnomalyEpisodes({
     windowStart,
@@ -183,6 +190,7 @@ export function EpisodeTable({
           >
             <EpisodeSummary
               episode={episode}
+              setpoints={setpoints}
               onZoomToSpan={
                 onWindowSelect
                   ? () => {
@@ -199,6 +207,7 @@ export function EpisodeTable({
                   sample={sample}
                   fallbackChannel={episode.channel}
                   episodeSpan={{ start_ts: episode.start_ts, end_ts: episode.end_ts }}
+                  setpoints={setpoints}
                 />
               ))}
             </ul>
