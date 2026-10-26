@@ -416,7 +416,9 @@ test("vpd tile shows derived provenance badge", async ({ page }) => {
   await expect(page.getByTestId("sensor-tile-vpd")).toContainText("derived");
 });
 
-test("critical temperature value colors its tile with sev-critical border", async ({ page }) => {
+test("critical temperature value colors its tile with sev-warning border (setpoint excursion, no detector anomaly)", async ({
+  page,
+}) => {
   await mockAllRoutesV2(page, SSE_BODY_CRITICAL);
   await page.goto("/monitoring?live=true");
 
@@ -427,8 +429,15 @@ test("critical temperature value colors its tile with sev-critical border", asyn
   await page.waitForTimeout(1000);
 
   const tile = page.getByTestId("sensor-tile-temperature");
+
+  // Setpoint state is "critical" (the value is far outside the range).
+  await expect(tile).toHaveAttribute("data-setpoint-state", "critical");
+
+  // Visual border: setpoint excursion WITHOUT a detector anomaly → amber (sev-warning),
+  // not red (sev-critical). The detector anomaly must be present for red.
   const className = await tile.getAttribute("class");
-  expect(className).toContain("border-l-sev-critical");
+  expect(className).toContain("border-l-sev-warning");
+  expect(className).not.toContain("border-l-sev-critical");
 });
 
 // ---------------------------------------------------------------------------
@@ -483,7 +492,10 @@ test("editing a setpoint changes tile status when value crosses new threshold", 
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("setpoints-dropdown")).not.toBeVisible();
 
-  // The tile's value (22) is now critically below the new min (25 - 10%*5=0.5 = warnMin 24.5)
+  // The tile's value (22) is now critically below the new min (25).
+  // Setpoint state → "critical". Visual: setpoint excursion without detector anomaly → amber.
+  await expect(tile).toHaveAttribute("data-setpoint-state", "critical");
   className = await tile.getAttribute("class");
-  expect(className).toContain("border-l-sev-critical");
+  expect(className).toContain("border-l-sev-warning");
+  expect(className).not.toContain("border-l-sev-critical");
 });

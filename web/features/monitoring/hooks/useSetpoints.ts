@@ -19,7 +19,9 @@ const setpointRangeSchema = z
 const setpointsSchema = z.record(z.string(), setpointRangeSchema);
 
 const DEFAULT_SETPOINTS: Setpoints = Object.fromEntries(
-  Object.entries(CHANNEL_META).map(([ch, meta]) => [ch, meta.optimal]),
+  Object.entries(CHANNEL_META).flatMap(([ch, meta]) =>
+    meta.optimal !== undefined ? [[ch, meta.optimal]] : [],
+  ),
 ) as Setpoints;
 
 const MIGRATED_KEY_PREFIX = "gh-setpoints-migrated:";

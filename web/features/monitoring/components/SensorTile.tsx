@@ -1,52 +1,48 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-
 import type { ChannelMeta, TileSetpointState } from "@/features/monitoring/lib/channelMeta";
-import { formatSensorValue } from "@/features/monitoring/lib/channelMeta";
+import { formatSensorValue, getChannelLabel } from "@/features/monitoring/lib/channelMeta";
 
 interface SensorTileProps {
   readonly channel: string;
   readonly value: number | null;
   readonly meta: ChannelMeta | undefined;
-  /** Latest value vs setpoint range — drives the border/background colour only. */
+  /** Latest value vs setpoint range — drives data-setpoint-state only. */
   readonly status: TileSetpointState;
   /**
    * Detector-flagged readings for this channel in the current window.
-   * Independent of `status`: a tile can be in range AND anomalous (e.g. a
-   * stuck sensor), or out of range with no anomaly (a setpoint excursion).
+   * Anomaly presence is the DOMINANT visual signal — it overrides the setpoint
+   * colour and makes the tile red regardless of whether the value is in range.
    */
   readonly anomalyCount?: number;
   /** True while the live SSE stream is active (drives pulse animation). */
   readonly isLive: boolean;
   /** True when the stream is stale — dims the tile to indicate stalled data. */
   readonly isStale: boolean;
+  /**
+   * Short directional hint shown when the tile is out of setpoint range but
+   * has NO detector anomaly (e.g. "below setpoint 53–77").  `null` or absent
+   * when the value is within range or there is no range configured.
+   */
+  readonly setpointHint?: string | null;
+  /**
+   * Channel name of a physically related channel that HAS detector anomalies
+   * on the current page.  Only set when this tile has no anomaly but is out of
+   * setpoint range — it never adds a badge or count to this tile.
+   */
+  readonly relatedAnomalyChannel?: string | null;
 }
-
-const STATUS_BORDER: Record<TileSetpointState, string> = {
-  no_range: "border-l-border",
-  ok: "border-l-sev-normal",
-  warning: "border-l-sev-warning",
-  critical: "border-l-sev-critical",
-};
-
-const STATUS_VALUE_COLOR: Record<TileSetpointState, string> = {
-  no_range: "text-text",
-  ok: "text-text",
-  warning: "text-sev-warning",
-  critical: "text-sev-critical",
-};
-
-const STATUS_BG: Record<TileSetpointState, string> = {
-  no_range: "bg-bg-elevated",
-  ok: "bg-bg-elevated",
-  warning: "bg-sev-warning/5",
-  critical: "bg-sev-critical/5",
-};
 
 /**
  * Individual sensor tile: shows the latest value for one channel with
  * status-based accent colouring and a one-shot glow pulse on live updates.
+ *
+ * Visual priority (highest first):
+ *   1. Anomaly (anomalyCount > 0) → red border + red tint, regardless of setpoint
+ *   2. Setpoint excursion, no anomaly → amber border + amber tint
+ *   3. In range, no anomaly → green border
+ *   4. No range / no data → neutral
  */
 export function SensorTile({
   channel,
@@ -56,6 +52,8 @@ export function SensorTile({
   anomalyCount = 0,
   isLive,
   isStale,
+  setpointHint,
+  relatedAnomalyChannel,
 }: SensorTileProps) {
   const prevValueRef = useRef<number | null>(null);
   const flashRef = useRef<HTMLDivElement>(null);
@@ -82,16 +80,53 @@ export function SensorTile({
   // Dim when not in live mode (historical data) or when stream is stale.
   const isDimmed = !isLive || isStale;
 
+  // ── Visual state derivation ────────────────────────────────────────────────
+  // Anomaly is the dominant signal: even an in-range tile gets red treatment
+  // when the detector flagged it (the product's core differentiator).
+  const hasAnomaly = anomalyCount > 0;
+  const isSetpointExcursion = !hasAnomaly && (status === "warning" || status === "critical");
+
+  let borderClass: string;
+  let bgClass: string;
+  let valueColorClass: string;
+
+  if (hasAnomaly) {
+    borderClass = "border-l-sev-critical";
+    bgClass = "bg-sev-critical/10";
+    valueColorClass = "text-sev-critical";
+  } else if (isSetpointExcursion) {
+    borderClass = "border-l-sev-warning";
+    bgClass = "bg-sev-warning/5";
+    valueColorClass = "text-sev-warning";
+  } else if (status === "ok") {
+    borderClass = "border-l-sev-normal";
+    bgClass = "bg-bg-elevated";
+    valueColorClass = "text-text";
+  } else {
+    // no_range: no value yet or channel has no configured range
+    borderClass = "border-l-border";
+    bgClass = "bg-bg-elevated";
+    valueColorClass = "text-text";
+  }
+
+  // Show the related-anomaly hint only when this tile is a setpoint excursion
+  // (no anomaly of its own) and a coupled channel has anomalies.
+  const showRelatedHint = isSetpointExcursion && relatedAnomalyChannel != null;
+  const relatedLabel = relatedAnomalyChannel ? getChannelLabel(relatedAnomalyChannel) : null;
+
   return (
     <div
       data-testid={`sensor-tile-${channel}`}
       data-setpoint-state={status}
       data-anomaly-count={anomalyCount}
+      {...(showRelatedHint && relatedAnomalyChannel
+        ? { "data-related-anomaly": relatedAnomalyChannel }
+        : {})}
       className={[
         "relative flex min-w-[7rem] flex-col gap-1.5 rounded-[var(--radius-card)]",
         "border border-border border-l-4 p-3 shadow-[var(--shadow-elevation)]",
-        STATUS_BORDER[status],
-        STATUS_BG[status],
+        borderClass,
+        bgClass,
         isDimmed ? "opacity-60" : "opacity-100",
         "transition-opacity duration-300",
       ].join(" ")}
@@ -108,9 +143,7 @@ export function SensorTile({
       />
 
       {/* Big numeric value + unit */}
-      <span
-        className={`text-2xl font-bold tabular-nums leading-none ${STATUS_VALUE_COLOR[status]}`}
-      >
+      <span className={`text-2xl font-bold tabular-nums leading-none ${valueColorClass}`}>
         {value !== null ? formatSensorValue(value, decimals) : "—"}
         {value !== null && unit !== "" ? (
           <span className="ml-0.5 text-sm font-normal text-text-muted">{unit}</span>
@@ -138,6 +171,26 @@ export function SensorTile({
           </span>
         ) : null}
       </div>
+
+      {/* Setpoint direction hint — shown only for excursions without a detector anomaly */}
+      {isSetpointExcursion && setpointHint ? (
+        <span
+          data-testid={`sensor-tile-setpoint-hint-${channel}`}
+          className="text-[10px] leading-tight text-sev-warning"
+        >
+          {setpointHint}
+        </span>
+      ) : null}
+
+      {/* Related-anomaly hint — coupled channel has anomalies while this tile has none */}
+      {showRelatedHint ? (
+        <span
+          data-testid={`sensor-tile-related-${channel}`}
+          className="text-[10px] leading-tight text-text-muted"
+        >
+          related to {relatedLabel} anomaly
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -18,6 +18,8 @@ interface TileOpts {
   anomalyCount?: number;
   isLive?: boolean;
   isStale?: boolean;
+  setpointHint?: string | null;
+  relatedAnomalyChannel?: string | null;
 }
 
 function renderTile({
@@ -27,6 +29,8 @@ function renderTile({
   anomalyCount = 0,
   isLive = false,
   isStale = false,
+  setpointHint,
+  relatedAnomalyChannel,
 }: TileOpts = {}) {
   return render(
     <SensorTile
@@ -37,6 +41,8 @@ function renderTile({
       anomalyCount={anomalyCount}
       isLive={isLive}
       isStale={isStale}
+      setpointHint={setpointHint}
+      relatedAnomalyChannel={relatedAnomalyChannel}
     />,
   );
 }
@@ -102,32 +108,36 @@ describe("SensorTile — value rendering", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Status-based styling
+// Status-based styling — setpoint-only (no anomaly)
 // ---------------------------------------------------------------------------
 
-describe("SensorTile — status styles", () => {
+describe("SensorTile — setpoint-only status styles (no anomaly)", () => {
   it("applies ok border class", () => {
-    renderTile({ status: "ok" });
+    renderTile({ status: "ok", anomalyCount: 0 });
     const tile = screen.getByTestId("sensor-tile-temperature");
     expect(tile.className).toContain("border-l-sev-normal");
   });
 
-  it("applies warning border class", () => {
-    renderTile({ status: "warning" });
+  it("applies amber (warning) border class for warning setpoint excursion", () => {
+    renderTile({ status: "warning", anomalyCount: 0 });
     const tile = screen.getByTestId("sensor-tile-temperature");
     expect(tile.className).toContain("border-l-sev-warning");
+    expect(tile.className).not.toContain("border-l-sev-critical");
   });
 
-  it("applies critical border class", () => {
-    renderTile({ status: "critical" });
+  it("applies amber (warning) border class for critical setpoint excursion — NOT red", () => {
+    renderTile({ status: "critical", anomalyCount: 0 });
     const tile = screen.getByTestId("sensor-tile-temperature");
-    expect(tile.className).toContain("border-l-sev-critical");
+    // Critical setpoint without anomaly gets amber treatment, not red
+    expect(tile.className).toContain("border-l-sev-warning");
+    expect(tile.className).not.toContain("border-l-sev-critical");
   });
 
-  it("applies critical background on critical status", () => {
-    renderTile({ status: "critical" });
+  it("applies amber background for setpoint excursion (warning or critical)", () => {
+    renderTile({ status: "critical", anomalyCount: 0 });
     const tile = screen.getByTestId("sensor-tile-temperature");
-    expect(tile.className).toContain("bg-sev-critical");
+    expect(tile.className).toContain("bg-sev-warning");
+    expect(tile.className).not.toContain("bg-sev-critical");
   });
 });
 
@@ -141,6 +151,44 @@ describe("SensorTile — no range is neutral, never green", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Anomaly dominant — overrides setpoint visuals
+// ---------------------------------------------------------------------------
+
+describe("SensorTile — anomaly is the dominant visual signal", () => {
+  it("shows red border for an in-range tile the detector flagged", () => {
+    renderTile({ status: "ok", anomalyCount: 3 });
+    const tile = screen.getByTestId("sensor-tile-temperature");
+    expect(tile.className).toContain("border-l-sev-critical");
+    expect(tile.className).not.toContain("border-l-sev-normal");
+  });
+
+  it("shows red bg for an in-range tile the detector flagged", () => {
+    renderTile({ status: "ok", anomalyCount: 2 });
+    const tile = screen.getByTestId("sensor-tile-temperature");
+    expect(tile.className).toContain("bg-sev-critical");
+    expect(tile.className).not.toContain("bg-bg-elevated");
+  });
+
+  it("shows red border even when setpoint is critical (anomaly dominates)", () => {
+    renderTile({ status: "critical", anomalyCount: 1 });
+    const tile = screen.getByTestId("sensor-tile-temperature");
+    expect(tile.className).toContain("border-l-sev-critical");
+    expect(tile.className).not.toContain("border-l-sev-warning");
+  });
+
+  it("shows red border for no_range tile with anomaly", () => {
+    renderTile({ status: "no_range", anomalyCount: 1 });
+    const tile = screen.getByTestId("sensor-tile-temperature");
+    expect(tile.className).toContain("border-l-sev-critical");
+    expect(tile.className).not.toContain("border-l-border");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Anomaly badge
+// ---------------------------------------------------------------------------
+
 describe("SensorTile — anomaly badge is independent of setpoint state", () => {
   it("shows no badge when the detector flagged nothing", () => {
     renderTile({ status: "critical", anomalyCount: 0 });
@@ -150,7 +198,6 @@ describe("SensorTile — anomaly badge is independent of setpoint state", () => 
   it("shows the badge on an in-range tile the detector flagged", () => {
     renderTile({ status: "ok", anomalyCount: 3 });
     const tile = screen.getByTestId("sensor-tile-temperature");
-    expect(tile.className).toContain("border-l-sev-normal");
     expect(screen.getByTestId("sensor-tile-anomaly-temperature")).toHaveTextContent("3 anomalies");
     expect(tile).toHaveAttribute("data-anomaly-count", "3");
   });
@@ -158,6 +205,103 @@ describe("SensorTile — anomaly badge is independent of setpoint state", () => 
   it("uses the singular for one anomaly", () => {
     renderTile({ status: "no_range", anomalyCount: 1 });
     expect(screen.getByTestId("sensor-tile-anomaly-temperature")).toHaveTextContent(/^1 anomaly$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Setpoint hint
+// ---------------------------------------------------------------------------
+
+describe("SensorTile — setpoint direction hint", () => {
+  it("shows the setpoint hint for a critical excursion with no anomaly", () => {
+    renderTile({
+      channel: "humidity",
+      value: 29,
+      status: "critical",
+      anomalyCount: 0,
+      setpointHint: "below setpoint 53–77",
+    });
+    expect(screen.getByTestId("sensor-tile-setpoint-hint-humidity")).toHaveTextContent(
+      "below setpoint 53–77",
+    );
+  });
+
+  it("does not show a setpoint hint when there is an anomaly", () => {
+    renderTile({
+      channel: "humidity",
+      value: 29,
+      status: "critical",
+      anomalyCount: 2,
+      setpointHint: "below setpoint 53–77",
+    });
+    expect(screen.queryByTestId("sensor-tile-setpoint-hint-humidity")).toBeNull();
+  });
+
+  it("does not show a setpoint hint when the value is in range", () => {
+    renderTile({
+      channel: "humidity",
+      value: 65,
+      status: "ok",
+      anomalyCount: 0,
+      setpointHint: null,
+    });
+    expect(screen.queryByTestId("sensor-tile-setpoint-hint-humidity")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Related-anomaly hint
+// ---------------------------------------------------------------------------
+
+describe("SensorTile — related-anomaly hint", () => {
+  it("shows the related-anomaly hint for a setpoint excursion with a coupled anomalous channel", () => {
+    renderTile({
+      channel: "humidity",
+      value: 29,
+      status: "critical",
+      anomalyCount: 0,
+      relatedAnomalyChannel: "measured_hd",
+    });
+    const hint = screen.getByTestId("sensor-tile-related-humidity");
+    expect(hint).toHaveTextContent("related to Humidity Deficit anomaly");
+    expect(screen.getByTestId("sensor-tile-humidity")).toHaveAttribute(
+      "data-related-anomaly",
+      "measured_hd",
+    );
+  });
+
+  it("does not show the related hint when the tile itself has an anomaly", () => {
+    renderTile({
+      channel: "humidity",
+      value: 29,
+      status: "critical",
+      anomalyCount: 2,
+      relatedAnomalyChannel: "measured_hd",
+    });
+    expect(screen.queryByTestId("sensor-tile-related-humidity")).toBeNull();
+    expect(screen.getByTestId("sensor-tile-humidity")).not.toHaveAttribute("data-related-anomaly");
+  });
+
+  it("does not show the related hint for an in-range tile", () => {
+    renderTile({
+      channel: "humidity",
+      value: 65,
+      status: "ok",
+      anomalyCount: 0,
+      relatedAnomalyChannel: "measured_hd",
+    });
+    expect(screen.queryByTestId("sensor-tile-related-humidity")).toBeNull();
+  });
+
+  it("does not add data-related-anomaly when no related channel", () => {
+    renderTile({
+      channel: "humidity",
+      value: 29,
+      status: "critical",
+      anomalyCount: 0,
+      relatedAnomalyChannel: null,
+    });
+    expect(screen.getByTestId("sensor-tile-humidity")).not.toHaveAttribute("data-related-anomaly");
   });
 });
 
