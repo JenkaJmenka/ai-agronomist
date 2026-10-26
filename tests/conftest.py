@@ -15,8 +15,16 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-# Ensure test DB is used globally before any app imports
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_global.db"
+# Ensure test DB is used globally before any app imports.
+# When pytest-xdist is active, each worker gets its own SQLite file to avoid
+# cross-worker contention on a single database.  Without xdist the path is
+# byte-identical to the original so serial behaviour is unchanged.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    _db_path = f"./test_global_{_xdist_worker}.db"
+else:
+    _db_path = "./test_global.db"
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
 
 # Disable LiveRuntime mock SCADA sources and live-to-DB persistence in tests.
 # The supervised mock connector tasks attempt to publish to Redis, which is
@@ -29,10 +37,24 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_global.db"
 os.environ.setdefault("MOCK_SCADA_ENABLED", "false")
 os.environ.setdefault("LIVE_PERSIST_ENABLED", "false")
 
+import pathlib
+
 import pytest
 import torch
 from src.models.lstm_vae import LSTMVAE
 from src.config import MODEL_CONFIG
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Clean up per-worker SQLite files created by xdist workers."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        db_file = pathlib.Path(f"./test_global_{worker}.db")
+        if db_file.exists():
+            try:
+                db_file.unlink()
+            except OSError:
+                pass
 
 
 @pytest.fixture(autouse=True)
