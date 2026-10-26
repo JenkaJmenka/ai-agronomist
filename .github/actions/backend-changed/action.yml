@@ -1,0 +1,90 @@
+name: 'Detect backend changes'
+description: >
+  Outputs backend=true if backend-relevant files changed (or on push/schedule).
+  Conservative inverse semantics: run unless EVERY changed file is under
+  web/** (excluding web/openapi.json and web/lib/api-types.gen.ts), docs/**,
+  or *.md. Empty diff → true. Requires a prior checkout step with full history
+  on pull_request events (fetch-depth: '0'); on push/schedule the checkout depth
+  does not matter because we exit before diffing.
+  If the base ref cannot be fetched or git diff fails for any reason, emits a
+  warning, sets backend=true, and exits 0 — never exits non-zero because
+  detection was impossible.
+
+outputs:
+  backend:
+    description: "'true' if backend tests should run"
+    value: ${{ steps.filter.outputs.backend }}
+
+runs:
+  using: composite
+  steps:
+    - name: Determine whether backend-relevant files changed
+      id: filter
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        if [[ "$EVENT_NAME" != "pull_request" ]]; then
+          # push to main / schedule: always run the full suite
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # Ensure the base ref's remote-tracking ref exists.
+        # Only fetch when it is absent — avoids a redundant network round-trip
+        # when actions/checkout already fetched it (fetch-depth:'0' case).
+        # NEVER fetch with --depth on a full clone: a depth-limited fetch into
+        # a full clone grafts the tip and makes the repository shallow, which
+        # removes the merge-base that git diff origin/<base>...HEAD requires.
+        if ! git rev-parse --verify "refs/remotes/origin/${BASE_REF}" \
+              > /dev/null 2>&1; then
+          if ! git fetch --no-tags origin \
+                "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+            echo "::warning::fetch of origin/${BASE_REF} failed; change detection skipped — running backend tests by default"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        # Safety net: if the repository is shallow for any reason (e.g. the
+        # caller checked out with fetch-depth != 0), unshallow it so the
+        # three-dot diff has a reachable merge base.
+        if git rev-parse --is-shallow-repository 2>/dev/null | grep -q 'true'; then
+          echo "::warning::shallow repository detected; unshallowing before diff"
+          if ! git fetch --unshallow; then
+            echo "::warning::unshallow failed; change detection skipped — running backend tests by default"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        # Three-dot diff: files changed in this PR since the merge base.
+        # Wrap in 'if !' so set -e (active in GitHub Actions bash shells) does
+        # not abort the step on a non-zero git exit code; we handle it below.
+        changed=""
+        if ! changed=$(git diff --name-only "origin/${BASE_REF}...HEAD"); then
+          echo "::warning::git diff origin/${BASE_REF}...HEAD failed; change detection skipped — running backend tests by default"
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        printf 'Changed files:\n%s\n' "$changed"
+        # Conservative inverse semantics: run unless EVERY changed file is in
+        # the skip-list: web/** (except web/openapi.json and
+        # web/lib/api-types.gen.ts), docs/**, or *.md.
+        # Unknown / empty diff → run.
+        if [[ -z "$changed" ]]; then
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        backend=false
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          # These two files are excluded from the skip-list so changes to the
+          # committed OpenAPI snapshot still trigger the backend checks.
+          if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
+            backend=true; break
+          elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
+            : # in skip-list — keep scanning
+          else
+            backend=true; break
+          fi
+        done <<< "$changed"
+        echo "backend=$backend" >> "$GITHUB_OUTPUT"

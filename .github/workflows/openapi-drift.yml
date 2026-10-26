@@ -27,47 +27,29 @@ jobs:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
+      backend: ${{ steps.detect.outputs.backend }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Full history is only needed on pull_request to three-dot diff.
+          # On push/schedule the composite action exits before diffing, so a
+          # shallow clone of depth 1 is sufficient and faster.
+          # String literals required: 0 is falsy in GitHub Actions expressions,
+          # so `cond && 0 || 1` evaluates to 1 for every event.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
-      - name: Determine whether backend-relevant files changed
-        id: filter
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
-          printf 'Changed files:\n%s\n' "$changed"
-          if [[ -z "$changed" ]]; then
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          backend=false
-          while IFS= read -r f; do
-            [[ -z "$f" ]] && continue
-            # web/openapi.json and web/lib/api-types.gen.ts are the files this
-            # job checks for drift — changes to them always trigger the check.
-            if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
-              backend=true; break
-            elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
-              :
-            else
-              backend=true; break
-            fi
-          done <<< "$changed"
-          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+      - name: Detect backend changes
+        id: detect
+        uses: ./.github/actions/backend-changed
 
   check:
     name: openapi.json / api-types.gen.ts drift check
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    # Run unless the changes job explicitly output 'false'.
+    # If changes failed (output is empty) we treat it as backend=true so the
+    # gate fails closed rather than open: a skipped job satisfies required
+    # status checks, allowing a broken commit through.
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

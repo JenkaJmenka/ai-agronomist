@@ -76,12 +76,19 @@ jobs:
 
       - name: Resolve Playwright version for browser cache key
         id: pw-version
-        # pnpm-lock.yaml v9 lists packages as '@playwright/test@X.Y.Z:'.
-        # Keying on the version (not the full lockfile hash) means the browser
-        # cache survives unrelated dependency updates.
+        # Read the INSTALLED version from the package.json that pnpm wrote into
+        # node_modules after the install step above. This is the single source of
+        # truth and is immune to peer-dep lines in the lockfile (e.g. Next.js
+        # lists @playwright/test as a peer, so grep on the lockfile returns
+        # "16.2.10(@playwright/test@1.61.1)..." and a numeric-only grep emits
+        # four version numbers, breaking GITHUB_OUTPUT assignment).
         run: |
-          v=$(grep -m1 '@playwright/test@' pnpm-lock.yaml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "version=${v:-unknown}" >> "$GITHUB_OUTPUT"
+          v=$(node -p "require('@playwright/test/package.json').version")
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Playwright version '${v}' does not match X.Y.Z — aborting"
+            exit 1
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright browsers
         id: pw-cache

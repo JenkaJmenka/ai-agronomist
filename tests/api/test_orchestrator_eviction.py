@@ -2,31 +2,29 @@ import os
 import json
 import pytest
 from unittest.mock import MagicMock, AsyncMock
+from src.api.services import orchestrator_registry
 from src.api.services.orchestrator_registry import (
     _orchestrators,
     get_orchestrator,
     clear_orchestrator_cache,
-    CHECKPOINT_DIR,
 )
 from src.models.retraining_orchestrator import RetrainingOrchestrator
 from src.utils.lru import LRUDict
 
+
 @pytest.mark.asyncio
-async def test_orchestrator_cache_eviction_and_rehydration():
+async def test_orchestrator_cache_eviction_and_rehydration(tmp_path, monkeypatch):
+    # Redirect checkpoint writes to a per-test temp directory so parallel
+    # xdist workers never collide on the same filesystem path.
+    ckpt_dir = str(tmp_path / "orchestrator_checkpoints")
+    monkeypatch.setattr(orchestrator_registry, "CHECKPOINT_DIR", ckpt_dir)
+
     # 1. Start fresh
     clear_orchestrator_cache()
-    
+
     # Ensure cache is LRUDict with max_size=10
     assert isinstance(_orchestrators, LRUDict)
     assert _orchestrators.max_size == 10
-
-    # Ensure checkpoint dir exists or gets cleared
-    if os.path.exists(CHECKPOINT_DIR):
-        for f in os.listdir(CHECKPOINT_DIR):
-            try:
-                os.remove(os.path.join(CHECKPOINT_DIR, f))
-            except Exception:
-                pass
 
     # 2. Add 10 orchestrators to fill the cache
     orchestrators = []
@@ -52,7 +50,7 @@ async def test_orchestrator_cache_eviction_and_rehydration():
     assert len(_orchestrators) == 10
 
     # 6. Verify checkpoint file exists for "cust_0" and contains correct data
-    checkpoint_file = os.path.join(CHECKPOINT_DIR, "cust_0.json")
+    checkpoint_file = os.path.join(ckpt_dir, "cust_0.json")
     assert os.path.exists(checkpoint_file)
     with open(checkpoint_file, "r") as f:
         saved_data = json.load(f)
@@ -60,7 +58,7 @@ async def test_orchestrator_cache_eviction_and_rehydration():
 
     # 7. Get "cust_0" again. It should read from the checkpoint file, rehydrate, delete it, and put it in cache.
     mock_db = AsyncMock()
-    
+
     load_state_calls = []
     original_load_state = RetrainingOrchestrator.load_state
     def mock_load_state(self, state):
@@ -68,11 +66,8 @@ async def test_orchestrator_cache_eviction_and_rehydration():
         original_load_state(self, state)
 
     # Temporary monkeypatch
-    RetrainingOrchestrator.load_state = mock_load_state
-    try:
-        restored_orch = await get_orchestrator("cust_0", mock_db)
-    finally:
-        RetrainingOrchestrator.load_state = original_load_state
+    monkeypatch.setattr(RetrainingOrchestrator, "load_state", mock_load_state)
+    restored_orch = await get_orchestrator("cust_0", mock_db)
 
     # Verify restoration
     assert restored_orch.customer_id == "cust_0"
@@ -85,11 +80,3 @@ async def test_orchestrator_cache_eviction_and_rehydration():
     # 9. Verify "cust_0" is back in cache
     assert "cust_0" in _orchestrators
     assert _orchestrators["cust_0"] is restored_orch
-
-    # Clean up checkpoint files
-    if os.path.exists(CHECKPOINT_DIR):
-        for f in os.listdir(CHECKPOINT_DIR):
-            try:
-                os.remove(os.path.join(CHECKPOINT_DIR, f))
-            except Exception:
-                pass
