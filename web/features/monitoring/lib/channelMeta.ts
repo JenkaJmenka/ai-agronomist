@@ -7,8 +7,12 @@ export interface ChannelMeta {
   readonly label: string;
   readonly unit: string;
   readonly decimals: number;
-  /** [min, max] optimal/setpoint range (best-practice defaults). */
-  readonly optimal: readonly [number, number];
+  /**
+   * [min, max] optimal/setpoint range (best-practice defaults).
+   * Optional — some channels have no universal default range and require
+   * per-installation configuration (e.g. humidity deficit).
+   */
+  readonly optimal?: readonly [number, number];
   /**
    * Present when the channel value is calculated from other sensors rather
    * than measured directly (e.g. VPD from temperature + humidity).
@@ -122,7 +126,44 @@ export const CHANNEL_META: Readonly<Record<string, ChannelMeta>> = {
     decimals: 2,
     optimal: [0, 5],
   },
+  /**
+   * Humidity deficit (measured). No default optimal range — must be configured
+   * per installation based on crop type. Added here for label/unit resolution.
+   */
+  measured_hd: {
+    label: "Humidity Deficit",
+    unit: "g/m³",
+    decimals: 1,
+  },
 } as const;
+
+/**
+ * Related-channel map — plain data, no logic.
+ *
+ * These pairs are agronomically coupled: a problem in one often co-occurs
+ * with an excursion in the other. Used by tile hints and the anomaly page
+ * "related event" callout.
+ *
+ * Directions are explicit (not auto-symmetric) so each channel controls which
+ * related channels it acknowledges.
+ */
+export const RELATED_CHANNELS: Readonly<Record<string, readonly string[]>> = {
+  humidity: ["measured_hd", "vpd"],
+  measured_hd: ["humidity"],
+  temperature: ["vpd"],
+  vpd: ["temperature", "humidity"],
+};
+
+/**
+ * Human-readable label for any channel — from CHANNEL_META when available,
+ * otherwise title-cased from the raw name.
+ */
+export function getChannelLabel(channel: string): string {
+  const meta = CHANNEL_META[channel];
+  if (meta) return meta.label;
+  // Fallback: replace underscores with spaces and title-case.
+  return channel.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 /**
  * Determine the channel status given its current value and effective setpoints.
