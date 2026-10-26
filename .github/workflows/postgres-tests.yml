@@ -18,40 +18,18 @@ jobs:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
+      backend: ${{ steps.detect.outputs.backend }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Full history is only needed on pull_request to three-dot diff.
+          # On push/schedule the composite action exits before diffing, so a
+          # shallow clone of depth 1 is sufficient and faster.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
 
-      - name: Determine whether backend-relevant files changed
-        id: filter
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
-          printf 'Changed files:\n%s\n' "$changed"
-          if [[ -z "$changed" ]]; then
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          backend=false
-          while IFS= read -r f; do
-            [[ -z "$f" ]] && continue
-            if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
-              backend=true; break
-            elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
-              :
-            else
-              backend=true; break
-            fi
-          done <<< "$changed"
-          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+      - name: Detect backend changes
+        id: detect
+        uses: ./.github/actions/backend-changed
 
   pgvector:
     needs: changes
@@ -162,27 +140,39 @@ jobs:
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
         run: |
           # A skip here means the suite silently stopped covering Postgres —
-          # the failure mode this job was added to prevent. Parse the junitxml
-          # from the single run above (no second pytest invocation needed).
+          # the failure mode this job was added to prevent.
+          # Use per-testcase <skipped> elements, not the suite-level "skipped"
+          # attribute: the suite attribute also counts xfail (expected failures),
+          # which are not the same as a test that did not run. We count only
+          # <skipped> child elements whose "type" attribute is NOT "pytest.xfail".
           python3 - << 'EOF'
           import xml.etree.ElementTree as ET, sys
           try:
               tree = ET.parse("/tmp/pg-results.xml")
               root = tree.getroot()
+              # pytest may emit <testsuites><testsuite> or a bare <testsuite>
               suite = root.find("testsuite") if root.tag == "testsuites" else root
               if suite is None:
                   suite = root
-              skipped = int(suite.get("skipped", "0"))
+              # Count <testcase> elements that contain a <skipped> child
+              # whose type is not "pytest.xfail". xfail entries have
+              # type="pytest.xfail" and should not trip this check.
+              real_skips = 0
+              for tc in suite.iter("testcase"):
+                  for sk in tc.findall("skipped"):
+                      if sk.get("type", "") != "pytest.xfail":
+                          real_skips += 1
           except Exception as e:
               print(f"Cannot parse /tmp/pg-results.xml: {e}", file=sys.stderr)
-              # Fallback: grep the tee'd log (same check as before the merge)
-              import subprocess
-              result = subprocess.run(
-                  ["grep", "-qE", r"[0-9]+ skipped", "/tmp/pg-tests.log"],
-                  capture_output=True
-              )
-              skipped = 1 if result.returncode == 0 else 0
-          if skipped:
-              print(f"PostgreSQL-only tests were skipped ({skipped}) — they are not actually running")
+              # Fail-closed: if we cannot parse the XML, assume something was
+              # skipped so the problem does not go undetected.
+              print("Treating unparseable XML as a skip — failing the check")
               sys.exit(1)
+          if real_skips:
+              print(
+                  f"PostgreSQL-only tests were skipped ({real_skips}) — "
+                  "they are not actually running"
+              )
+              sys.exit(1)
+          print(f"Skip check passed (0 real skips; xfail entries not counted)")
           EOF

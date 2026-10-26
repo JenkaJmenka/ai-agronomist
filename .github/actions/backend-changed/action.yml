@@ -1,0 +1,54 @@
+name: 'Detect backend changes'
+description: >
+  Outputs backend=true if backend-relevant files changed (or on push/schedule).
+  Conservative inverse semantics: run unless EVERY changed file is under
+  web/** (excluding web/openapi.json and web/lib/api-types.gen.ts), docs/**,
+  or *.md. Empty diff → true. Requires a prior checkout step with full history
+  on pull_request events (fetch-depth: 0); on push/schedule the checkout depth
+  does not matter because we exit before diffing.
+
+outputs:
+  backend:
+    description: "'true' if backend tests should run"
+    value: ${{ steps.filter.outputs.backend }}
+
+runs:
+  using: composite
+  steps:
+    - name: Determine whether backend-relevant files changed
+      id: filter
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        if [[ "$EVENT_NAME" != "pull_request" ]]; then
+          # push to main / schedule: always run the full suite
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # Three-dot diff: files changed in this PR since the merge base.
+        changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+        printf 'Changed files:\n%s\n' "$changed"
+        # Conservative inverse semantics: run unless EVERY changed file is in
+        # the skip-list: web/** (except web/openapi.json and
+        # web/lib/api-types.gen.ts), docs/**, or *.md.
+        # Unknown / empty diff → run.
+        if [[ -z "$changed" ]]; then
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        backend=false
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          # These two files are excluded from the skip-list so changes to the
+          # committed OpenAPI snapshot still trigger the backend checks.
+          if [[ "$f" == "web/openapi.json" || "$f" == "web/lib/api-types.gen.ts" ]]; then
+            backend=true; break
+          elif [[ "$f" == web/* || "$f" == docs/* || "$f" == *.md ]]; then
+            : # in skip-list — keep scanning
+          else
+            backend=true; break
+          fi
+        done <<< "$changed"
+        echo "backend=$backend" >> "$GITHUB_OUTPUT"
