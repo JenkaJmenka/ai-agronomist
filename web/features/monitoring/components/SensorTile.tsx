@@ -2,33 +2,43 @@
 
 import { useEffect, useRef } from "react";
 
-import type { ChannelMeta, ChannelStatus } from "@/features/monitoring/lib/channelMeta";
+import type { ChannelMeta, TileSetpointState } from "@/features/monitoring/lib/channelMeta";
 import { formatSensorValue } from "@/features/monitoring/lib/channelMeta";
 
 interface SensorTileProps {
   readonly channel: string;
   readonly value: number | null;
   readonly meta: ChannelMeta | undefined;
-  readonly status: ChannelStatus;
+  /** Latest value vs setpoint range — drives the border/background colour only. */
+  readonly status: TileSetpointState;
+  /**
+   * Detector-flagged readings for this channel in the current window.
+   * Independent of `status`: a tile can be in range AND anomalous (e.g. a
+   * stuck sensor), or out of range with no anomaly (a setpoint excursion).
+   */
+  readonly anomalyCount?: number;
   /** True while the live SSE stream is active (drives pulse animation). */
   readonly isLive: boolean;
   /** True when the stream is stale — dims the tile to indicate stalled data. */
   readonly isStale: boolean;
 }
 
-const STATUS_BORDER: Record<ChannelStatus, string> = {
+const STATUS_BORDER: Record<TileSetpointState, string> = {
+  no_range: "border-l-border",
   ok: "border-l-sev-normal",
   warning: "border-l-sev-warning",
   critical: "border-l-sev-critical",
 };
 
-const STATUS_VALUE_COLOR: Record<ChannelStatus, string> = {
+const STATUS_VALUE_COLOR: Record<TileSetpointState, string> = {
+  no_range: "text-text",
   ok: "text-text",
   warning: "text-sev-warning",
   critical: "text-sev-critical",
 };
 
-const STATUS_BG: Record<ChannelStatus, string> = {
+const STATUS_BG: Record<TileSetpointState, string> = {
+  no_range: "bg-bg-elevated",
   ok: "bg-bg-elevated",
   warning: "bg-sev-warning/5",
   critical: "bg-sev-critical/5",
@@ -38,7 +48,15 @@ const STATUS_BG: Record<ChannelStatus, string> = {
  * Individual sensor tile: shows the latest value for one channel with
  * status-based accent colouring and a one-shot glow pulse on live updates.
  */
-export function SensorTile({ channel, value, meta, status, isLive, isStale }: SensorTileProps) {
+export function SensorTile({
+  channel,
+  value,
+  meta,
+  status,
+  anomalyCount = 0,
+  isLive,
+  isStale,
+}: SensorTileProps) {
   const prevValueRef = useRef<number | null>(null);
   const flashRef = useRef<HTMLDivElement>(null);
 
@@ -67,6 +85,8 @@ export function SensorTile({ channel, value, meta, status, isLive, isStale }: Se
   return (
     <div
       data-testid={`sensor-tile-${channel}`}
+      data-setpoint-state={status}
+      data-anomaly-count={anomalyCount}
       className={[
         "relative flex min-w-[7rem] flex-col gap-1.5 rounded-[var(--radius-card)]",
         "border border-border border-l-4 p-3 shadow-[var(--shadow-elevation)]",
@@ -97,9 +117,18 @@ export function SensorTile({ channel, value, meta, status, isLive, isStale }: Se
         ) : null}
       </span>
 
-      {/* Channel label + provenance badge */}
-      <div className="flex items-center gap-1">
+      {/* Channel label + provenance / anomaly badges */}
+      <div className="flex flex-wrap items-center gap-1">
         <span className="text-xs text-text-muted">{label}</span>
+        {anomalyCount > 0 ? (
+          <span
+            data-testid={`sensor-tile-anomaly-${channel}`}
+            title="Detector-flagged readings for this sensor in the current window"
+            className="rounded bg-sev-critical/15 px-1 py-px text-[10px] font-semibold leading-tight text-sev-critical"
+          >
+            {anomalyCount} {anomalyCount === 1 ? "anomaly" : "anomalies"}
+          </span>
+        ) : null}
         {meta?.provenance === "derived" ? (
           <span
             title="Derived from other sensor channels — not directly measured"

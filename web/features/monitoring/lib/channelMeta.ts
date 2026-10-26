@@ -24,6 +24,16 @@ export interface ChannelMeta {
 
 export type ChannelStatus = "ok" | "warning" | "critical";
 
+/**
+ * Setpoint state shown on a sensor tile. Adds `"no_range"` for channels with
+ * no configured or default range (and tiles with no value yet): those render
+ * neutral, never green — green would claim "healthy" without any basis.
+ *
+ * This is ONLY the setpoint comparison. Detector anomalies are a separate,
+ * independent signal (the tile's anomaly badge).
+ */
+export type TileSetpointState = ChannelStatus | "no_range";
+
 export const CHANNEL_META: Readonly<Record<string, ChannelMeta>> = {
   temperature: {
     label: "Air Temp",
@@ -154,6 +164,14 @@ export function getChannelStatus(
   }
 
   return "ok";
+}
+
+/** True when a range exists for `channel` (user setpoint or CHANNEL_META default). */
+export function hasSetpointRange(
+  channel: string,
+  setpoints: Readonly<Record<string, readonly [number, number]>>,
+): boolean {
+  return (setpoints[channel] ?? CHANNEL_META[channel]?.optimal) !== undefined;
 }
 
 /** Format a numeric sensor value for display (rounds to meta.decimals). */
