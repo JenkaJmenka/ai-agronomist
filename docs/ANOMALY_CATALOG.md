@@ -5,6 +5,8 @@ parameters control it, what you see in the UI, and what an operator should do.
 
 **Related docs:** [User Guide](USER_GUIDE.md) · [Framework spec](anomaly_framework_spec.md) · [README](../README.md)
 
+**Last verified:** 2026-10-30, against commit `2be4406` (backend-engineer pass to cover band breaches, BOCPD gating, the cold-run upload path, stuck-fault temporal markers, and gas thresholds).
+
 ---
 
 ## How to read this catalog
@@ -32,6 +34,26 @@ gate order** takes precedence for the `fault_type`, and co-firing rules are
 appended to the reasoning as `"…; also flagged by: <root causes>"`. This is why
 you can see `spike_fault` as the label while the reasoning also mentions a
 correlation breakdown.
+
+That "first rule wins" rule only decides *among sensor-fault votes*. The
+full fault-type precedence has four levels, in this order
+(`comprehensive_pipeline.py:728-736`):
+
+1. **Sensor-fault rule votes** — spike, stuck, bias, correlation, drift,
+   diurnal, change-point, multivariate.
+2. **Physics** (psychrometric contradiction) — confirms or suppresses the
+   model signal.
+3. **Ensemble / LSTM** — the learned detector's own classification.
+4. **Crop setpoint band breaches** — always last.
+
+Band breaches rank last because they are deliberately **not** sensor-fault
+evidence: they are collected into a separate `band_findings` list instead
+of `rule_votes`, specifically so a real equipment fault (say, a stuck
+sensor) keeps claiming the `fault_type` over "the greenhouse is also
+outside its configured band" — the two are not mutually exclusive, and the
+sensor fault is almost always the more actionable one. A sensor-trust gate
+and a last-resort fusion step run after every sensor-fault detector has
+voted, before band findings are even considered.
 
 Two detectors *do* short-circuit and return immediately, because nothing
 downstream is meaningful once they fire:
@@ -178,6 +200,29 @@ dead-flat line while neighbouring channels still move.
 the redundant one is still moving, the probe is dead. If *both* froze, suspect
 the gateway or the SCADA polling loop, not the sensors.
 
+**Temporal markers.** The wall-clock stuck detector
+(`WallclockStuckDetector`, `stuck_fault_detector.py:~565`) records three
+timestamps per fault, not one:
+
+| Marker | Meaning |
+|--------|---------|
+| `onset_ts` | First frozen sample — the start of the fault. |
+| `last_frozen_ts` | Last sample still at the frozen value. `anomaly_episodes.end_ts` equals this, **not** the release. |
+| `release_ts` | First non-frozen sample after the freeze ends. |
+
+Baseline exclusion uses the closed span `[onset_ts, last_frozen_ts]`; alert
+suppression uses the wider `[onset_ts, release_ts + N]` so a just-recovered
+channel does not immediately re-alarm on its own recovery transient.
+`detected_ts` (when the wall-clock gate actually fired) is distinct from
+`timestamp` (= `onset_ts`); the gap between them is detection latency.
+
+Stuck hits also carry `frozen_hours_at_detection` instead of `z_score`
+(`src/api/schemas/sensor_data.py:~335`) — hours elapsed-so-far when the gate
+fired, not the final freeze duration. Legacy rows persisted before this
+field existed still carry the duration in `z_score`; a reader should only
+fall back to `z_score` when `detector == "stuck_fault"` **and**
+`frozen_hours_at_detection` is absent.
+
 > **Caveat:** a genuinely well-controlled compartment on a stable night can look
 > flat. `FLATLINE_IDENTICAL_STEPS = 24` exists to require *bit-identical* repeats
 > rather than merely small variance, which is what separates control quality from
@@ -220,6 +265,14 @@ computer faithfully controls to a wrong number.
 > runs `K = 0.25`, `H = 4.0` — on live telemetry the textbook values produce a
 > drift alarm roughly every few hours. ARL₀ ≈ 340 means about one false drift
 > alarm per 340 samples of in-control data.
+
+**Why BOCPD requires multiple sensors.** A single channel stepping to a new
+level is usually a control action (a setpoint change, a vent opening), not
+a fault — so one channel alone never raises `change_point`. The gate
+(`comprehensive_pipeline.py:~897-910`) only votes when at least
+`BOCPD_MIN_SENSORS` (default **2**) channels shift at the same sample.
+Multiple *unrelated* channels stepping together is what a recalibration or
+a probe swap looks like, and is much less often an intended control move.
 
 **In the UI.** Reasoning: *"Change-point: Bayesian online change-point detection
 (BOCPD) flagged a level shift on temperature"*. Drift is easiest to confirm on
@@ -371,6 +424,16 @@ picks it up from columns matching *humidity deficit*, *HD (g…)*, or *HD* — s
 physically impossible) and `psychrometric_inconsistency` (mapped to
 `humidity_fault` — inconsistent but not impossible).
 
+> **Known gap.** `humidity_fault` is not a member of the `FaultType` enum
+> (`src/models/fault_classifier.py`) and is not one of the values the
+> `ck_incidents_fault_type` CHECK constraint permits (migration `019`'s
+> value list), even though the frontend's `FAULT_LABELS` map
+> (`web/lib/severity.ts`) already has a label for it. A
+> `psychrometric_inconsistency` physics confirmation is the only path that
+> produces this fault type, so this is a live risk, not a theoretical one —
+> flagged here as found, not fixed; see the task report for the backlog
+> item.
+
 **What to do.** Trust this one. Physics does not have false positives; only your
 column mapping does. Verify first that the HD column really is in g/m³ and the
 temperature is in °C, then investigate the humidity sensor — it is the usual
@@ -435,9 +498,19 @@ does not page anyone.
 
 All eight share the root cause `crop_setpoint_band_breach`.
 
+The day/night bands themselves come from the operator's own crop profile
+(`OperationalConfig`, loaded per tenant/greenhouse via
+`get_operational_config_store()` — `band_breach_detector.py:~106-115`), not
+from anything the system infers. The wrong crop profile therefore produces
+noisy alarms indistinguishable from a real climate-control failure — check
+Configuration first whenever a band breach looks suspicious.
+
 **VPD** (vapour pressure deficit) is computed from temperature and RH rather than
-measured, so a VPD band breach is only as good as those two channels. If a
-psychrometric contradiction is also firing, fix that first.
+measured, so a VPD band breach is only as good as those two channels. For
+fusion purposes VPD is attributed to the **air temperature** sensor
+(`_CHANNEL_SENSOR`, `band_breach_detector.py:~40-45`), since there is no
+separate VPD sensor to blame. If a psychrometric contradiction is also
+firing, fix that first.
 
 ### The CO₂ enrichment flag
 
@@ -605,6 +678,51 @@ the User Guide.
 
 ---
 
+## Cold-run CSV upload detection
+
+**Every** CSV upload — not only a tenant's first one — runs through
+`run_cold_run_upload` (`src/api/services/cold_run_upload.py`), shared by
+both the synchronous upload endpoint and the RabbitMQ upload worker via
+`src/api/services/upload_portions.py`. The name is historical: this is not
+gated on "no model exists" the way the name suggests. It always runs **two**
+detectors over the file and merges their hits:
+
+1. **LSTM scoring** — the tenant's active model, or a freshly cold-started
+   one if none exists yet ("Option A" in the upload endpoint).
+2. **Per-column rolling z-score** (`ColdRunStatisticalDetector`,
+   `src/models/cold_run_detector.py`) — independent of whether a model
+   exists, over every continuous climate column.
+
+**Which columns.** `is_cold_run_stat_column` excludes `light`, `rain`,
+`screen` and `vent` columns — actuator positions and diurnal channels that
+would produce false positives under a rolling z-score. Humidity deficit
+(`measured_hd`/`deficit`) is deliberately **not** excluded: it is a derived
+thermodynamic quantity computed from air temperature and RH via the Tetens
+equation, not an actuator output, and excluding it previously blocked
+psychrometric validation on the upload path entirely.
+
+**Stuck detection on this path** uses `WallclockStuckDetector`, not the
+sample-indexed `StuckFaultDetector` the live pipeline uses — an elapsed-time
+gate handles the irregular cadence and NaN gaps a batch CSV can have in a
+way a fixed-length rolling window cannot. See "3. Stuck-at / unresponsive
+sensor (flatline)" above for its temporal markers.
+
+**Psychrometric pair suppression.** When air temperature drops and RH rises
+together in a way the Tetens equation predicts, that is expected physics,
+not two coincident faults — `_suppress_psychrometric_pairs`
+(`upload_portions.py:~303`) suppresses both sides of such a pair. If the
+measured humidity deficit disagrees with the HD derived from T and RH, the
+pairing is kept and marked `psychrometric_inconsistency` instead.
+
+**The `detector` label an operator sees** on an upload row is one of three
+values (`cold_run_upload.py:~423`): `lstm`, `statistical`, or the compound
+`lstm+statistical` when both detectors flag the same timestamp. **Filtering
+on `detector == "statistical"` alone undercounts** — every compound hit is
+a statistical hit too, so an exact-match filter misses it. Filter on
+`detector.endswith("statistical")` or check membership instead.
+
+---
+
 ## Pattern classification (what *kind* of anomaly)
 
 Once something is flagged, the pattern detector classifies the *shape*. Seven
@@ -685,8 +803,12 @@ value is scored by whichever method the baseline supports:
   distributions where a Gaussian z-score would mislead.
 - **`none`** — insufficient baseline data; no scoring.
 
-Severity comes back as `critical` / `warning` / `normal` directly from the
-detector.
+A baseline needs at least `_MIN_BASELINE_SAMPLES` (**5**) finite readings
+before it is used at all. Z-score severity tiers come from `GAS_Z_WARNING`
+(**2.0**) and `GAS_Z_CRITICAL` (**3.0**) in `src/config.py`; the IQR
+fallback uses the same `1.5×IQR` fence as every other Tukey check in this
+catalog. Severity comes back as `critical` / `warning` / `normal` directly
+from the detector.
 
 **API:** `GET /api/gas/summary` and `GET /api/gas/readings`.
 
