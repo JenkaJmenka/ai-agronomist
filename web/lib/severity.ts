@@ -23,12 +23,36 @@ export const SEVERITY_ORDER: Readonly<Record<Severity, number>> = {
   urgent: 4,
 };
 
+/**
+ * Full fault_type key set the backend can store, derived from
+ * FaultType (src/models/fault_classifier.py), _PHYSICS_REASON_TO_FAULT and
+ * _RULE_VOTE_PROFILES (src/api/services/comprehensive_pipeline.py).
+ */
 export const FAULT_LABELS: Readonly<Record<string, string>> = {
   spike_fault: "Spike fault",
   calibration_drift: "Calibration drift",
   stuck_fault: "Stuck sensor",
   bias_offset: "Bias offset",
   accuracy_decline: "Accuracy decline",
+  correlation_breakdown: "Correlation breakdown",
+  diurnal_deviation: "Diurnal deviation",
+  under_heating: "Under-heating",
+  over_heating: "Over-heating",
+  dehumidification_failure: "Dehumidification failure",
+  humidity_saturation_risk: "Humidity saturation risk",
+  thermal_divergence: "Thermal divergence",
+  temp_band_high: "Temperature above setpoint",
+  temp_band_low: "Temperature below setpoint",
+  vpd_band_high: "VPD above setpoint",
+  vpd_band_low: "VPD below setpoint",
+  humidity_band_high: "Humidity above setpoint",
+  humidity_band_low: "Humidity below setpoint",
+  co2_band_high: "CO₂ above setpoint",
+  co2_band_low: "CO₂ below setpoint",
+  polling_dropout: "Polling dropout",
+  out_of_bounds: "Out of bounds",
+  thermodynamic_contradiction: "Thermodynamic contradiction",
+  humidity_fault: "Humidity fault",
   unknown: "Unknown / unclassified",
 };
 

@@ -428,6 +428,25 @@ one-owner rule: another agent may add to a handoff spec when its own task
 explicitly says so (Task 4 does). It is a cross-agent contract, not one
 agent's working notes.
 
+Top-level `docs/*.md` (the 20 loose files directly under `docs/`, not its
+subdirectories) is backend-engineer's, assigned 2026-10-30 by the user. The
+table covered seven `docs/` subdirectories and backend-engineer's *root-level*
+`*.md` row, so the loose files in between — `ANOMALY_CATALOG.md`,
+`USER_GUIDE.md`, `anomaly_framework_spec.md` and seventeen others — belonged to
+nobody. Found while refreshing the anomaly catalog, which had drifted three
+months behind the detectors it documents. The reasoning: the fault taxonomy an
+operator-facing doc describes lives in `src/api/services/comprehensive_pipeline.py`
+(`_RULE_VOTE_PROFILES`, the band mapping, the two short-circuit gates), which
+backend-engineer already owns.
+
+Note the asymmetry, the same shape as the `src/live/` one: the *detectors
+themselves* are under `src/models/` and are **ml-engineer's** — MAD, BOCPD,
+Mahalanobis, the stuck detector, the pattern classifier. A doc task that
+re-derives detector maths or a threshold therefore needs ml-engineer too; one
+that documents pipeline precedence and operator-visible labels does not. The
+thresholds live in `src/config.py`, also ml-engineer's, so a doc agent reads
+them and reports drift rather than changing them.
+
 `.husky/` is devops-lead's, assigned 2026-10-16. It had no row, which surfaced
 when the pre-commit hook was found to fail in every git worktree: `node_modules/`
 is gitignored, so `pnpm exec lint-staged` cannot resolve and the hook aborts.

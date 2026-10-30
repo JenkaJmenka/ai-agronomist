@@ -7009,3 +7009,48 @@ Related: BACKLOG-17 (the same silent-unscored outcome, different and unreached
 cause), [[project_live_monitoring_stack]], and
 [[project_imputed_channel_phantom_freeze]] for the other orchestrator diagnosis
 that reached a commit message before a measurement did.
+
+## BACKLOG-20 — `humidity_fault` is produced but forbidden by the DB CHECK constraint (Orchestrator, 2026-10-30)
+
+`_PHYSICS_REASON_TO_FAULT["psychrometric_inconsistency"] = "humidity_fault"`
+(`src/api/services/comprehensive_pipeline.py:136`) yields a `fault_type` that is
+**not** in the `FaultType` enum (`src/models/fault_classifier.py:15`) and **not**
+among the 24 values in `ck_incidents_fault_type` (`_VALUES_V4`,
+`alembic/versions/019_add_band_breach_fault_types.py:21-45`). An incident write
+carrying it should violate the constraint.
+
+Reachable, and the producing site is not `PhysicsValidator`. That class never
+returns this reason — its only reasons are `psychrometric_impossibility`,
+`nocturnal_light`, `co2_out_of_range`, `temperature_out_of_range`,
+`normal_diurnal_variation` (`src/models/physics_validator.py:98-182`). The
+pipeline *synthesizes* the outcome itself at `comprehensive_pipeline.py:1513`:
+when `climate_context` carries `measured_hd` and
+`psychrometric_validate_row` returns `FAILED_PSYCHROMETRIC_LIMIT`, it returns
+`ValidationResult(confirmed=True, reason="psychrometric_inconsistency")`, which
+`:1566` (and `:976`) then maps to `humidity_fault`.
+
+Latent because `measured_hd` is opt-in — it only appears when the CSV carries a
+humidity-deficit column. Anyone grepping for the reason string and finding only
+the mapping will conclude the key is dead; it is not. Check `:1513` before
+writing it off.
+
+Two UIs already label the value — `web/lib/severity.ts:55` and
+`src/dashboard/constants.py:57` — so the fix is a migration adding it to the
+constraint plus an enum member, not removing the mapping. Decide which before
+touching it: dropping the mapping would silently reclassify a real
+psychrometric fault as `spike_fault` via the `.get` default.
+
+Found while refreshing `docs/ANOMALY_CATALOG.md`; documented there as a "Known
+gap" callout under the psychrometric section. Not verified against a live
+Postgres (no local server — see `project_postgres_tests_are_ci_only`); the
+constraint text is unambiguous, but the INSERT itself was not exercised.
+
+### Adjacent, not fixed
+
+`comprehensive_pipeline.py:801` comments the spike-MAD gate as
+"short-circuit on transient outliers". It does not short-circuit — the block
+below only appends to `rule_votes["spike_mad"]`, with no `return`, unlike the
+out-of-bounds gate at `:792`. `_persist_gate_result`'s own docstring (`:1590`)
+confirms only dropout and out-of-bounds are hard gates. A stale comment, not a
+behaviour bug; the catalog's "two gates" claim stays correct. One-line fix,
+backend-engineer's file.
