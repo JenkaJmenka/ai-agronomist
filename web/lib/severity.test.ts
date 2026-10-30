@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { getSeverity, resolveRowSeverity, SEVERITY_ORDER, type Severity } from "./severity";
+import {
+  FAULT_LABELS,
+  getSeverity,
+  resolveRowSeverity,
+  SEVERITY_ORDER,
+  type Severity,
+} from "./severity";
 
 // ─── getSeverity (fallback path) ─────────────────────────────────────────────
 
@@ -184,5 +190,51 @@ describe("severity group ordering", () => {
     ].sort((a, b) => b.order - a.order);
     expect(sorted[0]?.key).toBe("urgent");
     expect(sorted[1]?.key).toBe("critical");
+  });
+});
+
+// ─── FAULT_LABELS coverage ─────────────────────────────────────────────────
+
+describe("FAULT_LABELS", () => {
+  it("has a human-readable label for every fault_type the backend can store", () => {
+    // Derived from FaultType (src/models/fault_classifier.py),
+    // _PHYSICS_REASON_TO_FAULT and _RULE_VOTE_PROFILES
+    // (src/api/services/comprehensive_pipeline.py).
+    const backendFaultTypes = [
+      "accuracy_decline",
+      "spike_fault",
+      "bias_offset",
+      "correlation_breakdown",
+      "diurnal_deviation",
+      "calibration_drift",
+      "under_heating",
+      "over_heating",
+      "dehumidification_failure",
+      "humidity_saturation_risk",
+      "thermal_divergence",
+      "stuck_fault",
+      "temp_band_high",
+      "temp_band_low",
+      "vpd_band_high",
+      "vpd_band_low",
+      "humidity_band_high",
+      "humidity_band_low",
+      "co2_band_high",
+      "co2_band_low",
+      "polling_dropout",
+      "out_of_bounds",
+      "thermodynamic_contradiction",
+      "humidity_fault",
+      "unknown",
+    ];
+    for (const faultType of backendFaultTypes) {
+      expect(FAULT_LABELS[faultType]).toBeDefined();
+    }
+  });
+
+  it("never renders a raw snake_case key", () => {
+    for (const label of Object.values(FAULT_LABELS)) {
+      expect(label).not.toMatch(/_/);
+    }
   });
 });
