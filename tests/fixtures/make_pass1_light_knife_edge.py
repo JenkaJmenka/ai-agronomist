@@ -40,8 +40,10 @@ The discontinuity is the point. **Above** 50% dark the MAD is 0, the
 ``mad_z_scores`` guard short-circuits and the channel culls nothing; **just
 below** 50% it culls the whole other mode. A fixture on the wrong side of that
 line passes for the wrong reason, which is why the counts below are exact
-integers over an odd row count rather than approximate fractions: with an odd
-``ROWS`` the median is a data value rather than an interpolation between two.
+integers over an **odd** row count rather than approximate fractions. See the
+comment on ``ROWS``: an even count makes ``numpy.median`` interpolate between
+the two middle order statistics, so the median is a value no row holds and
+``MAD == median`` stops holding exactly.
 
 ## Adapter constraints these fixtures are shaped around
 
@@ -68,7 +70,28 @@ from pathlib import Path
 import numpy as np
 
 # --- Grid ------------------------------------------------------------------
-# Odd, so median(light) is a data value and the knife edge is exact.
+# ROWS MUST BE ODD. This is the one constant here that cannot be changed
+# casually, and the reason is `numpy.median`, not anything about greenhouses.
+#
+# With an even count numpy returns the **mean of the two middle order
+# statistics** rather than a value present in the data. The knife edge this
+# fixture exists to reproduce is the identity `MAD == median`, and that
+# identity is exact only when the median lands *on* the floor value `v`:
+#
+#   even ROWS  -> median = (v + first_bright) / 2, some value no row holds,
+#                 every deviation shifts, and MAD != median. The fixture then
+#                 silently stops reproducing the bug and the regression tests
+#                 pass for the wrong reason.
+#   odd ROWS   -> median = the element at index (ROWS - 1) // 2, which the
+#                 counts below place squarely inside the floor mode, so
+#                 median == v and MAD == v exactly.
+#
+# 401 was chosen as the smallest odd count that leaves comfortable headroom
+# over BOOTSTRAP_MIN_CLEAN_ROWS (100) after IsolationForest's ~4%
+# contamination budget, while keeping the file near 18 KB.
+#
+# If you change ROWS, re-derive CASE_HIGH_MODAL and CASE_LOW_MODAL with it:
+# both need dark + floor == (ROWS + 1) // 2 with each part under ROWS / 2.
 ROWS: int = 401
 INTERVAL_MINUTES: int = 5
 START = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
