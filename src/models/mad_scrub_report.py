@@ -20,6 +20,7 @@ from src.config import (
     BOOTSTRAP_MAD_MIN_SPREAD,
     BOOTSTRAP_MAD_Z_THRESHOLD,
 )
+from src.models.pass1_warning import Pass1Warning
 
 # Skip reasons reported on MadChannelReport.skip_reason.
 SKIP_REASON_EXCLUDED: str = "excluded_channel"
@@ -69,7 +70,7 @@ class MadScrubResult:
 
     flags: pd.Series
     channels: tuple[MadChannelReport, ...] = ()
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[Pass1Warning, ...] = ()
 
     @property
     def cull_fractions(self) -> dict[str, float]:

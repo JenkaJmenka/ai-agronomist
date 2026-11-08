@@ -49,6 +49,7 @@ from src.models.pass1_discard_guard import (
     Pass1DiscardStats,
     evaluate_pass1_discard,
 )
+from src.models.pass1_warning import Pass1Warning
 from src.models.psychrometric_validator import calculate_humidity_deficit
 from src.utils.profiling import timed
 
@@ -64,6 +65,14 @@ InsufficientDataError = ValueError
 # It subclasses ValueError, i.e. InsufficientDataError, so the route's existing
 # `except InsufficientDataError` still maps it to HTTP 400.
 
+# The canonical channel set, and the reason BOOTSTRAP_MAD_EXCLUDED_CHANNELS is
+# bounded rather than an open special-case register: that list is keyed on these
+# names, so it can never hold more than these four entries, and the default
+# holds one (`light`). If you ADD a channel here, the MAD scrub will evaluate it
+# with a whole-file median/MAD — check it is unimodal first, or the BACKLOG-14
+# failure recurs for the new channel. If you REMOVE one, drop it from
+# BOOTSTRAP_MAD_EXCLUDED_CHANNELS too, or the config carries a name that
+# matches nothing and the scrub silently stops excluding anything.
 _SENSOR_COLS: list[str] = ["temperature", "humidity", "co2", "light"]
 _GAS_COLS: frozenset[str] = frozenset({"co2", "light"})
 _TRAIN_EPOCHS: int = 10
@@ -91,7 +100,7 @@ class BootstrapPass1Result:
     mad_channels: tuple[MadChannelReport, ...] = ()
     if_flag_fraction: float = 0.0
     discard_stats: Pass1DiscardStats = field(default_factory=Pass1DiscardStats)
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[Pass1Warning, ...] = ()
 
     @property
     def mad_channel_cull_fractions(self) -> dict[str, float]:
@@ -165,10 +174,19 @@ class ColdStartBootstrap:
 
         discard_stats = evaluate_pass1_discard(df, combined, _SENSOR_COLS)
         warnings = mad_scrub.warnings + discard_stats.warnings
-        for message in warnings:
-            logger.warning("Pass 1: %s", message)
+        # Each producer already logged its own engineering detail, including the
+        # env-var remediation that must not reach the tenant; log the codes here
+        # so one line ties a run to the warnings it returned.
+        if warnings:
+            logger.warning(
+                "Pass 1 returned %d warning(s): %s",
+                len(warnings),
+                [warning.code for warning in warnings],
+            )
         if discard_stats.status == DISCARD_STATUS_FAIL:
-            raise ExcessivePass1DiscardError(discard_stats.warnings[0])
+            # str(exc) becomes the HTTP 400 body, so this must be the
+            # tenant-safe message, never the code and never the log text.
+            raise ExcessivePass1DiscardError(discard_stats.warnings[0].message)
 
         return BootstrapPass1Result(
             clean_df=clean_df,
@@ -226,6 +244,54 @@ class Pass2BootstrapDetector:
             train_losses = _train_loop(self._model, sequences)
         if train_losses:
             self._threshold = float(np.percentile(train_losses, BOOTSTRAP_THRESHOLD_PERCENTILE))
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        path: str,
+        *,
+        ranges: list[tuple[float, float]] | None = None,
+    ) -> "Pass2BootstrapDetector":
+        """Rebuild a scorer from a saved checkpoint, for offline comparison.
+
+        Added for the shadow-retraining procedure in
+        ``docs/runbooks/cold-start-retraining.md``, which has to score one
+        window with an old and a new model. It exists so that tooling does not
+        reach into ``_model``/``_threshold``.
+
+        **The checkpoint does not carry the training-time sensor ranges.**
+        ``train`` derives adaptive ranges via ``compute_adaptive_sensor_ranges``
+        and keeps them only in memory; ``save_checkpoint`` passes no
+        ``model_config``. So a reloaded detector normalizes with whatever
+        *ranges* is given, defaulting to the static ``SENSOR_RANGES`` — which is
+        also what the live inference path uses, so the default reproduces
+        production rather than the original training. Pass *ranges* explicitly
+        when comparing two models, so both sides normalize alike; a comparison
+        that lets the two differ is measuring the normalization, not the models.
+
+        The calibration threshold *is* carried, in the checkpoint's ``loss``
+        field, which is where ``save_checkpoint`` puts it.
+        """
+        detector = cls()
+        model = LSTMVAE()
+        model.to(DEVICE)
+        checkpoint = model.load_checkpoint(path)
+        model.eval()
+        detector._model = model
+        detector._threshold = float(checkpoint.get("loss", detector._threshold))
+        if ranges is not None:
+            detector._ranges = list(ranges)
+        return detector
+
+    @property
+    def calibration_threshold(self) -> float:
+        """The anomaly cutoff this detector scores against."""
+        return self._threshold
+
+    @property
+    def sensor_ranges(self) -> list[tuple[float, float]]:
+        """The normalization ranges in use — adaptive after ``train``."""
+        return list(self._ranges)
 
     def save_checkpoint(self, path: str) -> float:
         """Persist the trained model; returns the calibration threshold."""
@@ -409,12 +475,18 @@ def _compute_physics_flags(df: pd.DataFrame) -> pd.Series:
 
 
 def _compute_if_flags(df: pd.DataFrame) -> tuple[list[str], pd.Series]:
-    """Flag IsolationForest outliers, fitting and scoring the SAME population.
+    """Flag IsolationForest outliers.
 
-    ``contamination`` calibrates the decision boundary to the distribution the
-    forest was fitted on, so scoring a *different* population voids that
-    calibration. Between 2026-07-24 (``892bcd3``) and 2026-11-08 the fit
-    excluded MAD-flagged rows while ``.predict()`` ran over the whole frame,
+    **The invariant is `fit population == predict population`.** It is not a
+    prohibition on removing rows: removing rows is fine, and a future stage may
+    well want to — a flatline/stuck rule (BACKLOG-21) would need exactly that.
+    What is forbidden is the *asymmetry*, fitting on one population and scoring
+    a different one. If you drop rows, drop them from both sides.
+
+    Why: ``contamination`` calibrates the decision boundary to the distribution
+    the forest was fitted on, so scoring a different distribution voids the
+    calibration silently. Between 2026-07-24 (``892bcd3``) and 2026-11-08 the
+    fit excluded MAD-flagged rows while ``.predict()`` ran over the whole frame,
     which turned IsolationForest from a detector into an amplifier of the MAD
     cull: on the tenant_1 corpus it flagged 4.00% of its fit subset — the
     contamination it was asked for — but 98.08% of the rows MAD had already

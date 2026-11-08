@@ -22,6 +22,7 @@ All fractions here are fractions in [0, 1], never percentages.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -31,6 +32,13 @@ from src.config import (
     BOOTSTRAP_CULL_FAIL_FRACTION,
     BOOTSTRAP_CULL_WARN_FRACTION,
 )
+from src.models.pass1_warning import (
+    WARNING_CODE_DISCARD_EXCESSIVE,
+    WARNING_CODE_DISCARD_HIGH,
+    Pass1Warning,
+)
+
+logger = logging.getLogger(__name__)
 
 DISCARD_STATUS_OK: str = "ok"
 DISCARD_STATUS_WARN: str = "warn"
@@ -64,7 +72,7 @@ class Pass1DiscardStats:
     data_discarded: int = 0
     data_discard_fraction: float = 0.0
     status: str = DISCARD_STATUS_OK
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[Pass1Warning, ...] = ()
 
     @property
     def is_failing(self) -> bool:
@@ -141,18 +149,56 @@ def _status_for(data_discard_fraction: float) -> str:
 
 
 def _with_warning(stats: Pass1DiscardStats) -> Pass1DiscardStats:
-    """Attach the operator-facing message for a warn/fail status."""
+    """Log the engineering detail for a warn/fail status; attach the safe half.
+
+    The log line keeps both numerators and both denominators and names the
+    environment variables that set the limits. The returned ``message`` cannot:
+    it reaches the tenant both in ``pass1_warnings`` and — on a fail — as the
+    HTTP 400 body, because ``ColdStartBootstrap.run`` raises with this text and
+    ``src/api/routes/bootstrap.py`` passes ``str(exc)`` straight to the caller.
+    """
     limit = (
         BOOTSTRAP_CULL_FAIL_FRACTION
         if stats.is_failing
         else BOOTSTRAP_CULL_WARN_FRACTION
     )
-    verdict = "exceeds the fail limit" if stats.is_failing else "exceeds the warn limit"
-    message = (
-        f"{stats.summary()} — {verdict} of {100.0 * limit:.0f}%. The model would "
-        f"learn 'normal' from the remainder, selected by the very filter under "
-        f"suspicion. Inspect the per-channel MAD cull fractions and the "
-        f"IsolationForest flag rate on the Pass-1 result before retraining."
+    logger.warning(
+        "%s — %s of %.0f%% (%s). The model would learn 'normal' from the "
+        "remainder, selected by the very filter under suspicion. Inspect the "
+        "per-channel MAD cull fractions and the IsolationForest flag rate on "
+        "the Pass-1 result before retraining.",
+        stats.summary(),
+        "exceeds the fail limit" if stats.is_failing else "exceeds the warn limit",
+        100.0 * limit,
+        "BOOTSTRAP_CULL_FAIL_FRACTION"
+        if stats.is_failing
+        else "BOOTSTRAP_CULL_WARN_FRACTION",
+    )
+    if stats.is_failing:
+        message = (
+            f"Data cleaning removed {stats.data_discarded} of {stats.data_rows} "
+            f"readings ({100.0 * stats.data_discard_fraction:.1f}%), above the "
+            f"{100.0 * limit:.0f}% limit, so training was stopped. Training on "
+            f"what remained would have taught the model normal behaviour from "
+            f"too small a share of your history. Please check the sensors "
+            f"flagged above and upload again."
+        )
+    else:
+        message = (
+            f"Data cleaning removed {stats.data_discarded} of {stats.data_rows} "
+            f"readings ({100.0 * stats.data_discard_fraction:.1f}%) before "
+            f"training, above the {100.0 * limit:.0f}% level we flag for "
+            f"review. The model learns normal behaviour only from the readings "
+            f"that remain, so a high share narrows how much of your history it "
+            f"represents."
+        )
+    warning = Pass1Warning(
+        code=(
+            WARNING_CODE_DISCARD_EXCESSIVE
+            if stats.is_failing
+            else WARNING_CODE_DISCARD_HIGH
+        ),
+        message=message,
     )
     return Pass1DiscardStats(
         frame_rows=stats.frame_rows,
@@ -162,5 +208,5 @@ def _with_warning(stats: Pass1DiscardStats) -> Pass1DiscardStats:
         data_discarded=stats.data_discarded,
         data_discard_fraction=stats.data_discard_fraction,
         status=stats.status,
-        warnings=(message,),
+        warnings=(warning,),
     )
