@@ -7175,6 +7175,26 @@ correct; they are different populations. The orchestrator relayed the
 fixture-scoped figure as if it were corpus-wide and the user scoped this item off
 it. Always state which corpus a conditional was measured on.
 
+**Design constraint set by the user on 2026-11-08, before any work starts:
+humidity at 100.0 is NOT stuck by definition.** Winter saturation and fog are
+real greenhouse conditions, and 8.00% of the tenant_1 corpus sits at exactly
+100.0 while only part of that is the Nov 21 - Dec 26 fault. A rule that keys on
+**the value** would cull genuine saturation; the rule must key on **zero variance
+over a sustained duration**. So the first measurement is the distribution of
+legitimate 100% runs against the runs inside the fault window — not a threshold
+picked first and justified after.
+
+Deliverables for the diagnosis, as specified: the proposed rule and its
+duration; detection rate on the fault window; **false cull rate on legitimate
+saturation**; and the December IF flag rate, pinned vs not-pinned, recomputed
+after the stuck rows are excluded. STOP after the report — the fix is a separate
+decision.
+
+Note the measurement already in hand does not separate the two populations:
+December's 71.67% pinned share is genuine winter saturation *plus* whatever is
+frozen, and nothing measured so far distinguishes them. That separation is the
+task.
+
 Related: [[project_adapter_drops_null_rows]] (NaN temp/humidity rows are deleted
 before Pass 1 ever sees a null slot), [[project_imputed_channel_phantom_freeze]].
 
@@ -7222,3 +7242,57 @@ p99, every row brighter than 938.56 W/m² flagged. But **~15% of flags are not
 bright rows at all** (13.37% below 100 W/m²) — March's 33 flags have median light
 1.0 W/m² and are driven by low temperature and humidity — so a light-only
 conditioner leaves a residue by construction.
+
+## tenant_1 retraining is two-stage, and the first model is knowingly imperfect (Orchestrator, 2026-11-08)
+
+User directive, 2026-11-08. **Retrain tenant_1 once BACKLOG-14's fix D and its
+Phase 2 observability have merged** — the four stored checkpoints are built on a
+night-only corpus and their 0.0614-0.0650 thresholds are roughly **2x
+mis-calibrated** against the 0.12-0.13 any daylight-aware variant produces, so
+leaving them in place is worse than a retrain.
+
+**Record with that retrain that the model still trains on the December fault.**
+Fix D removed the daylight cull, which is correct, but it also removed the
+*incidental* exclusion of frozen rows, so ~94.7% of stuck-sensor rows now enter
+training ([[BACKLOG-21]]). A **second retrain follows once BACKLOG-21 lands.**
+The first model is therefore a deliberate improvement on a 2x calibration error,
+not a finished artifact, and should not be described as one.
+
+**The PDF report stays blocked on BACKLOG-21**, not on BACKLOG-14. Fix D makes
+the discard figure honest; it does not make "normal" honest while a frozen
+sensor helps define it.
+
+## A JSON blob in a String column fails on READ, not on write (Orchestrator, 2026-11-08)
+
+Found while closing a one-line gap on BACKLOG-14's branch (`c205265`). Worth not
+re-deriving, because the obvious reading of the known SQLite/Postgres NaN gap is
+wrong here.
+
+`ModelVersion.metrics_json` (`src/db/models.py:185`) is a **`String`** column, not
+JSON/JSONB. So a non-finite metric is **not** an instance of the usual gap: there
+is no write-time divergence between SQLite and Postgres, because no JSON
+validation happens at the write on either. The row stores cleanly everywhere.
+
+The failure is on the read path and it is **permanent**:
+
+- `json.dumps` emits the non-standard bare literals `NaN` / `Infinity`
+- `json.loads` **accepts** them, so the row revives into a live dict and looks fine
+- Starlette's `JSONResponse.render` uses `allow_nan=False` (verified on 1.2.1)
+
+So one bad write 500s that tenant's model reads on **every call, indefinitely**,
+until the row is edited out of the database — and the row is silent between the
+write and the first read. `model_registry.py:88` and `:110` `json.loads` this
+column, so `GET /api/models/active` and the model list were both exposed.
+
+Guarded at the write with `json.dumps(..., allow_nan=False)`
+(`model_registry.py:36`), which is the only choke point. Prefer the flag over a
+field sanitizer alone: a sanitizer covers the fields you thought of, the flag
+fails loudly on the one you did not. Non-finite values arise from skipped or
+degenerate statistics as readily as from detectors — Pass 1's skipped MAD
+channels report `median`/`mad`/`modal_share` as NaN **by design**, which is what
+made this reachable at all.
+
+A `ValueError` here is deliberately **not** mapped to HTTP 400, unlike the Pass-1
+discard guards: those reject operator data, while a non-finite metric is a
+statistic the server computed, so 5xx is the honest class and a 400 would tell an
+operator to fix a CSV that is not at fault.
