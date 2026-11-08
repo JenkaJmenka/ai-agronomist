@@ -6366,25 +6366,92 @@ reads as prudent isolation. Thirty tests across four files went red the moment
 the real guard was added. That fixture now carries a comment saying so. When a
 whole-suite-green claim covers a path that is failing in production, suspect an
 autouse fixture before suspecting the production report.
-### BACKLOG-14 — cold-start pass 1 flags half the training corpus as anomalous
+### BACKLOG-14 — cold-start pass 1 discarded half the training corpus (DIAGNOSED + FIXED 2026-11-08)
 
-Found by the user's read-only prod query on 2026-10-18. **Investigate before the
-PDF report feature ships** (user directive).
+Found by the user's read-only prod query on 2026-10-18; diagnosed and fixed
+2026-11-08. All four `tenant_1` cold-start `model_version` rows recorded an
+identical split: `pass1_clean_rows` **51,917**, `pass1_anomaly_rows` **53,004**
+of 104,921 — **50.52% discarded**.
 
-All four `tenant_1` cold-start `model_version` rows record an identical pass-1
-split: `pass1_clean_rows` **51,917** and `pass1_anomaly_rows` **53,004** —
-104,921 rows in total, so **50.5% of the corpus was flagged anomalous** and the
-model trained on the remaining 49.5%.
+**Root cause: `compute_mad_flags` takes one whole-file median/MAD per channel
+(`src/models/mad_scrub.py:44-49`), which assumes a unimodal channel. `light` is
+structurally bimodal.** When dark rows sit just *under* 50% of the window, every
+zero deviates from the median by exactly the median, so the median of those
+deviations **is** the median — `MAD == median` identically — and the cull
+boundary collapses to
 
-Why it matters: a detector that calls half of normal greenhouse history
-anomalous is either mis-thresholded at pass 1 or fed a corpus whose distribution
-it was never calibrated for. Either way the trained model inherits it — it
-learned "normal" from a 49.5% subset selected by the very criterion under
-suspicion. Any customer-facing report quoting anomaly rates would quote this.
+    cut = median × (1 + 3.5/0.6745) = 6.18903 × median(light)
 
-That all four rows carry the *same* counts is itself a clue: the 09-16 and 10-06
-retrains saw exactly the split 09-14 saw, so the input corpus did not grow
-between them.
+For tenant_1: `6.18903 × 1.35 = 8.3552`, max light among kept rows **8.35** vs
+min among culled **8.36**. **49,741 rows (47.41%) culled for being daylight.**
+`frac(light ≤ median) = 0.50000` — the knife edge.
+
+The discontinuity is the thing to remember: **above 50% dark, `MAD == 0`, the
+`mad_scrub.py:45-47` guard short-circuits and the channel culls nothing; just
+below 50%, it culls the entire other mode.** `native_dec_stuck_fault.csv` (65.69%
+dark) sits on the safe side and shows 4.43%; the year-long corpus sits on the
+other and shows 50.52%. Both are the same code. A 30-day March slice gives
+**53.05%** — worse than the year — so this is not a year-only bug: the trigger is
+"the median lands on the twilight floor", not "a long window".
+
+**IsolationForest was an amplifier, not the driver.** `contamination = 0.04` sets
+the decision offset from the **fit** sample only; `_compute_if_flags` fit on
+non-MAD rows then `.predict()`ed the whole frame, so it honoured 4.00% on its fit
+set while flagging **98.08%** of the MAD-culled rows it then scored. With no
+exclusion it flags 4.00%. Anyone reasoning "contamination caps it at 4%, so 50%
+is impossible" will dismiss the real cause — that premise cost this
+investigation a wrong turn.
+
+**Regression is datable: `892bcd3`, 2026-07-24**, which added `mad_scrub.py` and
+the IF `exclude_mask` in one commit. Before it, this corpus family produced
+0.35-4%.
+
+**Consequence, measured.** The clean set was night-only (max light 4.66 W/m²),
+so `compute_adaptive_sensor_ranges` returned light ∈ **(−0.23, 4.89)** instead of
+(−53, 1123); a July reading of 1020 normalised to ≈208 instead of ≈1. Calibration
+threshold **0.064** against 0.12-0.13 for any variant that has seen daylight —
+wrong by ~2×. `P(alert | day) = 97.60%`. Hours 11-13 had **zero** clean rows all
+year: the model scoring this tenant had never seen solar noon.
+
+**Fix (D), on `fix/pass1-mad-bimodal-channels` (`30e92dc`):** drop `light` from
+the MAD channel list; add a generic skip for any channel whose modal share
+exceeds 40% or whose MAD ≤ 1e-9; remove the `exclude_mask` so IF fits and
+predicts on one population; return per-channel cull fractions and the IF
+full-frame rate; guard at warn ≥15% / fail ≥25% discard **over rows carrying
+data** plus warn if any single channel culls >10%. Result: **50.52% → 4.62%**,
+hour-12 survival **0.00% → 84.47%**, humidity keeps all 1,426 legitimate culls,
+full suite `3843/27/3/0`.
+
+Rejected on measurement, so do not re-propose: **raising
+`BOOTSTRAP_MAD_Z_THRESHOLD`** (what `mad_scrub.py:98-99` used to advise — z>10
+still gives 46.48%, z>1000 gives 4.00%, because `median == MAD` makes a
+1000 W/m² row's z ≈ 499; the advice text was corrected), **MAD on log1p(light)**
+(28.50%), and **per-hour / per-(month,hour) baselines** (fix the year at
+8.57-13.87% but are 2-3× *worse* than production on short uploads — 12.04% on 3
+days — because a 288-cell grid leaves ~84 samples per cell).
+
+Residual: the noon gate was relaxed to >80% for D's PR; the remaining shortfall
+is all IsolationForest and is tracked as [[BACKLOG-22]]. The stuck-sensor
+interaction D exposed is [[BACKLOG-21]].
+
+Process notes worth keeping. **The source CSV is not recoverable from prod** —
+`/api/bootstrap` unlinks its temp file in `finally` (`routes/bootstrap.py:193`)
+and the async path calls `delete_upload_blob` once portions are enqueued
+(`upload_prepare_consumer.py:73`). The user supplied
+`~/Projects/ai-agronomist-data/2026_1d_english_clean_fixed.csv`, which reduces to
+the production frame exactly: 105,121 rows → dedup 1 duplicate timestamp →
+105,120 → drop 199 rows with blank temperature/humidity (`csv_adapter.py:32`,
+`REQUIRED_SENSOR_COLS`) → **104,921**. Every figure above was reproduced by the
+orchestrator on that file independently of the agent that produced it, which is
+the only reason they are stated flatly here.
+
+And **`bootstrap.py:104` cited a spec that had never been committed**:
+`docs/architecture/scada-config-engine-plan.md` was hidden by
+`.gitignore`'s `docs/architecture/*`, so checking the citation took archaeology —
+and the plan turned out not to support the code (its Pass-1 items specify stage
+order, "before IsolationForest", and say nothing about a fit exclusion). Fixed in
+`5cbcae3`: the directory is now tracked in full with only `drafts/` ignored.
+Same failure as `docs/live_scada_connectors.md`, one directory over.
 
 Not to be confused with the threshold spread recorded directly below: that is a
 *training* non-determinism, this is a *data/labelling* problem at pass 1.
@@ -7054,3 +7121,104 @@ out-of-bounds gate at `:792`. `_persist_gate_result`'s own docstring (`:1590`)
 confirms only dropout and out-of-bounds are hard gates. A stale comment, not a
 behaviour bug; the catalog's "two gates" claim stays correct. One-line fix,
 backend-engineer's file.
+
+## BACKLOG-21 — stuck-sensor rows pass Pass 1 unflagged, and fix D made it worse (Orchestrator, 2026-11-08)
+
+**Numbered 21, not 15.** The user's brief called this "BACKLOG-15"; that number
+was taken on 2026-10-18 by the dead raw-readings query, which had itself been
+renumbered off a BACKLOG-14 collision. Renumbering here rather than creating a
+second BACKLOG-15 — see that entry for how durable the earlier collision was
+(commit `3e3af3c`'s message still names the wrong number).
+
+**Blocks the PDF report alongside [[BACKLOG-14]]. Diagnose-first — do not start
+with a fix.**
+
+Pass 1 has no rule for a flatlined channel. On the tenant_1 corpus, with
+"frozen" = inside a run of ≥ `STUCK_WINDOW_K` (10) identical readings:
+
+    P(pass-1 flag | humidity frozen at 100.0)   5.33%   (post-D)
+    background discard rate                     4.62%   (post-D)
+
+so **frozen rows are flagged at essentially the background rate — Pass 1 cannot
+tell a dead sensor from a working one**, and ~94.7% of frozen rows enter the
+training corpus.
+
+**Fix D made this worse, and the direction matters.** Pre-D the figure was
+32.80%, so ~67% of frozen rows entered training. That filtering was **incidental**:
+frozen *daylight* rows were being culled for being daylight, not for being frozen.
+D removed the daylight cull and with it the accidental protection. An improvement
+in the conditional (32.80% → 5.33%) is a *regression* in the problem; the
+orchestrator initially read it the other way round and the user corrected it.
+
+**The December inversion is the sharpest evidence**, and it is why this is no
+longer only a missed-detection problem. On December daylight rows:
+
+    71.67% have humidity pinned at exactly 100.0
+    IF flag rate | pinned      17.53%
+    IF flag rate | NOT pinned  53.74%
+
+The stuck population is the statistical **majority** of the month, so Pass 1
+learns the frozen sensor as normal and flags the healthy readings as anomalous.
+Corpus-wide the same inversion holds (15.87% pinned vs 6.01% not) and December
+supplies almost all the pinned rows. Nov is 17.64% pinned; Jan-Oct are 0.00%.
+
+Needs a flatline / zero-variance rule at Pass 1. Note the detectors already have
+one — `StuckFaultDetector` (`STUCK_WINDOW_K`, `STUCK_EPSILON`,
+`STUCK_VARIANCE_THRESHOLD`) — so the question is why Pass 1 does not consult it,
+not how to write one. Note also the related trap: the MAD scrub can never catch
+this, because within a window where the frozen value is the median, `MAD == 0`
+and `mad_scrub.py:45-47` short-circuits the channel entirely.
+
+Measurement trap, paid for once: `P(flag | frozen)` is **1.17% on
+`native_dec_stuck_fault.csv`** and **32.80% on the full corpus** pre-D. Both are
+correct; they are different populations. The orchestrator relayed the
+fixture-scoped figure as if it were corpus-wide and the user scoped this item off
+it. Always state which corpus a conditional was measured on.
+
+Related: [[project_adapter_drops_null_rows]] (NaN temp/humidity rows are deleted
+before Pass 1 ever sees a null slot), [[project_imputed_channel_phantom_freeze]].
+
+## BACKLOG-22 — condition `light` inside IsolationForest rather than dropping it (Orchestrator, 2026-11-08)
+
+Follow-up to [[BACKLOG-14]]. **Diagnose-first, separate branch.** D's noon gate
+was relaxed to >80% (achieved 84.47%) on the understanding this lands here.
+
+After D, the whole hour-12 shortfall is IsolationForest: MAD-only noon survival
+is **98.72%**, while IF's flag rate climbs from ~0.5% at night to **15.53%** at
+noon. `light` is an IF input feature and diurnal light is the dominant variance
+direction, so the fixed 4% contamination budget is spent on "it is sunny" —
+flagged rows have median light **734 W/m²** vs 1 W/m² for clean.
+
+**Do not drop `light` from IF's feature set.** It reaches 96.00% noon survival,
+but the diagnosis measured that IF is the *only* Pass-1 coverage for light faults
+once MAD stops looking at the channel: an injected over-bright spike was caught
+**24/24 by IsolationForest** and 0/24 by everything else. Removing it makes Pass
+1 blind to light entirely. Note also that contamination pins the global rate at
+4.00% either way — the change redistributes which 4% is flagged, it does not
+reduce the count.
+
+Candidates: (a) hour sin/cos as IF features; (b) per-hour or hour×month
+normalised light. Gates: noon survival >90%, light-spike detection 24/24
+unchanged, global discard not above D's 4.62%, IF flags not concentrated by month.
+
+**The month gate cannot be met by conditioning light alone, and this is the one
+thing to read before starting.** The IF-flagged-daylight distribution is
+concentrated but **not on summer**:
+
+    Dec  27.79% IF rate among daylight — 22.72% of all flags on 5.30% of daylight rows
+    Jul  11.84%   Jun 9.29%   Apr 9.07%   Aug 7.52%   Nov 7.48%
+    Jan / Feb / Oct  exactly 0.00%
+    Apr-Sep 7.53% vs Oct-Mar 4.89% — only 1.54×, i.e. mild
+
+December is rank 1 under three of four daylight definitions. Its driver is
+**humidity, not light** ([[BACKLOG-21]]: 71.67% of its daylight rows are frozen at
+100.0 and IF flags the *working* ones at 53.74%), and its flags already sit at
+only p80.4 of December's own light distribution. Neither candidate (a) nor (b)
+reaches that population. Chasing the month gate with a light lever will fail.
+
+On the light axis the concentration is unambiguous: flagged daylight median
+**773.35** vs unflagged **127.32** (6.07×), 34.95% of flags above the unflagged
+p99, every row brighter than 938.56 W/m² flagged. But **~15% of flags are not
+bright rows at all** (13.37% below 100 W/m²) — March's 33 flags have median light
+1.0 W/m² and are driven by low temperature and humidity — so a light-only
+conditioner leaves a residue by construction.
