@@ -103,15 +103,59 @@ Frozen dataclass, one per channel.
 | `cull_fraction` | `float` | `cull_rows / finite_rows`, `0.0` when `finite_rows == 0` |
 
 `skip_reason` is one of these five string constants, exported from the same
-module. Treat the set as closed and match on the constants, not the literals:
+module. Treat the set as closed and match on the constants, not the literals.
 
-| constant | value | when |
-|---|---|---|
-| `SKIP_REASON_EXCLUDED` | `"excluded_channel"` | named in `BOOTSTRAP_MAD_EXCLUDED_CHANNELS` |
-| `SKIP_REASON_MODAL_SHARE` | `"modal_share_above_limit"` | modal share > `BOOTSTRAP_MAD_MAX_MODAL_SHARE` |
-| `SKIP_REASON_NO_SPREAD` | `"mad_at_or_below_min_spread"` | MAD ≤ `BOOTSTRAP_MAD_MIN_SPREAD` |
-| `SKIP_REASON_NO_FINITE` | `"no_finite_values"` | channel is entirely NaN |
-| `SKIP_REASON_MISSING` | `"column_absent"` | asked for, not present in the frame |
+**The five reasons are not independent alternatives — they are checked in a
+fixed precedence order, and only the first match is reported.** A reviewer's
+point, recorded here rather than left implicit: a DB row's `skip_reason`
+answers "which check fired first", not "which checks apply" — a channel that
+is both zero-spread and nominally over the modal-share limit is reported as
+zero-spread (`mad_at_or_below_min_spread`), never `modal_share_above_limit`,
+because the spread check runs first and returns before modal share is even
+evaluated for that channel.
+
+| order | constant | value | when | checked in |
+|---|---|---|---|---|
+| 0 | `SKIP_REASON_MISSING` | `"column_absent"` | requested column not present in the frame | `compute_mad_scrub` (before per-column evaluation) |
+| 1 | `SKIP_REASON_EXCLUDED` | `"excluded_channel"` | named in `BOOTSTRAP_MAD_EXCLUDED_CHANNELS` | `_skip_reason`, first check |
+| 2 | `SKIP_REASON_NO_FINITE` | `"no_finite_values"` | channel is entirely NaN | `_skip_reason`, second check |
+| 3 | `SKIP_REASON_NO_SPREAD` | `"mad_at_or_below_min_spread"` | MAD ≤ `BOOTSTRAP_MAD_MIN_SPREAD` | `_skip_reason`, third check — **tested before modal share, and the order is load-bearing** (see below) |
+| 4 | `SKIP_REASON_MODAL_SHARE` | `"modal_share_above_limit"` | modal share > `BOOTSTRAP_MAD_MAX_MODAL_SHARE`, reached only when spread is non-degenerate | `_skip_reason`, last check |
+
+**Why the order changed (review finding, fixed in this branch):** `mad == 0`
+implies at least half the channel's finite values sit exactly at the median,
+so its modal share is always ≥ ~0.5 — above the 0.40 limit. With modal share
+tested first, `SKIP_REASON_NO_SPREAD` was unreachable in production, and a
+genuinely *constant* sensor was reported as `modal_share_above_limit` —
+"bimodal" — which is false, and was being persisted into `metrics_json` per
+model. `co2` is the live case: the CSV adapter fills it with the constant
+400.0 whenever the vendor file carries no real CO2 channel. Testing spread
+first makes the reported reason true, and makes `mad_at_or_below_min_spread`
+a usable zero-variance signal for BACKLOG-21 (stuck-sensor detection) that
+`modal_share_above_limit` could not be, having been contaminated with every
+constant channel in the corpus.
+
+Measured on the three fixture corpora, real `ColdStartBootstrap.run()`, same
+inputs before and after — **only the reported reason changes; `cull_rows` is
+0 → 0 on every row below**, because this is a label fix, not a behavior
+change: a skipped channel never culls (`cull_rows` is set to 0 whenever
+`_skip_reason` returns non-``None``, before the z-score mask is even
+computed), and every channel below has `mad == 0.0`, so it was already
+`is_skipped=True` — just under the wrong reason — both before and after.
+
+| corpus | channel | before | after |
+|---|---|---|---|
+| tenant_1 | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_july_clearsky.csv` | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_dec_stuck_fault.csv` | `humidity` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_dec_stuck_fault.csv` | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+
+`light` stays `excluded_channel` on all three corpora in both columns — the
+exclusion check runs first (order 1) and returns before spread or modal share
+are evaluated at all, so reordering those two later checks cannot touch it.
+`modal_share_above_limit` is still reachable, and now means what it says:
+genuinely multi-modal *with real spread* (`mad > BOOTSTRAP_MAD_MIN_SPREAD`) —
+not a constant sensor masquerading as one.
 
 `MadScrubResult` (same module) carries `flags: pd.Series`, `channels` and
 `warnings`, with `cull_fractions` / `cull_counts` / `finite_counts` /

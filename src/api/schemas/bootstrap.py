@@ -20,6 +20,18 @@ class BootstrapRowResult(BaseModel):
     physics_validation_status: str
 
 
+class BootstrapPass1Warning(BaseModel):
+    """One Pass-1 warning, mirroring ``src.models.pass1_warning.Pass1Warning``.
+
+    ``code`` is a member of the closed set in that module
+    (``PASS1_WARNING_CODES``); ``message`` is tenant-safe prose with no
+    internal env var or config names in it (see that module's docstring).
+    """
+
+    code: str
+    message: str
+
+
 class BootstrapRunResponse(BaseModel):
     """Top-level response from POST /api/v1/bootstrap/run.
 
@@ -29,10 +41,15 @@ class BootstrapRunResponse(BaseModel):
     logged server-side. Empty on a clean run; non-empty does not mean the
     pipeline failed (a "warn" discard status still returns 200 — only "fail"
     raises).
+
+    The field is a list of structured objects, not strings: Pass 1 now
+    returns ``tuple[Pass1Warning, ...]`` (a `(code, message)` pair each, see
+    ``src/models/pass1_warning.py``), and this schema mirrors that shape
+    rather than collapsing it to prose the caller can't branch on.
     """
 
     rows_ingested: int
     pass1_clean_rows: int
     pass1_anomaly_rows: int
     results: list[BootstrapRowResult]
-    pass1_warnings: list[str] = Field(default_factory=list)
+    pass1_warnings: list[BootstrapPass1Warning] = Field(default_factory=list)
