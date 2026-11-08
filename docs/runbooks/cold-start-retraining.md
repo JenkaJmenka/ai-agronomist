@@ -66,11 +66,17 @@ prints:
     --csv /path/to/tenant_corpus.csv \
     --window-start 2026-12-02 --window-end 2026-12-31 \
     --old-checkpoint /path/to/current_active.pt \
+    --seeds 3 \
     --json-out /tmp/shadow_report.json
 ```
 
-Report, for old and new: **alert counts, the calibration threshold, and the new
-model's `metrics_json`.** The script prints all three.
+Report, for old and new: **the alert-count range, the threshold range, and the
+new model's `metrics_json`.** The script prints all three.
+
+**It trains each model under at least three seeds and reports ranges, never
+single values.** `--seeds` defaults to 3 and the script refuses fewer — a
+single run cannot distinguish a real change from training noise, so the
+single-value form is deliberately not available.
 
 ### Pick the window explicitly — "the last 30 days" is a trap here
 
@@ -87,28 +93,44 @@ not quote a local alert count in an activation decision.
 
 ### How much movement is noise
 
-**Cold-start training is non-deterministic**, so a threshold that moved is not
-by itself evidence of anything. Two runs of the command above on the identical
-corpus and identical window, measured 2026-11-08:
+**A single-run difference is not a signal.** Cold-start training is
+non-deterministic: weight initialisation, the `DataLoader` shuffle order and
+dropout are all unseeded, so a threshold or an alert count from one run is a
+sample, not a measurement. **Compare the two models' ranges. If the ranges
+overlap, you have measured noise.**
 
-| run | threshold | alerts (8,283 rows) | alert rate |
-|---|---|---|---|
-| 1 | 0.133601 | 139 | 1.68% |
-| 2 | 0.131892 | 149 | 1.80% |
+Measured 2026-11-08, three seeds on the `tenant_1` corpus, window
+2026-12-02..2026-12-31, 8,283 rows:
 
-That is a threshold spread of 1.7e-3 and a 10-alert spread from nothing but
-retraining. `AGENT_MEMORY.md` records the same effect pre-fix, four production
-runs on identical data spanning 0.06140-0.06501. So:
+| model | threshold min..max | spread | alerts min..max | spread |
+|---|---|---|---|---|
+| new | 0.130524 .. 0.135238 | 0.004714 | 138 .. 148 | 10 |
 
-- a threshold difference of order 1e-3 between old and new is **noise**;
-- an alert-count difference of order ten on ~8,000 rows is **noise**;
-- if the decision hinges on a difference that small, run it again rather than
-  deciding.
+So on this corpus, **a threshold difference below ~5e-3 and an alert-count
+difference of ten or so on ~8,000 rows are both inside the noise.** Two
+unseeded runs earlier the same day gave 0.133601/139 and 0.131892/149, which is
+the same picture from two samples instead of three. `AGENT_MEMORY.md` records
+the effect pre-fix too: four production runs on identical data spanning
+0.06140-0.06501.
 
-The measured post-fix threshold on the `tenant_1` corpus is **0.1319-0.1336**
-across those two runs. Note this is **above** the ≈0.12-0.13 that the task
-brief anticipated; the figures above are what the shipped code produced, and no
-constant was adjusted toward the expectation.
+If the decision hinges on a difference that small, raise `--seeds` and run it
+again rather than deciding.
+
+A model loaded from a checkpoint is a different case: its weights are fixed and
+dropout is off in eval mode, so it scores identically on every seed. The script
+reports `[identical across all seeds]` when that holds, and it is **measured
+rather than assumed** — a surprise there would mean something is wrong with the
+load path.
+
+The measured post-fix threshold band on the `tenant_1` corpus is therefore
+**0.1305-0.1352**. Note this sits **above** the ≈0.12-0.13 the task brief
+anticipated; these are what the shipped code produced, and no constant was
+adjusted toward the expectation.
+
+Training determinism itself — seeding `torch`/`numpy` in the training path
+rather than only in this script — is a separate backlog item, on the grounds
+that *a grower's report must not change on retrain with identical data*. Until
+it lands, ranges are the only honest way to report a comparison.
 
 ### Fidelity caveat you must state in any write-up
 

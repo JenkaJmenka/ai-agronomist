@@ -45,7 +45,6 @@ import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
 
 import pandas as pd
 
@@ -60,20 +59,14 @@ from src.models.bootstrap import (  # noqa: E402
     ColdStartBootstrap,
     Pass2BootstrapDetector,
 )
-
-
-@dataclass(frozen=True)
-class ScoredWindow:
-    """What one model made of the window."""
-
-    label: str
-    threshold: float
-    rows_scored: int
-    alerts: int
-
-    @property
-    def alert_fraction(self) -> float:
-        return self.alerts / self.rows_scored if self.rows_scored else 0.0
+from src.models.shadow_report import (  # noqa: E402
+    MIN_SEEDS,
+    ScoredRun,
+    SeedSpread,
+    pass1_metrics,
+    seed_everything,
+    spread_entry,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -97,11 +90,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Existing .pt to compare against. Omit to score the new model only.",
     )
     parser.add_argument(
+        "--seeds",
+        type=int,
+        default=MIN_SEEDS,
+        help=(
+            f"Number of training seeds per model (minimum {MIN_SEEDS}). "
+            "Results are reported as a range across seeds, never as one value."
+        ),
+    )
+    parser.add_argument(
         "--json-out",
         default=None,
         help="Write the full report as JSON to this path (stdout always prints).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.seeds < MIN_SEEDS:
+        parser.error(
+            f"--seeds must be at least {MIN_SEEDS}: a single run cannot "
+            f"distinguish a real change from training noise."
+        )
+    return args
 
 
 def select_window(
@@ -132,77 +140,76 @@ def score_with(
     detector: Pass2BootstrapDetector,
     window: pd.DataFrame,
     label: str,
-) -> ScoredWindow:
+    seed: int,
+) -> ScoredRun:
     """Score *window* and count alerts, without persisting anything."""
     results = detector.infer(window)
-    return ScoredWindow(
+    return ScoredRun(
         label=label,
+        seed=seed,
         threshold=detector.calibration_threshold,
         rows_scored=len(results),
         alerts=sum(1 for row in results if row.is_anomaly),
     )
 
 
-def pass1_metrics(pass1: BootstrapPass1Result) -> dict[str, object]:
-    """The Pass-1 half of what `metrics_json` will carry, for eyeballing.
+def run_pass1(csv_path: str, workdir: str) -> tuple[BootstrapPass1Result, str]:
+    """Run the real Pass 1 once; return its result and the clean-rows path.
 
-    Mirrors ``cold_start_training._build_pass1_metrics`` in content but is
-    deliberately a separate, read-only shaping: this script must not import the
-    API service layer, and a drift between the two is a reason to re-read both
-    rather than to trust this one.
+    Pass 1 runs once rather than per seed because it is deterministic: its only
+    stochastic component is `IsolationForest`, pinned at `random_state=42`.
+    Measured across repeated runs on the tenant_1 corpus, the discard fraction
+    is 0.046187 every time.
     """
-    stats = pass1.discard_stats
-    return {
-        "pass1_clean_rows": len(pass1.clean_df),
-        "pass1_anomaly_rows": len(pass1.anomaly_df),
-        "pass1_if_flag_fraction": pass1.if_flag_fraction,
-        "pass1_mad_cull_fractions": pass1.mad_channel_cull_fractions,
-        "pass1_mad_skipped_channels": pass1.mad_skipped_channels,
-        "pass1_discard": {
-            "frame_rows": stats.frame_rows,
-            "frame_discarded": stats.frame_discarded,
-            "frame_discard_fraction": stats.frame_discard_fraction,
-            "data_rows": stats.data_rows,
-            "data_discarded": stats.data_discarded,
-            "data_discard_fraction": stats.data_discard_fraction,
-            "status": stats.status,
-        },
-        "pass1_warnings": [warning.as_dict() for warning in pass1.warnings],
-    }
-
-
-def train_new_model(csv_path: str, workdir: str) -> tuple[Pass2BootstrapDetector, BootstrapPass1Result]:
-    """Run the real Pass 1 + Pass 2 into *workdir*. Nothing is registered."""
     clean_path = os.path.join(workdir, "shadow_clean.csv")
-    anomaly_path = os.path.join(workdir, "shadow_anomalies.csv")
     pass1 = ColdStartBootstrap(
-        clean_path=clean_path, anomaly_path=anomaly_path
+        clean_path=clean_path,
+        anomaly_path=os.path.join(workdir, "shadow_anomalies.csv"),
     ).run(csv_path)
+    return pass1, clean_path
+
+
+def train_seed(clean_path: str, seed: int) -> Pass2BootstrapDetector:
+    """Train one Pass-2 model on *clean_path* under *seed*."""
+    seed_everything(seed)
     detector = Pass2BootstrapDetector()
     detector.train(clean_path)
     if detector.trained_model is None:
         raise ValueError(
             "Pass 2 trained no model — too few clean rows after Pass 1 filtering."
         )
-    return detector, pass1
+    return detector
 
 
 def build_report(args: argparse.Namespace, workdir: str) -> dict[str, object]:
-    """Train, score, and assemble the report. No side effects outside *workdir*."""
-    detector, pass1 = train_new_model(args.csv, workdir)
+    """Train and score every seed, and assemble the report.
+
+    No side effects outside *workdir*: nothing is registered or activated.
+    """
+    pass1, clean_path = run_pass1(args.csv, workdir)
     frame = pd.concat([pass1.clean_df, pass1.anomaly_df]).sort_index()
     window = select_window(frame, args.window_start, args.window_end)
 
-    scored = [score_with(detector, window, "new")]
-    if args.old_checkpoint:
-        # Both sides are given the NEW model's adaptive ranges on purpose: the
-        # checkpoint does not carry the ranges its own training used, so letting
-        # the two differ would measure the normalization, not the models. See
-        # Pass2BootstrapDetector.from_checkpoint.
-        old = Pass2BootstrapDetector.from_checkpoint(
-            args.old_checkpoint, ranges=detector.sensor_ranges
-        )
-        scored.append(score_with(old, window, "old"))
+    seeds = tuple(range(args.seeds))
+    new_runs: list[ScoredRun] = []
+    old_runs: list[ScoredRun] = []
+    for seed in seeds:
+        logger.info("Seed %d of %d", seed + 1, len(seeds))
+        detector = train_seed(clean_path, seed)
+        new_runs.append(score_with(detector, window, "new", seed))
+        if args.old_checkpoint:
+            # Both sides get the NEW model's adaptive ranges on purpose: the
+            # checkpoint does not carry the ranges its own training used, so
+            # letting them differ would measure the normalization, not the
+            # models. See Pass2BootstrapDetector.from_checkpoint.
+            old = Pass2BootstrapDetector.from_checkpoint(
+                args.old_checkpoint, ranges=detector.sensor_ranges
+            )
+            old_runs.append(score_with(old, window, "old", seed))
+
+    spreads = [SeedSpread(label="new", runs=tuple(new_runs))]
+    if old_runs:
+        spreads.append(SeedSpread(label="old", runs=tuple(old_runs)))
 
     return {
         "corpus": os.path.abspath(args.csv),
@@ -210,20 +217,12 @@ def build_report(args: argparse.Namespace, workdir: str) -> dict[str, object]:
         "window": [args.window_start, args.window_end],
         "window_rows": len(window),
         "old_checkpoint": args.old_checkpoint,
+        "seeds": list(seeds),
         "normalization_note": (
             "Both models scored with the new model's adaptive sensor ranges; "
             "checkpoints do not persist their training-time ranges."
         ),
-        "scored": [
-            {
-                "label": entry.label,
-                "calibration_threshold": entry.threshold,
-                "rows_scored": entry.rows_scored,
-                "alerts": entry.alerts,
-                "alert_fraction": entry.alert_fraction,
-            }
-            for entry in scored
-        ],
+        "spreads": [spread_entry(spread) for spread in spreads],
         "new_model_metrics_json": pass1_metrics(pass1),
     }
 
@@ -238,14 +237,28 @@ def print_report(report: dict[str, object]) -> None:
     print(f"window      : {report['window'][0]} .. {report['window'][1]}"
           f"  ({report['window_rows']} rows)")
     print(f"old ckpt    : {report['old_checkpoint'] or '(none — new model only)'}")
+    print(f"seeds       : {report['seeds']}  "
+          f"({len(report['seeds'])} training runs per model)")
     print()
-    print(f"{'model':<8}{'threshold':>14}{'rows':>10}{'alerts':>10}{'alert %':>10}")
-    for entry in report["scored"]:  # type: ignore[union-attr]
+    print("RANGES ACROSS SEEDS — a single value would be meaningless here.")
+    print(f"{'model':<7}{'threshold min..max':>26}{'spread':>11}"
+          f"{'alerts min..max':>19}{'spread':>8}")
+    for entry in report["spreads"]:  # type: ignore[union-attr]
+        thr, alerts = entry["threshold"], entry["alerts"]
         print(
-            f"{entry['label']:<8}{entry['calibration_threshold']:>14.6f}"
-            f"{entry['rows_scored']:>10}{entry['alerts']:>10}"
-            f"{100.0 * entry['alert_fraction']:>9.2f}%"
+            f"{entry['label']:<7}"
+            f"{thr['min']:>11.6f}..{thr['max']:<13.6f}"
+            f"{thr['spread']:>11.6f}"
+            f"{alerts['min']:>9d}..{alerts['max']:<9d}"
+            f"{alerts['spread']:>8d}"
         )
+        print(f"       median threshold {thr['median']:.6f}, median alerts "
+              f"{alerts['median']:.1f} of {entry['rows_scored']} rows"
+              + ("  [identical across all seeds]"
+                 if entry["identical_across_seeds"] else ""))
+    print()
+    print("Compare the two models' RANGES, not their medians. If the ranges")
+    print("overlap, the difference is training noise and not a signal.")
     print()
     print(f"NOTE: {report['normalization_note']}")
     print()
