@@ -26,8 +26,9 @@ results/
 # docs/runbooks/** is onboarding material: step-by-step procedures written for
 # someone with no prior knowledge of this project, plus the agent prompts they
 # reference. Useless if it does not survive a clone.
-# docs/architecture/ADR-*.md are decision records — they explain why the code is
-# the way it is, and are cited from commit messages and source comments.
+# docs/architecture/ holds decision records and design docs — they explain why
+# the code is the way it is, and are cited from commit messages and source
+# comments, so the whole directory is tracked (see below).
 # Everything else under docs/ (working notes, review reports, plans) stays local.
 docs/*
 # docs/live_scada_connectors.md is the Priva / Hoogendoorn integration guide.
@@ -41,13 +42,18 @@ docs/*
 !docs/ANOMALY_CATALOG.md
 !docs/runbooks/
 !docs/runbooks/**
+# Tracked in full, with only an explicit drafts/ subfolder kept local. It was
+# the inverse until 2026-11-08: docs/architecture/* ignored everything but
+# ADR-*.md and two named files, leaving 21 of 31 docs local-only. src/models/
+# bootstrap.py cited scada-config-engine-plan.md as "Spec:" while that plan had
+# never been committed, so checking the citation took archaeology instead of a
+# clone — and the citation turned out not to support the code. That is the same
+# failure as docs/live_scada_connectors.md above, one directory over, and the
+# reason a per-file negation list is not used here: it defaults to invisible,
+# so each new design doc is lost unless someone remembers to add a line.
+# Genuine work-in-progress goes under docs/architecture/drafts/.
 !docs/architecture/
-docs/architecture/*
-!docs/architecture/ADR-*.md
-# These two are cited as required reading by docs/runbooks/** — a runbook that
-# points at a file missing from a fresh clone is a broken runbook.
-!docs/architecture/upload_detector_convergence.md
-!docs/architecture/episode_grouping.md
+docs/architecture/drafts/
 # docs/security/auth-audit-phase1.md and docs/security/deploy-runbook-phase2.md
 # are the phase-1 audit and phase-2 runbook, committed as the audit trail for
 # d76ca19. Other working notes under docs/security/ stay local.
