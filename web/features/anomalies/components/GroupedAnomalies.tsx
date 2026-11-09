@@ -208,7 +208,13 @@ function PaginatedList<T>({
   );
 }
 
-function ServerGroupedList(props: {
+/**
+ * Exported (only this component needs to be, among this file's internals) so
+ * tests can mount it directly — GroupedAnomalies itself pulls in several
+ * data-fetching hooks that would otherwise have to be mocked just to reach
+ * this render path.
+ */
+export function ServerGroupedList(props: {
   readonly groups: readonly AnomalyGroup[];
   readonly groupsPageIndex: number;
   readonly onGroupsPageChange: (pageIndex: number) => void;
@@ -247,23 +253,25 @@ function ServerGroupedList(props: {
             <PaginatedList
               items={samples}
               resetKey={`${group.key}:${samples.length}`}
-              renderItem={(sample) => (
-                <AnomalyDetailRow
-                  key={sample.timestamp}
-                  timestamp={sample.timestamp}
-                  score={sample.anomaly_score ?? null}
-                  sensors={
-                    props.serverGroupBy === "sensor" && sample.affected_sensors.length === 0
-                      ? [group.key]
-                      : sample.affected_sensors
-                  }
-                  values={sample.values}
-                  reasoning={sample.reasoning ?? null}
-                  jumpChannels={
-                    props.serverGroupBy === "sensor" ? [group.key] : sample.affected_sensors
-                  }
-                />
-              )}
+              renderItem={(sample) => {
+                // Same list feeds the displayed sensors and the Monitoring
+                // jump — a multi-sensor sample must jump with every sensor
+                // the row shows, not just the sensor this group was keyed on.
+                const groupKeyFallback = props.serverGroupBy === "sensor" ? [group.key] : [];
+                const sensors =
+                  sample.affected_sensors.length > 0 ? sample.affected_sensors : groupKeyFallback;
+                return (
+                  <AnomalyDetailRow
+                    key={sample.timestamp}
+                    timestamp={sample.timestamp}
+                    score={sample.anomaly_score ?? null}
+                    sensors={sensors}
+                    values={sample.values}
+                    reasoning={sample.reasoning ?? null}
+                    jumpChannels={sensors}
+                  />
+                );
+              }}
             />
           </details>
         );
