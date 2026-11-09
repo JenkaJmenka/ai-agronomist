@@ -1,0 +1,82 @@
+# Live Monitoring (SSE) — Final Tech-Lead Review
+
+> **Historical — point-in-time record.** Written 2026-07-19. Status: record only — the tech-lead half of the review that gated the first SSE live-monitoring merge; the live lifecycle it reviewed was later reworked under ADR-009. Not maintained against current code.
+
+**Date:** 2026-07-19
+**Reviewer:** tech-lead (read-only final review, Phase 6)
+**Scope:** `src/live/` (all modules + sources), `src/api/routes/live.py`, `src/api/services/live_hub_provider.py`, lifespan wiring in `src/api/main.py`, Live section of `src/config.py`, `web/` live feature (BFF relay, hook, components, MonitoringView), `tests/live/`, `tests/api/test_live_events*.py`, `docs/coverage/live-monitoring-qa.md`, `docs/live_scada_connectors.md`.
+**Test state at review time:** `tests/live/ + tests/api/test_live_events*` → **257 passed** (re-run during this review, 21.9 s).
+
+---
+
+## Verdict: **NEEDS FIXES** (2 blocking findings)
+
+The feature is well-architected — clean layer separation (sources → merger → scorer → hub → SSE), cancellation-safe generators, bounded buffers, correct tenant isolation, and a disciplined secrets pattern in the connectors. But two defects must be fixed before this ships: a cross-layer correlation bug that corrupts displayed anomaly enrichment, and per-event Redis connection churn on the production publish path.
+
+---
+
+## Findings Table
+
+| # | Severity | Location | Issue | Recommended fix |
+|---|----------|----------|-------|-----------------|
+| 1 | **BLOCKING** | `src/live/merge.py:214` → `src/live/scoring.py:255,281` → `web/features/monitoring/hooks/useLiveReadings.ts:129-141` | **`seq` is always `""` in production, breaking anomaly↔detail correlation.** The merger emits `LiveReadingEvent(seq="")` (by design — the Redis entry ID is the SSE `id:`). The scorer then copies that empty `seq` into `LiveAnomalyEvent.seq` and `AnomalyDetailEvent.anomaly_seq`. The frontend matches details via `a.seq === detail.anomaly_seq` — `"" === ""` matches **every** anomaly in the strip, so one enrichment result overwrites the reasoning/fault_type of all displayed anomalies. `tests/live/test_scoring.py` masks this by always injecting non-empty seqs (`seq="seq-{step}"`, `seq="1"`), so the production `seq=""` path is never exercised. | In `LiveScorer._handle_episode`, generate a unique episode ID (`uuid4().hex` or `f"{tenant}:{gh}:{monotonic_ns}"`) when a new episode starts; use it for both the `LiveAnomalyEvent.seq` (including re-emits) and the `AnomalyDetailEvent.anomaly_seq`. Add a scoring test that feeds merger-realistic `seq=""` readings and asserts distinct non-empty seqs across two episodes. |
+| 2 | **BLOCKING** | `src/live/hub.py:184-189` (`_get_client`) with `src/api/services/live_hub_provider.py:42-54` | **New Redis client per `publish()` call, never closed.** Production wires `LiveHub(redis_factory=...)` only. `publish()` → `_get_client()` → `self._factory()` creates a fresh `aioredis.from_url` client (own connection pool) for **every event** — one TCP connect + handshake per reading (every ~2 s per scope), per anomaly, per status event — and the client is never `aclose()`d; socket cleanup relies on GC. 24/7 monitoring workload → sustained fd/socket churn, `Unclosed client` warnings, ephemeral-port pressure as scopes scale. | Memoize the publisher client: in `_get_client`, do `if self._client is None: self._client = self._factory()` (and add an `aclose()` on hub shutdown). Keep the per-subscriber factory behavior in `_subscriber_client` — that part is correct. Two-line fix. |
+| 3 | non-blocking | `src/live/runtime.py:302-320` (`stop()`) | Connectors are never `close()`d on shutdown — Priva/Hoogendoorn `httpx.AsyncClient`s leak; task cancellation closes the stream generator but not the HTTP client. | In `stop()`, after gathering cancelled tasks: `for scope in self._scopes: for c in scope.connectors: await c.close()` wrapped in try/except-log. |
+| 4 | non-blocking | `src/live/sources/priva.py:111`, `hoogendoorn.py:117` (`connect()`) | On supervised restart (`_supervised` → `_run_connector` → `connect()`), `self._client = httpx.AsyncClient(...)` overwrites the previous client without closing it — one leaked client per mid-stream crash. | Guard at top of `connect()`: `if self._client is not None: await self._client.aclose()`. |
+| 5 | non-blocking | `src/live/runtime.py:253` | `MOCK_SCADA_INTERVAL_SECONDS` is used as `ChannelMerger.emit_interval` for **all** scopes, including real Priva/Hoogendoorn scopes from `LIVE_SOURCES_JSON`. A vendor scope polling at 60 s gets 2 s buckets — bucket alignment across sources silently degrades, and mock config leaks into the production path. | Add `LIVE_EMIT_INTERVAL_SECONDS` to config (or derive per scope as `min(poll_interval_seconds)` of that scope's sources) and use it in `_build_scope`. |
+| 6 | non-blocking | `src/live/events.py:63-66` | **Known debt confirmed:** `json_encoders` is deprecated in Pydantic v2 and removed in v3; it is also redundant here — `model_dump_json()` already emits ISO-8601 datetimes. `ser_json_timedelta="float"` is dead config (no timedelta fields exist). | Delete `_SHARED_MODEL_CONFIG` and the five `model_config` assignments entirely; serialization output is unchanged. Low-risk, removes the deprecation warning. |
+| 7 | non-blocking | `src/live/merge.py:158-171` | Unbounded bucket growth on future timestamps: a vendor payload with a far-future timestamp creates a bucket whose `bucket_end` never passes the wall clock, so it is never flushed and `_buckets` grows forever. Vendor timestamps are parsed but not range-checked. | In `_ingest`, drop (and count) readings with `timestamp > now + LIVE_MERGE_GRACE_SECONDS + emit_interval`, mirroring the existing late-drop counter. |
+| 8 | non-blocking | `src/live/scoring.py:177-206` | `_resolve_detector` hard-imports `AsyncSessionLocal` / `detector_cache` inside the method instead of accepting injected factories (contrast: `PersistenceBatcher` takes `session_factory=`). This is the direct cause of the 73 % coverage on this module, and `get_cached_detector` runs a synchronous `torch.load` on the event loop on first resolution per checkpoint. Also note the architecture smell: `src/live` (logic layer) imports from `src/api/services` (entry layer) — inverted dependency, papered over with lazy imports. | Accept `session_factory` and `detector_loader` in `LiveScorer.__init__` with production defaults; wrap the first-load path in `asyncio.to_thread`. Longer-term: move `detector_cache` and `comprehensive_pipeline` out of `src/api/services` into a shared service layer. |
+| 9 | non-blocking | `src/live/scoring.py:73` coverage (QA report) | `scoring.py` at **73.14 %** — below the 80 % critical-path guardrail. The uncovered lines are exactly the seams in finding #8; the hot path is fully covered and QA documented the rationale, so this is WARN not STOP, but the debt is real and fixable via #8's DI refactor. Additionally, the QA coverage table omits `sources/polling.py`, `priva.py`, `hoogendoorn.py` (Phase 5 connectors landed after the Phase 4 report) — connector coverage is unmeasured despite smoke tests existing. | Refresh `docs/coverage/live-monitoring-qa.md` after the connector phase; add `_resolve_detector` tests using injected factories. |
+| 10 | non-blocking | `src/live/persistence.py:138-139` | `except (asyncio.CancelledError, Exception): pass` in `close()` swallows non-cancellation task failures silently — violates the no-silent-failure guardrail (`run()` re-raises CancelledError by design, but a genuine crash disappears here). | Catch `CancelledError` with `pass`; log any other exception with context. |
+| 11 | non-blocking | `src/live/sources/priva.py:222`, `hoogendoorn.py:180` | `float(response.headers.get("Retry-After", ...))` raises `ValueError` on the HTTP-date form of `Retry-After`; the crash is absorbed by the polling backoff, but the intended rate-limit wait is lost. | Parse defensively: try float, fall back to `_DEFAULT_RETRY_AFTER`. |
+| 12 | non-blocking | `priva.py` / `hoogendoorn.py` (`fetch_since` + `_request`) | ~60 lines of near-verbatim duplication: pagination loop (`next_url` / `first_page` walk), 429 Retry-After block, `_DEFAULT_RETRY_AFTER` constant, and the clamp expression `max(lo, min(hi, fval))` (also a third time in `mock._clamp_and_sanitize`). Two occurrences is at the guardrail edge (3+), but a third connector will cross it. | Lift `paginate(next_key)` and `request_with_retry_after` into `PollingSourceConnector`; add `clamp_to_bounds(channel, value)` next to `CHANNEL_BOUNDS` in `events.py`. |
+| 13 | non-blocking | `src/api/services/live_hub_provider.py:27` + `src/api/main.py:109` | Redis URL default `redis://localhost:6379/0` hardcoded in two places (config-in-one-place rule). | Add `REDIS_URL` default to `src/config.py`; import in both. |
+| 14 | non-blocking | `src/live/scoring.py:44`, `merge.py:25-26`, `attribution.py:25`, `persistence.py:42`, `runtime.py:50`, `polling.py:22` | Hard-coded operational thresholds as module constants rather than `src/config.py` (WARN guardrail): detector refresh 300 s, degraded/offline multipliers 3×/10×, attribution floor 0.20, persistence cap 10 000, and **two different `_MAX_BACKOFF_SECONDS` (60 s runtime vs 300 s polling) under the same name** — confusing at minimum. | Batch-move to the Live section of `src/config.py` with env overrides; rename the backoffs distinctly (`LIVE_SUPERVISOR_MAX_BACKOFF`, `LIVE_POLL_MAX_BACKOFF`). |
+| 15 | non-blocking | `src/live/scoring.py:343`, `runtime.py:338`, `mock.py:315` | Three files exceed the 300-line file limit (343/338/315). All are cohesive; mechanical splits available (episode mgmt out of scoring; `build_from_config` parsing out of runtime; episode classes out of mock). | Split opportunistically during the fixes for #1/#5 — do not split for its own sake. |
+| 16 | non-blocking | `src/api/routes/live.py:43` vs `web/features/monitoring/api/live.ts:93-97` | Heartbeat contract drift: backend sends `{"ts": ...}`, frontend schema declares optional `timestamp`. Works today only because the schema is passthrough and the value is unused. | Align on one field name (`ts`) in the zod schema. |
+| 17 | non-blocking | `web/features/monitoring/components/LiveAnomalyStrip.tsx:61-67` | `formatTime` near-duplicates `formatTimestamp` in `features/jobs/components/JobCard.tsx`; second occurrence — extract to `lib/` when touched next. Also, once finding #1 lands, re-emitted anomalies (same episode every 60 s) will share a `seq` — the list `key={seq}-{timestamp}` stays unique, but consider collapsing re-emits into one updating row for UX. | Shared `lib/formatTime.ts`; optional re-emit dedupe by seq. |
+
+---
+
+## Guardrail Check (explicit)
+
+| Guardrail | Result | Evidence |
+|---|---|---|
+| **STOP: LSTM-VAE ↔ API layer tight coupling** | ✅ PASS (with note) | No model code in the API layer; SSE route only touches `LiveHub`. Note: the inverse direction exists — `src/live/scoring.py` lazily imports `src.api.services.*` (finding #8). Not the guardrail's coupling, but tracked as debt. |
+| **STOP: Secrets/API keys hardcoded** | ✅ PASS | Connectors reference secrets by **env-var name** (`client_secret_env`, `api_key_env`) — values read via `os.environ` at connect time, never logged. BFF injects `API_KEY` server-side; key never reaches the browser. `grep eval(\|os.system\|shell=True` over live scope: no hits. API-key comparison uses `secrets.compare_digest` (constant-time). |
+| **STOP: Checkpoint without metadata** | ✅ N/A | Live feature writes no checkpoints; detector is read-only via `detector_cache`. |
+| **STOP: DB schema without tenant_id** | ✅ PASS | Persistence writes `SensorReading` with `tenant_id` in every row and in the conflict target `(tenant_id, greenhouse_id, timestamp)`. |
+| **STOP: Coverage <80 % on critical paths** | ⚠️ MARGINAL | Aggregate 91.15 %. `scoring.py` at 73.14 % — uncovered lines are DB/pipeline integration seams, hot scoring path fully covered, rationale documented by QA. Downgraded to WARN (findings #8/#9); connectors absent from the coverage table must be measured. |
+| **STOP: Major design change without ADR** | ✅ PASS | Live architecture documented (`docs/live_scada_connectors.md`); no locked ML spec touched. |
+| **WARN: Hard-coded thresholds not in config.py** | ⚠️ WARN | Findings #5, #14. Core cadences/thresholds (heartbeat, buffer, threshold, re-emit, flush) *are* in config; six operational constants are not. |
+| **WARN: Missing error handling on external calls** | ⚠️ minor | Broadly strong (supervised restarts, backoff, publish guards, resilient lifespan). Exceptions: findings #10, #11. |
+| **WARN: Code duplication (3+ blocks)** | ⚠️ borderline | Findings #12, #13, #17 — currently 2 occurrences each; will cross the line with a third connector. |
+| **WARN: Silent failures (bare except / pass)** | ⚠️ one instance | Finding #10 (`persistence.close()`); frontend BFF `catch {}` returns a structured 502, acceptable. |
+
+## Security & Resource Review (task items 4–5)
+
+- **Auth on both endpoints:** ✅ `/api/live/events` and `/api/live/status` both use `require_api_key` + `enforce_tenant_access`; tests cover 401 (missing key) and 403 (cross-tenant) on both routes.
+- **Tenant isolation on streams:** ✅ Stream key is `live:{tenant_id}:{greenhouse_id}` and `tenant_id` is forced through `enforce_tenant_access` before subscribe — tenant A cannot read tenant B's stream. BFF forwards the browser-chosen tenant, but the server-held key pins the authenticated tenant, so spoofing yields 403.
+- **SSE subscriber lifecycle:** ✅ Per-subscriber factory connections closed in the generator `finally`; client disconnect cancels the generator (Starlette); `LIVE_MAX_STREAM_SECONDS` hard-deadline sheds stale connections. The **publisher** side is the leak (finding #2).
+- **Unbounded growth:** window deques `maxlen=SEQ_LEN`; persistence buffer capped 10 k with drop-oldest; Redis streams `MAXLEN ~ LIVE_REPLAY_BUFFER_SIZE`; enrichment task set supervised and self-cleaning; frontend rows capped 2 000 / anomalies 50. Exception: merger buckets under future timestamps (finding #7).
+- **Torch on event loop:** ✅ forward pass runs via `asyncio.to_thread` in one combined pass (score + per-channel MSE). Exception: first-load `torch.load` (finding #8).
+- **DB pool (pool_size=5):** ✅ Sessions are short-lived and never held across the streaming loop: one per persistence flush (10 s cadence), one per detector refresh (≥300 s), one per enrichment episode (debounced). No session crosses an SSE await gap.
+- **NaN/JSON injection:** ✅ Triple-layered: pydantic finite-validators on all event models, `sanitize_channels` + 0.0 defaults before DB rows (SQLite/Postgres NaN gap addressed), connector-side `isfinite` + bounds clamping. SSE frames carry pydantic-serialized JSON (newlines escaped) — no frame injection path.
+
+## Prioritized Tech-Debt List
+
+1. **Fix now (blocking):** #1 empty-`seq` correlation bug; #2 per-publish Redis client. Both are small, surgical fixes with clear tests to add.
+2. **Next sprint:** #3/#4 connector close paths; #5 emit-interval config; #6 `json_encoders` removal (deprecation clock ticking toward pydantic v3); #7 future-timestamp guard.
+3. **When touching scoring next:** #8 DI refactor of `_resolve_detector` (+ thread the first torch load) — this also resolves the #9 coverage gap; refresh the QA coverage report to include the Phase 5 connectors.
+4. **Opportunistic:** #10–#17 (error-handling polish, connector helper extraction, config consolidation, file splits, frontend contract alignment).
+
+## What's Good (keep)
+
+- Layering discipline: `merge.py` and `hub.py` genuinely know nothing about each other or the DB; callbacks wired only in the runtime.
+- Cancellation safety end-to-end: merger final flush, batcher final flush, generator `finally`, resilient lifespan start/stop ordering (live stops before DB teardown so the last flush lands).
+- Replay/gap protocol (`Last-Event-ID` → XRANGE replay → `reset` event) with the browser reconnect loop and frontend state clear on `reset` is textbook SSE.
+- Frontend hook: batched flushes (500 ms) to avoid per-event re-renders, error-windowed fallback to polling, URL-as-state, zod at the BFF boundary.
+- Secrets-by-env-var-name in `SourceConfig.params` is the right connector pattern and is documented in `docs/live_scada_connectors.md`.
+
+Other half of this co-review: [live-monitoring-review.md](live-monitoring-review.md).
