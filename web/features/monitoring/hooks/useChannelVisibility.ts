@@ -1,7 +1,7 @@
 "use client";
 
 import { parseAsString, useQueryState } from "nuqs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { mergeChannelLists } from "@/features/monitoring/api/readings";
 import { matchChannelParam } from "@/features/monitoring/lib/anomalyHighlight";
@@ -95,10 +95,26 @@ export function useChannelVisibility({
   /** Manual override — null means "follow jump focus / show all". */
   const [manualVisible, setManualVisible] = useState<ReadonlySet<string> | null>(null);
 
-  // New tenant / gh / jump focus clears manual overrides so preselect re-applies.
+  // The last `channelParam` a pre-select was applied for. Lets us tell a
+  // fresh jump (new non-null param) apart from `toggleChannel` clearing the
+  // param back to null, which must NOT re-apply/clear the manual selection.
+  const lastAppliedJumpParamRef = useRef<string | null>(null);
+
+  // New tenant/gh clears manual overrides and jump bookkeeping outright.
   useEffect(() => {
     setManualVisible(null);
-  }, [tenant, gh, channelParam]);
+    lastAppliedJumpParamRef.current = null;
+  }, [tenant, gh]);
+
+  // A new, different, non-null jump param re-applies the pre-select. A
+  // transition to null (e.g. from toggleChannel dropping sticky focus) is
+  // intentionally not handled here, so it leaves manualVisible alone.
+  useEffect(() => {
+    if (channelParam && channelParam !== lastAppliedJumpParamRef.current) {
+      setManualVisible(null);
+      lastAppliedJumpParamRef.current = channelParam;
+    }
+  }, [channelParam]);
 
   const jumpFocus = useMemo(
     () => (channelParam ? matchChannelParam(channels, channelParam) : []),
@@ -117,17 +133,18 @@ export function useChannelVisibility({
 
   const toggleChannel = useCallback(
     (ch: string): void => {
-      setManualVisible(() => {
-        const current = new Set(visible);
-        if (current.has(ch)) current.delete(ch);
-        else current.add(ch);
-        return current;
+      setManualVisible((prev) => {
+        const base = prev ?? new Set(jumpFocus.length > 0 ? jumpFocus : channels);
+        const next = new Set(base);
+        if (next.has(ch)) next.delete(ch);
+        else next.add(ch);
+        return next;
       });
       // Drop sticky jump focus so later Monitoring visits are not stuck filtered.
       void setChannelParam(null);
       measureInteraction("ui.channel_toggle", { channel: ch });
     },
-    [visible, setChannelParam],
+    [jumpFocus, channels, setChannelParam],
   );
 
   return { channels, visible, jumpFocus, toggleChannel };
