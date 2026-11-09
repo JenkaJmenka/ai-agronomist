@@ -41,6 +41,7 @@ from src.api.services.cold_start_training import (
     _mad_channel_entry,
 )
 from src.models.bootstrap import BootstrapPass1Result
+from src.models.metrics_serialization import MetricsSerializationError
 from src.models.mad_scrub_report import (
     SKIP_REASON_EXCLUDED,
     SKIP_REASON_NO_SPREAD,
@@ -250,15 +251,16 @@ class TestBuildPass1Metrics:
         assert metrics["calibration_threshold"] == CALIBRATION_THRESHOLD
         assert metrics["source"] == "cold_start_upload"
 
-    def test_an_infinite_statistic_is_rejected_at_build_time(self) -> None:
-        """The ``allow_nan=False`` guard must be load-bearing, not decorative.
+    @staticmethod
+    def _report_with_infinite_cull_fraction() -> MadChannelReport:
+        """A report carrying a non-finite value in an *uncovered* field.
 
-        ``_finite_or_none`` already coerces every statistic it covers, so this
-        drives a non-finite value in through a field it does **not** cover —
-        ``cull_fraction`` — to prove the guard would catch a future gap here
-        rather than at a production INSERT.
+        ``_finite_or_none`` already coerces every statistic it covers, so the
+        non-finite value is driven in through ``cull_fraction``, which it does
+        **not** cover. That is what proves the serialization guard would catch
+        a future gap here rather than at a production INSERT.
         """
-        leaky = MadChannelReport(
+        return MadChannelReport(
             column="temperature",
             is_skipped=False,
             skip_reason=None,
@@ -269,8 +271,27 @@ class TestBuildPass1Metrics:
             cull_rows=0,
             cull_fraction=float("inf"),
         )
-        with pytest.raises(ValueError):
-            _build(channels=(leaky,))
+
+    def test_an_infinite_statistic_is_rejected_at_build_time(self) -> None:
+        """The serialization guard must be load-bearing, not decorative."""
+        with pytest.raises(MetricsSerializationError):
+            _build(channels=(self._report_with_infinite_cull_fraction(),))
+
+    def test_the_build_time_rejection_is_not_a_value_error(self) -> None:
+        """The base class is the contract at *this* site above all others.
+
+        ``_build_pass1_metrics`` sits on the auto-train path, where
+        ``upload_checkpoint.py`` catches ``except (InsufficientDataError,
+        ValueError)``. If this exception were ever a ``ValueError`` again, a
+        serialization defect of ours would be relabelled to the tenant as "not
+        enough clean data" about their upload — the exact misrouting this round
+        removed. ``RuntimeError`` is what keeps it a 500.
+        """
+        with pytest.raises(MetricsSerializationError) as exc_info:
+            _build(channels=(self._report_with_infinite_cull_fraction(),))
+
+        assert not isinstance(exc_info.value, ValueError)
+        assert isinstance(exc_info.value, RuntimeError)
 
     def test_an_empty_channel_set_still_builds(self) -> None:
         """An empty frame yields no channel reports; the builder must survive it."""
