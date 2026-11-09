@@ -15,6 +15,14 @@ when ``POSTGRES_TEST_URL`` is unset. No pytest marker is used because
 ``pytest.ini`` runs with ``--strict-markers`` and the marker list is not this
 module's to extend.
 
+**CI never sets ``PASS1_TENANT_CSV``, so nothing automated runs this module.**
+Who runs it, when, and what else must be checked alongside it is the
+pre-merge checklist in ``docs/runbooks/cold-start-retraining.md`` — see
+§"4. Where the env-gated corpus test runs — and where it does not" and
+§"Pre-merge checklist — any change to Pass 1". That is deliberately the only
+copy: a procedure duplicated here would drift from the runbook, and the
+runbook is what an operator actually opens.
+
 The synthetic half of this regression — the knife-edge construction, both
 channel guards, and the asymmetry between them — is in
 ``tests/models/test_pass1_light_knife_edge.py`` and always runs. This module
@@ -60,11 +68,22 @@ EXPECTED_DISCARD_FRACTION = 0.0462
 # worthless, so the band is +/- 0.5 percentage points: it absorbs an
 # IsolationForest nudge from a scikit-learn upgrade and nothing larger.
 DISCARD_TOLERANCE = 0.005
+
+# The gate spans the whole midday block, not hour 12 alone. Hour 12 measures
+# 84.4713% but it is NOT the worst hour: hour 13 measures 80.5530%, clearing
+# 80% by 0.553pp. An hour-12-only assertion therefore passed with 4.47pp of
+# headroom while the real margin was an eighth of that, and would not have
+# noticed hour 13 crossing.
+#
+# Measured survival across the block, shipped code:
+#   hour 11 -> 89.4484%   hour 12 -> 84.4713%
+#   hour 13 -> 80.5530%   hour 14 -> 83.4287%   (min: hour 13)
+#
 # Relaxed from 90% for this PR. The residual shortfall is IsolationForest
-# spending its 4% contamination budget on bright midday rows, tracked as
-# BACKLOG-22; MAD-only hour-12 survival is 98.72%.
-MIN_HOUR_12_SURVIVAL = 0.80
-MIDDAY_HOUR = 12
+# spending its fixed 4% contamination budget almost entirely on bright midday
+# rows, tracked as BACKLOG-22; MAD-only hour-12 survival is 98.72%.
+MIN_MIDDAY_SURVIVAL = 0.80
+MIDDAY_HOURS = (11, 12, 13, 14)
 
 # Per-channel MAD outcome — the fix must not have become "skip everything".
 EXPECTED_HUMIDITY_CULLS = 1_426
@@ -149,20 +168,60 @@ def test_discard_fraction_is_back_under_five_percent(pass1_result) -> None:
     assert stats.status == DISCARD_STATUS_OK
 
 
-def test_midday_rows_survive_pass_one(pass1_result) -> None:
-    """Hour-12 survival clears 80%, against 0.00% before the fix.
+def _survival_by_hour(pass1_result, hours: tuple[int, ...]) -> dict[int, float]:
+    """Clean-row share per hour of day, for each hour in *hours*.
 
-    Pre-fix the collapsed MAD boundary of 8.3552 W/m^2 culled every bright row,
-    so Pass 1 taught the model that midday does not exist.
+    Returned as a dict rather than a bare minimum so a failure names *which*
+    hour moved. The minimum alone would say the gate broke without saying
+    where, and the four hours have very different margins.
     """
     clean_hours = pass1_result.clean_df.index.hour
     anomaly_hours = pass1_result.anomaly_df.index.hour
 
-    survived = int((clean_hours == MIDDAY_HOUR).sum())
-    total = survived + int((anomaly_hours == MIDDAY_HOUR).sum())
+    survival: dict[int, float] = {}
+    for hour in hours:
+        survived = int((clean_hours == hour).sum())
+        total = survived + int((anomaly_hours == hour).sum())
+        assert total > 0, f"no hour-{hour} rows in the corpus — wrong file or stage"
+        survival[hour] = survived / total
+    return survival
 
-    assert total > 0, "no hour-12 rows in the corpus — wrong file or wrong stage"
-    assert survived / total > MIN_HOUR_12_SURVIVAL
+
+def test_midday_rows_survive_pass_one(pass1_result) -> None:
+    """Every hour from 11 to 14 clears 80% survival, against 0.00% before the fix.
+
+    Pre-fix the collapsed MAD boundary of 8.3552 W/m^2 culled every bright row,
+    so Pass 1 taught the model that midday does not exist.
+
+    The gate is the *minimum* over the block because hour 12 is not the worst
+    hour — hour 13 is, at 80.5530%. The per-hour dict is asserted as a whole so
+    the failure message carries all four figures.
+    """
+    survival = _survival_by_hour(pass1_result, MIDDAY_HOURS)
+
+    below_gate = {
+        hour: f"{fraction:.4%}"
+        for hour, fraction in survival.items()
+        if fraction <= MIN_MIDDAY_SURVIVAL
+    }
+    assert not below_gate, (
+        f"midday survival at or below {MIN_MIDDAY_SURVIVAL:.0%}: {below_gate} "
+        f"(all four hours: "
+        f"{ {hour: f'{frac:.4%}'  for hour, frac in survival.items()} })"
+    )
+
+
+def test_hour_13_is_the_binding_hour_of_the_midday_gate(pass1_result) -> None:
+    """Pins *where* the margin is, so a future relaxation is an informed one.
+
+    If this starts failing because some other hour became the minimum, the
+    gate's headroom has moved and the threshold deserves a fresh look rather
+    than a quiet nudge.
+    """
+    survival = _survival_by_hour(pass1_result, MIDDAY_HOURS)
+
+    assert min(survival, key=survival.__getitem__) == 13
+    assert survival[13] == pytest.approx(0.8055, abs=5e-4)
 
 
 def test_light_is_skipped_and_culls_nothing(pass1_result) -> None:

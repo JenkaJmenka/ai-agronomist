@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from src.db.models import ModelVersion, ModelDeployment, ModelBaseline
 from src.models.artifact_store import delete_artifact
+from src.models.metrics_serialization import dumps_metrics
 
 class ModelRegistry:
     """
@@ -33,13 +34,19 @@ class ModelRegistry:
             model_type=model_type,
             checkpoint_path=checkpoint_path,
             baseline_id=baseline_id,
-            # allow_nan=False: a NaN/Infinity metric would serialize to the
-            # non-standard literals NaN/Infinity, store fine in this String
-            # column, and then make every subsequent read of this row fail --
-            # Starlette's JSONResponse.render also uses allow_nan=False, so the
-            # model-read endpoints would 500 for that tenant until the row was
-            # edited out of the database. Fail at the write instead.
-            metrics_json=json.dumps(metrics, allow_nan=False) if metrics else None,
+            # dumps_metrics rejects non-finite floats. Without it a NaN would
+            # serialize to the non-standard literal NaN, store fine in this
+            # String column, and then make every subsequent READ of this row
+            # fail -- Starlette's JSONResponse.render also uses
+            # allow_nan=False, so the model-read endpoints would 500 for that
+            # tenant until the row was edited out of the database.
+            #
+            # It raises MetricsSerializationError (a RuntimeError, NOT a
+            # ValueError) so the cold-start path's
+            # `except (InsufficientDataError, ValueError)` cannot catch it and
+            # report our serialization defect to the tenant as "not enough
+            # clean data". See src/models/metrics_serialization.py.
+            metrics_json=dumps_metrics(metrics) if metrics else None,
             status="active"
         )
         self.db.add(version)

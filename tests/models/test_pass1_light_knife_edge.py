@@ -62,6 +62,7 @@ from src.models.mad_scrub_report import (
     MadScrubOptions,
 )
 from src.models.pass1_discard_guard import DISCARD_STATUS_OK
+from src.models.pass1_warning import WARNING_CODE_CHANNEL_CULL_HIGH
 
 _FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -356,7 +357,16 @@ def test_disabling_both_guards_reproduces_the_pre_fix_cull(
     assert unguarded.skipped_channels == {}
     assert unguarded.cull_counts["light"] == EXPECTED_BRIGHT_ROWS
     assert float(unguarded.flags.mean()) > 0.45
-    assert any("light" in message for message in unguarded.warnings)
+
+    # Keyed on the stable machine-readable code, not on the prose: the message
+    # is tenant-facing copy and will be edited. The channel name is checked
+    # separately because the code cannot carry it — it repeats once per
+    # offending channel, so the message is the only place `light` is named, and
+    # that identification is contract rather than wording.
+    assert [warning.code for warning in unguarded.warnings] == [
+        WARNING_CODE_CHANNEL_CULL_HIGH
+    ]
+    assert "light" in unguarded.warnings[0].message
 
 
 def test_light_is_excluded_by_default_configuration() -> None:

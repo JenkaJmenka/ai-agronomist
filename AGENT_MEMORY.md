@@ -7269,6 +7269,18 @@ immediately, so both fixtures report `SKIP_REASON_EXCLUDED` on shipped code.
 Proving it requires running `compute_mad_scrub` with
 `MadScrubOptions(excluded_columns=frozenset())`.
 
+**Added gate (user, 2026-11-09): a PERSISTENT light fault must be injected and
+still detected.** E.g. a dirty dome attenuating 40% all year. The reason is that
+after fix D, `light` has IsolationForest as its **only** Pass-1 detector —
+`_compute_physics_flags` computes a humidity deficit and nothing else — and
+candidate (b), per-hour or hour x month normalised light, would make a persistent
+fault **part of its own baseline and therefore invisible**. None of the four
+gates above tests a persistent fault, so a change could open that hole and pass
+every one of them. Architect's recommendation, recorded rather than actioned: a
+light range/envelope arm on the physics stage is immune to whatever happens to
+IF, and is where a light fault always belonged — a robust-Z stage was never the
+right home for it.
+
 ## tenant_1 retraining is two-stage, and the first model is knowingly imperfect (Orchestrator, 2026-11-08)
 
 User directive, 2026-11-08. **Retrain tenant_1 once BACKLOG-14's fix D and its
@@ -7322,3 +7334,239 @@ A `ValueError` here is deliberately **not** mapped to HTTP 400, unlike the Pass-
 discard guards: those reject operator data, while a non-finite metric is a
 statistic the server computed, so 5xx is the honest class and a 400 would tell an
 operator to fix a CSV that is not at fault.
+
+## BACKLOG-23 — train/serve normalisation skew (Orchestrator, 2026-11-09) — TOP PRIORITY
+
+**Diagnose-first. RETRAIN ACTIVATION IS HELD ON THIS.** Found while preparing
+BACKLOG-14's shadow retrain; every figure below was verified by the orchestrator
+on the real corpus, not relayed.
+
+**The three paths normalise differently, and two of them disagree with training:**
+
+| path | ranges | evidence |
+|---|---|---|
+| Pass-2 training + calibration | **adaptive**, over the training corpus | `src/models/bootstrap.py:224` |
+| **live scoring** | **static `SENSOR_RANGES`** | `src/live/scoring.py:129`, import `:42` |
+| live enrichment | static | `src/live/enrichment.py:87` |
+| upload scoring | adaptive over a **head sample** of the uploaded file | `src/models/cold_run_upload.py:213` |
+
+The static bounds are the **synthetic generator's**: temp `(20,30)`, humidity
+`(50,80)` (`src/config.py:139-140`). Real tenant_1 data spans 5.34-33.49 C and
+48.24-102.46%. So live normalises real greenhouse data against bounds invented
+for fake data.
+
+**Measured effect on 100,075 known-clean rows:** 54.26% of temperature and
+52.76% of humidity values land **outside [0,1]** — the interval the model trained
+within. Median reconstruction loss **9.81x higher** (0.165 vs 0.017). Against
+live's actual rule, **64.18%** of known-normal history would alert, vs 3.85%
+under training normalisation.
+
+Harness credibility check, which is why these numbers are stated flatly: exactly
+**1.00%** of windows exceed the 99th-percentile calibration threshold under
+training normalisation — the arithmetic identity the calibration asserts. A
+harness that merely approximated the pipeline would not land on it.
+
+**`calibration_threshold` is write-only across the entire codebase.** Only
+`bootstrap.py:287` (property) and `cold_start_training.py:123/143/184` (writes).
+**No scoring path reads it.** Live compares against `LIVE_ANOMALY_THRESHOLD =
+0.05` (`src/config.py:1458`), a global constant, after scaling by
+`ANOMALY_SCALING_FACTOR` (`src/live/attribution.py:49`); upload derives its own
+per-file threshold (`src/models/cold_run_threshold.py:40`). So the 0.064-vs-0.13
+threshold story from BACKLOG-14 is incomplete in a way nobody predicted: **those
+numbers never governed anything.**
+
+Two couplings that belong to this item rather than standing alone:
+- **A checkpoint does not persist the adaptive ranges it trained with** —
+  `save_checkpoint` passes no `model_config`, so a reloaded model cannot
+  reproduce its own normalisation. This is why the shadow script scores both
+  models with the *new* model's ranges and says so: the old column is "old
+  weights on a fair footing", not "what production did".
+- **No test asserts live-vs-training range consistency.** Three tests touch
+  adaptive ranges; none compares the two paths.
+
+**THIS IS TEMPERATURE AND HUMIDITY, NOT LIGHT** — a distinct defect from
+BACKLOG-14, not a continuation, and it **applies to the currently active model**.
+Retraining neither causes nor fixes it.
+
+**NOT established: whether wrong live alerts were actually produced.** This is a
+code-path fact. tenant_1's live feed is recorded as having run only 2026-09-14/15
+before being purged and moved to tenant_2. Confirming realised impact needs a
+read-only production query, which the **user** runs. Do not infer impact from the
+64% figure.
+
+The diagnosis must answer explicitly whether the current prod model is scoring
+with skewed normalisation.
+
+## BACKLOG-24 — training is non-deterministic; a grower's report changes on retrain (Orchestrator, 2026-11-09)
+
+Identical corpus, identical window, 3 seeds: threshold **0.130524..0.135238**,
+alerts **138..148**. So a ten-alert difference is noise. The user's framing: *a
+grower's report must not change on retrain with identical data.*
+
+Seed torch, numpy and IsolationForest's `random_state`. Four things that make it
+less mechanical than it sounds, measured rather than guessed:
+1. `torch.manual_seed` happens to cover all three Pass-2 noise sources — weight
+   init, dropout, loader shuffle — **only because `num_workers=0`**
+   (`src/models/bootstrap.py:436`). Adding workers needs an explicit `generator=`.
+2. `IsolationForest(random_state=42)` is a **hardcoded literal at two sites**
+   (`bootstrap.py:513`, `src/models/data_utils.py:342`), duplicating
+   `config.RANDOM_SEED = 42` instead of importing it. Pass 1 is deterministic but
+   not *configurably* so, and the duplication will drift.
+3. GPU determinism would additionally need `torch.use_deterministic_algorithms(True)`
+   plus cuDNN flags. `DEVICE` is `cpu` today, so it does not bite yet.
+4. `_cap_training_sequences` is an even-stride subsample and is **not** a noise
+   source — recorded so nobody chases it.
+
+Note Pass 1 itself is already deterministic: discard measures 0.046187 on every
+run, which is why the shadow script runs Pass 1 once and only retrains Pass 2
+per seed.
+
+## BACKLOG-25 — exception taxonomy on the cold-start path (Orchestrator, 2026-11-09)
+
+`InsufficientDataError = ValueError` (`src/models/bootstrap.py:61`) is a **bare
+alias, not a subclass**, so a genuine insufficient-rows raise and an unrelated
+bare `ValueError` are the identical class with no distinguishing attribute. Five
+bare `raise ValueError` sites are reachable and four catch sites rely on the
+alias to map them to HTTP 400.
+
+**The one-line "make it a subclass" fix is wrong** and the reason is the whole
+value of this ticket: two of those raises are genuine *client* data errors that
+correctly return 400 today and would become **500s** —
+`cold_start_training.py:167` ("Invalid or unreadable CSV file") and
+`bootstrap.py:437/440` ("Uploaded CSV contains no valid data"). The alias's own
+comment says it exists so route catches work without importing a separate class.
+
+So the work is **classifying each raise site as client-data (400) vs
+server-defect (500)**, not renaming a class. Partially mitigated already:
+`MetricsSerializationError(RuntimeError)` (`src/models/metrics_serialization.py`)
+deliberately escapes the `(InsufficientDataError, ValueError)` tuple so a
+serialization defect surfaces as 500 instead of as "not enough clean data" — that
+pattern is the template, applied narrowly.
+
+## BACKLOG-26 — load-stage losses are invisible to the discard gate (Orchestrator, 2026-11-09)
+
+The discard guard's denominator is the **post-load** frame, and chunk
+normalisation failures are **log-only** (`src/models/bootstrap.py:356-366`). So a
+half-lost upload reports `status: "ok"` and trains on what survived. Record
+`raw_rows` / `loaded_rows` in `metrics_json` and fold them into the gate.
+
+Prior art for why the denominator matters: `data/bootstrapped_clean_csvtest_20260712.csv`
+showed a **44.6% cull of real readings appearing as 3.84% of a 91.4%-NaN frame**.
+The gate already measures over rows-carrying-data for that reason; this extends
+the same logic one stage earlier.
+
+## BACKLOG-27 — the 4% contamination floor is the discard metric's zero (Orchestrator, 2026-11-09)
+
+`BOOTSTRAP_IF_CONTAMINATION = 0.04` sets IsolationForest's decision offset from
+its fit sample, so IF flags ~4.00% **by construction** (measured to three
+decimals). The discard metric's real range is therefore **4%-25%, not 0%-25%**.
+Document it in the metric, and the PDF report must present discard **relative to
+that floor** — otherwise a grower reads 4.62% as "4.62% of my year was anomalous"
+when the irreducible component is 4%.
+
+## BACKLOG-28 — per-channel cull-fraction guard (Orchestrator, 2026-11-09)
+
+Ahead of BACKLOG-22. **A channel culling far more than the warn constant is proof
+its own MAD precondition failed**, which is a better abstention test than modal
+share. Architect's point: modal share detects a *point mass*, not bimodality — a
+light sensor with 0.1-0.4 W/m2 dark noise is equally bimodal with modal share
+near 1/n and the generic rule is blind to it; conversely it fires on `co2`, which
+is not bimodal at all.
+
+The separation is already measured and it is wide: `light` **47.41%** vs
+`humidity` **1.36%** around the existing `BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION`
+— a **35x** gap, against modal share's 1.4x. Promote that constant from warning
+to guard. Diagnose-first, separate branch; the honest cost is that it fails open.
+
+## BACKLOG-29 — split `src/models/bootstrap.py` (Orchestrator, 2026-11-09)
+
+**633 lines against the project's 300-line guardrail**, up from 500 before
+BACKLOG-14 and 568 after fix D. Deliberately not refactored during BACKLOG-14
+because three agents were working behind it. Architect named the seams:
+`_load_and_resample` (~110 lines) and `Pass2BootstrapDetector` (~170) each get it
+under 400.
+
+## BACKLOG-30 — architecture-doc triage and a "Spec:" citation check (Orchestrator, 2026-11-09)
+
+Two halves of the same lesson. `.gitignore` now tracks `docs/architecture/` in
+full with only `drafts/` ignored (commit `5cbcae3`), and the one cited plan is
+committed — but **20 local-only docs still need triage** into keep vs drafts.
+That is a judgement about content and belongs to the architect role; it stalled
+twice on exhausted Fable credits and was never done.
+
+Second half: **a test (not a hook, so it runs in CI) asserting that every
+`"Spec:"` path cited from `src/` resolves via `git ls-files`.** `bootstrap.py:104`
+cited a plan that had never been committed, and the citation turned out not to
+support the code — checking it took archaeology. A mechanical check is what would
+have caught that.
+
+## BACKLOG-31 — pipeline verification rule (Orchestrator, 2026-11-09)
+
+**Every local pytest run uses `set -o pipefail`, or redirects to a file and reads
+`$?`.** A run reporting exit 0 while 7 tests failed must not be possible; it
+happened once in BACKLOG-14 because pytest was piped through `tail` and the
+pipeline's exit was the tail's.
+
+**Do NOT write the rule as "or check `$PIPESTATUS`".** This machine's shell is
+**zsh 5.9**, where `${PIPESTATUS[0]}` expands **empty** — zsh spells the array
+`$pipestatus`, lowercase and 1-indexed — so a `${PIPESTATUS[0]}` guard is
+silently vacuous, i.e. it is the exact failure mode the rule exists to prevent.
+Verified on this machine. `set -o pipefail` works in both shells.
+
+CI was checked and is **safe**: `backend-tests.yml:77` is unpiped and parses
+`--junitxml`; `postgres-tests.yml:141` pipes to `tee` but line 140 already sets
+`pipefail`. The exposure was local only.
+
+Related: only **one pytest run on the machine at a time**. Two concurrent runs
+produced 1584s and 739s outliers against a ~370s norm. And note that dropping a
+measurement from an agent's queue does **not** kill the process it started — one
+was found still executing a round later.
+
+## BACKLOG-32 — unactioned review findings and dropped verification (Orchestrator, 2026-11-09)
+
+BACKLOG-14 closed with these **deliberately** not done, at the user's direction,
+to stop the round expanding. Recorded so a later reader does not mistake them for
+oversights.
+
+**Dropped verification:**
+- the tech-lead + architect **re-run on the B1/B2 diff**
+- qa's unfinished suite measurement, including the one question it never
+  answered: whether `MIN_HOUR_12_SURVIVAL = 0.80` is still right now that the
+  gate covers hours 11-14 and hour 13 measures 80.55%
+- **the consequence, which is the real exposure: the two reviews covered the
+  stack as it stood BEFORE the review-findings line.** The warning restructure,
+  the skip-reason precedence swap, `MetricsSerializationError`, the shadow
+  script, qa's ~140 tests and the final two one-liners have **never been
+  reviewed**. Also: the architect had no Bash, so its review ran no tests and
+  reproduced no measurement — its "no test exists" finding was a grep, which is
+  sound for identifiers that distinctive but is not a coverage run.
+
+**Architect follow-ups not actioned** (6 of 13 were done or ticketed elsewhere):
+attach `Pass1DiscardStats` and the per-channel reports to
+`ExcessivePass1DiscardError` so the fail path stops being log-only
+(`bootstrap.py:170-171`) — note this contradicts the module's own "returned, not
+merely logged" principle; give `evaluate_pass1_discard` warn/fail parameters
+defaulted from config to match `MadScrubOptions`
+(`pass1_discard_guard.py:87-140`); run the discard guard **before** the
+`BOOTSTRAP_MIN_CLEAN_ROWS` check and append `summary()` to the message
+(`bootstrap.py:160-166`), since the floor currently hides the better diagnosis on
+small files; `MadChannelReport.median`/`.mad`/`.modal_share` -> `float | None`
+instead of NaN sentinels (`mad_scrub_report.py:58-60`), dropping one of three NaN
+guards — note the sentinel is **not uniform** across skip reasons, since
+MODAL_SHARE and NO_SPREAD return real values while EXCLUDED/NO_FINITE/MISSING
+return NaN; strip or date-stamp the task-scoped sections of
+`docs/handoff/backlog14_pass1_observability.md` (two already superseded on
+arrival); and record the deviation in
+`docs/architecture/scada-config-engine-plan.md` so the plan and the code stop
+disagreeing — the plan still specifies the global-median scrub that fix D removed.
+
+**Tech-lead follow-ups not actioned** (F1-F3 done or ticketed): `_with_warning`
+copies nine fields by hand instead of `dataclasses.replace`; three copies of
+`_finite_or_none`; four properties duplicated verbatim across
+`BootstrapPass1Result` and `MadScrubResult`; nothing validates the new config
+constants; a fail-open path when no `sensor_columns` member is present;
+`ExcessivePass1DiscardError`'s distinctness unused where it matters most; and SQL
+nits in the handoff queries.
+
+Full reports, if still present:
+`scratchpad/review_architect.md` (514 lines) and `review_techlead.md` (337).

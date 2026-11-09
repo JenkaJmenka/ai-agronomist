@@ -12,7 +12,7 @@ from src.api.services.cold_start_training import (
     should_train_cold_start,
     train_cold_start_from_csv,
 )
-from src.models.bootstrap import InsufficientDataError
+from src.models.bootstrap import ExcessivePass1DiscardError, InsufficientDataError
 from src.models.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,35 @@ async def resolve_upload_checkpoint(
         train_result: ColdStartTrainResult = await train_cold_start_from_csv(
             db, tenant_id, tmp_path
         )
-    except (InsufficientDataError, ValueError) as exc:
+    except ExcessivePass1DiscardError:
+        # Reaches the tenant with its OWN message, unwrapped -- do not build a
+        # NoModelAvailableError around it. `ColdStartBootstrap.run()` raises this
+        # with `discard_stats.warnings[0].message`, already tenant-safe prose
+        # (`Pass1Warning.message`), and the HTTP-level `ValueError` -> 400 mapping
+        # on this path (`src/api/routes/inference.py`) renders `str(exc)` straight
+        # into the response body. Wrapping it in the "not enough clean data...
+        # upload a longer history" text below would invert the diagnosis: too much
+        # was thrown away, not too little supplied. Must stay ahead of the
+        # `except InsufficientDataError` clause below -- `ExcessivePass1DiscardError`
+        # subclasses `ValueError`, so it would otherwise be caught there instead,
+        # which is the bug this clause fixes. Propagates the same way regardless of
+        # `train_model`: a discard-fail is the same genuine data problem whether or
+        # not this attempt was an explicit forced retrain.
+        raise
+    except InsufficientDataError as exc:
+        # `InsufficientDataError` is a bare alias for `ValueError`
+        # (`src/models/bootstrap.py:61`: `InsufficientDataError = ValueError`), not a
+        # distinct subclass. At runtime it is therefore IDENTICAL to any other plain
+        # `ValueError` this call chain can raise that is not `ExcessivePass1DiscardError`
+        # -- e.g. `_run_pass1_pass2`'s "Cold-start training produced no model" or
+        # `train_cold_start_from_csv`'s "Invalid or unreadable CSV file" wrap of
+        # `FileNotFoundError`. No `isinstance` check in this file can separate "true"
+        # insufficient-clean-rows from those other bare `ValueError`s, because they
+        # are literally the same Python class -- so a bare, unrelated `ValueError`
+        # still lands here and gets this tenant-data message, same as before this
+        # change. A full three-way split needs a real `InsufficientDataError(ValueError)`
+        # subclass in `src/models/bootstrap.py` (ml-engineer's, not touched here);
+        # flagging the gap rather than papering over it with a `str(exc)` match.
         if train_model:
             raise
         logger.warning(

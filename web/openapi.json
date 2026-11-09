@@ -7977,6 +7977,25 @@
         ],
         "title": "Body_upload_csv_api_upload_post"
       },
+      "BootstrapPass1Warning": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "BootstrapPass1Warning",
+        "description": "One Pass-1 warning, mirroring ``src.models.pass1_warning.Pass1Warning``.\n\n``code`` is a member of the closed set in that module\n(``PASS1_WARNING_CODES``); ``message`` is tenant-safe prose with no\ninternal env var or config names in it (see that module's docstring).\n\n``from_attributes=True`` lets this model validate directly from a\n``Pass1Warning`` dataclass instance, not only from a dict \u2014 so a\nconsumer that forgets ``.as_dict()`` degrades to an accepted input\nrather than a 500."
+      },
       "BootstrapRowResult": {
         "properties": {
           "timestamp": {
@@ -8050,7 +8069,7 @@
           },
           "pass1_warnings": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/BootstrapPass1Warning"
             },
             "type": "array",
             "title": "Pass1 Warnings"
@@ -8064,7 +8083,7 @@
           "results"
         ],
         "title": "BootstrapRunResponse",
-        "description": "Top-level response from POST /api/v1/bootstrap/run.\n\n``pass1_warnings`` (BACKLOG-14 Phase 2) surfaces Pass 1's operator-facing\ndiscard/MAD warnings to the caller \u2014 a tenant who just uploaded a year of\ndata deserves to be told part of it was thrown away, not just have it\nlogged server-side. Empty on a clean run; non-empty does not mean the\npipeline failed (a \"warn\" discard status still returns 200 \u2014 only \"fail\"\nraises)."
+        "description": "Top-level response from POST /api/v1/bootstrap/run.\n\n``pass1_warnings`` (BACKLOG-14 Phase 2) surfaces Pass 1's operator-facing\ndiscard/MAD warnings to the caller \u2014 a tenant who just uploaded a year of\ndata deserves to be told part of it was thrown away, not just have it\nlogged server-side. Empty on a clean run; non-empty does not mean the\npipeline failed (a \"warn\" discard status still returns 200 \u2014 only \"fail\"\nraises).\n\nThe field is a list of structured objects, not strings: Pass 1 now\nreturns ``tuple[Pass1Warning, ...]`` (a `(code, message)` pair each, see\n``src/models/pass1_warning.py``), and this schema mirrors that shape\nrather than collapsing it to prose the caller can't branch on."
       },
       "ComprehensiveInferenceRequest": {
         "properties": {

@@ -33,7 +33,7 @@ unchanged.
 | `mad_channels` | `tuple[MadChannelReport, ...]` | One report per channel the MAD scrub was asked about, in request order. Empty when the frame was empty. |
 | `if_flag_fraction` | `float` | IsolationForest flag rate over the **whole frame** (`if_flags.mean()`). Fit and predict now run on the same population, so there is exactly one IF rate — see §3. |
 | `discard_stats` | `Pass1DiscardStats` | Union discard against both denominators, plus the guard status. §4. |
-| `warnings` | `tuple[str, ...]` | Operator-facing strings, **returned** rather than only logged. Order: per-channel MAD warnings, then the discard warning. |
+| `warnings` | `tuple[Pass1Warning, ...]` | Structured `(code, message)` pairs, **returned** rather than only logged. Order: per-channel MAD warnings, then the discard warning. **Was `tuple[str, ...]`** — see §8. |
 
 Four derived read-only properties are provided so a consumer never has to walk
 `mad_channels` by hand:
@@ -103,15 +103,59 @@ Frozen dataclass, one per channel.
 | `cull_fraction` | `float` | `cull_rows / finite_rows`, `0.0` when `finite_rows == 0` |
 
 `skip_reason` is one of these five string constants, exported from the same
-module. Treat the set as closed and match on the constants, not the literals:
+module. Treat the set as closed and match on the constants, not the literals.
 
-| constant | value | when |
-|---|---|---|
-| `SKIP_REASON_EXCLUDED` | `"excluded_channel"` | named in `BOOTSTRAP_MAD_EXCLUDED_CHANNELS` |
-| `SKIP_REASON_MODAL_SHARE` | `"modal_share_above_limit"` | modal share > `BOOTSTRAP_MAD_MAX_MODAL_SHARE` |
-| `SKIP_REASON_NO_SPREAD` | `"mad_at_or_below_min_spread"` | MAD ≤ `BOOTSTRAP_MAD_MIN_SPREAD` |
-| `SKIP_REASON_NO_FINITE` | `"no_finite_values"` | channel is entirely NaN |
-| `SKIP_REASON_MISSING` | `"column_absent"` | asked for, not present in the frame |
+**The five reasons are not independent alternatives — they are checked in a
+fixed precedence order, and only the first match is reported.** A reviewer's
+point, recorded here rather than left implicit: a DB row's `skip_reason`
+answers "which check fired first", not "which checks apply" — a channel that
+is both zero-spread and nominally over the modal-share limit is reported as
+zero-spread (`mad_at_or_below_min_spread`), never `modal_share_above_limit`,
+because the spread check runs first and returns before modal share is even
+evaluated for that channel.
+
+| order | constant | value | when | checked in |
+|---|---|---|---|---|
+| 0 | `SKIP_REASON_MISSING` | `"column_absent"` | requested column not present in the frame | `compute_mad_scrub` (before per-column evaluation) |
+| 1 | `SKIP_REASON_EXCLUDED` | `"excluded_channel"` | named in `BOOTSTRAP_MAD_EXCLUDED_CHANNELS` | `_skip_reason`, first check |
+| 2 | `SKIP_REASON_NO_FINITE` | `"no_finite_values"` | channel is entirely NaN | `_skip_reason`, second check |
+| 3 | `SKIP_REASON_NO_SPREAD` | `"mad_at_or_below_min_spread"` | MAD ≤ `BOOTSTRAP_MAD_MIN_SPREAD` | `_skip_reason`, third check — **tested before modal share, and the order is load-bearing** (see below) |
+| 4 | `SKIP_REASON_MODAL_SHARE` | `"modal_share_above_limit"` | modal share > `BOOTSTRAP_MAD_MAX_MODAL_SHARE`, reached only when spread is non-degenerate | `_skip_reason`, last check |
+
+**Why the order changed (review finding, fixed in this branch):** `mad == 0`
+implies at least half the channel's finite values sit exactly at the median,
+so its modal share is always ≥ ~0.5 — above the 0.40 limit. With modal share
+tested first, `SKIP_REASON_NO_SPREAD` was unreachable in production, and a
+genuinely *constant* sensor was reported as `modal_share_above_limit` —
+"bimodal" — which is false, and was being persisted into `metrics_json` per
+model. `co2` is the live case: the CSV adapter fills it with the constant
+400.0 whenever the vendor file carries no real CO2 channel. Testing spread
+first makes the reported reason true, and makes `mad_at_or_below_min_spread`
+a usable zero-variance signal for BACKLOG-21 (stuck-sensor detection) that
+`modal_share_above_limit` could not be, having been contaminated with every
+constant channel in the corpus.
+
+Measured on the three fixture corpora, real `ColdStartBootstrap.run()`, same
+inputs before and after — **only the reported reason changes; `cull_rows` is
+0 → 0 on every row below**, because this is a label fix, not a behavior
+change: a skipped channel never culls (`cull_rows` is set to 0 whenever
+`_skip_reason` returns non-``None``, before the z-score mask is even
+computed), and every channel below has `mad == 0.0`, so it was already
+`is_skipped=True` — just under the wrong reason — both before and after.
+
+| corpus | channel | before | after |
+|---|---|---|---|
+| tenant_1 | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_july_clearsky.csv` | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_dec_stuck_fault.csv` | `humidity` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+| `native_dec_stuck_fault.csv` | `co2` | `modal_share_above_limit` | `mad_at_or_below_min_spread` |
+
+`light` stays `excluded_channel` on all three corpora in both columns — the
+exclusion check runs first (order 1) and returns before spread or modal share
+are evaluated at all, so reordering those two later checks cannot touch it.
+`modal_share_above_limit` is still reachable, and now means what it says:
+genuinely multi-modal *with real spread* (`mad > BOOTSTRAP_MAD_MIN_SPREAD`) —
+not a constant sensor masquerading as one.
 
 `MadScrubResult` (same module) carries `flags: pd.Series`, `channels` and
 `warnings`, with `cull_fractions` / `cull_counts` / `finite_counts` /
@@ -177,7 +221,7 @@ feeds IF's fit population.
 | `data_discarded` | `int` | discarded rows among those |
 | `data_discard_fraction` | `float` | `data_discarded / data_rows` |
 | `status` | `str` | `"ok"` \| `"warn"` \| `"fail"` |
-| `warnings` | `tuple[str, ...]` | empty for `"ok"`; one message otherwise |
+| `warnings` | `tuple[Pass1Warning, ...]` | empty for `"ok"`; exactly one warning otherwise |
 
 Plus `is_failing: bool` and `summary() -> str` (one line carrying both
 numerators and both denominators).
@@ -341,7 +385,7 @@ output rather than Pass-1 flags.
 ## 7. What Phase 2 must not assume
 
 - **`warnings` can be non-empty on a successful run.** `status == "warn"` returns
-  normally. Persist the strings; do not treat a non-empty tuple as failure.
+  normally. Persist them; do not treat a non-empty tuple as failure.
 - **`mad_channels` order follows the requested columns**, currently
   `_SENSOR_COLS = ["temperature", "humidity", "co2", "light"]`. Key by
   `column`; do not index positionally.
@@ -350,3 +394,62 @@ output rather than Pass-1 flags.
   is lower than the rate among rows the forest actually scored.
 - **A `"fail"` never reaches a `BootstrapPass1Result`** — it raises. Anything
   reading `discard_stats.status` off a returned result sees only `ok`/`warn`.
+
+---
+
+## 8. Warning codes — the closed set (added 2026-11-08, review finding)
+
+`warnings` changed from `tuple[str, ...]` to `tuple[Pass1Warning, ...]`.
+**This is a breaking change for the serializer and for `web/openapi.json`.**
+
+Why: `pass1_warnings` reaches the tenant through `POST /api/v1/bootstrap/run`
+and is published in `web/openapi.json`, and the free-text form named our
+internal environment variables to the customer — it told them to "add it to
+`BOOTSTRAP_MAD_EXCLUDED_CHANNELS`". A warning is now two things with two
+audiences.
+
+`Pass1Warning` lives in **`src/models/pass1_warning.py`**:
+
+| field | type | notes |
+|---|---|---|
+| `code` | `str` | Stable, machine-readable, safe to branch on and to store. Always a member of `PASS1_WARNING_CODES`. |
+| `message` | `str` | Tenant-safe prose. **No environment variable names, no internal constant / module / field names.** Safe in an HTTP body. |
+
+Plus `as_dict() -> dict[str, str]` returning `{"code": ..., "message": ...}`.
+**Serialize with `[w.as_dict() for w in result.warnings]`** — a bare
+`list(result.warnings)` now holds dataclasses and will raise `TypeError` in
+`json.dumps`.
+
+### The closed set
+
+Match on the module constants, never on the literals. All three are exercised
+and verified free of internal names.
+
+| constant | value | when |
+|---|---|---|
+| `WARNING_CODE_DISCARD_HIGH` | `"discard_fraction_high"` | union discard at/above the warn limit; result still returned |
+| `WARNING_CODE_DISCARD_EXCESSIVE` | `"discard_fraction_excessive"` | at/above the fail limit; training stopped, raised as `ExcessivePass1DiscardError` |
+| `WARNING_CODE_CHANNEL_CULL_HIGH` | `"channel_cull_fraction_high"` | one channel over its per-channel cull share; **emitted once per offending channel, so this code can repeat in one result** |
+
+`PASS1_WARNING_CODES` is the frozenset of all three. If a code is added, it is
+added there in the same edit.
+
+### The remediation text moved to the log, it was not deleted
+
+A reviewer praised those messages, so they are intact — just relocated. Each
+producer (`mad_scrub_warnings._channel_cull_warning`,
+`pass1_discard_guard._with_warning`) logs the full engineering detail at
+WARNING level, naming `BOOTSTRAP_MAD_EXCLUDED_CHANNELS`,
+`BOOTSTRAP_MAD_Z_THRESHOLD`, `BOOTSTRAP_CULL_WARN_FRACTION` /
+`BOOTSTRAP_CULL_FAIL_FRACTION` and printing the `mad`/`median` pair that proves
+raising the z threshold cannot help a bimodal channel. **Nothing API-visible
+carries any of it.** `ColdStartBootstrap.run` additionally logs one line with
+the codes, so a run can be tied to the warnings it returned.
+
+### The fail message is also the HTTP 400 body
+
+`ColdStartBootstrap.run` raises `ExcessivePass1DiscardError(warning.message)`
+and `src/api/routes/bootstrap.py` passes `str(exc)` straight to the caller, so
+the fail message had to be tenant-safe as well — not only the returned
+warnings. Raise with `.message`, never with the code and never with the log
+text.

@@ -2228,6 +2228,25 @@ export interface components {
             greenhouse_id: string;
         };
         /**
+         * BootstrapPass1Warning
+         * @description One Pass-1 warning, mirroring ``src.models.pass1_warning.Pass1Warning``.
+         *
+         *     ``code`` is a member of the closed set in that module
+         *     (``PASS1_WARNING_CODES``); ``message`` is tenant-safe prose with no
+         *     internal env var or config names in it (see that module's docstring).
+         *
+         *     ``from_attributes=True`` lets this model validate directly from a
+         *     ``Pass1Warning`` dataclass instance, not only from a dict — so a
+         *     consumer that forgets ``.as_dict()`` degrades to an accepted input
+         *     rather than a 500.
+         */
+        BootstrapPass1Warning: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /**
          * BootstrapRowResult
          * @description Per-row classification result from the two-pass bootstrap pipeline.
          */
@@ -2257,6 +2276,11 @@ export interface components {
          *     logged server-side. Empty on a clean run; non-empty does not mean the
          *     pipeline failed (a "warn" discard status still returns 200 — only "fail"
          *     raises).
+         *
+         *     The field is a list of structured objects, not strings: Pass 1 now
+         *     returns ``tuple[Pass1Warning, ...]`` (a `(code, message)` pair each, see
+         *     ``src/models/pass1_warning.py``), and this schema mirrors that shape
+         *     rather than collapsing it to prose the caller can't branch on.
          */
         BootstrapRunResponse: {
             /** Rows Ingested */
@@ -2268,7 +2292,7 @@ export interface components {
             /** Results */
             results: components["schemas"]["BootstrapRowResult"][];
             /** Pass1 Warnings */
-            pass1_warnings?: string[];
+            pass1_warnings?: components["schemas"]["BootstrapPass1Warning"][];
         };
         /**
          * ComprehensiveInferenceRequest

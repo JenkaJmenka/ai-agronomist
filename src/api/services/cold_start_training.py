@@ -12,7 +12,6 @@ the cross-agent contract in ``docs/handoff/backlog14_pass1_observability.md``
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -30,6 +29,7 @@ from src.models.bootstrap import (
     Pass2BootstrapDetector,
 )
 from src.models.mad_scrub_report import MadChannelReport
+from src.models.metrics_serialization import dumps_metrics
 from src.models.model_registry import ModelRegistry
 from src.models.pass1_discard_guard import Pass1DiscardStats
 
@@ -128,10 +128,13 @@ def _build_pass1_metrics(
     value raises here — at the point this dict is built — rather than being
     silently written as the invalid JSON token ``NaN`` (Postgres rejects it,
     SQLite does not; see ``project_sqlite_postgres_nan_gap``).
-    ``ModelRegistry.register_model`` (src/models/model_registry.py, not owned
-    here) does its own unguarded ``json.dumps(metrics)`` right after this —
-    harmless once every value here is already finite, but it is a second gap
-    worth flagging rather than patching outside this module's ownership.
+    ``ModelRegistry.register_model`` (``src/models/model_registry.py:42``) now
+    carries its own ``json.dumps(metrics, allow_nan=False)`` guard too
+    (commit ``c205265``, pinned by a test there) — this call and that one are
+    two independent layers on the same hazard, not one guard standing in for
+    the other: this one fails fast with the full ``BootstrapPass1Result`` and
+    field names still in scope for the traceback, before the dict ever leaves
+    this function.
     """
     metrics: dict[str, object] = {
         "source": "cold_start_upload",
@@ -144,9 +147,9 @@ def _build_pass1_metrics(
         },
         "pass1_if_flag_fraction": pass1_result.if_flag_fraction,
         "pass1_discard": _discard_stats_entry(pass1_result.discard_stats),
-        "pass1_warnings": list(pass1_result.warnings),
+        "pass1_warnings": [warning.as_dict() for warning in pass1_result.warnings],
     }
-    json.dumps(metrics, allow_nan=False)
+    dumps_metrics(metrics)
     return metrics
 
 

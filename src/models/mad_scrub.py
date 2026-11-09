@@ -39,7 +39,6 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
-    BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION,
     BOOTSTRAP_MAD_MIN_SPREAD,
     BOOTSTRAP_MAD_Z_THRESHOLD,
 )
@@ -53,6 +52,7 @@ from src.models.mad_scrub_report import (
     MadScrubOptions,
     MadScrubResult,
 )
+from src.models.mad_scrub_warnings import build_mad_warnings
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +117,19 @@ def _skip_reason(
     mad = float(np.median(np.abs(subset - med)))
     share = modal_share(subset)
 
-    if share > options.max_modal_share:
-        return SKIP_REASON_MODAL_SHARE, med, mad, share
+    # Zero spread is tested BEFORE modal share, and the order is load-bearing.
+    # mad == 0 implies at least half the values sit exactly at the median, so
+    # modal share is >= ~0.5 and always above the 0.40 limit: with modal share
+    # first, SKIP_REASON_NO_SPREAD was unreachable in production and a constant
+    # channel was reported as "modal_share_above_limit", i.e. bimodal, which is
+    # false and was being persisted per model. `co2` is the live case -- the CSV
+    # adapter fills it with a constant 400.0. Testing spread first makes the
+    # reported reason true, and makes `no_spread` a usable zero-variance signal
+    # for stuck-sensor work (BACKLOG-21).
     if mad <= options.min_spread:
         return SKIP_REASON_NO_SPREAD, med, mad, share
+    if share > options.max_modal_share:
+        return SKIP_REASON_MODAL_SHARE, med, mad, share
     return None, med, mad, share
 
 
@@ -224,52 +233,9 @@ def compute_mad_scrub(
     return MadScrubResult(
         flags=flags,
         channels=tuple(reports),
-        warnings=_build_warnings(flags, tuple(reports), opts),
+        warnings=build_mad_warnings(flags, tuple(reports), opts),
     )
 
-
-def _build_warnings(
-    flags: pd.Series,
-    reports: tuple[MadChannelReport, ...],
-    options: MadScrubOptions,
-) -> tuple[str, ...]:
-    """Log the scrub outcome and return the operator-facing warnings."""
-    cull_frac = float(flags.mean()) if len(flags) else 0.0
-    scrubbed = [r.column for r in reports if not r.is_skipped]
-    logger.info(
-        "MAD scrub flagged %.2f%% of rows (threshold=%.2f, scrubbed=%s)",
-        100.0 * cull_frac,
-        options.threshold,
-        scrubbed,
-    )
-
-    warnings: list[str] = []
-    for report in reports:
-        if report.is_skipped:
-            logger.info(
-                "MAD scrub skipped channel '%s' (%s; modal_share=%.4f, mad=%.6g)",
-                report.column,
-                report.skip_reason,
-                report.modal_share,
-                report.mad,
-            )
-            continue
-        if report.cull_fraction <= BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION:
-            continue
-        message = (
-            f"MAD scrub culled {100.0 * report.cull_fraction:.1f}% of channel "
-            f"'{report.column}' ({report.cull_rows}/{report.finite_rows} finite "
-            f"values), above the per-channel limit of "
-            f"{100.0 * BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION:.0f}%. Check the "
-            f"sensor for a step change or a second operating mode; if the "
-            f"channel is genuinely multi-modal, add it to "
-            f"BOOTSTRAP_MAD_EXCLUDED_CHANNELS. Raising BOOTSTRAP_MAD_Z_THRESHOLD "
-            f"will NOT help when MAD scales with the median (mad="
-            f"{report.mad:.6g}, median={report.median:.6g})."
-        )
-        logger.warning("%s", message)
-        warnings.append(message)
-    return tuple(warnings)
 
 
 def compute_mad_flags(
