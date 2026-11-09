@@ -11,10 +11,10 @@ Scope (files the decision concerns, none of them changed here):
 
 Supersedes the "backlog, not work" status that ADR-011 gave this gap under
 **Known limitations**. The design exploration behind it is
-`docs/architecture/BACKLOG-1-concurrent-channel-storage.md`, which is
-deliberately untracked (`docs/architecture/` tracks only `ADR-*.md`,
-`upload_detector_convergence.md`, `episode_grouping.md`); everything from it
-that the decision rests on is reproduced here.
+[`docs/architecture/BACKLOG-1-concurrent-channel-storage.md`](BACKLOG-1-concurrent-channel-storage.md),
+tracked alongside this ADR since PR #101 (2026-11-08) inverted the directory's
+ignore rule to track everything under `docs/architecture/` except `drafts/`;
+everything from it that the decision rests on is reproduced here.
 
 ## Problem
 
