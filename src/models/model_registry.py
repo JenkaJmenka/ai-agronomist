@@ -33,7 +33,13 @@ class ModelRegistry:
             model_type=model_type,
             checkpoint_path=checkpoint_path,
             baseline_id=baseline_id,
-            metrics_json=json.dumps(metrics) if metrics else None,
+            # allow_nan=False: a NaN/Infinity metric would serialize to the
+            # non-standard literals NaN/Infinity, store fine in this String
+            # column, and then make every subsequent read of this row fail --
+            # Starlette's JSONResponse.render also uses allow_nan=False, so the
+            # model-read endpoints would 500 for that tenant until the row was
+            # edited out of the database. Fail at the write instead.
+            metrics_json=json.dumps(metrics, allow_nan=False) if metrics else None,
             status="active"
         )
         self.db.add(version)

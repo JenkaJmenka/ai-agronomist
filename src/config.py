@@ -1111,6 +1111,64 @@ BOOTSTRAP_MAD_Z_THRESHOLD: float = float(
     os.environ.get("BOOTSTRAP_MAD_Z_THRESHOLD", "3.5")
 )
 
+# Channels the Pass-1 MAD scrub never evaluates, by name. The scrub takes one
+# whole-file median/MAD per channel, a statistic that assumes a *unimodal*
+# distribution. `light` is structurally bimodal — night zeros and day
+# irradiance — and when the dark rows sit near half the window every zero
+# deviates from the median by exactly the median, so MAD == median identically
+# and the cull boundary collapses to median x (1 + z/0.6745), about 6.19x the
+# median at z = 3.5. On the year-long tenant_1 corpus that boundary is
+# 8.36 W/m^2: it culled 47.4% of all rows and 100% of midday rows (BACKLOG-14).
+# Comma-separated; set to an empty string to scrub every channel.
+BOOTSTRAP_MAD_EXCLUDED_CHANNELS: frozenset = frozenset(
+    name.strip()
+    for name in os.environ.get("BOOTSTRAP_MAD_EXCLUDED_CHANNELS", "light").split(",")
+    if name.strip()
+)
+
+# Generic degeneracy guard for the Pass-1 MAD scrub: skip any channel where a
+# single value accounts for more than this fraction of its finite samples.
+# A dominant mode drags the median onto itself, which both shrinks MAD toward
+# the mode's own spread and makes the cull boundary a multiple of the mode
+# rather than of the channel's real variation. 0.40 sits below the 0.44 modal
+# share `light` reaches on the tenant_1 corpus and well above the 0.08 that
+# `humidity` reaches there, so it catches the degenerate case without
+# suppressing a channel whose culls are genuine.
+BOOTSTRAP_MAD_MAX_MODAL_SHARE: float = float(
+    os.environ.get("BOOTSTRAP_MAD_MAX_MODAL_SHARE", "0.40")
+)
+
+# MAD floor for the Pass-1 scrub: at or below this the channel is treated as
+# constant and contributes no culls. Sensor values arrive as decimal text with
+# at most four fractional digits, so the smallest MAD a genuinely varying
+# channel can show is 1e-4; float64 round-off on greenhouse magnitudes is
+# ~1e-13. 1e-9 sits between the two by five and four orders of magnitude
+# respectively, so it separates "constant" from "coarsely quantized but real"
+# without being reachable by either. Subsumes the exact MAD == 0 case.
+BOOTSTRAP_MAD_MIN_SPREAD: float = float(
+    os.environ.get("BOOTSTRAP_MAD_MIN_SPREAD", "1e-9")
+)
+
+# Pass-1 discard guard. The denominator for both thresholds is rows *carrying
+# data* (at least one finite sensor value), not rows in the frame: a mostly-NaN
+# upload once showed a 44.6% cull of real readings as 3.84% of the frame.
+# At or above the warn fraction Pass 1 returns a warning; at or above the fail
+# fraction it raises ExcessivePass1DiscardError and training stops.
+BOOTSTRAP_CULL_WARN_FRACTION: float = float(
+    os.environ.get("BOOTSTRAP_CULL_WARN_FRACTION", "0.15")
+)
+BOOTSTRAP_CULL_FAIL_FRACTION: float = float(
+    os.environ.get("BOOTSTRAP_CULL_FAIL_FRACTION", "0.25")
+)
+
+# Per-channel MAD cull warning threshold, as a fraction of that channel's
+# finite values. Was hardcoded as `_CULL_WARN_FRACTION` in mad_scrub.py, where
+# it only ever reached the log — it fired on every tenant_1 run from July to
+# October and nobody saw it. Warnings are now returned on the Pass-1 result.
+BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION: float = float(
+    os.environ.get("BOOTSTRAP_CHANNEL_CULL_WARN_FRACTION", "0.10")
+)
+
 # Seasonal baseline / scaler (σ_season relative to global σ).
 SEASONAL_MIN_SAMPLES: int = int(os.environ.get("SEASONAL_MIN_SAMPLES", "500"))
 SEASONAL_SCALE_MIN: float = float(os.environ.get("SEASONAL_SCALE_MIN", "0.5"))

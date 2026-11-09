@@ -41,7 +41,14 @@ from src.models.data_utils import (
     preprocess_sequences,
 )
 from src.models.lstm_vae import LSTMVAE
-from src.models.mad_scrub import compute_mad_flags
+from src.models.mad_scrub import compute_mad_scrub
+from src.models.mad_scrub_report import MadChannelReport
+from src.models.pass1_discard_guard import (
+    DISCARD_STATUS_FAIL,
+    ExcessivePass1DiscardError,
+    Pass1DiscardStats,
+    evaluate_pass1_discard,
+)
 from src.models.psychrometric_validator import calculate_humidity_deficit
 from src.utils.profiling import timed
 
@@ -51,6 +58,11 @@ logger = logging.getLogger(__name__)
 # caught by `except InsufficientDataError` in the route without requiring an import
 # of a separate exception class.
 InsufficientDataError = ValueError
+
+# Pass 1's second failure mode, ExcessivePass1DiscardError, is imported above
+# and so is also reachable as src.models.bootstrap.ExcessivePass1DiscardError.
+# It subclasses ValueError, i.e. InsufficientDataError, so the route's existing
+# `except InsufficientDataError` still maps it to HTTP 400.
 
 _SENSOR_COLS: list[str] = ["temperature", "humidity", "co2", "light"]
 _GAS_COLS: frozenset[str] = frozenset({"co2", "light"})
@@ -62,7 +74,12 @@ _TRAIN_LR: float = 1e-3
 
 @dataclass
 class BootstrapPass1Result:
-    """Output of ColdStartBootstrap.run()."""
+    """Output of ColdStartBootstrap.run().
+
+    The observability fields are documented as a cross-agent contract in
+    ``docs/handoff/backlog14_pass1_observability.md``. Every fraction on this
+    class is a fraction in [0, 1] — never a percentage.
+    """
 
     clean_df: pd.DataFrame
     anomaly_df: pd.DataFrame
@@ -70,6 +87,35 @@ class BootstrapPass1Result:
     mad_flags: pd.Series      # bool — True when MAD robust Z cull flagged the row
     if_flags: pd.Series       # bool — True when IsolationForest marked as outlier
     gas_mask_cols: frozenset  # gas columns dropped due to high null fraction
+    # Observability (BACKLOG-14). Defaulted so existing constructors still work.
+    mad_channels: tuple[MadChannelReport, ...] = ()
+    if_flag_fraction: float = 0.0
+    discard_stats: Pass1DiscardStats = field(default_factory=Pass1DiscardStats)
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def mad_channel_cull_fractions(self) -> dict[str, float]:
+        """Channel → MAD cull fraction of that channel's finite values."""
+        return {report.column: report.cull_fraction for report in self.mad_channels}
+
+    @property
+    def mad_channel_cull_rows(self) -> dict[str, int]:
+        """Channel → absolute MAD cull count."""
+        return {report.column: report.cull_rows for report in self.mad_channels}
+
+    @property
+    def mad_channel_finite_rows(self) -> dict[str, int]:
+        """Channel → finite-value count, the cull-fraction denominator."""
+        return {report.column: report.finite_rows for report in self.mad_channels}
+
+    @property
+    def mad_skipped_channels(self) -> dict[str, str]:
+        """Channel → reason, for channels the MAD scrub did not evaluate."""
+        return {
+            report.column: report.skip_reason
+            for report in self.mad_channels
+            if report.is_skipped and report.skip_reason is not None
+        }
 
 
 @dataclass
@@ -99,10 +145,10 @@ class ColdStartBootstrap:
         with timed(logger, "bootstrap.pass1.physics_flags", rows=len(df)):
             physics_flags = _compute_physics_flags(df)
         with timed(logger, "bootstrap.pass1.mad_scrub", rows=len(df)):
-            mad_flags = compute_mad_flags(df, _SENSOR_COLS)
+            mad_scrub = compute_mad_scrub(df, _SENSOR_COLS)
+            mad_flags = mad_scrub.flags
         with timed(logger, "bootstrap.pass1.isolation_forest", rows=len(df)):
-            # Spec: MAD-flagged rows are excluded from IF *fit*, then OR-ed in.
-            gas_mask_cols, if_flags = _compute_if_flags(df, exclude_mask=mad_flags)
+            gas_mask_cols, if_flags = _compute_if_flags(df)
 
         combined = physics_flags | mad_flags | if_flags
         clean_df = df[~combined]
@@ -117,6 +163,13 @@ class ColdStartBootstrap:
                 f"(minimum {BOOTSTRAP_MIN_CLEAN_ROWS} required after Pass 1 filtering)"
             )
 
+        discard_stats = evaluate_pass1_discard(df, combined, _SENSOR_COLS)
+        warnings = mad_scrub.warnings + discard_stats.warnings
+        for message in warnings:
+            logger.warning("Pass 1: %s", message)
+        if discard_stats.status == DISCARD_STATUS_FAIL:
+            raise ExcessivePass1DiscardError(discard_stats.warnings[0])
+
         return BootstrapPass1Result(
             clean_df=clean_df,
             anomaly_df=anomaly_df,
@@ -124,6 +177,10 @@ class ColdStartBootstrap:
             mad_flags=mad_flags,
             if_flags=if_flags,
             gas_mask_cols=frozenset(gas_mask_cols),
+            mad_channels=mad_scrub.channels,
+            if_flag_fraction=float(if_flags.mean()) if len(if_flags) else 0.0,
+            discard_stats=discard_stats,
+            warnings=warnings,
         )
 
 
@@ -351,10 +408,23 @@ def _compute_physics_flags(df: pd.DataFrame) -> pd.Series:
     return flags
 
 
-def _compute_if_flags(
-    df: pd.DataFrame,
-    exclude_mask: pd.Series | None = None,
-) -> tuple[list[str], pd.Series]:
+def _compute_if_flags(df: pd.DataFrame) -> tuple[list[str], pd.Series]:
+    """Flag IsolationForest outliers, fitting and scoring the SAME population.
+
+    ``contamination`` calibrates the decision boundary to the distribution the
+    forest was fitted on, so scoring a *different* population voids that
+    calibration. Between 2026-07-24 (``892bcd3``) and 2026-11-08 the fit
+    excluded MAD-flagged rows while ``.predict()`` ran over the whole frame,
+    which turned IsolationForest from a detector into an amplifier of the MAD
+    cull: on the tenant_1 corpus it flagged 4.00% of its fit subset — the
+    contamination it was asked for — but 98.08% of the rows MAD had already
+    culled, so a MAD misfire arrived at the operator as two independent
+    detectors agreeing.
+
+    The removed code credited that split to a spec ("Spec: MAD-flagged rows are
+    excluded from IF *fit*, then OR-ed in."). No such spec item exists; see
+    ``docs/handoff/backlog14_pass1_observability.md`` §3.
+    """
     flags = pd.Series(False, index=df.index)
     feature_cols = list(_SENSOR_COLS)
     gas_mask: list[str] = []
@@ -364,22 +434,13 @@ def _compute_if_flags(
             feature_cols.remove(col)
             gas_mask.append(col)
 
-    fit_df = df
-    if exclude_mask is not None and len(exclude_mask) == len(df):
-        fit_df = df.loc[~exclude_mask.reindex(df.index, fill_value=False)]
-
-    sub = fit_df[feature_cols].dropna()
+    sub = df[feature_cols].dropna()
     if len(sub) < BOOTSTRAP_MIN_IF_ROWS:
         return gas_mask, flags
 
     clf = IsolationForest(contamination=BOOTSTRAP_IF_CONTAMINATION, random_state=42)
     preds = clf.fit_predict(sub.to_numpy())
-    # Score the full (non-excluded) frame so MAD-culled rows stay MAD-only.
-    score_df = df[feature_cols].dropna()
-    if len(score_df) == 0:
-        return gas_mask, flags
-    score_preds = clf.predict(score_df.to_numpy())
-    flags[score_df.index[score_preds == -1]] = True
+    flags[sub.index[preds == -1]] = True
     return gas_mask, flags
 
 
