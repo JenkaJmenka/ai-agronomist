@@ -5,7 +5,7 @@ Field names mirror the engine BootstrapRowResult dataclass exactly so
 dataclasses.asdict() can be unpacked directly into the Pydantic model.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BootstrapRowResult(BaseModel):
@@ -26,7 +26,14 @@ class BootstrapPass1Warning(BaseModel):
     ``code`` is a member of the closed set in that module
     (``PASS1_WARNING_CODES``); ``message`` is tenant-safe prose with no
     internal env var or config names in it (see that module's docstring).
+
+    ``from_attributes=True`` lets this model validate directly from a
+    ``Pass1Warning`` dataclass instance, not only from a dict — so a
+    consumer that forgets ``.as_dict()`` degrades to an accepted input
+    rather than a 500.
     """
+
+    model_config = ConfigDict(from_attributes=True)
 
     code: str
     message: str

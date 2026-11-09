@@ -12,7 +12,6 @@ the cross-agent contract in ``docs/handoff/backlog14_pass1_observability.md``
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -30,6 +29,7 @@ from src.models.bootstrap import (
     Pass2BootstrapDetector,
 )
 from src.models.mad_scrub_report import MadChannelReport
+from src.models.metrics_serialization import dumps_metrics
 from src.models.model_registry import ModelRegistry
 from src.models.pass1_discard_guard import Pass1DiscardStats
 
@@ -149,7 +149,7 @@ def _build_pass1_metrics(
         "pass1_discard": _discard_stats_entry(pass1_result.discard_stats),
         "pass1_warnings": [warning.as_dict() for warning in pass1_result.warnings],
     }
-    json.dumps(metrics, allow_nan=False)
+    dumps_metrics(metrics)
     return metrics
 
 
