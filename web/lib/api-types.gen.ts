@@ -2250,6 +2250,13 @@ export interface components {
         /**
          * BootstrapRunResponse
          * @description Top-level response from POST /api/v1/bootstrap/run.
+         *
+         *     ``pass1_warnings`` (BACKLOG-14 Phase 2) surfaces Pass 1's operator-facing
+         *     discard/MAD warnings to the caller — a tenant who just uploaded a year of
+         *     data deserves to be told part of it was thrown away, not just have it
+         *     logged server-side. Empty on a clean run; non-empty does not mean the
+         *     pipeline failed (a "warn" discard status still returns 200 — only "fail"
+         *     raises).
          */
         BootstrapRunResponse: {
             /** Rows Ingested */
@@ -2260,6 +2267,8 @@ export interface components {
             pass1_anomaly_rows: number;
             /** Results */
             results: components["schemas"]["BootstrapRowResult"][];
+            /** Pass1 Warnings */
+            pass1_warnings?: string[];
         };
         /**
          * ComprehensiveInferenceRequest

@@ -188,6 +188,7 @@ async def run_bootstrap(
             pass1_clean_rows=len(pass1_result.clean_df),
             pass1_anomaly_rows=len(pass1_result.anomaly_df),
             results=pydantic_results,
+            pass1_warnings=list(pass1_result.warnings),
         )
 
     finally:
