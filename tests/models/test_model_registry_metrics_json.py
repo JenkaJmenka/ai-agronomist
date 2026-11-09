@@ -12,6 +12,19 @@ on *read* — Starlette's ``JSONResponse.render`` uses ``allow_nan=False``, so
 time and 500 for that tenant on every call until the row was edited out of the
 database. Python's own ``json.loads`` accepts ``NaN``, which is exactly why such
 a row could sit undetected between the write and the first read.
+
+The raise is now ``MetricsSerializationError``, which is a **``RuntimeError``
+subclass and deliberately not a ``ValueError``**. That distinction is the whole
+point of the type: the cold-start path catches
+``except (InsufficientDataError, ValueError)`` and maps it to HTTP 400 "not
+enough clean data", so while a bare ``json.dumps`` ``ValueError`` was raised
+here, a serialization defect of *ours* reached the tenant as a complaint about
+*their* upload. A non-finite metric is a number we computed, so it is our
+defect and belongs in a 500.
+
+:func:`test_the_error_is_not_a_value_error` pins the base class for that
+reason. A future refactor rebasing it onto ``ValueError`` would silently
+reopen the misrouting with no other test noticing.
 """
 
 from __future__ import annotations
@@ -25,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import Base, ModelVersion
 from src.db.session import AsyncSessionLocal, engine
+from src.models.metrics_serialization import MetricsSerializationError
 from src.models.model_registry import ModelRegistry
 
 
@@ -48,7 +62,7 @@ async def test_register_model_rejects_non_finite_metric(test_db: AsyncSession) -
     """A NaN metric raises and leaves no half-written model version behind."""
     registry = ModelRegistry(test_db)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(MetricsSerializationError):
         await registry.register_model(
             "tenant_nan",
             "cold_start",
@@ -63,3 +77,26 @@ async def test_register_model_rejects_non_finite_metric(test_db: AsyncSession) -
     )
     assert rows.scalars().all() == []
     assert await registry.get_active_model("tenant_nan") is None
+
+
+@pytest.mark.asyncio
+async def test_the_error_is_not_a_value_error(test_db: AsyncSession) -> None:
+    """The base class is the contract, not an implementation detail.
+
+    ``MetricsSerializationError`` must stay outside ``ValueError`` so it
+    escapes the cold-start path's ``except (InsufficientDataError, ValueError)``
+    and surfaces as a 500. Asserted on a real raise rather than on the class
+    alone, so it covers what ``register_model`` actually propagates.
+    """
+    registry = ModelRegistry(test_db)
+
+    with pytest.raises(MetricsSerializationError) as exc_info:
+        await registry.register_model(
+            "tenant_nan",
+            "cold_start",
+            "path/v1.pt",
+            metrics={"calibration_threshold": math.nan},
+        )
+
+    assert not isinstance(exc_info.value, ValueError)
+    assert isinstance(exc_info.value, RuntimeError)
