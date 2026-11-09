@@ -53,7 +53,42 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3843 passed, 27 skipped, 3 xfailed, 0 failed
+### Current baseline — 3991 passed, 35 skipped, 3 xfailed, 0 failed
+
+Measured 2026-11-09 by the orchestrator on `main` at `94852a6` — the merge of
+BACKLOG-14's five PRs (#98, #99, #100, #102, #101) — full suite in the
+foreground, 372.41s: `./venv/bin/python -m pytest tests/ -q`. The same figure was
+measured on the assembled branch before the merges, so the merge commits
+composed cleanly rather than merely applying cleanly.
+
+The arithmetic, since BACKLOG-14 landed across five PRs and that is the only way
+to tell a regression from a merge artefact: `3843` on `88f8e76` (and still `3843`
+on `fa93270`, corroborated by measuring #98's branch, whose fix adds no tests)
+→ `+1` from the `register_model` non-finite guard → `3844` → `+25` from #100's
+knife-edge fixtures (13 functions, 11 parametrized over two fixtures) → `3869`
+→ `+122` from #102's review round → `3991`.
+
+Re-measured independently on `main` at `75586b4` — the merge of #104, the
+anomaly-jump channel pre-select fix — full suite in the foreground, 374.11s:
+the same `3991 / 35 / 3 / 0`. #104 is `web/`-only and adds no pytest cases, so
+the count is expected to be unchanged, and it is; the run's value is that the
+figure above was reproduced on a second commit by a second session rather than
+copied forward. Prefer that to trusting a recorded number — it is the same
+cross-check the `3819` note below describes, and it costs one command.
+
+**The skipped count moved 27 → 35, and that is expected.** #100 added
+`tests/models/test_pass1_tenant_corpus.py`, 7 tests gated on `PASS1_TENANT_CSV`
+pointing at a 12.7 MB customer corpus that lives outside the repo and must never
+be committed; they skip on every run that does not set it, which is every CI run.
+They pass when it is set (verified: 7 passed in 3.44s). Plus the standing 27,
+which includes the five `@pytest.mark.postgres` tests that skip with no local
+server. So a local `35 skipped` and a CI `32 passed` in the pgvector job are the
+same fact seen from two sides.
+
+Note the figure below this line was the baseline until 2026-11-09 and is kept
+for the arithmetic above; it is not current.
+
+### Previous baseline — 3843 passed, 27 skipped, 3 xfailed, 0 failed
 
 Measured 2026-10-17 by the orchestrator on `fix/live-feed-survives-redeploy`,
 the merge of `origin/main` (`b100b77`, i.e. PRs #80 and #81) into the live-feed
