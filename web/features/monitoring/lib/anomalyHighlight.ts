@@ -3,6 +3,8 @@
  * anomaly bands / cell highlights on Monitoring / Climate / Gas.
  */
 
+import { toDisplayChannel } from "@/features/monitoring/api/readings";
+
 /** `channel=` is a comma-separated list when an anomaly touches several sensors. */
 export function parseChannelParam(param: string): string[] {
   return param
@@ -11,10 +13,24 @@ export function parseChannelParam(param: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * `wanted` arrives as a raw detector column name (e.g.
+ * `measured_greenhouse_temp`), but `channels` are already display-aliased
+ * (e.g. `temperature`) by `applyDisplayChannelAliases`. Normalise both sides
+ * through the same alias map before comparing so a raw name matches its
+ * canonical page channel.
+ */
 function matchOneChannel(channels: readonly string[], wanted: string): string[] {
-  const exact = channels.filter((ch) => ch === wanted);
+  const wantedDisplay = toDisplayChannel(wanted);
+  const exact = channels.filter((ch) => ch === wanted || ch === wantedDisplay);
   if (exact.length > 0) return exact;
-  return channels.filter((ch) => ch.toLowerCase().includes(wanted.toLowerCase()));
+
+  const wantedLower = wanted.toLowerCase();
+  const wantedDisplayLower = wantedDisplay.toLowerCase();
+  return channels.filter((ch) => {
+    const chLower = ch.toLowerCase();
+    return chLower.includes(wantedLower) || chLower.includes(wantedDisplayLower);
+  });
 }
 
 /** Map jump/sensor names onto channels present on this page. */
