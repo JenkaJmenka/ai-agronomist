@@ -68,6 +68,14 @@ on `fa93270`, corroborated by measuring #98's branch, whose fix adds no tests)
 knife-edge fixtures (13 functions, 11 parametrized over two fixtures) → `3869`
 → `+122` from #102's review round → `3991`.
 
+Re-measured independently on `main` at `75586b4` — the merge of #104, the
+anomaly-jump channel pre-select fix — full suite in the foreground, 374.11s:
+the same `3991 / 35 / 3 / 0`. #104 is `web/`-only and adds no pytest cases, so
+the count is expected to be unchanged, and it is; the run's value is that the
+figure above was reproduced on a second commit by a second session rather than
+copied forward. Prefer that to trusting a recorded number — it is the same
+cross-check the `3819` note below describes, and it costs one command.
+
 **The skipped count moved 27 → 35, and that is expected.** #100 added
 `tests/models/test_pass1_tenant_corpus.py`, 7 tests gated on `PASS1_TENANT_CSV`
 pointing at a 12.7 MB customer corpus that lives outside the repo and must never
