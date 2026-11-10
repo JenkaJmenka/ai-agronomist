@@ -6332,6 +6332,35 @@ tenant's active model through
 `detector_cache.resolve_tenant_checkpoint`. Until then the route is honestly
 unavailable rather than misleadingly broken.
 
+**Blocked by BACKLOG-33, then ADR-013, in that order** (added 2026-11-10 while
+closing BACKLOG-19). Online learning is the one feature that would reintroduce
+in-place weight mutation of a cached module, which is exactly the hazard class
+BACKLOG-19 was: `OnlineLearner.load_checkpoint` calls `load_state_dict`
+(`src/models/online_learner.py:303`), and `OnlineLearningManager.__init__`
+(`:341-342`) does `base_model.to(device)` + `.eval()` on whatever it is handed.
+Both are harmless today only because the manager's only two constructors are
+`src/api/routes/learning.py:83` and `src/workers/training_consumer.py:49`, and
+each calls a `_load_base_model` that raises before the manager is built —
+`learning.py:69` raises 503 unconditionally, and `training_consumer.py:43`
+calls `get_cached_detector(None)`, which raises `MissingCheckpointError`
+(`src/models/inference.py:40`).
+
+**So the revival rule, for whoever brings either `_load_base_model` back to
+life: pass a copy, or a model loaded independently of the cache — never the
+cached instance.** `OnlineLearningManager.__init__` mutates what it is handed,
+and `_load_base_model`'s whole purpose is to hand it something from the shared
+cache, so reviving the function as written reintroduces BACKLOG-19 on a second
+path. ADR-013 should state this as a concrete case of the read-only rule, named
+by file and line, not as a general principle.
+
+So the order matters: BACKLOG-33 must move the copy into the components first,
+ADR-013 must then record the cached-module read-only invariant, and only then
+can online learning be made per-tenant. The constraint ADR-013 has to carry:
+**adapted weights are published as a new checkpoint, never `load_state_dict`-ed
+into a cached module** — otherwise attribution silently decouples from detection
+for the life of every cached pipeline, since the attributor holds a weight
+snapshot taken when its pipeline was built.
+
 ### BACKLOG-13 — two routes still assume a tenant always has a model
 
 Found 2026-10-17 by the test fallout from removing the dead baseline.
@@ -6962,7 +6991,7 @@ intent in one file leaves the other silently on the default build. See
 [[project_api_migration_deploy_skew]] for why a CI/prod environment difference
 here is not merely cosmetic.
 
-## BACKLOG-19 — enrichment mutates the shared detector while scoring reads it (Orchestrator, 2026-10-19)
+## BACKLOG-19 — enrichment mutates the shared detector while scoring reads it (Orchestrator, 2026-10-19) — FIXED 2026-11-10
 
 The real cause of the CI flake that BACKLOG-17 was mistakenly written about.
 Found by qa-engineer on 2026-10-19, against a brief that asserted the wrong
@@ -7077,6 +7106,72 @@ Related: BACKLOG-17 (the same silent-unscored outcome, different and unreached
 cause), [[project_live_monitoring_stack]], and
 [[project_imputed_channel_phantom_freeze]] for the other orchestrator diagnosis
 that reached a commit message before a measurement did.
+
+### Fixed 2026-11-10 — a deep copy at the single call site, not any of the three candidates
+
+Branch `fix/backlog-19-pipeline-model-copy` off `7b59a76`. `_get_cached_components`
+(`src/api/services/comprehensive_pipeline.py:551`) now builds the attributor on
+`copy.deepcopy(self.detector.model)`. 7 insertions, 1 deletion, one file.
+Reviewed by tech-lead and architect in parallel on Fable: **PASS WITH NOTES**
+from both, zero blocking findings.
+
+Measured by the orchestrator, not relayed: full suite in the foreground
+**3997 passed, 35 skipped, 3 xfailed, 0 failed** (3991 baseline + 6 new tests).
+The new tests were proved to be regression tests by restoring `7b59a76`'s
+pipeline file and re-running them — **2 failed, 4 passed** pre-fix, 6 passed on
+the fix. `copy.deepcopy` costs **0.363 ms** on the real model (62,612 params,
+≈245 KiB); `MAX_PIPELINE_CACHE_SIZE` defaults to 1.
+
+**The fix is at the pipeline, not at enrichment, and that was deliberate.**
+`get_cached_detector` (`src/api/services/detector_cache.py:49`) is process-wide,
+so the sync `/api/inference` route (`inference_integrated.py:51`) raced live
+scoring by the same mechanism. One change closed both routes;
+`comprehensive_pipeline.py:551` is now the only `AnomalyAttributor(...)` site in
+`src/` (the hit at `anomaly_attributor.py:53` is a docstring example).
+
+**Correct the candidate list above: option (3) was wrong, and would not have
+worked.** Stripping `.to()`/`.eval()` from `AnomalyAttributor.__init__` leaves
+`:340` and `:365`, which re-assert `.eval()` on *every* reconstruction pass — an
+attributor holding a shared model would still write to it mid-forward-pass. Both
+reviewers found this independently. The real end state is the inverse of what
+this entry recorded: the **component** owns a private copy, after which the
+caller-side copy at `:551` becomes a redundant double copy to delete. Tracked as
+BACKLOG-33.
+
+**Also correct: `online_learner.py:303` is not a cached-detector mutation path.**
+It calls `load_state_dict` on the learner's own deepcopy (`:366`, `:376`), and
+both production constructors of `OnlineLearningManager` are dead today —
+`learning.py` raises 503 by design, and `training_consumer.py:43` calls
+`get_cached_detector(None)`, which raises `MissingCheckpointError`
+(`inference.py:40`). So no path in the API process mutates a cached detector's
+weights in place, and the attributor's weight snapshot cannot go stale relative
+to the detector that produced the score it explains. Point-in-time attribution
+is the correct semantics, not a limitation: attribution decomposes one
+reconstruction error and must be coherent with the weights behind that score.
+
+The sharing itself was not changed and is **incidental rather than designed**:
+`DetectorResolver` holds its own reference for `LIVE_DETECTOR_REFRESH_SECONDS`
+(300 s, `config.py:1574`) while the LRU is size 1, so the live and sync paths can
+hold *different* instances of one checkpoint for up to five minutes. Neither
+"rely on sharing" nor "rely on isolation" is safe to write against today. Needs
+ADR-013 (next free number; 002/003/006 are gaps, highest is 012) — architect to
+write it once BACKLOG-33 has an owner, so it cites a change rather than a promise.
+
+Per-scope isolation would **not** have prevented this defect: the race fixed here
+is intra-scope, the scorer against its own enrichment.
+
+The test-side `_NoEnrichment` stub stays — it isolates those tests from a DB and
+the full pipeline, which is reason enough — but its justification was rewritten,
+since it had been asserting a race that no longer exists.
+
+Reviews: `docs/architecture/backlog-19-review-architect.md` (419 lines, tracked)
+and `docs/refactor/backlog19-pipeline-model-copy-review.md` (82 lines, **local
+only** — `.gitignore:33`'s `docs/*` covers `docs/refactor/` with no negation, so
+it will not travel with the branch; that is by design per `.gitignore:32`, not
+the `docs/handoff` hazard, but the reasoning survives only in this entry).
+
+Successors: BACKLOG-33 (component-owned copy), BACKLOG-34 (pipeline-cache
+invalidation, pre-existing).
 
 ## BACKLOG-20 — `humidity_fault` is produced but forbidden by the DB CHECK constraint (Orchestrator, 2026-10-30)
 
@@ -7610,3 +7705,62 @@ nits in the handoff queries.
 
 Full reports, if still present:
 `scratchpad/review_architect.md` (514 lines) and `review_techlead.md` (337).
+
+## BACKLOG-33 — the mutate-in-place contract belongs to the component, not its callers (Orchestrator, 2026-11-10)
+
+Successor to BACKLOG-19, which was fixed caller-side. Hygiene, not a live defect:
+there is exactly one caller today and it now defends itself. Owner: **ml-engineer**
+(`src/models/`), with the caller-side removal by backend-engineer.
+
+`AnomalyAttributor.__init__` still mutates whatever model it is handed
+(`src/models/anomaly_attributor.py:79-81`) and its class docstring (`:71-76`)
+still *sanctions* sharing — "Callers sharing the model with a training pipeline
+must expect this" — which is an invitation to the next caller to reintroduce
+BACKLOG-19. `AnomalyEmbedding.__init__` (`src/models/anomaly_embedding.py:52-53`)
+has the identical pattern and **zero callers in `src/`**, so the first one added
+inherits the bug.
+
+Do **not** implement this as "require the caller to pass an eval-mode model" —
+that was BACKLOG-19's recorded option (3) and it does not work, because
+`:340`/`:365` re-assert `.eval()` on every reconstruction pass. The component
+should take its own `copy.deepcopy` in the constructor (0.363 ms, ≈245 KiB,
+already accepted on the live path). Afterwards delete the now-redundant caller
+copy at `src/api/services/comprehensive_pipeline.py:551`.
+
+Nothing in `tests/models` asserts identity between an attributor's `.model` and
+its input (architect verified), so a copying constructor breaks no test. Note
+`OnlineLearningManager.__init__` (`src/models/online_learner.py:341-342`) does
+`base_model.to(device)` + `.eval()` in place as well; it is unreachable only
+because its sole caller raises first, so it is a latent third instance.
+
+**Whoever picks this up also triggers ADR-013.** The ADR is deliberately not
+written first: the architect's reasoning is that it should cite a change that
+exists rather than promise one, so the sequence is BACKLOG-33 → ADR-013 →
+BACKLOG-12 (see that entry's blocker note). BACKLOG-34 is independent of this
+chain and can land in any order.
+
+Confirmed read-only by the orchestrator on 2026-11-10, repo-wide, before
+deciding this was cleanup rather than a live fix:
+`comprehensive_pipeline.py:551` is the **only** production call site passing a
+model into either class, and it copies. `AnomalyEmbedding` has no construction
+site in `src/` at all — only `tests/models/test_anomaly_embedding.py:29` and
+`tests/models/test_inference_enriched.py:76`, the latter passing an uncopied
+`detector.model`, which is test-local and harmless but is the pattern the first
+production caller would copy from.
+
+## BACKLOG-34 — `clear_detector_cache()` does not clear the pipeline cache (Orchestrator, 2026-11-10)
+
+Pre-existing, found by tech-lead during the BACKLOG-19 review and **unchanged by
+that fix** — it behaves exactly as it did before. Owner: **backend-engineer**.
+
+`src/api/routes/inference_integrated.py` keeps its own `_pipeline_cache` keyed by
+resolved checkpoint path, and the six `clear_detector_cache()` call sites
+(`routes/models.py:137,159,185,203`, `routes/inference.py:247`,
+`routes/learning.py:349`) do not touch it. A same-path-different-weights reload
+would therefore serve the old detector for both scoring and attribution.
+
+Narrow in practice: `db://` artifacts are content-addressed, so a new artifact
+always resolves to a new path and gets a new pipeline. The reachable case is a
+**stable local checkpoint file overwritten in place**. Fix by clearing both
+caches together, or by keying the pipeline cache on something that changes with
+content.

@@ -5,6 +5,7 @@ Wires Detection -> Attribution -> Pattern -> Confidence -> Root Cause ->
 Recommendations -> Incident Store -> Learning progress -> Metrics.
 """
 
+import copy
 import logging
 import math
 from datetime import datetime, timezone
@@ -542,7 +543,12 @@ class ComprehensiveInferencePipeline:
         ):
             return self._cached_baseline, self._cached_attributor, self._cached_pattern_detector
 
-        attributor = AnomalyAttributor(self.detector.model)
+        # Deep-copy the model: AnomalyAttributor.__init__ mutates it in place
+        # (.to(device), .eval()), and self.detector.model is shared with the
+        # live scoring path (DetectorResolver's cached instance). Mutating it
+        # here races torch.nn.RNNBase._apply against a concurrent forward
+        # pass on that same instance (BACKLOG-19).
+        attributor = AnomalyAttributor(copy.deepcopy(self.detector.model))
         attributor.set_baseline(baseline)
 
         pattern_detector = PatternDetector()
