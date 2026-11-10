@@ -5843,6 +5843,64 @@ corrections are local-only by design and never reach any branch. `docs/coverage/
 is ignored the same way. **Before briefing doc work, check what is tracked** —
 "fix these four references" was wrong framing for two of them.
 
+## Backlog status index (Orchestrator, updated 2026-11-10)
+
+Audited item by item on 2026-11-10 against the code and git history, not read off
+the entries' own prose — several entries say "FIXED" while discussing a *different*
+item, so keyword matching gives the wrong answer. Each entry below is the
+authoritative record; this table is a finding aid. **Update it whenever an item's
+status changes**, and keep the marker in the entry's own heading in step.
+
+Numbering is not contiguous by accident: BACKLOG-14 was claimed concurrently by two
+sessions and 15 and 21 are renumbered survivors of that collision. See BACKLOG-15.
+
+| # | item | status | evidence |
+|---|---|---|---|
+| 1 | multi-channel hits per timestamp | OPEN | pinned by tests, not fixed; option 2b chosen 2026-10-15; design doc `docs/architecture/BACKLOG-1-concurrent-channel-storage.md` |
+| 2 | exclude generated OpenAPI artifacts from lint-staged | **DONE** 2026-10-15 | `aa15cf1`; glob is now `web/**/!(openapi\|api-types.gen).{ts,tsx,js,jsx,json}` |
+| 3 | parallel agents in separate worktrees | **ADOPTED** | `.claude/worktrees/` in use; see [[project_worktree_missing_node_modules]] for the node_modules/venv caveat |
+| 4 | no index covers `release_ts` | **CLOSED** 2026-10-17 | won't fix — `anomaly_episodes` is empty in production, far under the threshold |
+| 5 | `StuckCarry.recovery_channels` dead state | **DONE** 2026-10-15 | `d0bcf0d`; remaining mentions in `src/` are historical comments, field is gone |
+| 6 | recovery tagging is O(episodes × releases) | OPEN | |
+| 7 | API cannot run >1 replica | OPEN | won't fix now; constraint documented in `CLAUDE.md` and ADR-009 §0.3 |
+| 8 | live-only tenants can never acquire a model | OPEN | **blocked by BACKLOG-11** — shipping first would drop a third of flagged live anomalies |
+| 9 | every `model_version` row points at one artifact key | OPEN | |
+| 10 | `learning.py` loads the dead `models/baseline.pt` | **DONE** 2026-10-17 | `6692c3d`; route now fails fast with an accurate 503 (see note below) |
+| 11 | a flagged live event can be dropped from `sensor_readings` | OPEN | latent only because no live tenant has a model; arms the moment one does |
+| 12 | online learning has no base model | OPEN | **blocked by BACKLOG-33, then ADR-013**, in that order |
+| 13 | two routes assume a tenant always has a model | OPEN | behaviour is honest; what remains is UX/labelling |
+| 14 | cold-start pass 1 discarded half the corpus | **DONE** 2026-11-08 | five PRs #98, #99, #100, #102, #101, merged at `94852a6` |
+| 15 | dead raw-readings query in the dashboard tree | OPEN | recorded, not removed; `src/dashboard/` is still unowned |
+| 16 | Postgres CI job runs only marked tests | OPEN | recorded, not fixed; CI change with a real cost |
+| 17 | non-finite live score becomes an unscored reading | OPEN | record only; needs a decision on which signal to add |
+| 18 | CI never runs the CPU torch wheel it claims to | OPEN | record only; owner devops-lead |
+| 19 | enrichment mutates the shared detector while scoring reads it | **DONE** 2026-11-10 | PR #106, merge `ddd51eb`; caller-side deepcopy at `comprehensive_pipeline.py:551` |
+| 20 | `humidity_fault` forbidden by the DB CHECK constraint | OPEN | latent — `measured_hd` is opt-in |
+| 21 | stuck-sensor rows pass Pass 1 unflagged | OPEN | blocks the PDF report alongside BACKLOG-14 |
+| 22 | condition `light` inside IsolationForest | OPEN | diagnose-first, separate branch |
+| 23 | train/serve normalisation skew | OPEN | **TOP PRIORITY — retrain activation is held on this** |
+| 24 | training is non-deterministic | OPEN | 3 seeds move alerts 138..148 on an identical corpus |
+| 25 | exception taxonomy on the cold-start path | OPEN | the one-line subclass fix is wrong; see the entry |
+| 26 | load-stage losses invisible to the discard gate | OPEN | |
+| 27 | the 4% contamination floor is the discard metric's zero | OPEN | |
+| 28 | per-channel cull-fraction guard | OPEN | ahead of BACKLOG-22 |
+| 29 | split `src/models/bootstrap.py` | OPEN | 633 lines against a 300-line guardrail |
+| 30 | architecture-doc triage + "Spec:" citation check | **PARTIAL** | first half DONE 2026-11-09 (`eb537ea`, PR #105); the CI citation test is not written |
+| 31 | pipeline verification rule (`set -o pipefail`) | OPEN | rule to adopt; do NOT write it as `$PIPESTATUS` — zsh |
+| 32 | unactioned review findings from BACKLOG-14 | OPEN | deliberately deferred at the user's direction, recorded so it is not read as oversight |
+| 33 | mutate-in-place contract belongs to the component | OPEN | successor to BACKLOG-19; triggers ADR-013 |
+| 34 | `clear_detector_cache()` does not clear the pipeline cache | OPEN | pre-existing, unchanged by BACKLOG-19 |
+
+Tally: **5 done** (2, 5, 10, 14, 19), 1 closed as won't-fix (4), 1 adopted as
+practice (3), 1 partial (30), **26 open**.
+
+One caveat on BACKLOG-10, because "DONE" could mislead: the item was specifically
+`learning.py` loading the dead baseline, and that is fixed. The **literal**
+`models/baseline.pt` still survives as a fallback in
+`src/models/training_pipeline.py:37` and `src/workers/retrain_consumer.py:151`.
+Neither is on the live scoring path, so neither was in scope — but do not read
+this row as "the dead baseline is gone everywhere".
+
 ## Backlog — three follow-ups out of Task 5 (Orchestrator, 2026-10-15)
 
 Recorded only. No code for any of these on `task-5-is-recovery-tagging`.
@@ -5905,7 +5963,7 @@ Decision 2026-10-15: **2b** (extend the existing `anomaly_columns` JSON) as the
 zero-migration interim, **option 1** (secondary hits table) as the planned fix.
 Recorded in `ADR-012`. Implementing 2b is a separate task.
 
-### BACKLOG-2 — exclude generated OpenAPI artifacts from lint-staged
+### BACKLOG-2 — exclude generated OpenAPI artifacts from lint-staged — DONE 2026-10-15
 
 **This reverses the recommendation in the earlier follow-up entry above**
 ("lint-staged biome rewrites the generated OpenAPI artifacts", 2026-10-14),
@@ -5921,7 +5979,7 @@ output equals generator output by construction rather than by luck**.
 and it is precisely the signal that cannot be relied upon: the next person to
 regenerate must be able to read a non-empty diff as real contract drift.
 
-### BACKLOG-3 — Task 6 runs parallel agents in separate worktrees
+### BACKLOG-3 — Task 6 runs parallel agents in separate worktrees — ADOPTED
 
 Two shared-tree collisions in Task 5, both from agents behaving correctly in
 isolation:
@@ -5942,7 +6000,7 @@ cost of a merge step. See [[project_agent_branch_drift]] and
 [[project_background_agent_stalls]] — the latter notes background agents stall
 outside the working dir, so worktree setup needs checking against that.
 
-### BACKLOG-4 — no index covers `release_ts` for `_fetch_recovery_release_events`
+### BACKLOG-4 — no index covers `release_ts` for `_fetch_recovery_release_events` — CLOSED 2026-10-17 (won't fix)
 
 **CLOSED 2026-10-17 — no index added.** Prod check by the user, read-only via
 the Railway Data tab:
@@ -5989,7 +6047,7 @@ table may stay small enough that the scan never matters, and an unnecessary
 index costs write throughput on the upload path. Accepted as out of scope for
 Task 5 rather than overlooked.
 
-### BACKLOG-5 — `StuckCarry.recovery_channels` is now dead state (ml-engineer)
+### BACKLOG-5 — `StuckCarry.recovery_channels` is now dead state (ml-engineer) — DONE 2026-10-15
 
 Two findings folded into one item; both in `src/models/stuck_fault_detector.py`,
 which is ml-engineer's and was deliberately untouched by Task 5.
@@ -6197,7 +6255,7 @@ alone cannot positively confirm a given retrain *did* write; there is simply no
 evidence that it did not. Add `updated_at` to the `set_` clause when BACKLOG-9 is
 picked up: it is a one-line addition to the same statement the key fix touches.
 
-### BACKLOG-10 — `learning.py` still loads the dead `models/baseline.pt`
+### BACKLOG-10 — `learning.py` still loads the dead `models/baseline.pt` — DONE 2026-10-17
 
 Recorded 2026-10-17. **Folded into the live-detector PR by user decision**, so
 this entry is the record rather than an open item; reopen only if that fix is
@@ -7582,7 +7640,7 @@ because three agents were working behind it. Architect named the seams:
 `_load_and_resample` (~110 lines) and `Pass2BootstrapDetector` (~170) each get it
 under 400.
 
-## BACKLOG-30 — architecture-doc triage and a "Spec:" citation check (Orchestrator, 2026-11-09)
+## BACKLOG-30 — architecture-doc triage and a "Spec:" citation check (Orchestrator, 2026-11-09) — FIRST HALF DONE 2026-11-09
 
 Two halves of the same lesson. `.gitignore` now tracks `docs/architecture/` in
 full with only `drafts/` ignored (commit `5cbcae3`), and the one cited plan is
