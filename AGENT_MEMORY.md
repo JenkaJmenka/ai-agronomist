@@ -6332,6 +6332,35 @@ tenant's active model through
 `detector_cache.resolve_tenant_checkpoint`. Until then the route is honestly
 unavailable rather than misleadingly broken.
 
+**Blocked by BACKLOG-33, then ADR-013, in that order** (added 2026-11-10 while
+closing BACKLOG-19). Online learning is the one feature that would reintroduce
+in-place weight mutation of a cached module, which is exactly the hazard class
+BACKLOG-19 was: `OnlineLearner.load_checkpoint` calls `load_state_dict`
+(`src/models/online_learner.py:303`), and `OnlineLearningManager.__init__`
+(`:341-342`) does `base_model.to(device)` + `.eval()` on whatever it is handed.
+Both are harmless today only because the manager's only two constructors are
+`src/api/routes/learning.py:83` and `src/workers/training_consumer.py:49`, and
+each calls a `_load_base_model` that raises before the manager is built —
+`learning.py:69` raises 503 unconditionally, and `training_consumer.py:43`
+calls `get_cached_detector(None)`, which raises `MissingCheckpointError`
+(`src/models/inference.py:40`).
+
+**So the revival rule, for whoever brings either `_load_base_model` back to
+life: pass a copy, or a model loaded independently of the cache — never the
+cached instance.** `OnlineLearningManager.__init__` mutates what it is handed,
+and `_load_base_model`'s whole purpose is to hand it something from the shared
+cache, so reviving the function as written reintroduces BACKLOG-19 on a second
+path. ADR-013 should state this as a concrete case of the read-only rule, named
+by file and line, not as a general principle.
+
+So the order matters: BACKLOG-33 must move the copy into the components first,
+ADR-013 must then record the cached-module read-only invariant, and only then
+can online learning be made per-tenant. The constraint ADR-013 has to carry:
+**adapted weights are published as a new checkpoint, never `load_state_dict`-ed
+into a cached module** — otherwise attribution silently decouples from detection
+for the life of every cached pipeline, since the attributor holds a weight
+snapshot taken when its pipeline was built.
+
 ### BACKLOG-13 — two routes still assume a tenant always has a model
 
 Found 2026-10-17 by the test fallout from removing the dead baseline.
@@ -7703,6 +7732,21 @@ its input (architect verified), so a copying constructor breaks no test. Note
 `OnlineLearningManager.__init__` (`src/models/online_learner.py:341-342`) does
 `base_model.to(device)` + `.eval()` in place as well; it is unreachable only
 because its sole caller raises first, so it is a latent third instance.
+
+**Whoever picks this up also triggers ADR-013.** The ADR is deliberately not
+written first: the architect's reasoning is that it should cite a change that
+exists rather than promise one, so the sequence is BACKLOG-33 → ADR-013 →
+BACKLOG-12 (see that entry's blocker note). BACKLOG-34 is independent of this
+chain and can land in any order.
+
+Confirmed read-only by the orchestrator on 2026-11-10, repo-wide, before
+deciding this was cleanup rather than a live fix:
+`comprehensive_pipeline.py:551` is the **only** production call site passing a
+model into either class, and it copies. `AnomalyEmbedding` has no construction
+site in `src/` at all — only `tests/models/test_anomaly_embedding.py:29` and
+`tests/models/test_inference_enriched.py:76`, the latter passing an uncopied
+`detector.model`, which is test-local and harmless but is the pattern the first
+production caller would copy from.
 
 ## BACKLOG-34 — `clear_detector_cache()` does not clear the pipeline cache (Orchestrator, 2026-11-10)
 
