@@ -53,6 +53,24 @@ interface DataTableProps<T> {
 }
 
 /**
+ * Background classes for a row given its selected/clickable state. Selected
+ * rows pin their hover/focus background to the same brand tint — without the
+ * override, Tailwind's hover: layer wins over the plain selected class and
+ * the row would look deselected on hover. Unselected clickable rows get a
+ * lighter hover/focus tint so all three states (default, hover, selected)
+ * stay visually distinct.
+ */
+function rowStateClasses(selected: boolean, clickable: boolean): string {
+  if (selected) {
+    return `bg-accent-soft ${clickable ? "hover:bg-accent-soft focus-visible:bg-accent-soft" : ""}`;
+  }
+  if (clickable) {
+    return "hover:bg-accent/5 focus-visible:bg-accent/10";
+  }
+  return "";
+}
+
+/**
  * Sticky-header table shell (TanStack Table) with client-side pagination.
  * Large single-page row sets still render through TanStack Virtual so a
  * 50k-row window stays smooth when pagination is disabled or oversized.
@@ -171,6 +189,7 @@ export function DataTable<T>({
               const row = tableRows[index];
               const selected = isRowSelected?.(row.original) ?? false;
               const clickable = Boolean(onRowClick);
+              const rowStateClass = rowStateClasses(selected, clickable);
               return (
                 <tr
                   key={row.id}
@@ -215,8 +234,8 @@ export function DataTable<T>({
                   // own the pointer-down gesture so drag-pan does not fire.
                   data-row-selectable={clickable ? "" : undefined}
                   className={`border-b border-border last:border-b-0 ${
-                    clickable ? "cursor-pointer hover:bg-accent/5 focus-visible:bg-accent/10" : ""
-                  } ${selected ? "bg-accent/15" : ""} ${rowClassName?.(row.original) ?? ""}`}
+                    clickable ? "cursor-pointer" : ""
+                  } ${rowStateClass} ${rowClassName?.(row.original) ?? ""}`}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <td

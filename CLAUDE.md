@@ -398,6 +398,7 @@ Explicitly check each guardrail. Read-only — do not modify files.
 | code-reviewer | `docs/review/` |
 | devops-lead | `docker/`, `.github/`, `.husky/`, `docs/deployment/`, `docs/runbooks/` |
 | tech-lead | `docs/refactor/` |
+| frontend-engineer | `web/`, `assets/brand/` |
 | orchestrator (you) | `AGENT_MEMORY.md`, `CLAUDE.md`, `.gitignore` — never delegate these |
 
 Root-level config and docs had no owner until 2026-10-05, and the gap stalled
@@ -503,6 +504,28 @@ Two facts worth keeping with this row, both learned the hard way:
   lint-staged glob covers.** If the hook cannot run, stop and report. "It would
   have been a no-op anyway" is a judgement made *instead of* the check, and it
   is exactly the reasoning that lets a real bypass through later.
+
+`web/` and `assets/brand/` are frontend-engineer's, assigned 2026-11-10 by the
+user during the Grovsen rebrand. Note that **`web/` never had a row at all** —
+the agent-model table said "Next.js/React work under `web/` per `web/AGENTS.md`"
+and everyone acted on that, but the ownership table below it listed only Python
+trees, so the entire operator UI was formally unowned for the whole Next.js
+migration. It went unnoticed because no two agents ever contended for it.
+
+`assets/brand/` is the brand source of truth (lockup/icon SVGs, their `-dark`
+variants, the favicon and the raster exports) and is committed deliberately
+rather than kept out of the repo, so the UI and any future marketing surface
+resolve the same artwork. It sits with `web/` because the only consumer is the
+Next.js app, which copies from it into `web/app/` and `web/public/brand/`.
+
+One asymmetry worth stating, since it is the same shape as the `src/live/` and
+`src/vendors/` ones: the brand *colour decisions* live in
+`web/app/globals.css` as design tokens, and that file is the only bridge from a
+CSS variable to a Tailwind utility (there is no `tailwind.config.*`). A class
+whose token is absent from its `@theme inline` block compiles to nothing and
+renders transparent with no error — `bg-surface` did exactly that at nine sites
+for months. So a task that adds a utility class touches two files by necessity,
+and "it looked fine locally" is not evidence that a token exists.
 
 `.gitignore` is the orchestrator's. It earned a row on 2026-10-06: `docs/*`
 had silently ignored `docs/handoff/task3_4_spec.md`, so the Task 3 spec was

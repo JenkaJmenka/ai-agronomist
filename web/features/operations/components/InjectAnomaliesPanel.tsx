@@ -62,7 +62,7 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
         <label className="text-sm">
           <span className="font-medium">Anomaly type</span>
           <select
-            className="mt-1 block rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 py-1.5 text-sm"
+            className="mt-1 block rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5 text-sm"
             value={anomalyType}
             onChange={(e) => setAnomalyType(e.target.value as InjectAnomalyType)}
             data-testid="inject-type"
@@ -82,7 +82,7 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
             max={50}
             value={anomalyCount}
             onChange={(e) => setAnomalyCount(Number(e.target.value))}
-            className="mt-1 block w-24 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 py-1.5 text-sm tabular-nums"
+            className="mt-1 block w-24 rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5 text-sm tabular-nums"
           />
         </label>
         <label className="text-sm">
@@ -94,7 +94,7 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
             step={10}
             value={normalCount}
             onChange={(e) => setNormalCount(Number(e.target.value))}
-            className="mt-1 block w-24 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 py-1.5 text-sm tabular-nums"
+            className="mt-1 block w-24 rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5 text-sm tabular-nums"
           />
         </label>
         <Button
@@ -124,7 +124,7 @@ export function InjectAnomaliesPanel({ tenant, gh }: InjectAnomaliesPanelProps) 
         <label className="text-sm">
           <span className="font-medium">Remove synthetic rows</span>
           <select
-            className="mt-1 block rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 py-1.5 text-sm"
+            className="mt-1 block rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5 text-sm"
             value={removeType}
             onChange={(e) => setRemoveType(e.target.value as InjectAnomalyType | "")}
             data-testid="remove-type"

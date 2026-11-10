@@ -46,7 +46,9 @@ function monthCells(viewMonth: Date): (Date | null)[] {
 }
 
 function dayButtonClasses(isSelected: boolean, isToday: boolean): string {
-  if (isSelected) return "bg-accent text-white font-semibold";
+  // Same fill as the primary button (components/ui/Button.tsx): --btn-primary-bg/fg
+  // (app/globals.css) already resolve per-theme, so no dark handling is needed here.
+  if (isSelected) return "bg-btn-primary-bg text-btn-primary-fg font-semibold";
   if (isToday) return "border border-accent text-accent";
   return "text-text hover:bg-border/50";
 }

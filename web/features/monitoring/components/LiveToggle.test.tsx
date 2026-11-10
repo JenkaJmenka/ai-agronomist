@@ -227,6 +227,14 @@ describe("LiveToggle — reacts to resume's scope_status", () => {
   });
 });
 
+// `Button` exposes no `data-variant` or `aria-*` attribute that distinguishes
+// primary from secondary, so the variant is only observable through its fill
+// class. These assertions are therefore coupled to `components/ui/Button.tsx`'s
+// primary variant class — a per-theme token pair (`--brand` in light,
+// `--accent` in dark) that replaced the literal `bg-accent` during the Grovsen
+// rebrand. Move them to a semantic hook if one is ever added to Button.
+const PRIMARY_VARIANT_CLASS = "bg-btn-primary-bg";
+
 // ---------------------------------------------------------------------------
 // No green Go Live toggle while stale (live.py:183-186 applies the same
 // standard to `resumed` for an unconfigured scope: a verdict that reads
@@ -243,7 +251,7 @@ describe("LiveToggle — no green toggle while stale", () => {
     const button = screen.getByTestId("live-toggle");
     expect(button).toHaveAttribute("data-live", "true");
     expect(button).toHaveAttribute("data-stale", "false");
-    expect(button.className).toContain("bg-accent");
+    expect(button.className).toContain(PRIMARY_VARIANT_CLASS);
   });
 
   it("falls back to the secondary variant when live but stale", () => {
@@ -255,7 +263,7 @@ describe("LiveToggle — no green toggle while stale", () => {
     const button = screen.getByTestId("live-toggle");
     expect(button).toHaveAttribute("data-live", "true");
     expect(button).toHaveAttribute("data-stale", "true");
-    expect(button.className).not.toContain("bg-accent");
+    expect(button.className).not.toContain(PRIMARY_VARIANT_CLASS);
   });
 
   it("does not report stale when the toggle itself is off, even if freshness lags behind", () => {
@@ -275,6 +283,6 @@ describe("LiveToggle — no green toggle while stale", () => {
 
     const button = screen.getByTestId("live-toggle");
     expect(button).toHaveAttribute("data-stale", "false");
-    expect(button.className).toContain("bg-accent");
+    expect(button.className).toContain(PRIMARY_VARIANT_CLASS);
   });
 });

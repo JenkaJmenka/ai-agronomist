@@ -2,66 +2,204 @@
 
 /* Design tokens — MIGRATION_PLAN.md §7.1. Dark mode is first-class and flips
    via [data-theme] so wall displays don't depend on OS settings. */
-:root {
+:root,
+[data-theme="light"] {
   /* Native widgets (date pickers, scrollbars) follow the active theme. */
   color-scheme: light;
-  --bg: #f8faf8;
-  --bg-elevated: #ffffff;
-  --border: #e2e8e2;
-  --text: #17211a;
-  --text-muted: #5d6b60;
-  --accent: #16a34a;
 
-  --sev-normal: #16a34a;
-  --sev-warning: #f59e0b;
-  --sev-lstm: #ff8c00;
-  --sev-critical: #ef4444;
-  --sev-urgent: #9333ea;
+  --brand: #0d3631;
+  --brand-fg: #ffffff;
+  --brand-tile: #0d3631;
+
+  --bg: #f5f8f7;
+  --bg-elevated: #ffffff;
+  --bg-sidebar: #eef3f1;
+
+  --border: #dce5e2;
+  --border-strong: #b9c9c4;
+
+  --text: #0f1f1c;
+  --text-muted: #566864;
+
+  --accent: #1b5f53;
+  --accent-hover: #0d3631;
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  /* "Fresh data" cue for tile-flash below — follows --accent, not a severity. */
+  --accent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
+
+  --focus-ring: #2a7768;
+
+  /* Primary-button/selected-day fill: brand in light, accent in dark (see the
+     dark blocks below) — --brand/--brand-fg alone don't carry the swap since
+     they're the same value in both themes. */
+  --btn-primary-bg: var(--brand);
+  --btn-primary-fg: var(--brand-fg);
+
+  --sev-ok: #1a7a4c;
+  --sev-normal: var(--sev-ok);
+  --sev-info: #1d5fd1;
+  --sev-warning: #9a5b00;
+  --sev-critical: #c0262d;
+  --sev-lstm: #b5450a;
+  --sev-urgent: #7c3aed;
+
+  --chart-grid: #e6ecea;
+  --chart-axis: #566864;
+  /* uPlot drag-select overlay; its own default is a light-only black wash. */
+  --chart-select-overlay: #0d363114;
+  --chart-1: #1b7a6b;
+  --chart-2: #2563eb;
+  --chart-3: #d97706;
+  --chart-4: #db2777;
+  --chart-5: #7c3aed;
+  --chart-6: #65a30d;
+  --chart-7: #0891b2;
+  --chart-8: #475569;
+
+  --logo-wordmark: #0d3631;
 
   --radius-control: 6px;
   --radius-card: 8px;
   --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.08);
-  /* uPlot drag-select overlay; its own default is a light-only black wash. */
-  --chart-select-overlay: rgb(0 0 0 / 0.07);
 }
 
+/* [data-theme="dark"] and the prefers-color-scheme fallback below MUST stay
+   byte-identical — same properties, same values, same order. Plain CSS can't
+   dedupe them (the fallback only applies when no [data-theme] is set at all),
+   and a QA guard test asserts they match. Edit one, edit both. */
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0e1310;
-  --bg-elevated: #171e19;
-  --border: #26302a;
-  --text: #e6ebe7;
-  --text-muted: #93a197;
-  --accent: #22c55e;
+
+  --brand: #0d3631;
+  --brand-fg: #ffffff;
+  --brand-tile: #2a7768;
+
+  --bg: #081614;
+  --bg-elevated: #0f2320;
+  --bg-sidebar: #0b1d1a;
+
+  --border: #1e3934;
+  --border-strong: #2c4d46;
+
+  --text: #e4eeeb;
+  --text-muted: #8da8a2;
+
+  --accent: #5cc4ae;
+  --accent-hover: #7bd3c0;
+  --accent-fg: #06201c;
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
+
+  --focus-ring: #5cc4ae;
+
+  --btn-primary-bg: var(--accent);
+  --btn-primary-fg: var(--accent-fg);
+
+  --sev-ok: #4ade80;
+  --sev-normal: var(--sev-ok);
+  --sev-info: #6aa8ff;
+  --sev-warning: #f5b942;
+  --sev-critical: #f87171;
+  --sev-lstm: #ffa94d;
+  --sev-urgent: #c4b5fd;
+
+  --chart-grid: #17302b;
+  --chart-axis: #8da8a2;
+  --chart-select-overlay: #ffffff1f;
+  --chart-1: #5cc4ae;
+  --chart-2: #6aa8ff;
+  --chart-3: #f5b942;
+  --chart-4: #f472b6;
+  --chart-5: #a78bfa;
+  --chart-6: #a3e635;
+  --chart-7: #22d3ee;
+  --chart-8: #94a3b8;
+
+  --logo-wordmark: #ffffff;
+
   --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
-  --chart-select-overlay: rgb(255 255 255 / 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --bg: #0e1310;
-    --bg-elevated: #171e19;
-    --border: #26302a;
-    --text: #e6ebe7;
-    --text-muted: #93a197;
-    --accent: #22c55e;
+
+    --brand: #0d3631;
+    --brand-fg: #ffffff;
+    --brand-tile: #2a7768;
+
+    --bg: #081614;
+    --bg-elevated: #0f2320;
+    --bg-sidebar: #0b1d1a;
+
+    --border: #1e3934;
+    --border-strong: #2c4d46;
+
+    --text: #e4eeeb;
+    --text-muted: #8da8a2;
+
+    --accent: #5cc4ae;
+    --accent-hover: #7bd3c0;
+    --accent-fg: #06201c;
+    --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+    --accent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
+
+    --focus-ring: #5cc4ae;
+
+    --btn-primary-bg: var(--accent);
+    --btn-primary-fg: var(--accent-fg);
+
+    --sev-ok: #4ade80;
+    --sev-normal: var(--sev-ok);
+    --sev-info: #6aa8ff;
+    --sev-warning: #f5b942;
+    --sev-critical: #f87171;
+    --sev-lstm: #ffa94d;
+    --sev-urgent: #c4b5fd;
+
+    --chart-grid: #17302b;
+    --chart-axis: #8da8a2;
+    --chart-select-overlay: #ffffff1f;
+    --chart-1: #5cc4ae;
+    --chart-2: #6aa8ff;
+    --chart-3: #f5b942;
+    --chart-4: #f472b6;
+    --chart-5: #a78bfa;
+    --chart-6: #a3e635;
+    --chart-7: #22d3ee;
+    --chart-8: #94a3b8;
+
+    --logo-wordmark: #ffffff;
+
     --shadow-elevation: 0 1px 3px rgb(0 0 0 / 0.4);
-    --chart-select-overlay: rgb(255 255 255 / 0.12);
   }
 }
 
 @theme inline {
   --color-bg: var(--bg);
   --color-bg-elevated: var(--bg-elevated);
+  --color-bg-sidebar: var(--bg-sidebar);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-text: var(--text);
   --color-text-muted: var(--text-muted);
+  --color-brand: var(--brand);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-tile: var(--brand-tile);
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-focus-ring: var(--focus-ring);
+  --color-btn-primary-bg: var(--btn-primary-bg);
+  --color-btn-primary-fg: var(--btn-primary-fg);
+  --color-sev-ok: var(--sev-ok);
   --color-sev-normal: var(--sev-normal);
+  --color-sev-info: var(--sev-info);
   --color-sev-warning: var(--sev-warning);
-  --color-sev-lstm: var(--sev-lstm);
   --color-sev-critical: var(--sev-critical);
+  --color-sev-lstm: var(--sev-lstm);
   --color-sev-urgent: var(--sev-urgent);
   --radius-control: var(--radius-control);
   --radius-card: var(--radius-card);
@@ -88,10 +226,10 @@ table {
 /* Sensor tile overlay — one-shot glow pulse when a live value updates. */
 @keyframes tile-flash {
   0% {
-    background: rgba(22, 163, 74, 0.2);
+    background: var(--accent-flash);
   }
   100% {
-    background: rgba(22, 163, 74, 0);
+    background: transparent;
   }
 }
 

@@ -23,7 +23,7 @@ export function GreenhouseSelector() {
         Greenhouse
         <select
           data-testid="greenhouse-select"
-          className="mt-1 block w-full rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 py-1.5 text-sm text-text"
+          className="mt-1 block w-full rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5 text-sm text-text"
           value={gh}
           onChange={(e) => void setGh(e.target.value)}
         >

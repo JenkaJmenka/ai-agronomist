@@ -158,7 +158,7 @@ function AppConfigurationBody() {
             Applied when Home opens with no from/to
           </span>
           <select
-            className="max-w-xs rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2"
+            className="max-w-xs rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-3 py-2"
             value={effective.defaultPeriodId}
             data-testid="app-config-default-period"
             onChange={(e) => update({ defaultPeriodId: e.target.value })}

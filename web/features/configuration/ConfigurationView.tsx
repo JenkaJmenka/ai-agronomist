@@ -74,7 +74,7 @@ function ConfigurationBody() {
           <label className="flex flex-col gap-1 text-sm">
             <span className="font-medium text-text-muted">Active crop</span>
             <select
-              className="rounded-[var(--radius-control)] border border-border bg-surface px-3 py-2"
+              className="rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-3 py-2"
               value={draft.crop}
               data-testid="crop-select"
               onChange={(event) => {
@@ -113,7 +113,7 @@ function ConfigurationBody() {
               type="number"
               min={0}
               max={23}
-              className="w-24 rounded border border-border bg-surface px-2 py-1.5"
+              className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1.5"
               value={draft.day_window.start_hour}
               onChange={(e) => {
                 const start_hour = Math.min(23, Math.max(0, Number(e.target.value) || 0));
@@ -129,7 +129,7 @@ function ConfigurationBody() {
               type="number"
               min={0}
               max={23}
-              className="w-24 rounded border border-border bg-surface px-2 py-1.5"
+              className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1.5"
               value={draft.day_window.end_hour}
               onChange={(e) => {
                 const end_hour = Math.min(23, Math.max(0, Number(e.target.value) || 0));

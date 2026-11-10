@@ -93,11 +93,11 @@ export function SensorTile({
   if (hasAnomaly) {
     borderClass = "border-l-sev-critical";
     bgClass = "bg-sev-critical/10";
-    valueColorClass = "text-sev-critical";
+    valueColorClass = "text-text";
   } else if (isSetpointExcursion) {
     borderClass = "border-l-sev-warning";
     bgClass = "bg-sev-warning/5";
-    valueColorClass = "text-sev-warning";
+    valueColorClass = "text-text";
   } else if (status === "ok") {
     borderClass = "border-l-sev-normal";
     bgClass = "bg-bg-elevated";

@@ -44,7 +44,7 @@ export function SeasonMapEditor({ seasonMap, onChange }: SeasonMapEditorProps) {
           <label key={key} className="flex flex-col gap-1 text-sm">
             <span className="font-medium text-text-muted">{label}</span>
             <select
-              className="rounded-[var(--radius-control)] border border-border bg-surface px-2 py-1.5"
+              className="rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 py-1.5"
               value={value}
               onChange={(event) => {
                 const season = event.target.value === "summer" ? "summer" : "winter";
@@ -122,7 +122,7 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
                   <input
                     type="number"
                     step="any"
-                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1"
                     value={day[0] ?? ""}
                     onChange={(e) => updateBand(channel, "day", 0, e.target.value)}
                   />
@@ -131,7 +131,7 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
                   <input
                     type="number"
                     step="any"
-                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1"
                     value={day[1] ?? ""}
                     onChange={(e) => updateBand(channel, "day", 1, e.target.value)}
                   />
@@ -140,7 +140,7 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
                   <input
                     type="number"
                     step="any"
-                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1"
                     value={(night ?? day)[0] ?? ""}
                     placeholder="Day min"
                     aria-label={`${channel} night min`}
@@ -151,7 +151,7 @@ export function SetpointsEditor({ setpoints, onChange }: SetpointsEditorProps) {
                   <input
                     type="number"
                     step="any"
-                    className="w-24 rounded border border-border bg-surface px-2 py-1"
+                    className="w-24 rounded border border-border-strong bg-bg-elevated px-2 py-1"
                     value={(night ?? day)[1] ?? ""}
                     placeholder="Day max"
                     aria-label={`${channel} night max`}
@@ -190,7 +190,7 @@ export function Co2EnrichmentToggle({ value, onChange }: Co2EnrichmentToggleProp
           type="checkbox"
           checked={value}
           data-testid="co2-enrichment-toggle"
-          className="h-4 w-4 accent-[var(--color-brand,#16a34a)]"
+          className="h-4 w-4 accent-accent"
           onChange={(e) => onChange(e.target.checked)}
         />
         <span className="text-sm font-medium">CO₂ enrichment equipment installed</span>

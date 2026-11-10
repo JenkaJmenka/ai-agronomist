@@ -22,7 +22,7 @@ import { useRefreshInterval } from "@/lib/useRefreshInterval";
 import { useScope } from "@/lib/useScope";
 
 const SELECT_CLASS =
-  "h-8 rounded-[var(--radius-control)] border border-border bg-bg-elevated px-2 text-sm text-text";
+  "h-8 rounded-[var(--radius-control)] border border-border-strong bg-bg-elevated px-2 text-sm text-text";
 
 interface DateRangeControlsProps {
   /**

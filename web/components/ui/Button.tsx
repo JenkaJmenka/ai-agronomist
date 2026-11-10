@@ -12,9 +12,11 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const VARIANT_CLASSES: Record<Variant, string> = {
-  primary: "bg-accent text-white hover:opacity-90 disabled:opacity-50",
+  // --btn-primary-bg/fg (app/globals.css) already resolve to --brand/--brand-fg
+  // in light and --accent/--accent-fg in dark — no per-component dark handling.
+  primary: "bg-btn-primary-bg text-btn-primary-fg hover:opacity-90 disabled:opacity-50",
   secondary:
-    "border border-border bg-bg-elevated text-text hover:border-accent disabled:opacity-50",
+    "border border-border-strong bg-bg-elevated text-text hover:border-accent disabled:opacity-50",
   ghost: "text-text-muted hover:text-text disabled:opacity-50",
 };
 
@@ -33,7 +35,7 @@ export function Button({
   const Comp = asChild ? Slot : "button";
   return (
     <Comp
-      className={`inline-flex items-center justify-center gap-2 rounded-[var(--radius-control)] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent ${VARIANT_CLASSES[variant]} ${SIZE_CLASSES[size]} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-[var(--radius-control)] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-focus-ring ${VARIANT_CLASSES[variant]} ${SIZE_CLASSES[size]} ${className}`}
       {...props}
     />
   );
