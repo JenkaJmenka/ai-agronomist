@@ -1241,7 +1241,8 @@ Done signal: tasks/done/backend-engineer.json
 ## Previous Phase
 **ADR-005 anomaly_score scale semantics (architect) — DESIGN COMPLETE (2026-08-01)**
 Design decision only; no implementation code written.
-Output: [docs/architecture/anomaly_score_scale_decision.md](docs/architecture/anomaly_score_scale_decision.md)
+Output: [docs/architecture/ADR-005-anomaly-score-scale.md](docs/architecture/ADR-005-anomaly-score-scale.md)
+(written as `anomaly_score_scale_decision.md`; renamed into the ADR series 2026-11-09)
 
 **Problem:** `anomaly_score` is written by 4 producers on 3 incompatible scales but read
 through one `threshold` param. Live = raw recon error (noise 0.017, peak 0.36, cutoff
@@ -7499,6 +7500,45 @@ Second half: **a test (not a hook, so it runs in CI) asserting that every
 cited a plan that had never been committed, and the citation turned out not to
 support the code — checking it took archaeology. A mechanical check is what would
 have caught that.
+
+**First half DONE 2026-11-09** (branch `docs/track-architecture-backlog`). All 20
+were triaged and tracked; none went to `drafts/`. Outcomes: 14 point-in-time
+reviews carry a historical banner; `anomaly_score_scale_decision.md` was renamed
+`ADR-005-anomaly-score-scale.md` and its status corrected from Proposed to
+Accepted (`score_scale` shipped in migration 023); `lstm_vae_architecture.md` was
+folded into `lstm_vae_design.md`; `cold_start_bootstrap.md` was corrected against
+`bootstrap.py` rather than merely annotated; the three tech-lead halves from
+`docs/refactor/` were copied in as `*-techlead.md` and cross-linked to their
+architect halves. `ADR-012:14-17` had to be corrected in the same commit — it
+asserted BACKLOG-1's doc was "deliberately untracked" under the pre-#101 rule.
+
+Four things the triage turned up, carried forward here rather than fixed:
+
+1. **`anomaly_math_definitions.md` needs a full `file:line` sweep.** Its 1524
+   lines are built on line-anchored citations read at `8de9cb3`; a two-sample
+   check at `54c6584` found one 7 lines off (`config.py:908` → `:915`, claim
+   still true) and one clean. The file now carries a drift notice saying as much.
+2. **`docs/team/ADRs/` (ignored) holds the "missing" ADRs**, with conflicting
+   numbering: three `ADR-001-*` variants, two `ADR-002-*`, two `ADR-003-*`.
+   Reconcile them and bring 002/003 into the tracked series. **ADR-006 is a
+   genuine gap** — nothing anywhere defines it.
+3. **`cold_start_bootstrap.md` §3 still describes a design-era file split**
+   (`bootstrap_cleaner.py`, `bootstrap_trainer.py`, `bootstrap_pipeline.py`) that
+   never existed; the code is one `bootstrap.py` plus `mad_scrub.py`,
+   `mad_scrub_report.py`, `pass1_discard_guard.py`, `pass1_warning.py`. Ties to
+   [[BACKLOG-29]] (split `bootstrap.py`) — fix the doc when the split lands.
+4. **~20 loose spec-like docs directly under `docs/`** are still local-only
+   (`HANDOVER.md`, `architecture.md`, `embeddings_architecture.md`,
+   `online_learning_design.md`, `incident_memory_schema.md`,
+   `phase2_implementation.md`, `RELEASE_NOTES.md` and others). Same triage,
+   not yet done.
+
+One unit disagreement found and deliberately not resolved: `lstm_vae_design.md`
+§4 and the root `CLAUDE.md` both say light is **0–1000 lux**, while
+`src/config.py:149` has `LIGHT_RANGE = (0.0, 1200.0)` with
+`LIGHT_CANONICAL_UNIT = "W/m²"` (`:152`). Whichever is wrong, two documents and a
+constant currently disagree about a model input range. Not a doc fix — decide the
+unit first.
 
 ## BACKLOG-31 — pipeline verification rule (Orchestrator, 2026-11-09)
 
