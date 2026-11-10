@@ -222,25 +222,19 @@ def _event(ts: datetime, *, temperature: float) -> LiveReadingEvent:
 class _NoEnrichment:
     """No-op stand-in for ``EnrichmentRunner`` via the ``enrichment=`` DI seam.
 
-    Enrichment is not under test here, and it must not run: it mutates the
-    detector these tests are scoring with, concurrently with the scoring pass.
-    ``EnrichmentRunner._run_enrichment`` builds an ``AnomalyAttributor``, whose
-    ``__init__`` calls ``model.to(device)`` on the **shared** cached detector
-    (``src/models/anomaly_attributor.py:79``). ``RNNBase._apply`` blanks
-    ``_flat_weight_refs`` for the duration of that call
-    (``torch/nn/modules/rnn.py:298``), so a forward pass running at the same
-    time in ``asyncio.to_thread`` reaches ``_weights_have_changed`` with an
-    empty ref list and raises ``ValueError: zip() argument 2 is longer than
-    argument 1``. ``LiveScorer.score`` logs "Forward pass failed" and returns
-    the event **unscored**, which the assertions below then see as
-    ``anomaly_score is None``.
+    Enrichment is not under test here, and running it for real would pull in a
+    DB session and the whole ``ComprehensiveInferencePipeline``. The seam keeps
+    these tests about scoring and nothing else, which is reason enough on its
+    own to take it.
 
-    Both tests in this class cross ``LIVE_ANOMALY_THRESHOLD`` even on the
-    in-range window, so the real runner would spawn enrichment on every run and
-    the race was lost in roughly 2 % of them -- 5/200 seeds for this test as it
-    stood on ``main``, 3/200 for the same logic at the 45 C input now used,
-    versus 0/400 with this stub. The production defect is reported separately;
-    the tests here are about scoring, so they take the seam.
+    History, because this stub predates the fix and its original justification
+    no longer holds: enrichment used to mutate the shared cached detector in
+    place while the scoring pass was reading it, losing a roughly 2 % race
+    (5/200 seeds for this test as it stood on ``main``, 3/200 for the same
+    logic at the 45 C input now used, versus 0/400 with this stub) and leaving
+    the reading at ``anomaly_score is None``. Commit ``1b9a87d`` removed that
+    race by handing the attributor a private copy; the invariant is pinned in
+    ``tests/api/test_pipeline_model_isolation.py``.
     """
 
     def spawn(self, window_array: Any, anomaly_seq: str) -> None:

@@ -1,27 +1,11 @@
 """BACKLOG-19 regression: the pipeline must not mutate a model it does not own.
 
 ``ComprehensiveInferencePipeline._get_cached_components`` builds an
-``AnomalyAttributor``, and ``AnomalyAttributor.__init__`` mutates whatever
-model it is handed **in place** -- ``.to(device)`` then ``.eval()``
-(``src/models/anomaly_attributor.py:79-81``, documented there as a side
-effect). Until ``1b9a87d`` the attributor was built on ``self.detector.model``
-directly, which is not the pipeline's model to mutate: ``DetectorResolver``
-caches one ``AnomalyDetector`` instance per scope
-(``src/live/detector_resolver.py:97``) and ``get_cached_detector`` is a
-process-wide LRU (``src/api/services/detector_cache.py:49``), so the same
-``LSTMVAE`` feeds the live scoring hot path and the sync ``/api/inference``
-routes.
-
-Why in-place mutation of a *shared* model is a bug and not merely untidy:
-``Module.to()`` runs ``_apply`` unconditionally, even for a no-op same-device
-move, and ``RNNBase._apply`` empties ``self._flat_weight_refs`` before
-delegating to ``super()._apply(fn)``, restoring it only afterwards
-(``torch/nn/modules/rnn.py:298``). A forward pass that reaches
-``_weights_have_changed`` (``rnn.py:364``) inside that window zips the empty
-ref list against ``_flat_weights_names`` under ``strict=True`` and raises
-``ValueError: zip() argument 2 is longer than argument 1``.
-``src/live/scoring.py:137`` logs and swallows it, so the reading persists with
-``anomaly_score`` NULL -- a silent data loss with no error surfaced anywhere.
+``AnomalyAttributor``, which mutates its model in place; until ``1b9a87d``
+that model was the shared ``detector.model``. For the torch mechanism behind
+the resulting race, see ``AGENT_MEMORY.md`` under BACKLOG-19 and
+``src/api/services/comprehensive_pipeline.py:546-550`` -- it is recorded there
+and deliberately not restated here.
 
 These tests pin the invariant that removes the race rather than the race
 itself: the pipeline hands the attributor a private copy, so no interleaving
@@ -29,11 +13,10 @@ of pipeline and scoring work can corrupt the shared model. A test that tried
 to lose the race instead would be reproducing a ~1.5-3% flake, which is
 exactly what BACKLOG-19 removes from the suite.
 
-The detector here is a real ``AnomalyDetector`` loaded from a checkpoint, not a
-mock: the assertions below are about ``torch`` module state (training flag,
-``_flat_weight_refs``), and against a ``MagicMock`` both ``.to()`` and
-``.eval()`` are silent no-ops that would make every mode assertion pass
-vacuously.
+The detector is a real ``AnomalyDetector`` loaded from a checkpoint, not a
+mock: the assertions are about ``torch`` module state (training flag,
+``_flat_weight_refs``), and on a ``MagicMock`` both ``.to()`` and ``.eval()``
+are silent no-ops that would make every mode assertion pass vacuously.
 """
 
 from __future__ import annotations
@@ -137,10 +120,13 @@ class TestPipelineDoesNotMutateSharedDetectorModel:
     def test_detector_lstm_weight_refs_survive_intact(
         self, attribution_components
     ) -> None:
-        """No torn RNNBase._apply state left behind on the shared model.
+        """A torn-state guard, not a discriminator for the fix.
 
-        ``_weights_have_changed`` zips these two lists under ``strict=True``,
-        so a length mismatch is precisely what raises mid-forward-pass.
+        ``RNNBase._apply`` restores ``_flat_weight_refs`` before it returns, so
+        this assertion holds on pre-fix code too; it fails only if a model is
+        left mid-``_apply``. It is here because ``_weights_have_changed`` zips
+        the ref list against ``_flat_weights_names`` under ``strict=True``, so
+        a length mismatch is precisely what raises mid-forward-pass.
         """
         caller_model, _ = attribution_components
 
