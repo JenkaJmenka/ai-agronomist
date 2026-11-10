@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { GrovsenLogo } from "@/components/brand/GrovsenLogo";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { requestMagicLinkAction } from "@/features/auth/actions";
@@ -21,7 +22,8 @@ export function LoginView({ callbackUrl }: LoginViewProps) {
   const [confirmation, formAction, isPending] = useActionState(boundAction, null);
 
   return (
-    <div className="mx-auto flex min-h-[60vh] max-w-sm items-center">
+    <div className="mx-auto flex max-w-sm flex-col items-center gap-6">
+      <GrovsenLogo variant="full" height={40} />
       <Card title="Sign in" className="w-full">
         {confirmation ? (
           <p data-testid="login-confirmation" className="text-sm text-text">

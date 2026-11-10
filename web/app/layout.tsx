@@ -3,14 +3,17 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 
 import { auth } from "@/auth";
-import { Sidebar } from "@/features/shell/Sidebar";
+import { AppShell } from "@/features/shell/AppShell";
 import { Providers } from "./providers";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "AI Agronomist",
-  description: "Greenhouse monitoring and anomaly detection",
+  title: {
+    template: "%s · Grovsen",
+    default: "Grovsen · AI Agronomist",
+  },
+  description: "Greenhouse monitoring and anomaly detection for Grovsen operators",
 };
 
 // Static literal (no user input): restores the persisted theme before first
@@ -41,10 +44,7 @@ export default async function RootLayout({
         {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static theme-restore literal */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <Providers tenantId={tenantId}>
-          <div className="flex">
-            <Sidebar />
-            <main className="min-h-dvh flex-1 overflow-x-hidden p-6">{children}</main>
-          </div>
+          <AppShell>{children}</AppShell>
         </Providers>
       </body>
     </html>

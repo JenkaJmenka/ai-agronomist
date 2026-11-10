@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
+import { GrovsenLogo } from "@/components/brand/GrovsenLogo";
 import { GreenhouseSelector } from "@/features/shell/GreenhouseSelector";
 import { NAV_SECTIONS } from "@/features/shell/nav";
 import { SignOutButton } from "@/features/shell/SignOutButton";
@@ -35,8 +36,10 @@ function NavLinks() {
                   if (isActive) return;
                   measureInteraction("ui.nav", { from: pathname, to: entry.href });
                 }}
-                className={`block rounded-[var(--radius-control)] px-2 py-1.5 text-sm ${
-                  isActive ? "bg-accent/15 font-medium text-accent" : "text-text hover:bg-border/50"
+                className={`block rounded-[var(--radius-control)] border-l-2 px-2 py-1.5 text-sm ${
+                  isActive
+                    ? "border-accent bg-accent-soft font-medium text-accent"
+                    : "border-transparent text-text hover:bg-border/50"
                 }`}
               >
                 {entry.label}
@@ -51,10 +54,13 @@ function NavLinks() {
 
 export function Sidebar() {
   return (
-    <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-bg-elevated">
-      <div className="flex items-center justify-between px-4 py-4">
-        <p className="text-sm font-bold text-accent">AI Agronomist</p>
-        <div className="flex items-center gap-2">
+    <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-bg-sidebar">
+      <div className="flex items-center justify-between gap-2 px-3 py-4">
+        <div className="flex min-w-0 flex-col gap-1">
+          <GrovsenLogo variant="full" height={26} />
+          <p className="text-[11px] uppercase tracking-wider text-text-muted">AI Agronomist</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
           <ThemeToggle />
           <SignOutButton />
         </div>

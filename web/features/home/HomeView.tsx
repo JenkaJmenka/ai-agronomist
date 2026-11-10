@@ -262,7 +262,7 @@ function HomeHeader({ windowLabel }: { readonly windowLabel: string }) {
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 className="text-2xl font-bold">AI Agronomist</h1>
+        <h1 className="text-2xl font-bold">Overview</h1>
         <p className="text-sm text-text-muted tabular-nums">
           {tenant} · {gh} · {windowLabel}
         </p>
