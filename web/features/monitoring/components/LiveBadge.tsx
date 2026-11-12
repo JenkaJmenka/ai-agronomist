@@ -24,7 +24,7 @@ const STATUS_DOT: Record<SourceStatus["status"], string> = {
   degraded: "bg-sev-warning",
   offline: "bg-sev-critical",
   // A paused scope is off, not broken — muted rather than a severity colour.
-  paused: "bg-muted-foreground/40",
+  paused: "bg-text-muted/40",
 };
 
 /**

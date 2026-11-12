@@ -150,7 +150,7 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
             isLiveButStale
               ? "bg-sev-critical"
               : live
-                ? "animate-pulse bg-green-400"
+                ? "motion-safe:animate-pulse bg-sev-normal"
                 : "bg-text-muted"
           }`}
           aria-hidden="true"

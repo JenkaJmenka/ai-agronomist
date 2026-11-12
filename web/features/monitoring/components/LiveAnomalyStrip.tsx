@@ -57,10 +57,10 @@ export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps
 
   return (
     <div
-      className="flex flex-col gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 p-2"
+      className="flex flex-col gap-1 rounded-md border border-sev-warning/30 bg-sev-warning/5 p-2"
       data-testid="live-anomaly-strip"
     >
-      <p className="text-xs font-semibold text-amber-600">Live anomalies</p>
+      <p className="text-xs font-semibold text-sev-warning">Live anomalies</p>
       <ul className="flex flex-col gap-0.5" data-testid="live-anomaly-list">
         {displayAnomalies.map((a) => {
           const time = formatTime(a.timestamp);
@@ -84,7 +84,7 @@ export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps
               data-testid={`live-anomaly-item-${a.seq || a.timestamp}`}
             >
               <span className="tabular-nums text-text-muted">{time}</span>
-              <span className="text-amber-600">{a.affected_channels.join(", ")}</span>
+              <span className="text-sev-warning">{a.affected_channels.join(", ")}</span>
               <span className="tabular-nums text-text-muted">score {a.score.toFixed(2)}</span>
               {a.fault_type && (
                 <span className="text-text-muted">{a.fault_type.replace(/_/g, " ")}</span>
