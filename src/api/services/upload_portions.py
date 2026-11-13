@@ -33,6 +33,8 @@ from src.config import (
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
+    UPLOAD_SPIKE_MAD_FLOOR,
+    UPLOAD_SPIKE_MAD_TUNING_C,
 )
 from src.models.psychrometric_validator import validate_row as _psychro_validate_row
 from src.models.cold_run_detector import (
@@ -43,6 +45,7 @@ from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
 from src.models.episode_grouper import group_alerts_into_episodes
+from src.models.spike_mad_detector import SpikeMADDetector
 from src.models.stuck_fault_detector import (
     FaultWindow,
     StuckCarry,
@@ -126,7 +129,85 @@ class PortionScores:
     uncertainties: list[float] = field(default_factory=list)
     stat_hits: list[StatisticalAnomalyDetail] = field(default_factory=list)
     stuck_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
+    mad_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
     rows_processed: int = 0
+
+
+def _timestamp_label(value: Any) -> str:
+    """ISO-8601 when the cell is a datetime; otherwise its string form."""
+    if value is None:
+        return "unknown"
+    if isinstance(value, float) and math.isnan(value):
+        return "unknown"
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    return str(value)
+
+
+def _upload_mad_settings() -> tuple[float, dict[str, float]]:
+    """Upload MAD constant and floors from config.
+
+    Only keys of ``UPLOAD_SPIKE_MAD_FLOOR`` are scored. Today that is
+    temperature (0.5 °C, c=8). The helper skips a sensor with no floor
+    key; it does not supply ``mad_floor`` 0.
+    """
+    floors = {str(name): float(floor) for name, floor in UPLOAD_SPIKE_MAD_FLOOR.items()}
+    return float(UPLOAD_SPIKE_MAD_TUNING_C), floors
+
+
+def _detect_upload_mad_spikes(
+    combined_df: pd.DataFrame,
+    *,
+    new_row_start: int,
+) -> list[UploadHighAnomalyDetail]:
+    """MAD spikes on canonical physical units, new rows of this portion only.
+
+    ``combined_df`` is the overlap tail plus the current chunk (the same
+    frame LSTM sequences are cut from), still in °C / % / ppm / W/m².
+    Flags inside the overlap were emitted with the previous portion.
+    The overlap is ``seq_len - 1`` rows, which covers ``SPIKE_MAD_WINDOW_K``
+    when ``seq_len`` is the production default (20) and the window is 10.
+    """
+    if combined_df.empty or "timestamp" not in combined_df.columns:
+        return []
+    tuning_c, floors = _upload_mad_settings()
+    detector = SpikeMADDetector(tuning_c=tuning_c)
+    timestamps = combined_df["timestamp"].tolist()
+    hits: list[UploadHighAnomalyDetail] = []
+    start = max(0, new_row_start)
+    for column, floor in floors.items():
+        if column not in combined_df.columns:
+            continue
+        values = combined_df[column].to_numpy(dtype=float)
+        flags = detector.detect(values, mad_floor=float(floor))
+        for idx in range(start, len(flags)):
+            if not flags[idx]:
+                continue
+            value = float(values[idx])
+            if not math.isfinite(value):
+                continue
+            hits.append(
+                UploadHighAnomalyDetail(
+                    score=1.0,
+                    timestamp=_timestamp_label(timestamps[idx]),
+                    detector="spike_mad",
+                    column=column,
+                    severity="high",
+                    method="mad",
+                    value=value,
+                )
+            )
+    return hits
+
+
+def _calibrate_upload_threshold(scores: np.ndarray) -> tuple[float, str]:
+    """File threshold for one upload.
+
+    Returns ``calibrate_threshold`` unchanged. The robust gate follows that
+    function: it is on unless ``COLD_RUN_ROBUST_GATE_ENABLED`` is set off,
+    and it can only raise the cutoff.
+    """
+    return calibrate_threshold(scores)
 
 
 def _sequence_timestamps_for(combined_df: pd.DataFrame, n_scores: int, seq_len: int) -> list[str]:
@@ -610,6 +691,11 @@ def score_portion(
     else:
         next_overlap = combined_df.copy()
 
+    result.mad_hits = _detect_upload_mad_spikes(
+        combined_df,
+        new_row_start=len(prev_overlap_df),
+    )
+
     if len(combined_df) < seq_len:
         return result, next_overlap
 
@@ -660,11 +746,13 @@ def finalize_scores(
     uncertainties: list[float] = []
     stat_details: list[StatisticalAnomalyDetail] = []
     stuck_details: list[UploadHighAnomalyDetail] = []
+    mad_details: list[UploadHighAnomalyDetail] = []
     for portion in portions_in_order:
         anomaly_scores.extend(portion.scores)
         sequence_timestamps.extend(portion.sequence_timestamps)
         stat_details.extend(portion.stat_hits)
         stuck_details.extend(portion.stuck_hits)
+        mad_details.extend(portion.mad_hits)
         if include_embeddings:
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
@@ -690,7 +778,7 @@ def finalize_scores(
         stuck_details.extend(_stuck_dict_to_high_detail(a) for a in flush_alerts)
 
     scores_arr = np.asarray(anomaly_scores, dtype=np.float64)
-    threshold_used, threshold_method = calibrate_threshold(scores_arr)
+    threshold_used, threshold_method = _calibrate_upload_threshold(scores_arr)
 
     lstm_high = [
         UploadHighAnomalyDetail(
@@ -739,9 +827,13 @@ def finalize_scores(
 
     high_anomalies = _merge_by_timestamp(lstm_high, stat_high)
 
-    # Append stuck-fault alerts (distinct detector — no timestamp merge needed).
+    # Append stuck-fault and MAD-spike alerts (distinct detectors — no
+    # timestamp merge with the LSTM/statistical pair).
     if stuck_details:
         high_anomalies.extend(stuck_details)
+    if mad_details:
+        high_anomalies.extend(mad_details)
+    if stuck_details or mad_details:
         high_anomalies.sort(key=lambda h: h.timestamp)
 
     # Task 5: group contiguous per-channel alerts into episodes.

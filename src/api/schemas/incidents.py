@@ -40,8 +40,13 @@ class IncidentCreateRequest(BaseModel):
     # which will be added to the enum by the ml-engineer (SCADA Phase A).
     # Until the enum is updated, we explicitly include it here so the API
     # can accept and store polling_dropout incidents immediately.
+    # humidity_fault is the documented psychrometric_inconsistency label
+    # (BACKLOG-20, migration 029). FaultType does not list it yet
+    # (ml-engineer owns that enum); union it here so the API accepts the
+    # value the pipeline now stores.
     _VALID_FAULT_TYPES: ClassVar[frozenset[str]] = (
-        frozenset(ft.value for ft in _FaultType) | {"polling_dropout"}
+        frozenset(ft.value for ft in _FaultType)
+        | {"polling_dropout", "humidity_fault"}
     )
 
     @field_validator('fault_type')

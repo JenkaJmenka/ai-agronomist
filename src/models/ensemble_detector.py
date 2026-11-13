@@ -23,13 +23,13 @@ from src.config import (
     ENSEMBLE_LSTM_VAE_THRESHOLD,
     ENSEMBLE_MIN_AGREEMENT,
     ENSEMBLE_STATISTICAL_THRESHOLD,
+    ENSEMBLE_STUCK_SKIP_CHANNELS,
     SENSOR_NAMES,
     TEMP_RANGE,
     HUMIDITY_RANGE,
     CO2_RANGE,
     LIGHT_RANGE,
 )
-from src.models.bias_detector import BiasOffsetDetector
 from src.models.inference import AnomalyDetector
 from src.models.stuck_fault_detector import StuckFaultDetector
 
@@ -37,12 +37,59 @@ logger = logging.getLogger(__name__)
 
 DETECTOR_NAMES = ("lstm_vae", "isolation_forest", "statistical", "correlation")
 
+# Night light is a legitimate flat channel. Built once so detect() does not
+# allocate the skip set on every window.
+_STUCK_PRECHECK_SKIP = frozenset(ENSEMBLE_STUCK_SKIP_CHANNELS)
+
 _SENSOR_BOUNDS = {
     "temperature": TEMP_RANGE,
     "humidity": HUMIDITY_RANGE,
     "co2": CO2_RANGE,
     "light": LIGHT_RANGE,
 }
+_PHYSICAL_RANGES = np.array(
+    [TEMP_RANGE, HUMIDITY_RANGE, CO2_RANGE, LIGHT_RANGE],
+    dtype=np.float64,
+)
+# Physical temperature is tens of °C and physical CO2 is hundreds of ppm.
+# Model-scale channels sit near [0, 1]. Both medians must clear this
+# ceiling before a window is treated as already physical, so one failed
+# channel cannot flip the decision.
+_MODEL_SCALE_CEILING = 10.0
+
+
+def _is_model_scale(sequence: np.ndarray) -> bool:
+    """True when ``sequence`` is normalized model input, not physical units."""
+    if sequence.ndim != 2 or sequence.shape[1] < 3:
+        return False
+    temp = sequence[:, 0]
+    co2 = sequence[:, 2]
+    temp_finite = temp[np.isfinite(temp)]
+    co2_finite = co2[np.isfinite(co2)]
+    if temp_finite.size == 0 or co2_finite.size == 0:
+        return False
+    return (
+        float(np.median(temp_finite)) < _MODEL_SCALE_CEILING
+        and float(np.median(co2_finite)) < _MODEL_SCALE_CEILING
+    )
+
+
+def _to_physical_range_units(sequence: np.ndarray) -> np.ndarray:
+    """Physical copy for range checks. Already-physical windows pass through.
+
+    Correlation is affine-invariant, so the correlation term can stay in
+    whatever space the baseline was fit in. The range term compares against
+    ``_SENSOR_BOUNDS``, which are physical, and must not see model-scale
+    values (every in-range greenhouse window would count as out of range).
+    """
+    if not _is_model_scale(sequence):
+        return sequence
+    ncols = min(sequence.shape[1], _PHYSICAL_RANGES.shape[0])
+    physical = np.array(sequence, dtype=np.float64, copy=True)
+    mins = _PHYSICAL_RANGES[:ncols, 0]
+    spans = _PHYSICAL_RANGES[:ncols, 1] - mins
+    physical[:, :ncols] = physical[:, :ncols] * spans + mins
+    return physical
 
 
 class DetectorProtocol(Protocol):
@@ -216,8 +263,9 @@ class CorrelationDetector:
         sensor_subset = SENSOR_NAMES[:ncols]
         mins = np.array([_SENSOR_BOUNDS[s][0] for s in sensor_subset])
         maxs = np.array([_SENSOR_BOUNDS[s][1] for s in sensor_subset])
-        range_violations = int(np.sum((sequence < mins) | (sequence > maxs)))
-        total_checks = sequence.size
+        ranged = _to_physical_range_units(sequence)
+        range_violations = int(np.sum((ranged < mins) | (ranged > maxs)))
+        total_checks = ranged.size
 
         range_score = range_violations / max(total_checks, 1)
 
@@ -261,14 +309,6 @@ class EnsembleAnomalyDetector:
         self._min_agreement = min_agreement
         self._baseline_cache: Optional[np.ndarray] = None
         self._stuck_detector = StuckFaultDetector()
-        self._bias_detector = BiasOffsetDetector(
-            expected_ranges={
-                "temperature": TEMP_RANGE,
-                "humidity": HUMIDITY_RANGE,
-                "co2": CO2_RANGE,
-                "light": LIGHT_RANGE,
-            }
-        )
 
     def fit_baseline(self, baseline: np.ndarray) -> None:
         """Pre-fit sklearn/stat detectors on customer baseline."""
@@ -284,13 +324,27 @@ class EnsembleAnomalyDetector:
     ) -> EnsembleResult:
         """Score sequence and return ensemble result.
 
-        Runs stuck-fault and bias-offset pre-checks before the 4-detector
-        weighted vote.  A stuck sensor short-circuits to ``is_anomaly=True``
-        with ``fault_type="stuck_fault"``.  Bias detection sets a flag
-        propagated through the result for downstream classification.
+        Runs a stuck-fault pre-check before the 4-detector weighted vote.
+        A stuck temperature, humidity, or CO2 channel short-circuits to
+        ``is_anomaly=True`` with ``fault_type="stuck_fault"``. Light is
+        omitted (``ENSEMBLE_STUCK_SKIP_CHANNELS``): a 20-step night window
+        is legitimately ~0 W/m². ``StuckFaultDetector.detect`` without
+        ``skip_channels``, and ``detect_series`` on one channel, still
+        flag a flat light series.
+
+        The midpoint bias pre-check is intentionally absent. It compared
+        this sequence to physical range midpoints, but the pipeline passes
+        normalized model input, so the flag was true on every window.
+        Even on physical units the greenhouse operating point is not the
+        range midpoint (prototype: 82/100 clean windows still flagged).
+        Persistent offset stays with the pipeline's BiasEMA and dual-sensor
+        checks, which see physical units. ``bias_flag`` is always False.
         """
-        # --- Pre-check: stuck fault ---
-        stuck_result = self._stuck_detector.detect(sequence)
+        # --- Pre-check: stuck fault (light excluded; night is legitimately flat) ---
+        stuck_result = self._stuck_detector.detect(
+            sequence,
+            skip_channels=_STUCK_PRECHECK_SKIP,
+        )
         has_stuck = any(stuck_result.values())
 
         if has_stuck:
@@ -303,10 +357,6 @@ class EnsembleAnomalyDetector:
                 bias_flag=False,
                 stuck_sensors=stuck_result,
             )
-
-        # --- Pre-check: bias offset ---
-        bias_result = self._bias_detector.detect(sequence)
-        bias_flag = any(mag > 0.0 for mag in bias_result.values())
 
         # --- Standard 4-detector vote ---
         if self._baseline_cache is None or baseline is not self._baseline_cache:
@@ -337,5 +387,5 @@ class EnsembleAnomalyDetector:
             ensemble_score=round(ensemble_score, 4),
             agreement_count=votes,
             is_anomaly=is_anomaly,
-            bias_flag=bias_flag,
+            bias_flag=False,
         )

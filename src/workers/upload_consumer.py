@@ -192,6 +192,7 @@ def _portion_result_payload(
         "sequence_timestamps": portion.sequence_timestamps,
         "stat_hits": [hit.model_dump() for hit in portion.stat_hits],
         "stuck_hits": [hit.model_dump() for hit in portion.stuck_hits],
+        "mad_hits": [hit.model_dump() for hit in portion.mad_hits],
         "rows_processed": portion.rows_processed,
         "stat_columns": None,  # filled below when known
         "sensor_rows": sensor_rows,
@@ -465,6 +466,11 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         stuck_hits: list[UploadHighAnomalyDetail] = [
             UploadHighAnomalyDetail(**h) for h in stored.get("stuck_hits", [])
         ]
+        # MAD spikes scored on this portion. Absent on results written before
+        # the upload MAD gate — those portions contribute no spike hits.
+        mad_hits: list[UploadHighAnomalyDetail] = [
+            UploadHighAnomalyDetail(**h) for h in stored.get("mad_hits", [])
+        ]
 
         portions.append(
             PortionScores(
@@ -472,6 +478,7 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 sequence_timestamps=stored.get("sequence_timestamps", []),
                 stat_hits=hits,
                 stuck_hits=stuck_hits,
+                mad_hits=mad_hits,
                 rows_processed=stored.get("rows_processed", 0),
             )
         )

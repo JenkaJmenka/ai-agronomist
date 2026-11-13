@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict
 import pandas as pd
 
+from src.config import OOB_LIMITS
+
 # =============================================================================
 # Custom Exception Hierarchy
 # =============================================================================
@@ -46,10 +48,14 @@ class DataSourceAdapter(ABC):
 
     Expected Canonical Schema columns:
     - `timestamp`: UTC datetime (datetime64[ns, UTC])
-    - `temperature`: float64 (Ambient temperature in degrees Celsius, [0.0, 50.0])
+    - `temperature`: float64 (Ambient temperature in degrees Celsius, [-40.0, 80.0])
     - `humidity`: float64 (Relative humidity percentage, [0.0, 100.0])
-    - `co2`: float64 (CO2 concentration in parts per million (ppm), [0.0, 1000.0])
-    - `light`: float64 (Light intensity in lux, [0.0, 2000.0])
+    - `co2`: float64 (CO2 concentration in parts per million (ppm), [0.0, 5000.0])
+    - `light`: float64 (Light intensity in W/m², [0.0, 2000.0])
+
+    Numeric bounds are ``OOB_LIMITS`` (src/config.py). A reading inside those
+    hard limits must not be rejected here; the out-of-bounds detector labels
+    it. CO₂ 1000–5000 ppm and temperatures outside 0–50 °C are valid.
 
     Error Handling strategy is fully specified:
     - Anticipated failures (such as connection timeouts, file-not-found, schema mismatch, etc.)
@@ -205,12 +211,12 @@ class DataSourceAdapter(ABC):
         except AttributeError:
             raise DataValidationError("Fail to parse 'timestamp' Series as datetime or access .dt namespace")
 
-        # 4. Check that numerical columns are numeric and within physical bounds:
+        # 4. Check that numerical columns are numeric and within the same
+        # hard limits the out-of-bounds detector uses. A tighter cap here
+        # rejects the whole chunk before that detector can label it.
         bounds = {
-            "temperature": (0.0, 50.0),
-            "humidity": (0.0, 100.0),
-            "co2": (0.0, 1000.0),
-            "light": (0.0, 2000.0)
+            col: OOB_LIMITS[col]
+            for col in ("temperature", "humidity", "co2", "light")
         }
 
         for col, (min_val, max_val) in bounds.items():

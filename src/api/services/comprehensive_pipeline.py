@@ -8,7 +8,7 @@ Recommendations -> Incident Store -> Learning progress -> Metrics.
 import copy
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 import numpy as np
@@ -19,11 +19,13 @@ from src.config import (
     ACTIVE_LEARNING_MIN_QUALITY_LABELS,
     ANOMALY_SCALING_FACTOR,
     ANOMALY_THRESHOLD,
+    BIAS_EMA_SPAN,
     BIAS_EMA_THRESHOLD,
     BIAS_EMA_THRESHOLD_BY_SENSOR,
     BOCPD_MIN_SENSORS,
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
+    DIURNAL_PROFILE_HISTORY_DAYS,
     EWMA_ALPHA,
     EWMA_K,
     INPUT_DIM,
@@ -32,17 +34,20 @@ from src.config import (
     POT_FPR,
     POT_Q,
     PSYCHROMETRIC_HD_TOLERANCE,
+    NOISE_CALIBRATED_RATIO_TARGET,
     SENSOR_NOISE_TARGETS,
     SEQ_LEN,
     SENSOR_NAMES,
     SPIKE_MAD_FLOOR,
+    UPLOAD_SPIKE_MAD_FLOOR,
+    UPLOAD_SPIKE_MAD_TUNING_C,
     TEMP_RANGE,
     HUMIDITY_RANGE,
     CO2_RANGE,
     LIGHT_RANGE,
 )
 from src.db.incident_memory import IncidentMemory
-from src.db.models import LearningState
+from src.db.models import LearningState, SensorReading
 from src.models.anomaly_attributor import AnomalyAttributor
 from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
 from src.models.bias_dual_sensor_detector import BiasDualSensorDetector
@@ -58,7 +63,11 @@ from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstim
 from src.models.diurnal_profile_detector import DiurnalProfileDetector
 from src.models.dropout_detector import DropoutDetector
 from src.models.ensemble_detector import EnsembleAnomalyDetector, LstmVaeDetector
-from src.models.noise_detector import NoiseDetector
+from src.models.noise_detector import (
+    NoiseDetector,
+    calibrate_noise_baseline,
+    resolve_noise_baseline,
+)
 from src.models.out_of_bounds_detector import OutOfBoundsDetector
 from src.models.spike_mad_detector import SpikeMADDetector
 from src.models.ewma_tracker import EWMATracker
@@ -134,20 +143,56 @@ def _season_for_timestamp(
 # Map PhysicsValidator reason strings to fault type values.
 _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
     "psychrometric_impossibility": "spike_fault",
+    # humidity_fault is the documented psychrometric label (BACKLOG-20).
+    # It is allowed by ck_incidents_fault_type as of migration 029.
+    # FaultType in src/models/fault_classifier.py does not list it yet
+    # (ml-engineer); the incident API unions it in until that enum grows.
     "psychrometric_inconsistency": "humidity_fault",
     "nocturnal_light": "spike_fault",
     "co2_out_of_range": "calibration_drift",
     "temperature_out_of_range": "spike_fault",
 }
 
+# Explicit fault-type precedence. The first key that actually voted wins.
+# Short-circuits (dropout, out-of-bounds) return before this list is
+# consulted. Band breaches are applied later, and only when nothing here
+# fired. Spike is before noise, and BOCPD is before both, so a level
+# shift is not labelled accuracy_decline and a transient is not labelled
+# as precision loss. Setpoint/flatline votes stay after that sensor-fault
+# chain so they cannot steal those labels.
+_RULE_PRECEDENCE: tuple[str, ...] = (
+    "change_point",
+    "spike_mad",
+    "noise",
+    "bias_dual",
+    "correlation_breakdown",
+    "diurnal",
+    "multivariate",
+    "sensor_flatline",
+    "under_heating",
+    "over_heating",
+    "dehumidification_failure",
+    "humidity_saturation_risk",
+    "thermal_divergence",
+)
+
+_SCADA_VOTE_KEYS: frozenset[str] = frozenset({
+    "sensor_flatline",
+    "under_heating",
+    "over_heating",
+    "dehumidification_failure",
+    "humidity_saturation_risk",
+    "thermal_divergence",
+})
+
 # Fault profile per rule detector (fusion, plan P2). Rule detectors vote
 # instead of short-circuiting: the full LSTM/ensemble path still runs, and
-# the FIRST fired rule (dict/gate order) takes fault-type precedence over
-# model-derived classification. Values mirror the former short-circuit
-# result builders so alert semantics stay stable. ``reasoning`` names the
-# algorithm that fired ({sensors} is filled with the flagged channels) so
-# the explanation always matches the detection method, not the model's
-# pattern guess.
+# the highest-precedence fired rule (``_RULE_PRECEDENCE``) takes fault-type
+# precedence over model-derived classification. Values mirror the former
+# short-circuit result builders so alert semantics stay stable.
+# ``reasoning`` names the algorithm that fired ({sensors} is filled with
+# the flagged channels) so the explanation always matches the detection
+# method, not the model's pattern guess.
 _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
     "noise": {
         "fault_type": "accuracy_decline",
@@ -276,7 +321,8 @@ _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
         "severity": "high",
         "urgency": "urgent",
         "reasoning": (
-            "Sensor flatline: {sensors} frozen (zero variance) for the "
+            "Sensor flatline: {sensors} frozen "
+            "(variance ≤ FLATLINE_VARIANCE_EPS²) for the "
             "configured multi-hour window"
         ),
     },
@@ -348,6 +394,129 @@ _DENORM_RANGES = np.array(
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
 
 
+def _order_rule_votes(
+    rule_votes: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """Return votes in ``_RULE_PRECEDENCE`` order (first key wins).
+
+    Keys that are not in the precedence list keep their relative order
+    and sort after the known rules, so a new vote is not dropped.
+    """
+    ordered: Dict[str, List[str]] = {}
+    for name in _RULE_PRECEDENCE:
+        sensors = rule_votes.get(name)
+        if sensors:
+            ordered[name] = list(sensors)
+    for name, sensors in rule_votes.items():
+        if name not in ordered and sensors:
+            ordered[name] = list(sensors)
+    return ordered
+
+
+def build_noise_detector(
+    detector: NoiseDetector,
+    clean_windows: Any = None,
+) -> NoiseDetector:
+    """Noise detector, calibrated when physical clean windows are supplied.
+
+    ``clean_windows`` is the input ``calibrate_noise_baseline`` accepts:
+    physical units, not the normalized LSTM baseline. None, or a
+    calibration that yields no positive variance, keeps ``detector``
+    (fixed ``NOISE_BASELINE_VARIANCE`` and its cold-start ratio).
+
+    A non-empty calibration uses ``resolve_noise_baseline`` and
+    ``NOISE_CALIBRATED_RATIO_TARGET``. The live scorer passes recent
+    physical windows it did not flag. ``None`` or an empty sequence
+    keeps the fixed map.
+    """
+    if clean_windows is None:
+        return detector
+    calibrated = calibrate_noise_baseline(clean_windows)
+    if not calibrated:
+        return detector
+    return NoiseDetector(
+        hp_cutoff=detector._hp_cutoff,
+        window=detector._window,
+        baseline_variance=resolve_noise_baseline(calibrated),
+        ratio_threshold=float(NOISE_CALIBRATED_RATIO_TARGET),
+        use_highpass=detector._use_highpass,
+    )
+
+
+async def _load_operational_overrides_if_uncached(
+    customer_id: str,
+    greenhouse_id: str,
+    session: AsyncSession,
+) -> None:
+    """Load saved band overrides when this scope is not already cached.
+
+    Tests set overrides in memory. A cached key is left alone, including
+    an empty dict. ``get_raw_overrides`` cannot tell those apart from a
+    scope that was never loaded. A missing table or row is logged and
+    the run continues on code defaults.
+    """
+    store = get_operational_config_store()
+    key = (customer_id, greenhouse_id)
+    if key in store._overrides:
+        return
+    try:
+        await store.load_from_db(customer_id, greenhouse_id, session)
+    except Exception:
+        logger.warning(
+            "Operational config table unavailable for tenant %s greenhouse %s; "
+            "continuing without saved band overrides",
+            customer_id,
+            greenhouse_id,
+            exc_info=True,
+        )
+        rollback = getattr(session, "rollback", None)
+        if rollback is not None:
+            try:
+                await rollback()
+            except Exception:
+                logger.warning(
+                    "Operational config session rollback failed for tenant %s "
+                    "greenhouse %s",
+                    customer_id,
+                    greenhouse_id,
+                    exc_info=True,
+                )
+        return
+    if key not in store._overrides:
+        logger.info(
+            "No operational config row for tenant %s greenhouse %s; "
+            "continuing with code defaults",
+            customer_id,
+            greenhouse_id,
+        )
+
+
+def enrichment_spike_mad_floor(sensor: str) -> Optional[float]:
+    """MAD floor for the enrichment spike vote.
+
+    Light is skipped: a lighting step is not a probe spike. Temperature
+    uses ``UPLOAD_SPIKE_MAD_FLOOR``. Every other sensor keeps
+    ``SPIKE_MAD_FLOOR`` scaled by
+    ``UPLOAD_SPIKE_MAD_FLOOR["temperature"] / SPIKE_MAD_FLOOR["temperature"]``
+    so the upload temperature ratio (5× at the shipped defaults) applies
+    to humidity and CO₂ as well. ``None`` means do not vote that channel.
+
+    This is not the live detector pair (``SPIKE_MAD_TUNING_C`` = 3,
+    temperature floor 0.1 °C). Callers pair the returned floor with
+    ``UPLOAD_SPIKE_MAD_TUNING_C``.
+    """
+    if sensor == "light":
+        return None
+    live_floor = SPIKE_MAD_FLOOR.get(sensor)
+    if live_floor is None:
+        return None
+    live_temp = float(SPIKE_MAD_FLOOR["temperature"])
+    if live_temp <= 0.0:
+        return None
+    upload_temp = float(UPLOAD_SPIKE_MAD_FLOOR["temperature"])
+    return float(live_floor) * (upload_temp / live_temp)
+
+
 def _humanize_sensors(sensors: List[str]) -> str:
     """Readable sensor list for reasoning text ('temperature, humidity')."""
     return ", ".join(s.replace("_", " ") for s in sensors) or "sensor channels"
@@ -357,7 +526,7 @@ def build_rule_reasoning(rule_votes: Dict[str, List[str]]) -> str:
     """Human-readable reasoning that names the algorithm(s) that fired.
 
     Keeps the explanation consistent with the fault type: the primary
-    (first-fired) rule leads, and any co-firing rules are appended so the
+    (highest-precedence) rule leads, and any co-firing rules are appended so the
     operator sees every algorithm that agreed. Empty when no rule fired
     (the caller then keeps the model's pattern-based reasoning).
     """
@@ -381,6 +550,87 @@ def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
     mins = _DENORM_RANGES[:, 0]
     spans = _DENORM_RANGES[:, 1] - _DENORM_RANGES[:, 0]
     return normalized * spans + mins
+
+
+def _as_utc(ts: datetime) -> datetime:
+    """Attach UTC to a naive timestamp; convert an aware one to UTC."""
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def _finite_sensor_row(row: object) -> Optional[list[float]]:
+    """One physical row in ``SENSOR_NAMES`` order, or None if any value is unusable."""
+    values: list[float] = []
+    for name in SENSOR_NAMES:
+        raw = getattr(row, name, None)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        value = float(raw)
+        if not math.isfinite(value):
+            return None
+        values.append(value)
+    return values
+
+
+def _finite_sensor_matrix(rows: list) -> np.ndarray:
+    """Physical history. A row is kept only when every sensor value is finite."""
+    kept: list[list[float]] = []
+    for row in rows:
+        values = _finite_sensor_row(row)
+        if values is not None:
+            kept.append(values)
+    width = len(SENSOR_NAMES)
+    if not kept:
+        return np.empty((0, width), dtype=float)
+    return np.asarray(kept, dtype=float)
+
+
+async def _query_physical_history(
+    db: AsyncSession,
+    *,
+    customer_id: str,
+    greenhouse_id: str,
+    before: Optional[datetime],
+) -> np.ndarray:
+    """Finite ``SensorReading`` rows over the diurnal trailing window.
+
+    ``before`` drops the reading under test when the sequence carries a
+    timestamp, so that point is not inside its own covariance fit.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
+    stmt = select(SensorReading).where(
+        SensorReading.tenant_id == customer_id,
+        SensorReading.greenhouse_id == greenhouse_id,
+        SensorReading.timestamp >= since,
+    )
+    if before is not None:
+        stmt = stmt.where(SensorReading.timestamp < before)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    if not isinstance(rows, list):
+        raise TypeError("sensor history query did not return rows")
+    return _finite_sensor_matrix(rows)
+
+
+async def _rollback_quietly(
+    db: AsyncSession,
+    customer_id: str,
+    greenhouse_id: str,
+) -> None:
+    """Clear an aborted transaction so the rest of the run can continue."""
+    rollback = getattr(db, "rollback", None)
+    if rollback is None:
+        return
+    try:
+        await rollback()
+    except Exception:
+        logger.warning(
+            "Mahalanobis history session rollback failed for tenant %s greenhouse %s",
+            customer_id,
+            greenhouse_id,
+            exc_info=True,
+        )
 
 
 def build_default_baseline(num_sequences: int = 10) -> np.ndarray:
@@ -498,6 +748,9 @@ class ComprehensiveInferencePipeline:
         self._band_breach_detector = BandBreachDetector()
         # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
         self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
+        # Physical history for the Mahalanobis fit, keyed by tenant and greenhouse.
+        # A live reading builds a new pipeline, so a hit only repeats inside one run.
+        self._mahalanobis_history_cache: dict[tuple[str, str], np.ndarray] = {}
         # Component caching
         self._default_baseline: Optional[np.ndarray] = None
         self._cached_baseline: Optional[np.ndarray] = None
@@ -571,12 +824,20 @@ class ComprehensiveInferencePipeline:
         sensor_pairs: Optional[List[Dict[str, Any]]] = None,
         sequence_timestamp: Optional[str] = None,
         climate_context: Optional[Dict[str, Any]] = None,
+        noise_clean_windows: Any = None,
     ) -> Dict[str, Any]:
         """Execute the full pipeline for one sequence.
 
         ``climate_context`` may carry climate-computer extras
         (``t_setpoint``, ``t_plant``, ``t_outdoor``, ``i_solar``, …).
+
+        ``noise_clean_windows`` are physical-unit windows for
+        ``calibrate_noise_baseline``. Omit them to keep the fixed noise
+        map. Do not pass the normalized LSTM baseline.
         """
+        await _load_operational_overrides_if_uncached(
+            customer_id, greenhouse_id, db
+        )
         seq_array = np.asarray(sequence, dtype=np.float32)
         if seq_array.shape != (SEQ_LEN, INPUT_DIM):
             raise ValueError(
@@ -599,6 +860,7 @@ class ComprehensiveInferencePipeline:
             sensor_pairs=sensor_pairs,
             sequence_timestamp=sequence_timestamp,
             climate_context=climate_context,
+            noise_clean_windows=noise_clean_windows,
         )
 
     async def run_batch(
@@ -650,13 +912,16 @@ class ComprehensiveInferencePipeline:
         sensor_pairs: Optional[List[Dict[str, Any]]] = None,
         sequence_timestamp: Optional[str] = None,
         climate_context: Optional[Dict[str, Any]] = None,
+        noise_clean_windows: Any = None,
     ) -> "PipelineResult":
         """Core pipeline logic shared by ``run()`` and ``run_batch()``."""
         now = datetime.now(timezone.utc)
         seq_ts = now
+        history_before: Optional[datetime] = None
         if sequence_timestamp:
             try:
                 seq_ts = datetime.fromisoformat(sequence_timestamp)
+                history_before = _as_utc(seq_ts)
             except (ValueError, TypeError):
                 pass
 
@@ -717,11 +982,25 @@ class ComprehensiveInferencePipeline:
             SENSOR_FLATLINE: "sensor_flatline",
         }
         for finding in _scada_findings:
-            scada_anomalies.append(finding.to_dict())
+            # Night light sits at zero for hours. That is not a frozen probe,
+            # so a light-only flatline neither votes nor lands in scada_anomalies.
+            affected = [
+                sensor
+                for sensor in finding.affected_sensors
+                if not (
+                    finding.anomaly_type == SENSOR_FLATLINE and sensor == "light"
+                )
+            ]
+            if finding.anomaly_type == SENSOR_FLATLINE and not affected:
+                continue
+            finding_dict = finding.to_dict()
+            if finding.anomaly_type == SENSOR_FLATLINE:
+                finding_dict["affected_sensors"] = affected
+            scada_anomalies.append(finding_dict)
             vote_key = _SCADA_TYPE_TO_VOTE.get(finding.anomaly_type)
             if vote_key:
                 rule_votes.setdefault(vote_key, [])
-                for sensor in finding.affected_sensors:
+                for sensor in affected:
                     if sensor not in rule_votes[vote_key]:
                         rule_votes[vote_key].append(sensor)
                 logger.warning(
@@ -738,7 +1017,14 @@ class ComprehensiveInferencePipeline:
         #   (1) sensor-fault rule votes → (2) physics → (3) ensemble/LSTM → (4) band LAST
         # Sensor-trust gate and last-resort fusion happen after all sensor-fault
         # detectors have voted (step 5c-gate / 5c-last below).
-        _op_config = get_operational_config_store().get(customer_id, greenhouse_id)
+        # An unconfigured tenant is on the default tomato profile. Those
+        # breaches stay on scada_anomalies and do not set is_anomaly.
+        # Promotion requires a non-empty raw override for this greenhouse.
+        _op_store = get_operational_config_store()
+        _op_config = _op_store.get(customer_id, greenhouse_id)
+        _band_overrides_configured = bool(
+            _op_store.get_raw_overrides(customer_id, greenhouse_id)
+        )
         _band_findings = self._band_breach_detector.detect(
             _denormed_for_noise,
             _op_config,
@@ -762,15 +1048,25 @@ class ComprehensiveInferencePipeline:
             customer_id, greenhouse_id, _season_key, _op_config, db
         )
 
+        # Noise stays a window-level variance ratio (NoiseDetector.detect).
+        # Light is excluded: the diurnal ramp and night zeros are not a
+        # precision fault, and the calibrated prototype omitted the channel.
+        # Calibrated baselines apply only when the caller passed physical
+        # clean windows (build_noise_detector).
+        _noise_detector = build_noise_detector(
+            self._noise_detector, noise_clean_windows
+        )
         noise_alarmed: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+            if s_name == "light":
+                continue
             base_target = SENSOR_NOISE_TARGETS.get(s_name)
             target_override = (
                 None
                 if base_target is None
                 else base_target * _scaler.factor(_season_key, s_name)
             )
-            if self._noise_detector.detect(
+            if _noise_detector.detect(
                 _denormed_for_noise[:, s_idx],
                 s_name,
                 target_override=target_override,
@@ -804,17 +1100,27 @@ class ComprehensiveInferencePipeline:
                 db=db,
             )
 
-        # 0c. Spike (MAD) check — short-circuit on transient outliers.
-        # The per-sensor MAD floor keeps near-constant series (rolling MAD ~ 0)
-        # from alarming on ordinary measurement noise.
+        # 0c. Spike (MAD). Enrichment scores the current reading, which is
+        # the last timestep. any(flags) over the whole window was the main
+        # clean-file FPR driver: a spike earlier in the window labelled the
+        # current (clean) sample.
+        # Light is excluded. Floors and c are the upload pair
+        # (UPLOAD_SPIKE_MAD_TUNING_C, enrichment_spike_mad_floor), not the
+        # live detector's c=3 / 0.1 °C floor. The shared instance stays on
+        # the live defaults for any caller that still wants them.
         spike_alarmed: list[str] = []
+        _enrichment_spike = SpikeMADDetector(
+            tuning_c=float(UPLOAD_SPIKE_MAD_TUNING_C),
+        )
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            base_floor = SPIKE_MAD_FLOOR.get(s_name, 0.0)
-            spike_flags = self._spike_mad_detector.detect(
+            base_floor = enrichment_spike_mad_floor(s_name)
+            if base_floor is None:
+                continue
+            spike_flags = _enrichment_spike.detect(
                 _denormed_for_noise[:, s_idx],
                 mad_floor=base_floor * _scaler.factor(_season_key, s_name),
             )
-            if any(spike_flags):
+            if spike_flags and spike_flags[-1]:
                 spike_alarmed.append(s_name)
         if spike_alarmed:
             logger.warning(
@@ -827,14 +1133,21 @@ class ComprehensiveInferencePipeline:
         # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
         # Thresholds are per sensor: the physical scales differ by orders of
         # magnitude, so a shared absolute limit over-flags lux/ppm channels.
+        # BIAS_EMA_SPAN is 288 samples (24 h at 5 min). A pipeline window
+        # shorter than that cannot host the EMA; any(flags) on it labelled
+        # ordinary steps as bias_offset. When the series is long enough,
+        # only the last timestep votes.
         bias_ema_alarmed: list[str] = []
-        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            bias_flags_ema = BiasEMADetector.detect_ema(
-                _denormed_for_noise[:, s_idx],
-                threshold=BIAS_EMA_THRESHOLD_BY_SENSOR.get(s_name, BIAS_EMA_THRESHOLD),
-            )
-            if any(bias_flags_ema):
-                bias_ema_alarmed.append(s_name)
+        if _denormed_for_noise.shape[0] >= BIAS_EMA_SPAN:
+            for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+                bias_flags_ema = BiasEMADetector.detect_ema(
+                    _denormed_for_noise[:, s_idx],
+                    threshold=BIAS_EMA_THRESHOLD_BY_SENSOR.get(
+                        s_name, BIAS_EMA_THRESHOLD
+                    ),
+                )
+                if bias_flags_ema and bias_flags_ema[-1]:
+                    bias_ema_alarmed.append(s_name)
         bias_ema_flag = len(bias_ema_alarmed) > 0
         if bias_ema_flag:
             logger.info(
@@ -891,9 +1204,30 @@ class ComprehensiveInferencePipeline:
 
         # 0g. Multivariate joint-implausibility (rolling Mahalanobis) — catches
         # in-range readings that are jointly impossible (plan P3). The last
-        # timestep is the current reading under evaluation.
-        mahal_flags = self._mahalanobis_detector.detect(_denormed_for_noise)
-        if mahal_flags and mahal_flags[-1]:
+        # timestep is the current reading under evaluation. Enough stored
+        # history fits the covariance; a short or missing history keeps the
+        # window fit and still votes on the last step only.
+        history = await self._load_mahalanobis_history(
+            customer_id,
+            greenhouse_id,
+            db,
+            before=history_before,
+        )
+        n_sensors = int(_denormed_for_noise.shape[1])
+        history_ready = (
+            history.ndim == 2
+            and history.shape[1] == n_sensors
+            and int(history.shape[0]) >= 2 * n_sensors
+        )
+        if history_ready:
+            mahal_last = self._mahalanobis_detector.score_last_against_history(
+                _denormed_for_noise,
+                history,
+            )
+        else:
+            mahal_flags = self._mahalanobis_detector.detect(_denormed_for_noise)
+            mahal_last = bool(mahal_flags and mahal_flags[-1])
+        if mahal_last:
             logger.warning(
                 "Multivariate implausibility for tenant %s at current reading",
                 customer_id,
@@ -903,10 +1237,17 @@ class ComprehensiveInferencePipeline:
         # 0h. Change-point (BOCPD) — level shifts CUSUM's fixed K/H may miss.
         # A shift is only credible on multiple channels at once; a single
         # channel's step is usually a control action, not a fault.
+        # Vote when a change-point is confirmed anywhere in the window, not
+        # only on the last step. A level shift that landed earlier in the
+        # window was otherwise labelled noise (accuracy_decline).
+        # Light is excluded so nightfall is not a second channel.
+        # BOCPD_MIN_SENSORS still applies across the remaining channels.
         cp_sensors: list[str] = []
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            cp_flags = self._bocpd_detector.detect(_denormed_for_noise[:, s_idx])
-            if cp_flags and cp_flags[-1]:
+            if s_name == "light":
+                continue
+            series = _denormed_for_noise[:, s_idx]
+            if self._bocpd_detector.any_in_window(series):
                 cp_sensors.append(s_name)
         if len(cp_sensors) >= BOCPD_MIN_SENSORS:
             logger.warning(
@@ -915,19 +1256,28 @@ class ComprehensiveInferencePipeline:
             )
             rule_votes["change_point"] = cp_sensors
 
+        rule_votes = _order_rule_votes(rule_votes)
+
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
 
-        # 1a. CUSUM drift update — EMA-derived standardised residuals.
-        # The EMABaselineEstimator tracks per-sensor running mean/variance and
-        # produces standardised residuals that feed into the two-sided CUSUM.
-        # Production-sensitive defaults: K=0.25, H=4.0 (detects 0.5σ shifts,
-        # ARL₀ ≈ 340 samples).
+        # 1a. CUSUM drift update — physical EMA residuals, load before update.
+        # A fresh pipeline (live enrichment builds one per reading) has an
+        # empty cache, so the saved LearningState must be installed before
+        # any detector is constructed. setdefault-before-load skips that
+        # state. The first sample on an empty EMA returns residual 0.
+        # Readings are the denormalized last timestep. Floors come from
+        # EMABaselineEstimator.for_physical_series, not from this caller.
+        # update_and_reset is edge-triggered: a True return is the alarm,
+        # and the accumulators are already clear, so alarmed_sensors() is
+        # empty afterwards. Step 5a is the only vote; CUSUM is not a rule.
         cusum_drift_alarm = False
         cusum_alarmed_sensors: list[str] = []
-        _cusum = self._cusum_cache.setdefault(
-            customer_id, CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
-        )
+        await self._restore_cusum_ema(customer_id, db)
+        _cusum = self._cusum_cache.get(customer_id)
+        if _cusum is None:
+            _cusum = CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
+            self._cusum_cache[customer_id] = _cusum
         # Mutate H only (never rebuild) so LearningState round-trips stay valid.
         # Use mean factor across sensors as a single decision interval scale.
         _cusum_factors = [
@@ -936,16 +1286,17 @@ class ComprehensiveInferencePipeline:
         _cusum.h = CUSUM_H_SIGMA * (
             sum(_cusum_factors) / len(_cusum_factors) if _cusum_factors else 1.0
         )
-        _ema = self._ema_cache.setdefault(
-            customer_id, EMABaselineEstimator()
-        )
-        _seq_last = seq_array[-1]  # most-recent timestep for residual computation
+        _ema = self._ema_cache.get(customer_id)
+        if _ema is None:
+            _ema = EMABaselineEstimator.for_physical_series()
+            self._ema_cache[customer_id] = _ema
+        _physical_last = _denormed_for_noise[-1]
         for _idx, _sensor in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            _residual, _ = _ema.update(_sensor, float(_seq_last[_idx]))
-            if _cusum.update(_sensor, _residual):
+            _residual, _ = _ema.update(_sensor, float(_physical_last[_idx]))
+            if _cusum.update_and_reset(_sensor, _residual):
                 cusum_drift_alarm = True
+                cusum_alarmed_sensors.append(_sensor)
         if cusum_drift_alarm:
-            cusum_alarmed_sensors = _cusum.alarmed_sensors()
             logger.info(
                 "CUSUM drift alarm for tenant %s — sensors: %s",
                 customer_id,
@@ -1018,9 +1369,11 @@ class ComprehensiveInferencePipeline:
         if bias_ema_flag and is_anomaly and not physics_result.confirmed:
             fault_type = "bias_offset"
 
-        # 5c. Rule-detector votes confirm the anomaly; the first fired rule
-        # (gate order) takes fault-type precedence unless physics already
-        # confirmed a specific fault.
+        # 5c. Rule-detector votes confirm the anomaly. The highest-precedence
+        # fired rule (_RULE_PRECEDENCE, applied via _order_rule_votes) takes
+        # fault-type precedence unless physics already confirmed a fault.
+        # Short-circuits (dropout, OOB) returned before this point. Bands
+        # are applied later, and only when no rule voted.
         rule_profile: Optional[Dict[str, str]] = None
         if rule_votes:
             is_anomaly = True
@@ -1063,13 +1416,18 @@ class ComprehensiveInferencePipeline:
         # 5c-last. Band-breach last resort: a configured-band breach is a
         # categorical anomaly per product spec, but only after all higher-
         # precedence detectors have had their say and found nothing.
-        # Conditions (ALL must hold): physics did not suppress, no sensor-fault
-        # rule fired, and the ensemble/LSTM/CUSUM statistical path did not flag.
+        # Conditions (ALL must hold): the greenhouse has stored operational
+        # overrides (an empty override dict is the default tomato profile,
+        # and a summer afternoon above that profile is not a sensor fault),
+        # physics did not suppress, no sensor-fault rule fired, and the
+        # ensemble/LSTM/CUSUM statistical path did not flag.
+        # The finding stays on scada_anomalies either way.
         # BAND_TYPE_TO_VOTE provides the fault_type lookup; the profile is set
         # on rule_profile so the root-cause block (step 8) picks up the band's
         # severity/urgency and the reasoning is drawn from scada_anomalies.
         if (
             band_findings
+            and _band_overrides_configured
             and not physics_result.suppressed
             and not rule_votes
             and not is_anomaly
@@ -1142,8 +1500,10 @@ class ComprehensiveInferencePipeline:
                 "urgency": rule_profile["urgency"],
                 "reasoning": build_rule_reasoning(rule_votes),
             }
-            # Prefer contextual setpoint-SCADA prose when those rules fired.
-            if scada_anomalies:
+            # Setpoint prose only when that rule won precedence. A co-firing
+            # flatline must not replace a spike or change-point explanation.
+            primary_rule = next(iter(rule_votes), None)
+            if scada_anomalies and primary_rule in _SCADA_VOTE_KEYS:
                 root_cause_result["reasoning"] = scada_anomalies[0]["reasoning"]
         recommendation_result = self.recommendation_engine.recommend(
             root_cause=root_cause_result["root_cause"],
@@ -1152,16 +1512,21 @@ class ComprehensiveInferencePipeline:
         reasoning = root_cause_result.get("reasoning", "")
 
         # Merge rule-vote evidence into the reported detector scores and
-        # affected sensors (rule sensors first — they are direct evidence).
+        # affected sensors. The winning rule's sensors lead (precedence
+        # order), then co-firing rules, then the model's attribution.
         detector_scores = dict(ensemble_result.detector_scores)
         affected_sensors = list(attribution_result["affected_sensors"])
         if rule_votes:
+            ordered_sensors: list[str] = []
             for rule_name, rule_sensors in rule_votes.items():
                 detector_scores[rule_name] = 1.0
-                affected_sensors = [
-                    *rule_sensors,
-                    *(s for s in affected_sensors if s not in rule_sensors),
-                ]
+                for sensor in rule_sensors:
+                    if sensor not in ordered_sensors:
+                        ordered_sensors.append(sensor)
+            affected_sensors = [
+                *ordered_sensors,
+                *(s for s in affected_sensors if s not in ordered_sensors),
+            ]
 
         root_cause_details = {
             "attribution": attribution_result["attribution"],
@@ -1336,7 +1701,7 @@ class ComprehensiveInferencePipeline:
             confidence=1.0,
             confidence_level="very_high",
             pattern_type="spike",
-            fault_type="spike_fault",
+            fault_type="out_of_bounds",
             attribution={},
             affected_sensors=alarmed_sensors,
             pattern_scores={},
@@ -1402,6 +1767,45 @@ class ComprehensiveInferencePipeline:
             scaler = SeasonalScaler()
         put_cached_seasonal_scaler(tenant_id, greenhouse_id, season, scaler)
         return scaler
+
+    async def _load_mahalanobis_history(
+        self,
+        customer_id: str,
+        greenhouse_id: str,
+        db: AsyncSession,
+        *,
+        before: Optional[datetime],
+    ) -> np.ndarray:
+        """Cached finite physical history for the Mahalanobis covariance fit.
+
+        Keyed by tenant and greenhouse. Live enrichment builds a new pipeline
+        per reading, so the hit is the second lookup inside one ``run``.
+        A query failure is logged and returns an empty array; the vote then
+        stays on ``detect()``.
+        """
+        key = (customer_id, greenhouse_id)
+        cached = self._mahalanobis_history_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            history = await _query_physical_history(
+                db,
+                customer_id=customer_id,
+                greenhouse_id=greenhouse_id,
+                before=before,
+            )
+        except Exception:
+            logger.warning(
+                "Mahalanobis history load failed for tenant %s greenhouse %s "
+                "(non-critical)",
+                customer_id,
+                greenhouse_id,
+                exc_info=True,
+            )
+            await _rollback_quietly(db, customer_id, greenhouse_id)
+            history = np.empty((0, len(SENSOR_NAMES)), dtype=float)
+        self._mahalanobis_history_cache[key] = history
+        return history
 
     async def _ensure_diurnal_profiles(
         self,
@@ -1694,6 +2098,58 @@ class ComprehensiveInferencePipeline:
 
     # ── EWMA / POT tracker persistence ────────────────────────────────────────
 
+    def _install_saved_cusum_ema(
+        self,
+        customer_id: str,
+        state: Dict[str, Any],
+    ) -> None:
+        """Install persisted CUSUM and EMA into empty cache slots only.
+
+        A slot that already holds a detector is the in-process state for
+        this tenant, including an update that has not been saved yet.
+        Replacing it with the row just read would drop that update.
+        """
+        if customer_id not in self._cusum_cache:
+            cusum_data = state.get("cusum_state")
+            if cusum_data is not None:
+                self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
+                    cusum_data
+                )
+        if customer_id not in self._ema_cache:
+            ema_data = state.get("ema_baseline_state")
+            if ema_data is not None:
+                self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
+                    ema_data
+                )
+
+    async def _restore_cusum_ema(
+        self,
+        customer_id: str,
+        db: AsyncSession,
+    ) -> None:
+        """Load ``cusum_state`` and ``ema_baseline_state`` before the update.
+
+        Called while both cache slots are still empty on a fresh pipeline.
+        A failure leaves the slots empty so the caller can build a physical
+        EMA instead of aborting the reading.
+        """
+        if customer_id in self._cusum_cache and customer_id in self._ema_cache:
+            return
+        try:
+            result = await db.execute(
+                select(LearningState).where(LearningState.customer_id == customer_id)
+            )
+            row: Optional[LearningState] = result.scalar_one_or_none()
+            if row is None:
+                return
+            self._install_saved_cusum_ema(customer_id, row.state_json or {})
+        except Exception:
+            logger.warning(
+                "CUSUM/EMA state load failed for tenant %s (non-critical)",
+                customer_id,
+                exc_info=True,
+            )
+
     async def _load_trackers(
         self,
         customer_id: str,
@@ -1715,17 +2171,10 @@ class ComprehensiveInferencePipeline:
                 if tracker_data is not None:
                     ewma = EWMATracker.from_dict(tracker_data["ewma"])
                     pot = POTThresholdFitter.from_dict(tracker_data["pot"])
-                    # Restore CUSUM + EMA state if persisted and not already in memory.
-                    cusum_data = state.get("cusum_state")
-                    if cusum_data is not None and customer_id not in self._cusum_cache:
-                        self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
-                            cusum_data
-                        )
-                    ema_data = state.get("ema_baseline_state")
-                    if ema_data is not None and customer_id not in self._ema_cache:
-                        self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
-                            ema_data
-                        )
+                    # Same empty-slot rule as the pre-update restore. A slot
+                    # filled by this call's update must not be replaced by
+                    # the state just read, which does not include it yet.
+                    self._install_saved_cusum_ema(customer_id, state)
                     diurnal_data = state.get("diurnal_profiles")
                     if diurnal_data is not None and customer_id not in self._diurnal_profiles_cache:
                         self._diurnal_profiles_cache[customer_id] = {

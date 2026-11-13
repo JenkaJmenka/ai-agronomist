@@ -50,7 +50,7 @@ def sample_csv_out_of_bounds_data(tmp_path):
     filepath = tmp_path / "out_of_bounds_sensor_data.csv"
     data = {
         "raw_time": ["2026-06-09 12:00:00", "2026-06-09 13:00:00", "2026-06-09 14:00:00"],
-        "temp_raw": [120.5, 23.1, 21.9],  # out of bounds (allowed range: 0.0 to 50.0)
+        "temp_raw": [120.5, 23.1, 21.9],  # above OOB_LIMITS temperature max (80 °C)
         "humid_raw": [60.2, 58.5, 62.0],
         "co2_raw": [410.0, 395.0, 420.0],
         "light_raw": [850.0, 900.0, 780.0]

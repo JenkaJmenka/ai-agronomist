@@ -5,7 +5,7 @@ parameters control it, what you see in the UI, and what an operator should do.
 
 **Related docs:** [User Guide](USER_GUIDE.md) · [Framework spec](anomaly_framework_spec.md) · [README](../README.md)
 
-**Last verified:** 2026-10-30, against commit `2be4406` (backend-engineer pass to cover band breaches, BOCPD gating, the cold-run upload path, stuck-fault temporal markers, and gas thresholds).
+**Last verified:** 2026-11-12, against branch `feat/anomaly-detection-module-refactoring` (enrichment MAD, noise history, rule precedence, upload MAD, and the `humidity_fault` CHECK).
 
 ---
 
@@ -28,39 +28,37 @@ page shows all four.
 
 ### Precedence
 
-Rule detectors **vote**; they do not short-circuit. The full LSTM/ensemble path
-still runs on every sequence. When one or more rules fire, the **first rule in
-gate order** takes precedence for the `fault_type`, and co-firing rules are
-appended to the reasoning as `"…; also flagged by: <root causes>"`. This is why
-you can see `spike_fault` as the label while the reasoning also mentions a
-correlation breakdown.
+Rule detectors **vote**; they do not short-circuit. The LSTM/ensemble path
+still runs, and the first fired rule in `_RULE_PRECEDENCE`
+(`src/api/services/comprehensive_pipeline.py`) supplies `fault_type`.
+Co-firing rules are appended as `"…; also flagged by: <root causes>"`.
 
-That "first rule wins" rule only decides *among sensor-fault votes*. The
-full fault-type precedence has four levels, in this order
-(`comprehensive_pipeline.py:728-736`):
-
-1. **Sensor-fault rule votes** — spike, stuck, bias, correlation, drift,
-   diurnal, change-point, multivariate.
-2. **Physics** (psychrometric contradiction) — confirms or suppresses the
-   model signal.
-3. **Ensemble / LSTM** — the learned detector's own classification.
-4. **Crop setpoint band breaches** — always last.
-
-Band breaches rank last because they are deliberately **not** sensor-fault
-evidence: they are collected into a separate `band_findings` list instead
-of `rule_votes`, specifically so a real equipment fault (say, a stuck
-sensor) keeps claiming the `fault_type` over "the greenhouse is also
-outside its configured band" — the two are not mutually exclusive, and the
-sensor fault is almost always the more actionable one. A sensor-trust gate
-and a last-resort fusion step run after every sensor-fault detector has
-voted, before band findings are even considered.
-
-Two detectors *do* short-circuit and return immediately, because nothing
-downstream is meaningful once they fire:
+Two checks return immediately:
 
 - **Polling dropout** — the data itself is missing.
-- **Out-of-bounds** — the value is physically impossible, so every derived
-  statistic is garbage.
+- **Out-of-bounds** — `fault_type` is `out_of_bounds`.
+
+Then, first match wins:
+
+1. **BOCPD** — `any_in_window` on temperature, humidity, or CO₂ (light
+   skipped), and only when at least `BOCPD_MIN_SENSORS` of those channels
+   confirm a change-point.
+2. **Spike** — MAD on the last timestep.
+3. **Noise**.
+4. **Dual-sensor bias**.
+5. **Correlation**.
+6. **Diurnal**.
+7. **Mahalanobis**.
+8. **Flatline** — a light-only finding is dropped.
+9. **Setpoint rules** — under-heating, over-heating, dehumidification
+   failure, humidity saturation, thermal divergence.
+10. **Crop bands.** A band sets `is_anomaly` only when
+    `OperationalConfigStore.get_raw_overrides` is non-empty. The finding
+    can still appear on `scada_anomalies`. A band whose sensor a fault
+    rule already flagged is dropped.
+
+Physics confirmation keeps its own `fault_type` when it has already
+confirmed. CUSUM sits outside this list.
 
 ---
 
@@ -120,10 +118,24 @@ runs alongside it, so a spike is caught even when the MAD floor is degenerate
 | Name | Default | Meaning |
 |------|---------|---------|
 | `SPIKE_MAD_WINDOW_K` | 10 | Rolling window length |
-| `SPIKE_MAD_TUNING_C` | 3.0 | Multiplier on MAD (spec minimum 2.5) |
-| `SPIKE_MAD_FLOOR` | per sensor | Minimum MAD so flat windows do not divide by ~0 |
+| `SPIKE_MAD_TUNING_C` | 3.0 | Live multiplier on MAD (spec minimum 2.5) |
+| `SPIKE_MAD_FLOOR` | temp 0.1 °C, humidity 0.2 %, CO₂ 10 ppm, light 4.0 | Live minimum MAD |
+| `UPLOAD_SPIKE_MAD_TUNING_C` | 8 | Enrichment and CSV-upload multiplier |
+| `UPLOAD_SPIKE_MAD_FLOOR` | temperature 0.5 °C | Upload scores only these keys |
 | `SPIKE_DELTA_MAX` | per sensor | Hard per-step delta ceiling |
 | `VELOCITY_LIMITS` | temp 2.0, humidity 5.0, CO₂ 50.0, light 200.0 | Units per timestep |
+
+**Enrichment vote.** The pipeline flags the **last timestep only**
+(`spike_flags[-1]`) on temperature, humidity, and CO₂. Light is skipped.
+`tuning_c` is `UPLOAD_SPIKE_MAD_TUNING_C` (8). Floors are the live
+`SPIKE_MAD_FLOOR` scaled by
+`UPLOAD_SPIKE_MAD_FLOOR["temperature"] / SPIKE_MAD_FLOOR["temperature"]`:
+**0.5 °C**, **1.0 %**, **50 ppm** when the seasonal factor is 1. The live
+pair (`c` 3, temperature floor 0.1 °C) is unchanged.
+
+**CSV upload** (`_detect_upload_mad_spikes`) scores only keys of
+`UPLOAD_SPIKE_MAD_FLOOR`. Today that is temperature at 0.5 °C with the
+same `c` of 8. A missing key is not passed as floor 0.
 
 **In the UI.** Anomaly Detection → the row's *Fault* column reads "Spike fault";
 reasoning reads *"Transient spike: temperature deviated beyond the rolling
@@ -149,10 +161,13 @@ validity failure, not a statistical judgement.
 **How it is detected.** Static range validation against physical constraints:
 `x_t < L_lower` or `x_t > L_upper`. No window, no history.
 
-**Parameters.** `OOB_LIMITS` in `src/config.py` (per sensor lower/upper). The
-nominal operating ranges used elsewhere are `TEMP_RANGE (20–30 °C)`,
-`HUMIDITY_RANGE (50–80 %)`, `CO2_RANGE`, `LIGHT_RANGE (0–1000 lux)` — note that
-those are *normalisation* ranges, not the out-of-bounds limits, which are wider.
+**Parameters.** `OOB_LIMITS` in `src/config.py`: temperature **−40..80 °C**,
+humidity **0..100 %**, CO₂ **0..5000 ppm**, light **0..2000 W/m²**. Canonical
+CSV validation (`validate_canonical_schema` in `src/vendors/base.py`) uses
+those same limits, so a reading inside them is not rejected before this
+detector can label it. `TEMP_RANGE (20–30 °C)`, `HUMIDITY_RANGE (50–80 %)`,
+`CO2_RANGE`, and `LIGHT_RANGE (0–1200 W/m²)` are *normalisation* ranges, not
+these limits.
 
 **Why it short-circuits.** Once a value is physically impossible, every derived
 statistic downstream (variance, correlation, VPD, reconstruction error) is
@@ -177,10 +192,13 @@ has noise; a perfectly constant value over hours means the probe is frozen, the
 polling loop is serving a cached value, or the transport is repeating the last
 good frame.
 
-**How it is detected.** Rolling variance against a noise floor: flag when
-`σ²_w < ε` over window `w`. A second check counts *identical consecutive
-values*, which catches a frozen digital value that a variance test on a coarse
-sensor might miss.
+**How it is detected.** The setpoint flatline gate
+(`_is_flatline`) flags a channel when peak-to-peak is within
+`FLATLINE_VARIANCE_EPS` (default **1e-4**) and rolling variance is
+≤ `FLATLINE_VARIANCE_EPS`². A second check counts *identical consecutive
+values*. A light-only flatline does not vote and is not attached to
+`scada_anomalies`. The ensemble stuck pre-check also skips light
+(`ENSEMBLE_STUCK_SKIP_CHANNELS`).
 
 **Parameters:**
 
@@ -191,10 +209,12 @@ sensor might miss.
 | `STUCK_EPSILON` | 1e-4 | Spec-aligned ε |
 | `FLATLINE_VARIANCE_WINDOW` | 12 | Window for the multi-hour flatline gate |
 | `FLATLINE_IDENTICAL_STEPS` | 24 | Consecutive identical samples that trigger the gate |
+| `FLATLINE_VARIANCE_EPS` | 1e-4 | Peak-to-peak ceiling; variance must be ≤ FLATLINE_VARIANCE_EPS² |
 
-**In the UI.** Reasoning: *"Sensor flatline: humidity frozen (zero variance) for
-the configured multi-hour window"*. The Monitoring chart makes this obvious — a
-dead-flat line while neighbouring channels still move.
+**In the UI.** Reasoning reports the channel constant over the configured
+multi-hour window and rolling variance ≤ `FLATLINE_VARIANCE_EPS`². The
+Monitoring chart makes this obvious — a dead-flat line while neighbouring
+channels still move.
 
 **What to do.** Compare against a redundant sensor in the same compartment. If
 the redundant one is still moving, the probe is dead. If *both* froze, suspect
@@ -224,9 +244,10 @@ fall back to `z_score` when `detector == "stuck_fault"` **and**
 `frozen_hours_at_detection` is absent.
 
 > **Caveat:** a genuinely well-controlled compartment on a stable night can look
-> flat. `FLATLINE_IDENTICAL_STEPS = 24` exists to require *bit-identical* repeats
-> rather than merely small variance, which is what separates control quality from
-> a frozen channel.
+> flat. `FLATLINE_IDENTICAL_STEPS` (24) still has to be met, but samples count
+> as the same when peak-to-peak is within `FLATLINE_VARIANCE_EPS`, not only
+> when they are bit-identical. Stored reasoning reports rolling variance
+> ≤ `FLATLINE_VARIANCE_EPS`².
 
 ---
 
@@ -267,12 +288,11 @@ computer faithfully controls to a wrong number.
 > alarm per 340 samples of in-control data.
 
 **Why BOCPD requires multiple sensors.** A single channel stepping to a new
-level is usually a control action (a setpoint change, a vent opening), not
-a fault — so one channel alone never raises `change_point`. The gate
-(`comprehensive_pipeline.py:~897-910`) only votes when at least
-`BOCPD_MIN_SENSORS` (default **2**) channels shift at the same sample.
-Multiple *unrelated* channels stepping together is what a recalibration or
-a probe swap looks like, and is much less often an intended control move.
+level is usually a control action, so one channel alone never raises
+`change_point`. The pipeline votes when `BOCPDDetector.any_in_window` is
+true on at least `BOCPD_MIN_SENSORS` (default **2**) channels anywhere in
+the window, not only on the last step. Light is skipped. The minimum still
+applies to temperature, humidity, and CO₂.
 
 **In the UI.** Reasoning: *"Change-point: Bayesian online change-point detection
 (BOCPD) flagged a level shift on temperature"*. Drift is easiest to confirm on
@@ -293,22 +313,33 @@ sample-to-sample scatter has blown up. The mean is fine; the precision is gone.
 Typically a failing analogue front end, moisture ingress, or a degrading
 connector.
 
-**How it is detected.** Rolling variance amplification ratio. Compute `σ²_w` over
-a short window and compare against the calibrated per-sensor baseline variance:
-flag when `σ²_w / σ²_baseline > θ_noise`.
+**How it is detected.** Rolling variance amplification ratio on temperature,
+humidity, and CO₂. Light is skipped. Flag when
+`σ²_w / σ²_baseline > θ`.
+
+Calibrated baselines run only when the caller passes `noise_clean_windows`.
+`build_noise_detector` then calls `calibrate_noise_baseline` and
+`resolve_noise_baseline`, and uses `NOISE_CALIBRATED_RATIO_TARGET`
+(default **20**). `LiveScorer` keeps up to
+**32** unflagged physical windows (`CLEAN_WINDOW_HISTORY` in
+`src/live/scoring.py`); `EnrichmentRunner` passes that ring. An empty
+history is passed as `None`, which keeps the fixed `NOISE_BASELINE_VARIANCE`
+and the cold-start ratio **10**.
 
 **Parameters:**
 
 | Name | Default | Meaning |
 |------|---------|---------|
 | `NOISE_HYBRID_WINDOW` | 5 | Rolling window |
-| `NOISE_BASELINE_VARIANCE` | per sensor | Calibrated clean-sensor variance |
-| `NOISE_RATIO_THRESHOLD` | 10.0 | Amplification ratio that trips the alarm |
+| `NOISE_BASELINE_VARIANCE` | per sensor | Fixed cold-start variance |
+| `NOISE_RATIO_THRESHOLD` | 10.0 | Cold-start amplification ratio |
+| `NOISE_CALIBRATED_RATIO_TARGET` | 20.0 | Ratio used only with clean-window calibration |
 | `NOISE_ALPHA` | 3.0 | Noise model shaping constant |
 | `SENSOR_NOISE_TARGETS` | per sensor | Expected noise targets |
 
-> The spec quotes `θ_noise = 50.0` against `σ²_baseline = 0.02`. Production runs
-> a more sensitive `10.0` against per-sensor calibrated baselines.
+> The spec quotes `θ_noise = 50.0` against `σ²_baseline = 0.02`. Cold start
+> stays at ratio **10** on the fixed variance map. Ratio **20** applies only
+> when physical clean windows were passed.
 
 **In the UI.** Reasoning: *"Precision degradation: rolling variance on
 temperature exceeded the calibrated noise-floor ratio"*. On the chart the line
@@ -335,7 +366,10 @@ you have a redundant co-located sensor to compare against.
    when `|D_w| > θ_bias`. Averaging over a window is deliberate — it lets a
    single large disagreement pass while catching a *persistent* offset.
 2. **EMA bias** (`bias_detector`): a long-span EMA of the deviation from the
-   expected level, for installations without redundancy.
+   expected level, for installations without redundancy. It does not vote
+   when the series is shorter than `BIAS_EMA_SPAN` (default **288**). A
+   pipeline window is `SEQ_LEN` (20), so this check does not fire there.
+   A series that is long enough votes the last timestep only.
 
 **Parameters:**
 
@@ -424,16 +458,6 @@ picks it up from columns matching *humidity deficit*, *HD (g…)*, or *HD* — s
 physically impossible) and `psychrometric_inconsistency` (mapped to
 `humidity_fault` — inconsistent but not impossible).
 
-> **Known gap.** `humidity_fault` is not a member of the `FaultType` enum
-> (`src/models/fault_classifier.py`) and is not one of the values the
-> `ck_incidents_fault_type` CHECK constraint permits (migration `019`'s
-> value list), even though the frontend's `FAULT_LABELS` map
-> (`web/lib/severity.ts`) already has a label for it. A
-> `psychrometric_inconsistency` physics confirmation is the only path that
-> produces this fault type, so this is a live risk, not a theoretical one —
-> flagged here as found, not fixed; see the task report for the backlog
-> item.
-
 **What to do.** Trust this one. Physics does not have false positives; only your
 column mapping does. Verify first that the HD column really is in g/m³ and the
 temperature is in °C, then investigate the humidity sensor — it is the usual
@@ -477,8 +501,9 @@ recent history, so it will follow a deliberate seasonal change on its own.
 # Part 2 — Crop setpoint band breaches
 
 These eight are **not** sensor faults. They say the greenhouse is outside the
-agronomic band you configured for your crop. They are the findings your grower
-cares about, and they are entirely driven by the **Configuration** page.
+agronomic band for the crop profile. They are the findings your grower
+cares about. Stored overrides on the **Configuration** page decide whether
+a breach sets `is_anomaly`.
 
 Each has a day band and a night band, selected by the configured day/night
 window. Detection is debounced: a breach must persist over `BAND_BREACH_DEBOUNCE_K`
@@ -500,10 +525,12 @@ All eight share the root cause `crop_setpoint_band_breach`.
 
 The day/night bands themselves come from the operator's own crop profile
 (`OperationalConfig`, loaded per tenant/greenhouse via
-`get_operational_config_store()` — `band_breach_detector.py:~106-115`), not
-from anything the system infers. The wrong crop profile therefore produces
-noisy alarms indistinguishable from a real climate-control failure — check
-Configuration first whenever a band breach looks suspicious.
+`get_operational_config_store()`), not from anything the system infers. A
+finding is always appended to `scada_anomalies`. It sets `is_anomaly` only
+when `OperationalConfigStore.get_raw_overrides` is non-empty for that
+greenhouse, and only when no higher-precedence rule already fired. An empty
+override dict is the default tomato profile: those breaches stay on
+`scada_anomalies` and do not by themselves mark the window anomalous.
 
 **VPD** (vapour pressure deficit) is computed from temperature and RH rather than
 measured, so a VPD band breach is only as good as those two channels. For
@@ -684,14 +711,25 @@ the User Guide.
 `run_cold_run_upload` (`src/api/services/cold_run_upload.py`), shared by
 both the synchronous upload endpoint and the RabbitMQ upload worker via
 `src/api/services/upload_portions.py`. The name is historical: this is not
-gated on "no model exists" the way the name suggests. It always runs **two**
-detectors over the file and merges their hits:
+gated on "no model exists" the way the name suggests. It scores the file
+with three checks and merges their hits:
 
 1. **LSTM scoring** — the tenant's active model, or a freshly cold-started
-   one if none exists yet ("Option A" in the upload endpoint).
+   one if none exists yet ("Option A" in the upload endpoint). The file
+   threshold uses `calibrate_threshold`, and the robust gate is on unless
+   `COLD_RUN_ROBUST_GATE_ENABLED` is set off. A raised cutoff is
+   reported with method suffix `+robust_gate`.
 2. **Per-column rolling z-score** (`ColdRunStatisticalDetector`,
    `src/models/cold_run_detector.py`) — independent of whether a model
    exists, over every continuous climate column.
+3. **Per-column MAD** (`_detect_upload_mad_spikes` in
+   `upload_portions.py`) — only keys of `UPLOAD_SPIKE_MAD_FLOOR`
+   (temperature, floor **0.5 °C**, `c` **8**). Those hits use
+   `detector="spike_mad"` and are appended beside the LSTM/statistical
+   merge. A channel with no floor key is not scored.
+
+Chunks outside `OOB_LIMITS` are rejected by `validate_canonical_schema`
+before any of this runs (see Out-of-bounds).
 
 **Which columns.** `is_cold_run_stat_column` excludes `light`, `rain`,
 `screen` and `vent` columns — actuator positions and diurnal channels that
@@ -714,12 +752,13 @@ not two coincident faults — `_suppress_psychrometric_pairs`
 measured humidity deficit disagrees with the HD derived from T and RH, the
 pairing is kept and marked `psychrometric_inconsistency` instead.
 
-**The `detector` label an operator sees** on an upload row is one of three
-values (`cold_run_upload.py:~423`): `lstm`, `statistical`, or the compound
-`lstm+statistical` when both detectors flag the same timestamp. **Filtering
-on `detector == "statistical"` alone undercounts** — every compound hit is
-a statistical hit too, so an exact-match filter misses it. Filter on
-`detector.endswith("statistical")` or check membership instead.
+**The `detector` label an operator sees** on a merged LSTM/statistical row is
+one of three values (`cold_run_upload.py:~423`): `lstm`, `statistical`, or
+the compound `lstm+statistical` when both flag the same timestamp. MAD rows
+are a separate `spike_mad` label and are not part of that compound.
+**Filtering on `detector == "statistical"` alone undercounts** — every
+compound hit is a statistical hit too, so an exact-match filter misses it.
+Filter on `detector.endswith("statistical")` or check membership instead.
 
 ---
 
@@ -763,6 +802,12 @@ An anomaly is declared when the weighted score exceeds
 (2) detectors agree. That agreement count is exactly what promotes a finding to a
 **critical** (red) chip in the UI. Two independent detectors agreeing is a much
 stronger signal than one detector scoring high.
+
+Before that vote, a stuck-fault pre-check short-circuits a flat temperature,
+humidity, or CO₂ channel. Light is skipped
+(`ENSEMBLE_STUCK_SKIP_CHANNELS`). The midpoint bias pre-check is not run.
+`bias_flag` stays false; a persistent offset is the pipeline EMA and
+dual-sensor checks.
 
 ---
 
@@ -907,7 +952,8 @@ models are held in memory.
 # Quick reference: fault type → meaning
 
 Complete list of values permitted in `incidents.fault_type`
-(constraint `ck_incidents_fault_type`, migration 019):
+(constraint `ck_incidents_fault_type`: migration 019's list, plus
+`humidity_fault` from migration 029):
 
 | Fault type | Layer | Meaning |
 |-----------|-------|---------|
@@ -919,6 +965,7 @@ Complete list of values permitted in `incidents.fault_type`
 | `bias_offset` | Rule | Constant offset vs redundant sensor |
 | `correlation_breakdown` | Rule | Coupled channels decoupled |
 | `thermodynamic_contradiction` | Rule | Psychrometric inconsistency |
+| `humidity_fault` | Rule | `psychrometric_inconsistency` |
 | `diurnal_deviation` | Rule | Abnormal for this hour of day |
 | `polling_dropout` | Rule | Missing telemetry |
 | `under_heating` | SCADA | Below heating setpoint |

@@ -250,13 +250,12 @@ COLD_RUN_BASELINE_FRACTION: float = 0.2
 # far the tail sits from the bulk instead of how many rows there are: a clean
 # file then yields zero hits and a file with N genuine faults yields ~N.
 #
-# Disabled by default.  It only ever RAISES the threshold, so enabling it can
-# never add anomalies, but it does move the ADR-005 canonical anchor
-# (canonical 0.5 == threshold) for every score in the file, and it changes what
-# tests/api/test_inference_upload_cold_run.py asserts about anomalies_detected
-# and threshold_method.  Enable per-deployment after validating the hit counts
-# against a labelled file.
-COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
+# On unless the env var disables it.  An explicit value always wins, including
+# 0 / false / no / off; an unset variable leaves the gate enabled.  The gate
+# only ever RAISES the threshold, so it can never add anomalies, but it does
+# move the ADR-005 canonical anchor (canonical 0.5 == threshold) for every
+# score in the file.
+COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", True)
 # Robust z-score a raw score must clear above the bulk of the distribution.
 # Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
 # "anomalous" starts.
@@ -914,6 +913,14 @@ STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
 # because diurnal zero (nighttime darkness) is normal, not a stuck sensor.
 STUCK_WALLCLOCK_CHANNELS: Tuple[str, ...] = ("temperature", "humidity", "co2")
 
+# Ensemble sample-indexed stuck pre-check (EnsembleAnomalyDetector.detect).
+# Light is excluded for the same reason as STUCK_WALLCLOCK_CHANNELS: a
+# 20-step night window is legitimately ~0 W/m² and must not short-circuit
+# is_anomaly. Temperature, humidity, and CO2 still do. Callers of
+# StuckFaultDetector.detect that omit skip_channels, and detect_series on
+# a single channel, are unchanged.
+ENSEMBLE_STUCK_SKIP_CHANNELS: Tuple[str, ...] = ("light",)
+
 # Expected inter-sample cadence (seconds) and tolerance factor.
 # The cadence check flags input whose median interval deviates beyond
 # CADENCE_EXPECTED_SECONDS × CADENCE_TOLERANCE_FACTOR.
@@ -983,6 +990,12 @@ THERMAL_DIVERGENCE_SEVERE_C: float = float(
 # At 5-minute sampling, N=12 ≈ 1 h; 24 identical samples ≈ 2 h.
 FLATLINE_VARIANCE_WINDOW: int = int(os.environ.get("FLATLINE_VARIANCE_WINDOW", "12"))
 FLATLINE_IDENTICAL_STEPS: int = int(os.environ.get("FLATLINE_IDENTICAL_STEPS", "24"))
+# Near-zero tolerance. Exact ``== 0`` misses a frozen channel after a
+# normalize/denormalize round trip: on 40 stuck ideal windows the exact
+# check fired 17/40, and eps=1e-6 still fired 17/40. eps=1e-4 fired 40/40
+# (proto_upload_mad.json). Peak-to-peak is compared to this value; variance
+# is compared to its square, the scale of a series bounded by eps.
+FLATLINE_VARIANCE_EPS: float = float(os.environ.get("FLATLINE_VARIANCE_EPS", "1e-4"))
 
 # Column aliases for optional climate-computer / microclimate context.
 SETPOINT_COLUMN_ALIASES: Tuple[str, ...] = (
@@ -1221,6 +1234,20 @@ SPIKE_MAD_FLOOR: Dict[str, float] = {
     "co2": 10.0,          # ppm
     "light": 4.0,         # W/m² (was labelled lux; canonical unit is W/m²; numeric floor unchanged)
 }
+# Upload-path MAD. Live scoring keeps SPIKE_MAD_TUNING_C / SPIKE_MAD_FLOOR.
+# On the July clear-sky week (proto_upload_mad.json) c=8 and a 0.5 °C
+# temperature floor caught 12/12 injected +6 °C spikes (one sample and a
+# 15-minute hold) with 0 clean false hits. The live pair (c=3, floor=0.1 °C)
+# produced 267 clean false hits on that same week, so the upload gate must
+# not reuse it. Humidity, CO₂, and light were not in that sweep and are
+# omitted rather than given an unmeasured floor (callers treat a missing
+# key as mad_floor=0).
+UPLOAD_SPIKE_MAD_TUNING_C: float = float(
+    os.environ.get("UPLOAD_SPIKE_MAD_TUNING_C", "8.0")
+)
+UPLOAD_SPIKE_MAD_FLOOR: Dict[str, float] = {
+    "temperature": float(os.environ.get("UPLOAD_SPIKE_MAD_FLOOR_TEMP", "0.5")),
+}
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
 OOB_LIMITS: Dict[str, Tuple[float, float]] = {
@@ -1239,6 +1266,28 @@ STUCK_EPSILON: float = float(os.environ.get("STUCK_EPSILON", "1e-4"))
 
 # CUSUM drift — EMA baseline estimator smoothing factor.
 CUSUM_EMA_ALPHA: float = float(os.environ.get("CUSUM_EMA_ALPHA", "0.01"))
+# Per-sensor floor on the EMA standard deviation, in physical units.
+# Opt-in: ``EMABaselineEstimator.for_physical_series()`` or
+# ``min_std_by_sensor=CUSUM_EMA_MIN_STD``. The scalar ``min_std`` default
+# stays 1e-6 so existing callers (including the pipeline, which currently
+# feeds normalized last-steps) are unchanged. These floors are the wrong
+# scale for normalized model input.
+#
+# With alpha=0.01 the second sample's residual equals
+# 1/sqrt(alpha*(1-alpha)) ≈ 10 for any nonzero step, which exceeds CUSUM
+# H=4 immediately. A floor at the sensor's own noise scale stops that for
+# ordinary noise. Temperature 0.05 °C is the value the stationary prototype
+# used (SENSOR_NOISE_TARGETS). Humidity, CO₂, and light were not in that
+# run; they reuse the same noise-target table so a CO₂ residual is not
+# floored at 0.05 ppm. The prototype also reset the CUSUM after each alarm
+# (see ``CUSUMDriftDetector.update_and_reset``): floor alone does not clear
+# a latched accumulator.
+CUSUM_EMA_MIN_STD: Dict[str, float] = {
+    "temperature": float(os.environ.get("CUSUM_EMA_MIN_STD_TEMP", "0.05")),
+    "humidity": float(os.environ.get("CUSUM_EMA_MIN_STD_HUMIDITY", "0.1")),
+    "co2": float(os.environ.get("CUSUM_EMA_MIN_STD_CO2", "5.0")),
+    "light": float(os.environ.get("CUSUM_EMA_MIN_STD_LIGHT", "2.0")),
+}
 
 # Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
 NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
@@ -1251,7 +1300,22 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
 }
 # spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
+# This ratio pairs with the fixed NOISE_BASELINE_VARIANCE cold start.
+# Do not raise it as a substitute for calibration: fixed baselines at
+# ratio 10 already false-alarm 76% of clean July windows.
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
+# Ratio to pass as ``NoiseDetector(ratio_threshold=...)`` only together
+# with a baseline from ``calibrate_noise_baseline``. The July prototype
+# (proto_noise_cal.json) swept calibrated high-pass variances:
+#   ratio 10 → clean FPR 9.6%, spike+noise composite 95.2%
+#   ratio 20 → clean FPR 3.6%, spike+noise composite 98.2%
+# The three-fault bundle (spike, noise, level_shift) at ratio 20 measured
+# clean FPR 4.2% and composite 97.9%. Ratio 5 sat outside this band
+# (clean FPR 29.3%). 20 is the production target inside the measured
+# 10–20 band; 10 remains the cold-start ratio above.
+NOISE_CALIBRATED_RATIO_TARGET: float = float(
+    os.environ.get("NOISE_CALIBRATED_RATIO_TARGET", "20.0")
+)
 
 # Bias / Constant Offset — dual-sensor cross-difference.
 # spec ref: w=3, theta_bias=1.5°C (docs/anomaly_framework_spec.md §6);
@@ -1289,6 +1353,24 @@ DIURNAL_PROFILE_HISTORY_DAYS: int = int(
 )
 DIURNAL_PROFILE_MIN_ROWS: int = int(
     os.environ.get("DIURNAL_PROFILE_MIN_ROWS", "288")
+)
+
+# Hour-of-day temperature residual (unwired). A multi-day level bias is
+# invisible to a rolling z-score. Each sample is compared to the median of
+# other days at the same clock hour, and a flag requires this many
+# consecutive hourly exceedances. Eight hours is longer than one afternoon
+# (about 12:00-18:00), so a single warm afternoon cannot complete a run.
+# 2.0°C is the temperature bias scale: a 2°C offset is a calibration fault,
+# and the upload gap is a multi-day +3°C bias, which clears it.
+HOUR_RESIDUAL_EXCESS_C: float = float(
+    os.environ.get("HOUR_RESIDUAL_EXCESS_C", "2.0")
+)
+HOUR_RESIDUAL_PERSISTENCE_HOURS: int = int(
+    os.environ.get("HOUR_RESIDUAL_PERSISTENCE_HOURS", "8")
+)
+# Other calendar days required at that clock hour before a center exists.
+HOUR_RESIDUAL_MIN_OTHER_DAYS: int = int(
+    os.environ.get("HOUR_RESIDUAL_MIN_OTHER_DAYS", "3")
 )
 
 # Multivariate joint-implausibility check (rolling-window Mahalanobis).

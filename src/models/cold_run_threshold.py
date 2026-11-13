@@ -8,11 +8,11 @@ Two criteria, composed:
    quality, so the anomaly count tracks file size rather than anomalousness.
 2. An *absolute* gate — median + z * MAD of the same scores, which measures how
    far the tail sits from the bulk and is therefore independent of row count.
-   Off by default; see ``COLD_RUN_ROBUST_GATE_ENABLED``.
+   On unless ``COLD_RUN_ROBUST_GATE_ENABLED`` is set to a false value.
 
-The gate can only raise the threshold, never lower it, so enabling it can only
+The gate can only raise the threshold, never lower it, so it can only
 remove anomalies.  It does move the ADR-005 canonical anchor for the file
-(``canonical 0.5 == threshold``), which is why it is behind a switch.
+(``canonical 0.5 == threshold``), which is why the env var can turn it off.
 """
 
 from __future__ import annotations

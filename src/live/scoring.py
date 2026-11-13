@@ -40,8 +40,41 @@ from src.live.enrichment import EnrichmentRunner
 from src.live.events import LiveAnomalyEvent, LiveReadingEvent
 from src.live.hub import LiveHub
 from src.models.data_utils import SENSOR_RANGES, normalize_data
+from src.models.noise_detector import NoiseDetector
 
 logger = logging.getLogger(__name__)
+
+# Recent physical windows the scorer did not flag, kept so enrichment can
+# calibrate the noise detector. No existing config constant counts clean
+# windows: ``SEQ_LEN`` is the window length and ``LIVE_REPLAY_BUFFER_SIZE``
+# is Redis stream entries. The cap stays in this module; moving it to
+# ``src/config.py`` does not change which windows are admitted.
+# Stored windows are one full slide apart (every ``SEQ_LEN`` scored steps)
+# so a noise fault under the LSTM threshold cannot fill the ring with
+# overlapping copies. A fixed-baseline noise hit on temperature, humidity,
+# or CO2 is refused. Light is ignored. The anomalous window is never appended.
+CLEAN_WINDOW_HISTORY: int = 32
+_CLIMATE_NOISE_CHANNELS: tuple[str, ...] = ("temperature", "humidity", "co2")
+
+
+def _fixed_baseline_noise_hit(window_array: np.ndarray) -> bool:
+    """True when the cold-start noise detector flags a climate channel.
+
+    The detector is local: no custom ``baseline_variance``, default ratio.
+    Light is not a precision fault and is not checked.
+    """
+    if window_array.ndim != 2:
+        return False
+    detector = NoiseDetector()
+    width = window_array.shape[1]
+    for name in _CLIMATE_NOISE_CHANNELS:
+        index = CHANNEL_ORDER.index(name)
+        if index >= width:
+            continue
+        series = np.asarray(window_array[:, index], dtype=float)
+        if detector.detect(series, name):
+            return True
+    return False
 
 
 class LiveScorer:
@@ -84,6 +117,11 @@ class LiveScorer:
         # Sliding window of raw [temp, humidity, co2, light] vectors.
         self._window: Deque[List[float]] = deque(maxlen=SEQ_LEN)
         self._window_timestamps: Deque[datetime] = deque(maxlen=SEQ_LEN)
+        # Physical windows with score < threshold. Not the window in flight.
+        self._clean_windows: Deque[np.ndarray] = deque(maxlen=CLEAN_WINDOW_HISTORY)
+        # Non-anomalous scored windows since construction. Admission keeps
+        # one window per full slide so consecutive stores do not overlap.
+        self._clean_scored_count: int = 0
 
         # Forward-fill: last known value per channel.
         self._last_known: Dict[str, float] = {}
@@ -204,11 +242,19 @@ class LiveScorer:
 
         if is_anomalous and not self._in_episode:
             # New episode — generate a unique episode ID for correlation.
+            # Snapshot before any await: this window is anomalous and is
+            # not in the ring. An empty ring stays None so enrichment keeps
+            # the fixed noise map.
+            clean_history = tuple(self._clean_windows) or None
             self._in_episode = True
             self._episode_id = uuid.uuid4().hex
             self._last_anomaly_emit = now
             await self._publish_anomaly(event, score, per_channel_errors)
-            self._enrichment.spawn(window_array, self._episode_id)
+            self._enrichment.spawn(
+                window_array,
+                self._episode_id,
+                noise_clean_windows=clean_history,
+            )
 
         elif is_anomalous and self._in_episode:
             if (now - self._last_anomaly_emit) >= LIVE_ANOMALY_REEMIT_SECONDS:
@@ -217,6 +263,29 @@ class LiveScorer:
 
         elif not is_anomalous and self._in_episode:
             self._in_episode = False
+
+        if not is_anomalous:
+            self._remember_clean_window(window_array)
+
+    def _remember_clean_window(self, window_array: np.ndarray) -> None:
+        """Keep a non-overlapping physical window the scorer did not flag.
+
+        The copy is owned by the ring. Enrichment snapshots it later and
+        must not see a window whose score was at or above the threshold.
+        Stride-1 windows overlap by ``SEQ_LEN - 1`` samples; only the first
+        eligible window and one window per full slide are stored. A
+        fixed-baseline noise hit on a climate channel is refused so that
+        fault cannot become the calibration median.
+        """
+        scored_index = self._clean_scored_count
+        self._clean_scored_count += 1
+        if scored_index % SEQ_LEN != 0:
+            return
+        if _fixed_baseline_noise_hit(window_array):
+            return
+        self._clean_windows.append(
+            np.array(window_array, dtype=np.float32, copy=True),
+        )
 
     async def _publish_anomaly(
         self,

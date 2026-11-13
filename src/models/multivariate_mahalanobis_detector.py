@@ -5,6 +5,10 @@ jointly impossible (hot air + saturated humidity + low CO2 at noon). This
 detector fits a robust center/covariance over the sequence window and
 flags timesteps whose Mahalanobis distance exceeds a chi-square cutoff.
 
+``detect`` fits on the window it scores. ``score_last_against_history``
+fits on a caller-supplied history and scores only the window's last row.
+That path does not trim the window into the history.
+
 Robustness choices:
 - Trimmed refit: distances are computed with a median-centered covariance,
   the most extreme ~10% of timesteps are dropped, and center/covariance are
@@ -81,6 +85,53 @@ class MultivariateMahalanobisDetector:
             return [False] * n
 
         return [bool(value > self._threshold) for value in d2]
+
+    def score_last_against_history(
+        self,
+        window: np.ndarray,
+        history: np.ndarray,
+    ) -> bool:
+        """Whether the last row of ``window`` is implausible under ``history``.
+
+        Center and covariance are fit on the finite rows of ``history``
+        only. The window is not appended to that fit and is not trimmed.
+        The chi-square threshold and the diagonal noise floor are the
+        same ones :meth:`detect` uses.
+
+        Args:
+            window: Physical window, shape ``(seq_len, n_sensors)``.
+            history: Physical history, shape ``(n_history, n_sensors)``.
+
+        Returns:
+            True when the last row's squared Mahalanobis distance exceeds
+            the chi-square threshold. False when fewer than
+            ``2 * n_sensors`` history rows are finite, when the window is
+            not entirely finite, or when the covariance cannot be inverted.
+        """
+        seq = np.asarray(window, dtype=float)
+        hist = np.asarray(history, dtype=float)
+        if seq.ndim != 2 or hist.ndim != 2:
+            raise ValueError(
+                "Expected 2-D window and history, "
+                f"got {seq.ndim}-D and {hist.ndim}-D"
+            )
+        if seq.shape[1] != hist.shape[1]:
+            raise ValueError(
+                "Window and history sensor counts differ: "
+                f"{seq.shape[1]} vs {hist.shape[1]}"
+            )
+        n_rows, n_sensors = seq.shape
+        if n_rows == 0 or n_sensors == 0 or not np.isfinite(seq).all():
+            return False
+        finite_rows = hist[np.isfinite(hist).all(axis=1)]
+        if finite_rows.shape[0] < n_sensors * 2:
+            return False
+        distances = self._distances(
+            seq[-1:], finite_rows, self._floor_vector(n_sensors)
+        )
+        if distances is None:
+            return False
+        return bool(distances[0] > self._threshold)
 
     @staticmethod
     def _distances(

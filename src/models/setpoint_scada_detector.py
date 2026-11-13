@@ -18,6 +18,7 @@ import numpy as np
 from src.config import (
     DEHUMID_HD_CRIT_G_M3,
     FLATLINE_IDENTICAL_STEPS,
+    FLATLINE_VARIANCE_EPS,
     FLATLINE_VARIANCE_WINDOW,
     MEASURED_HD_COLUMN_ALIASES,
     OUTDOOR_TEMP_COLUMN_ALIASES,
@@ -138,24 +139,37 @@ def _clamp01(x: float) -> float:
     return float(max(0.0, min(1.0, x)))
 
 
-def _is_flatline(series: np.ndarray, *, window: int, identical_steps: int) -> bool:
-    """True when recent samples are perfectly constant (frozen SCADA signal).
+def _is_flatline(
+    series: np.ndarray,
+    *,
+    window: int,
+    identical_steps: int,
+    eps: float = FLATLINE_VARIANCE_EPS,
+) -> bool:
+    """True when recent samples are flat within ``eps`` (frozen SCADA signal).
 
-    Prefers ``identical_steps`` consecutive equals when the series is long
-    enough (≈2 h at 5-min). Shorter pipeline windows (e.g. SEQ_LEN=20) still
-    alarm when the *entire* available history is constant and at least
+    Prefers ``identical_steps`` consecutive near-equals when the series is
+    long enough (≈2 h at 5-min). Shorter pipeline windows (e.g. SEQ_LEN=20)
+    still alarm when the *entire* available history is flat and at least
     ``window`` samples long.
+
+    Exact ``== 0`` misses a channel that is constant in physical units but
+    picks up a normalize/denormalize residual. ``eps`` (default 1e-4) treats
+    that residual as flat: peak-to-peak above ``eps`` is not flat, and the
+    rolling variance must sit at or below ``eps²``.
     """
     if series.size < window:
         return False
     if not np.isfinite(series).all():
         return False
+    if eps < 0.0:
+        raise ValueError(f"eps must be >= 0, got {eps}")
     required = identical_steps if series.size >= identical_steps else series.size
     tail = series[-required:]
-    if float(np.ptp(tail)) > 0.0:
+    if float(np.ptp(tail)) > eps:
         return False
     var_window = series[-window:]
-    return float(np.var(var_window)) == 0.0
+    return float(np.var(var_window)) <= eps * eps
 
 
 class SetpointAwareScadaDetector:
@@ -357,7 +371,8 @@ class SetpointAwareScadaDetector:
                         f"Sensor flatline anomaly: {sensor} constant at {last:.2f} "
                         f"for ≥ {FLATLINE_IDENTICAL_STEPS} steps "
                         f"(~2 h at 5-min sampling); "
-                        f"rolling variance over {FLATLINE_VARIANCE_WINDOW} = 0."
+                        f"rolling variance over {FLATLINE_VARIANCE_WINDOW} "
+                        f"≤ {FLATLINE_VARIANCE_EPS:g}²."
                     ),
                 )
             )

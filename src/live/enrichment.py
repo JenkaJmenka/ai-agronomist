@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Set
+from typing import Optional, Sequence, Set
 
 import numpy as np
 
@@ -23,6 +23,21 @@ from src.live.hub import LiveHub
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_physical_windows(
+    windows: Optional[Sequence[np.ndarray]],
+) -> tuple[np.ndarray, ...]:
+    """Own a snapshot of physical ``(seq, sensors)`` windows.
+
+    Empty input stays empty. The caller passes windows the scorer did
+    not flag; this does not add the anomalous window under enrichment.
+    """
+    if not windows:
+        return ()
+    return tuple(
+        np.array(window, dtype=np.float32, copy=True) for window in windows
+    )
 
 
 class EnrichmentRunner:
@@ -47,10 +62,21 @@ class EnrichmentRunner:
         """In-flight enrichment tasks (introspection for tests/monitoring)."""
         return self._tasks
 
-    def spawn(self, window_array: np.ndarray, anomaly_seq: str) -> None:
-        """Launch a supervised enrichment task for a new episode."""
+    def spawn(
+        self,
+        window_array: np.ndarray,
+        anomaly_seq: str,
+        noise_clean_windows: Optional[Sequence[np.ndarray]] = None,
+    ) -> None:
+        """Launch a supervised enrichment task for a new episode.
+
+        ``noise_clean_windows`` are recent physical windows the scorer
+        did not flag. Empty keeps the fixed noise baseline. Do not
+        include ``window_array`` — that is the anomalous window.
+        """
+        history = _copy_physical_windows(noise_clean_windows)
         task = asyncio.create_task(
-            self._run_enrichment(window_array.copy(), anomaly_seq),
+            self._run_enrichment(window_array.copy(), anomaly_seq, history),
         )
         self._tasks.add(task)
         task.add_done_callback(self._on_enrichment_done)
@@ -72,7 +98,10 @@ class EnrichmentRunner:
                 logger.warning("Enrichment task raised: %s", exc)
 
     async def _run_enrichment(
-        self, window_array: np.ndarray, anomaly_seq: str,
+        self,
+        window_array: np.ndarray,
+        anomaly_seq: str,
+        noise_clean_windows: Optional[Sequence[np.ndarray]] = None,
     ) -> None:
         """Run ``ComprehensiveInferencePipeline``, persist ``Incident``, publish detail.
 
@@ -93,11 +122,14 @@ class EnrichmentRunner:
 
             async with AsyncSessionLocal() as session:
                 pipeline = ComprehensiveInferencePipeline(detector=detector)
+                # Empty history is omitted so the pipeline keeps the fixed
+                # noise map. A non-empty tuple is physical, not normalized.
                 result = await pipeline.run(
                     customer_id=self._tenant_id,
                     sequence=normalized.tolist(),
                     db=session,
                     greenhouse_id=self._greenhouse_id,
+                    noise_clean_windows=noise_clean_windows or None,
                 )
 
             # Extract incident_id from the pipeline result (UUID string).
