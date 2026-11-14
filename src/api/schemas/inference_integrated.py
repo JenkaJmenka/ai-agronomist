@@ -22,8 +22,14 @@ class ComprehensiveInferenceRequest(BaseModel):
 
     customer_id: str = Field(..., min_length=1, description="Tenant / customer ID")
     greenhouse_id: str = Field("default", description="Greenhouse or zone ID")
-    sequence: List[List[float]] = Field(
-        ..., description="Sensor sequence [seq_len, input_dim]"
+    sequence: List[List[Optional[float]]] = Field(
+        ...,
+        description=(
+            "Sensor sequence [seq_len, input_dim].  JSON null is accepted for any "
+            "sensor value and treated as a missing sample (NaN) before the pipeline — "
+            "this is the expected representation for polling-dropout gaps.  NaN is also "
+            "accepted (Pydantic coerces it from the JSON number token)."
+        ),
     )
     baseline_sequences: Optional[List[List[List[float]]]] = Field(
         None,
@@ -47,15 +53,29 @@ class ComprehensiveInferenceRequest(BaseModel):
 
     @field_validator("sequence")
     @classmethod
-    def validate_sequence_shape(cls, value: List[List[float]]) -> List[List[float]]:
+    def validate_sequence_shape(
+        cls, value: List[List[Optional[float]]]
+    ) -> List[List[float]]:
+        """Validate shape and convert JSON null / Python None to NaN.
+
+        A null sensor value represents a missing sample (polling dropout).
+        NaN is preserved unchanged.  Any other non-float value raises a
+        ValueError.  Shape must be (SEQ_LEN, INPUT_DIM).
+        """
         if len(value) != SEQ_LEN:
             raise ValueError(f"sequence must have {SEQ_LEN} timesteps, got {len(value)}")
+        result: list[list[float]] = []
         for row in value:
             if len(row) != INPUT_DIM:
                 raise ValueError(
                     f"each timestep must have {INPUT_DIM} features, got {len(row)}"
                 )
-        return value
+            # None (JSON null) → NaN; existing NaN passes through; other floats
+            # pass through unchanged.  This is the only place the conversion
+            # happens so downstream code (np.asarray, the pipeline) always
+            # receives a plain float, never None.
+            result.append([float("nan") if v is None else float(v) for v in row])
+        return result
 
 
 class LearningProgressSummary(BaseModel):
@@ -103,9 +123,32 @@ class BatchInferenceRequest(BaseModel):
 
     customer_id: str = Field(..., min_length=1)
     greenhouse_id: str = Field("default")
-    sequences: List[List[List[float]]] = Field(
-        ..., min_length=1, description="List of sensor sequences"
+    sequences: List[List[List[Optional[float]]]] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "List of sensor sequences.  JSON null is accepted for any sensor value "
+            "and treated as a missing sample (NaN) before the pipeline."
+        ),
     )
+
+    @field_validator("sequences")
+    @classmethod
+    def convert_null_to_nan(
+        cls, value: List[List[List[Optional[float]]]]
+    ) -> List[List[List[float]]]:
+        """Convert JSON null / Python None to NaN in every sequence.
+
+        None (JSON null) represents a missing sample (polling dropout).
+        NaN is preserved.  Shape validation is left to the pipeline.
+        """
+        return [
+            [
+                [float("nan") if v is None else float(v) for v in row]
+                for row in seq
+            ]
+            for seq in value
+        ]
 
 
 class BatchInferenceResponse(BaseModel):

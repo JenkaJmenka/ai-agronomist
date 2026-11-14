@@ -32,6 +32,7 @@ from src.api.services.fault_classification import (  # noqa: F401
     _UNKNOWN_KEY,
     _affected_sensors_from_incident,
     _fault_type_from_anomaly_type as _fault_type_from_anomaly_type,
+    _fault_type_from_detector,
     _fault_type_from_incident,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
@@ -88,10 +89,21 @@ def _bucket_rows_by_group(
         affected_sensors = _affected_sensors_from_incident(incident)
 
         if incident is None:
-            # No incident match — prefer stored anomaly_type label over
-            # value-based inference.  "synthetic_context" maps to None and
-            # falls through to value inference (normal background row).
-            mapped_fault = _fault_type_from_anomaly_type(r.anomaly_type)
+            # No incident match.  Fault-type resolution priority:
+            # 1. anomaly_type (synthetic-injection rows; "synthetic_context"
+            #    maps to None → fall through).
+            # 2. trigger_detector (upload path).  Detectors with rule evidence
+            #    resolve directly.  Score-only detectors (lstm, statistical,
+            #    lstm+statistical) return "unknown" to avoid mislabelling an
+            #    ordinary in-band reading as "spike_fault" via normalisation
+            #    ranges (TEMP_RANGE 20–30 °C, etc.).
+            # 3. Value-based fallback — only for pre-migration rows whose
+            #    trigger_detector column is NULL.
+            mapped_fault: str | None = _fault_type_from_anomaly_type(r.anomaly_type)
+            if mapped_fault is None:
+                mapped_fault = _fault_type_from_detector(
+                    trigger_by_ts[ts_iso].get("trigger_detector")
+                )
             fault_type = (
                 mapped_fault
                 if mapped_fault is not None

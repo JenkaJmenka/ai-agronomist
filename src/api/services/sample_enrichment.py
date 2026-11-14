@@ -13,6 +13,7 @@ from src.api.services.fault_classification import (
     _UNKNOWN_KEY,
     _canonical_sensor_value,
     _fault_type_from_anomaly_type,
+    _fault_type_from_detector,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
     _simple_reasoning_from_values,
@@ -212,13 +213,29 @@ def _resolve_incident_enrichment(
 def _resolve_fallback_enrichment(
     row_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Resolve enrichment fields when no incident is matched."""
+    """Resolve enrichment fields when no incident is matched.
+
+    Fault-type resolution priority:
+    1. anomaly_type (written by the inject endpoint for synthetic rows; maps
+       via _ANOMALY_TYPE_TO_FAULT_TYPE).
+    2. trigger_detector (written from UploadHighAnomalyDetail.detector by the
+       upload path; maps via _DETECTOR_TO_FAULT_TYPE).  Detectors with rule-
+       level evidence (spike_mad, out_of_bounds, stuck_fault) resolve
+       directly.  Score-only detectors (lstm, statistical, lstm+statistical)
+       return "unknown" so we do NOT fall through to value-based inference,
+       which checks NORMALISATION ranges rather than sensor limits and would
+       mislabel an ordinary warm afternoon (31 °C) as "spike_fault".
+    3. Value-based fallback (_infer_fault_type_from_values) — only when no
+       detector information is available at all (pre-migration rows whose
+       trigger_detector column is NULL).
+    """
     temp = row_dict.get("temperature")
     hum = row_dict.get("humidity")
     co2 = row_dict.get("co2")
     light = row_dict.get("light")
     trigger_channel: str | None = row_dict.get("trigger_channel")
     trigger_value: float | None = row_dict.get("trigger_value")
+    trigger_detector: str | None = row_dict.get("trigger_detector")
 
     # Prefer persisted trigger_channel over value-based inference (D1).
     if trigger_channel:
@@ -231,12 +248,19 @@ def _resolve_fallback_enrichment(
         primary_val = _canonical_sensor_value(primary, temp, hum, co2, light)
         reasoning = _simple_reasoning_from_values(primary, primary_val)
 
-    # Prefer the stored anomaly_type label over value-based inference.
-    # anomaly_type is written by the inject endpoint for synthetic rows.
-    # "synthetic_context" sentinel maps to None -> fall through to value
-    # inference (marks a normal background reading, not a fault).
+    # Priority 1: anomaly_type label (written by inject endpoint for synthetic
+    # rows; "synthetic_context" maps to None → fall through).
     row_anomaly_type: str | None = row_dict.get("anomaly_type")
-    mapped_fault = _fault_type_from_anomaly_type(row_anomaly_type)
+    mapped_fault: str | None = _fault_type_from_anomaly_type(row_anomaly_type)
+
+    # Priority 2: trigger_detector (upload path; None when absent or
+    # unrecognised → fall through to value-based).
+    if mapped_fault is None:
+        mapped_fault = _fault_type_from_detector(trigger_detector)
+
+    # Priority 3: value-based fallback — only reached when no detector info is
+    # available (pre-migration rows).  Checks NORMALISATION ranges, not sensor
+    # limits, so it can mislabel; keep only as a last resort.
     fault_type = (
         mapped_fault
         if mapped_fault is not None
