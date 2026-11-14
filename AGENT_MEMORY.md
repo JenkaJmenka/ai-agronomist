@@ -120,6 +120,31 @@ the catch-all `claude` agent until the definition is changed, and note that per
 [[project_architect_agent_no_edit_tool]] a definition change needs a fresh
 session to take effect.
 
+**Three things only a browser walkthrough found**, after lint, typecheck,
+build, 663 unit tests and 76 Playwright specs were all green:
+
+- **Native form controls were never branded.** Nine `<input type=radio|checkbox|range>`
+  and `<progress>` elements had no `accent-*` class, so the UA painted them --
+  blue radios on `/operations`, a bright green progress bar on `/jobs`, inside a
+  deep-green app. No gate catches this: the classes that *are* present are all
+  valid, and nothing asserts a native control carries an accent. `accent-accent`
+  fixed eight.
+- **Chromium resolves `accent-color` for `<progress>` and then ignores it when
+  painting.** Computed `rgb(92,196,174)`, painted `rgb(0,128,0)` fill on an
+  `rgb(128,128,128)` track; checkbox/radio/range on the same page paint
+  correctly. Verified by sampling rendered pixels, isolated from the app's
+  stylesheet, headed and headless. Both bars are now
+  `div role="progressbar"` + `aria-value*` -- the exact ARIA mapping, so
+  semantics survive -- with a `--border-strong` track (`--border` measured
+  ~1.3:1 on `--bg-elevated` and was invisible). **Read painted pixels, not
+  `getComputedStyle`, when verifying a native control: computed style reported
+  success here while the widget rendered the wrong colour.**
+- **Four routes have no `error.tsx`** -- `/greenhouse-profile`,
+  `/app-configuration`, `/configuration`, `/login` -- so any error there
+  escalates to Next's global-error boundary, which replaces `<html>` and is
+  unstyled: a white page in dark mode. Nine other routes have one. Pre-existing,
+  not a rebrand regression, found when a bad test mock made a zod parse throw.
+
 **Not done in code:** G7 is a Railway variable only -- set `AUTH_RESEND_FROM` to
 a Grovsen sender on an owned domain. `lib/auth/emailProvider.ts` stays
 env-driven and must keep no domain literal (`emailProvider.test.ts:95-99` pins
