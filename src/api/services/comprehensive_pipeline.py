@@ -26,6 +26,7 @@ from src.config import (
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     DIURNAL_PROFILE_HISTORY_DAYS,
+    DROPOUT_CONSECUTIVE_P,
     EWMA_ALPHA,
     EWMA_K,
     INPUT_DIM,
@@ -966,9 +967,10 @@ class ComprehensiveInferencePipeline:
         ]
         if self._dropout_detector.detect(_seq_as_dicts):
             _dropout_reason = (
-                "Polling dropout: >{:.0%} of sequence steps have no sensor data".format(
-                    DropoutDetector.PERSISTENCE_THRESHOLD
+                "Polling dropout: {:d} consecutive sequence steps each have at least ".format(
+                    DROPOUT_CONSECUTIVE_P
                 )
+                + "one missing sensor value"
             )
             logger.warning(
                 "Polling dropout detected for tenant %s: %s",
@@ -1391,10 +1393,20 @@ class ComprehensiveInferencePipeline:
             physics_result=physics_result,
         )
 
-        # 5a. CUSUM drift: promotes is_anomaly and overrides fault_type.
+        # 5a. CUSUM drift — non-voting (demoted 2026-11-14).
+        # Measured at K=0.25, H=4: in-control run length is ~35-41 samples on
+        # stationary noise (20 runs of 5,000 samples), i.e. a false alarm
+        # roughly every 3 hours per sensor at 5-minute sampling — far short of
+        # the ARL0 ~ 340 the docs previously claimed.  CUSUM state is still
+        # computed, logged, and persisted (via LearningState) so the
+        # accumulator survives across calls, but it no longer sets is_anomaly
+        # or fault_type.  It will be re-armed once the detector is rebuilt
+        # against an hour-of-day reference with thresholds chosen from a
+        # measured false-alarm target.
         if cusum_drift_alarm and not physics_result.confirmed:
-            is_anomaly = True
-            fault_type = "calibration_drift"
+            # Non-voting: alarm is logged above; do not promote is_anomaly
+            # or override fault_type until the detector is rebuilt.
+            pass
 
         # 5b. Bias EMA: overrides fault_type when EMA-based bias was detected.
         if bias_ema_flag and is_anomaly and not physics_result.confirmed:

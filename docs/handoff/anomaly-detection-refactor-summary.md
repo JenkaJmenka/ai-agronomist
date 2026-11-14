@@ -54,3 +54,15 @@ The prototyped bundle was 97.9% composite and 4.2% FPR. That number scored only 
 2. Re-measure with `./venv/bin/python -m pytest tests/models/test_detection_accuracy.py -q --tb=line`. Do not lower `_COMPOSITE_BAR`.
 3. Run the full suite only when preparing to merge: `./venv/bin/python -m pytest tests/ -q`.
 4. Next product work, in order: drop the hour-of-day clean hits before wiring it; persist upload CUSUM on physical units only; add climate fields only when a live source actually has them.
+
+## 2026-11-14 follow-up
+
+- Legacy CUSUM state guard: `_install_saved_cusum_ema` skips EMA payloads without the `min_std_by_sensor` physical marker to avoid repeated false alarms from normalised-scale state.
+- Bounded/filtered Mahalanobis history: scored against `DIURNAL_PROFILE_HISTORY_DAYS` trailing readings (synthetic rows excluded) when at least `2×n_sensors` finite rows exist; falls back to 20-sample window otherwise.
+- Robust gate back to off: `COLD_RUN_ROBUST_GATE_ENABLED` defaults False; with it on, the LSTM raised zero alerts on July and December fixtures, breaking four determinism/parity tests.
+- Out-of-limit upload readings alert instead of chunk rejection: `validate_canonical_schema` called with `allow_oob=True`; `_detect_oob_hits` emits `out_of_bounds` with raw value, scoring continues on clamped copy.
+- Upload fault label follows detector: `spike_mad` → `spike_fault`; `out_of_bounds` → `out_of_bounds`; `stuck_fault` → `stuck_fault`; LSTM/statistical-only → `unknown`.
+- Over-heating either-condition: rule does not fire when EITHER solar > `OVERHEAT_SOLAR_WM2` OR outdoor temp > `OVERHEAT_OUTDOOR_TEMP_C`; fires when neither value is available.
+- Ensemble vote thresholds: LSTM member votes at `ANOMALY_THRESHOLD` (0.8) and statistical member at 3.0 — previously documented at half those values.
+- CUSUM demoted to non-voting: at K=0.25, H=4 the in-control run length is ~35–41 samples on stationary noise (measured 2026-11-14, 20 runs of 5,000 samples); CUSUM state is still computed, logged, and persisted but no longer sets `is_anomaly` or `fault_type`.
+- QA (unit tests beyond the 30 added, hardened harness, full-suite gate) is deferred to the end of the initiative by the user's direction.

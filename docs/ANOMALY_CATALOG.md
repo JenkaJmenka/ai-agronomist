@@ -5,7 +5,7 @@ parameters control it, what you see in the UI, and what an operator should do.
 
 **Related docs:** [User Guide](USER_GUIDE.md) · [Framework spec](anomaly_framework_spec.md) · [README](../README.md)
 
-**Last verified:** 2026-11-12, against branch `feat/anomaly-detection-module-refactoring` (enrichment MAD, noise history, rule precedence, upload MAD, and the `humidity_fault` CHECK).
+**Last verified:** 2026-11-14, against branch `feat/anomaly-detection-module-refactoring`.
 
 ---
 
@@ -64,14 +64,22 @@ confirmed. CUSUM sits outside this list.
 
 ## Severity and score semantics
 
-The UI colours everything from one function (`web/lib/severity.ts`):
+The server assigns a `detected_severity` to every stored row. `web/lib/severity.ts`
+exposes `resolveRowSeverity`, which returns the server value when present (six
+possible levels: `unclassified`, `normal`, `warning`, `lstm`, `critical`, `urgent`)
+and falls back to a client re-derivation for rows pre-dating migration 024. The
+client fallback function `getSeverity` can only return `normal` (score below
+threshold) or `warning` (score above threshold); the richer values only come from
+the server.
 
-| Chip | When |
-|------|------|
-| **Normal** (grey/green) | `score < threshold` |
-| **Warning** (amber) | Above threshold, single statistical detector |
-| **LSTM / drift** (orange) | Above threshold, flagged by an LSTM or drift detector |
-| **Critical** (red) | Above threshold **and** multiple detectors agree |
+| Level | Assigned by |
+|-------|-------------|
+| `unclassified` | Server sentinel meaning the row was never run through severity classification |
+| `normal` | Below threshold |
+| `warning` | Above threshold, insufficient agreement for a higher level |
+| `lstm` | Above threshold, LSTM or drift detector flagged |
+| `critical` | Above threshold, multiple detectors agree (`agreement_count ≥ 2`) |
+| `urgent` | Rule detectors and SCADA rules that are always time-critical (e.g. stuck-fault, heating failure) |
 
 The default UI threshold is **0.15** (`DEFAULT_SCORE_THRESHOLD`). This is *not*
 the same number as the backend's `ANOMALY_THRESHOLD = 0.8`: the UI slider works
@@ -109,10 +117,6 @@ probe, or a genuine transient event like a heating valve slamming open.
 `Δ_t > c · MAD_t`. MAD is used instead of standard deviation precisely because
 the spike itself would inflate a standard deviation and hide the event.
 
-A per-sensor absolute velocity limit (`SPIKE_DELTA_MAX` / `VELOCITY_LIMITS`)
-runs alongside it, so a spike is caught even when the MAD floor is degenerate
-(a perfectly flat window has MAD = 0).
-
 **Parameters** (`src/config.py`):
 
 | Name | Default | Meaning |
@@ -122,8 +126,8 @@ runs alongside it, so a spike is caught even when the MAD floor is degenerate
 | `SPIKE_MAD_FLOOR` | temp 0.1 °C, humidity 0.2 %, CO₂ 10 ppm, light 4.0 | Live minimum MAD |
 | `UPLOAD_SPIKE_MAD_TUNING_C` | 8 | Enrichment and CSV-upload multiplier |
 | `UPLOAD_SPIKE_MAD_FLOOR` | temperature 0.5 °C | Upload scores only these keys |
-| `SPIKE_DELTA_MAX` | per sensor | Hard per-step delta ceiling |
-| `VELOCITY_LIMITS` | temp 2.0, humidity 5.0, CO₂ 50.0, light 200.0 | Units per timestep |
+| `SPIKE_DELTA_MAX` | per sensor | Used only by training bootstrap; not by spike detection |
+| `VELOCITY_LIMITS` | temp 2.0, humidity 5.0, CO₂ 50.0, light 200.0 | Used only by pattern scoring; not by spike detection |
 
 **Enrichment vote.** The pipeline flags the **last timestep only**
 (`spike_flags[-1]`) on temperature, humidity, and CO₂. Light is skipped.
@@ -195,10 +199,18 @@ good frame.
 **How it is detected.** The setpoint flatline gate
 (`_is_flatline`) flags a channel when peak-to-peak is within
 `FLATLINE_VARIANCE_EPS` (default **1e-4**) and rolling variance is
-≤ `FLATLINE_VARIANCE_EPS`². A second check counts *identical consecutive
-values*. A light-only flatline does not vote and is not attached to
-`scada_anomalies`. The ensemble stuck pre-check also skips light
-(`ENSEMBLE_STUCK_SKIP_CHANNELS`).
+≤ `FLATLINE_VARIANCE_EPS`². A second check counts identical consecutive
+values (two values count as the same when peak-to-peak is within
+`FLATLINE_VARIANCE_EPS`). The channels covered are **temperature**,
+**humidity**, and **plant canopy temperature** when the full plant-temp series
+is available; CO₂ and light are not checked here. A light-only flatline does
+not vote and is not attached to `scada_anomalies`. The ensemble stuck
+pre-check also skips light (`ENSEMBLE_STUCK_SKIP_CHANNELS`).
+
+Pipeline windows are 20 samples (`SEQ_LEN`), so on the `/api/inference/`
+path the check covers those 20 samples; `FLATLINE_IDENTICAL_STEPS` (24) is
+the threshold and is never reached in a single 20-sample call — it matters
+only on the upload path, where the full uploaded series is passed.
 
 **Parameters:**
 
@@ -276,16 +288,20 @@ computer faithfully controls to a wrong number.
 | Name | Default | Meaning |
 |------|---------|---------|
 | `CUSUM_K_SIGMA` | 0.25 | Slack, in standard deviations. Detects ~0.5σ shifts |
-| `CUSUM_H_SIGMA` | 4.0 | Decision threshold. ARL₀ ≈ 340 samples |
+| `CUSUM_H_SIGMA` | 4.0 | Decision threshold. Measured in-control run length ~35–41 samples on stationary noise (measured 2026-11-14) |
 | `CUSUM_EMA_ALPHA` | 0.01 | EMA baseline adaptation rate |
 | `BOCPD_HAZARD_LAMBDA` | 250.0 | Expected run length between change points |
 | `BOCPD_MIN_RUN` | 8 | Minimum samples before a change point can be declared |
 | `BOCPD_MIN_SENSORS` | 2 | Sensors that must agree for a multivariate change point |
 
-> The spec's textbook values are `K = 0.2`, `H = 1.0`. Production deliberately
-> runs `K = 0.25`, `H = 4.0` — on live telemetry the textbook values produce a
-> drift alarm roughly every few hours. ARL₀ ≈ 340 means about one false drift
-> alarm per 340 samples of in-control data.
+> The spec's textbook values are `K = 0.2`, `H = 1.0`. Production runs
+> `K = 0.25`, `H = 4.0`. Measured 2026-11-14 (20 runs of 5,000 samples on
+> stationary noise): in-control run length ~35–41 samples, i.e. a false
+> alarm roughly every 3 hours per sensor at 5-minute sampling. CUSUM is
+> therefore **computed and persisted but does not raise an anomaly or set
+> a fault label** until the detector is rebuilt against an hour-of-day
+> reference with thresholds chosen from a measured false-alarm target.
+> Slow drift is currently not detected by CUSUM.
 
 **Why BOCPD requires multiple sensors.** A single channel stepping to a new
 level is usually a control action, so one channel alone never raises
@@ -421,24 +437,38 @@ the two sensors is lying.
 
 ---
 
-## 8. Thermodynamic contradiction (psychrometric)
+## 8. Psychrometric inconsistency
 
-**`fault_type: thermodynamic_contradiction`** · root cause `psychrometric_inconsistency`
+**`fault_type: humidity_fault`** (inconsistency) · **`spike_fault`** (impossibility) · root cause `psychrometric_inconsistency`
+
+**Note:** no code path emits `fault_type: thermodynamic_contradiction`. The
+pipeline maps `psychrometric_inconsistency` → `humidity_fault` and
+`psychrometric_impossibility` → `spike_fault`.
 
 **What it means.** The reported temperature, relative humidity and measured
 humidity deficit cannot all be true at once. Physics says they are linked; the
 sensors say otherwise. Therefore at least one of the three is wrong — and this
 is the only detector that can prove a sensor is faulty without a redundant unit.
 
-**How it is detected.** Tetens equation for saturation vapour pressure:
+**How it is detected.** Two distinct paths:
 
-```
-e_s(T) = 0.61078 · exp( 17.27·T / (T + 237.3) )      [kPa]
-e_a     = e_s · RH/100
-HD_calc = 2167.0 · (e_s − e_a) / (T + 273.15)         [g/m³]
-```
+1. **Tetens HD check** (`src/models/psychrometric_validator.py`): Tetens
+   equation for saturation vapour pressure:
 
-Flag when `|HD_meas − HD_calc| > θ_thermo`.
+   ```
+   e_s(T) = 0.61078 · exp( 17.27·T / (T + 237.3) )      [kPa]
+   e_a     = e_s · RH/100
+   HD_calc = 2167.0 · (e_s − e_a) / (T + 273.15)         [g/m³]
+   ```
+
+   Flag when `|HD_meas − HD_calc| > θ_thermo` → `psychrometric_inconsistency`
+   → `humidity_fault`.
+
+2. **Trend heuristic** (`src/models/physics_validator.py`): temperature and
+   humidity both rising across the window (mean per-step trends both positive
+   above their thresholds). This is a heuristic, not a physical proof — it
+   fires when both channels trend up simultaneously and reports
+   `psychrometric_impossibility` → `spike_fault`.
 
 > **Unit note.** The constant is `2167.0` = 216.7 × 10. The standard
 > psychrometric coefficient 216.7 applies when vapour pressure is in **hPa**;
@@ -451,17 +481,17 @@ Flag when `|HD_meas − HD_calc| > θ_thermo`.
 
 **Requires:** a measured humidity-deficit column in your data. The CSV adapter
 picks it up from columns matching *humidity deficit*, *HD (g…)*, or *HD* — see
-`MEASURED_HD_COLUMN_ALIASES`. Without it this detector is inert.
+`MEASURED_HD_COLUMN_ALIASES`. Without it the Tetens check is inert. The trend
+heuristic runs regardless.
 
-**In the UI.** Two outcomes are distinguished internally:
-`psychrometric_impossibility` (mapped to `spike_fault` — the combination is
-physically impossible) and `psychrometric_inconsistency` (mapped to
-`humidity_fault` — inconsistent but not impossible).
+**In the UI.** Two outcomes: `psychrometric_inconsistency` (mapped to
+`humidity_fault`) and `psychrometric_impossibility` (mapped to `spike_fault`).
 
-**What to do.** Trust this one. Physics does not have false positives; only your
-column mapping does. Verify first that the HD column really is in g/m³ and the
-temperature is in °C, then investigate the humidity sensor — it is the usual
-culprit.
+**What to do.** The Tetens check is high-specificity when the HD column is
+correctly mapped — verify first that it is in g/m³ and that temperature is in
+°C. The trend heuristic can produce false positives when both T and RH
+genuinely rise together (e.g. during active humidification). Investigate the
+humidity sensor first; it is the usual culprit.
 
 ---
 
@@ -506,9 +536,10 @@ cares about. Stored overrides on the **Configuration** page decide whether
 a breach sets `is_anomaly`.
 
 Each has a day band and a night band, selected by the configured day/night
-window. Detection is debounced: a breach must persist over `BAND_BREACH_DEBOUNCE_K`
-samples (default **3**) before it is raised, so a single sample crossing the line
-does not page anyone.
+window. Detection is debounced: the **mean** of the last `BAND_BREACH_DEBOUNCE_K` samples
+(default **3**) must breach the band before the finding is raised. A single
+sample crossing the line is smoothed out by the mean; the detector does not
+require all K samples to be breaching.
 
 | Fault type | Meaning | Severity | Urgency |
 |-----------|---------|----------|---------|
@@ -589,11 +620,15 @@ failure, and at night in winter it is time-critical.
 
 **`fault_type: over_heating`** · root cause `cooling_or_ventilation_shortfall` · **urgent**
 
-Temperature is above the heating setpoint **without** solar conditions to explain
-it. The solar check matters: on a bright day an over-temperature is expected
-physics, not a fault. The detector only fires when outdoor temperature is below
-`OVERHEAT_OUTDOOR_TEMP_C` (default **25.0 °C**) and solar radiation does not
-account for the excess.
+Temperature is above the heating setpoint **without** solar or outdoor conditions
+to explain it. The excess is considered explained — and the rule does not fire —
+when **either** solar radiation exceeds `OVERHEAT_SOLAR_WM2` **or** outdoor
+temperature exceeds `OVERHEAT_OUTDOOR_TEMP_C` (default **25.0 °C**). When
+neither value is available in the context, neither condition is true and the
+rule can still fire. Live readings carry no setpoint or outdoor-temperature
+context, so this rule is only active where that context is supplied (CSV upload
+with the relevant columns, or a `/api/inference/comprehensive` call with
+`climate_context`).
 
 *What to do:* vents stuck closed, screens stuck shut, or a heating valve that
 failed open.
@@ -634,8 +669,10 @@ direct disease risk. Requires a plant-temperature column.
 
 **`fault_type: polling_dropout`** · root cause `polling_dropout` · **short-circuits**
 
-Consecutive missing samples in the telemetry stream. Controlled by
-`DROPOUT_CONSECUTIVE_P` (default **5** consecutive missing samples).
+A step is flagged (ψ=1) when **any** sensor value at that step is null or NaN.
+An alarm fires when `DROPOUT_CONSECUTIVE_P` (default **5**) such steps occur
+consecutively. The `/api/inference/comprehensive` and batch schemas accept JSON
+`null` as a missing sample, which is converted to NaN internally.
 
 **Short-circuits** — with no data there is nothing to analyse, and every other
 detector would produce noise from the gap. This is an infrastructure fault: the
@@ -655,8 +692,14 @@ high humidity with low light at midday, for example — each plausible alone,
 jointly impossible.
 
 **How it is detected.** Mahalanobis distance of the joint reading vector from the
-learned mean, using the covariance of the tenant's clean history. Distance is
-compared against a χ²-derived cutoff.
+mean, using the covariance of recent tenant history. When the tenant has at least
+`2 × n_sensors` finite stored readings within the trailing
+`DIURNAL_PROFILE_HISTORY_DAYS` window (synthetic rows excluded, NULL-source rows
+kept), the last-step reading is scored against that history. When the history is
+too short or missing, the detector falls back to scoring the last step of the
+20-sample window against the window itself. The history is recent operational
+readings, not vetted clean data. Distance is compared against a χ²-derived
+cutoff.
 
 *Reasoning:* "Multivariate implausibility: the joint temperature, humidity
 reading exceeded the Mahalanobis distance cutoff — each channel is in range but
@@ -698,10 +741,17 @@ The encoder also emits a **latent embedding** (μ) and an **uncertainty**
 similar incidents are near each other in the 8-dimensional latent space, which is
 how "find past cases like this one" works.
 
-**Important:** the LSTM-VAE only detects meaningfully once a tenant model has been
-trained. Without one, the pipeline falls back to the global baseline and the
-score is far less informative. See [Training](USER_GUIDE.md#training-models) in
-the User Guide.
+**Important:** the LSTM-VAE requires a trained tenant model.
+
+- **`/api/inference/*`** — when no active model exists, `resolve_tenant_detector`
+  raises `NoActiveModelError` and the route returns **HTTP 503**. There is no
+  silent fallback to a global baseline.
+- **CSV upload** — when no active model exists, the upload endpoint cold-starts
+  a new model from the uploaded CSV ("Option A") before scoring. The upload
+  always produces a scored result even on a first upload with no prior history.
+
+See [Training](USER_GUIDE.md#training-models) in the User Guide for how to
+trigger a manual retrain.
 
 ---
 
@@ -727,9 +777,22 @@ with three checks and merges their hits:
    (temperature, floor **0.5 °C**, `c` **8**). Those hits use
    `detector="spike_mad"` and are appended beside the LSTM/statistical
    merge. A channel with no floor key is not scored.
+4. **Out-of-bounds check** (`_detect_oob_hits` in `upload_portions.py`) —
+   a finite reading outside `OOB_LIMITS` produces an `out_of_bounds` alert
+   carrying the raw value. The chunk is **not** rejected; processing continues
+   with a copy of the data clamped to the limits so LSTM sequences, rolling-z,
+   MAD, and stuck detection are not distorted. `validate_canonical_schema` is
+   called with `allow_oob=True` on the upload path, so out-of-range readings
+   are not discarded before this check runs.
 
-Chunks outside `OOB_LIMITS` are rejected by `validate_canonical_schema`
-before any of this runs (see Out-of-bounds).
+**Upload fault labels.** The fault label for a merged upload row follows the
+detector that fired. `spike_mad` → `spike_fault`; `out_of_bounds` →
+`out_of_bounds`; `stuck_fault` → `stuck_fault`. LSTM-only or rolling-z-only
+hits resolve to `unknown` — these paths carry no deterministic rule evidence so
+the honest answer is unknown rather than a confident wrong label. The
+value-range fallback in `_infer_fault_type_from_values` runs only when no
+detector is recorded (`src/api/services/fault_classification.py`,
+`_fault_type_from_detector`).
 
 **Which columns.** `is_cold_run_stat_column` excludes `light`, `rain`,
 `screen` and `vent` columns — actuator positions and diurnal channels that
@@ -792,9 +855,9 @@ Four detectors vote, weighted (`ENSEMBLE_DETECTOR_WEIGHTS`):
 
 | Member | Threshold constant | Default |
 |--------|-------------------|---------|
-| `lstm_vae` | `ENSEMBLE_LSTM_VAE_THRESHOLD` | = `ANOMALY_THRESHOLD` (0.8) |
+| `lstm_vae` | `ENSEMBLE_LSTM_VAE_THRESHOLD` | = `ANOMALY_THRESHOLD` (0.8) (fixed 2026-11-14; previously listed at half) |
 | `isolation_forest` | `ENSEMBLE_ISOLATION_FOREST_THRESHOLD` | 0.5 |
-| `statistical` (Mahalanobis) | `ENSEMBLE_STATISTICAL_THRESHOLD` | 3.0 |
+| `statistical` (Mahalanobis) | `ENSEMBLE_STATISTICAL_THRESHOLD` | 3.0 (fixed 2026-11-14; previously listed at half) |
 | `correlation` | `ENSEMBLE_CORRELATION_THRESHOLD` | 0.35 |
 
 An anomaly is declared when the weighted score exceeds
@@ -964,7 +1027,7 @@ Complete list of values permitted in `incidents.fault_type`
 | `accuracy_decline` | Rule | Noise amplification or multivariate implausibility |
 | `bias_offset` | Rule | Constant offset vs redundant sensor |
 | `correlation_breakdown` | Rule | Coupled channels decoupled |
-| `thermodynamic_contradiction` | Rule | Psychrometric inconsistency |
+| `thermodynamic_contradiction` | — | In the DB constraint (migration 016) but no code path emits it; see section 8 |
 | `humidity_fault` | Rule | `psychrometric_inconsistency` |
 | `diurnal_deviation` | Rule | Abnormal for this hour of day |
 | `polling_dropout` | Rule | Missing telemetry |
