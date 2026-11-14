@@ -1,5 +1,91 @@
 # Agent Memory
 
+## Task -- Grovsen rebrand of the Next.js operator UI -- DONE (2026-11-14)
+
+Brand `#0D3631`, light + dark, across `web/`. Four commits on
+`feat/grovsen-rebrand`: `eedf98a` tokens+primitives, `de3cd82` logo/shell/icons,
+`65ac253` chart+live token layer, `df00827` chart components + sidebar fix +
+theme guard. Design spec came from the user; the audit is
+`docs/architecture/grovsen-redesign-audit.md`.
+
+**`bg-surface` compiled to nothing, at nine sites, for months.** Tailwind v4
+here is CSS-first and there is **no `tailwind.config.*`** -- the `@theme inline`
+block in `web/app/globals.css` is the only bridge from a CSS variable to a
+utility class. A class whose token is absent from that block emits **no CSS at
+all**, silently, with no build error. `bg-surface` (`--surface` never existed)
+left nine selects and inputs transparent across the three configuration views,
+and `bg-muted-foreground/40` left `LiveBadge`'s paused dot with no background.
+Both were *invisible to every sweep that looked for hex literals and Tailwind
+palette classes*, which is how a codebase can look fully "token-driven" and not
+be. When auditing styling here, grep for utility classes whose token is missing
+from `@theme inline`, not just for colour literals. Fixed to `bg-bg-elevated` /
+`bg-text-muted/40`; `test/themeTokens.test.ts` now fails if either returns.
+
+**The two dark blocks in `globals.css` must be diffed against each other in any
+theme review.** Dark applies through two independent mechanisms -- the
+`[data-theme="dark"]` attribute and `@media (prefers-color-scheme: dark)` on
+`:root:not([data-theme])` -- and plain CSS cannot dedupe them. They are
+maintained byte-identical by hand. Edit one and forget the other and OS-dark
+users (who never pressed the toggle) silently get a stale palette. The guard
+test pins property, value *and* order; it was mutation-checked against a
+one-hex-digit desync. The same trap applies one level up: a component-level
+`[data-theme=dark]:` Tailwind variant has to be written twice for the same
+reason, which is why the primary button fill is a `--btn-primary-bg` /
+`--btn-primary-fg` token pair resolved once in the cascade instead.
+
+**The dark-mode logo tile is `--brand-tile` `#2A7768`, not the brand green.**
+Flat `#0D3631` measures **1.42:1** against dark `--bg` `#081614` -- the tile
+silhouette disappears and only the white sprout reads. `#2A7768` measures
+3.47:1. Note the brand README's advice ("dark backgrounds -> use the white
+lockup") does **not** solve this: `grovsen-lockup-white.svg` flips only the
+*wordmark* and leaves the tile `#0D3631`. `grovsen-lockup-dark.svg` is the one
+that lifts the tile.
+
+**The lockup needs no webfont.** `assets/brand/grovsen-lockup.svg` is 7 outlined
+glyph paths with no `<text>` element, so `components/brand/GrovsenLogo.tsx`
+renders "grovsen" with Inter as the only font the app loads. The README's
+"Poppins SemiBold" line is asset provenance, not a runtime dependency -- do not
+add a Poppins webfont on the strength of it.
+
+**A green test can protect nothing.** `LiveToggle.test.tsx`'s negative assertion
+was `not.toContain("bg-accent")`. After the token rename nothing emits
+`bg-accent`, so it passed unconditionally -- it would also have passed if the
+toggle had rendered the primary variant while stale, which is the exact
+regression its suite is named for ("no green toggle while stale"). No test run
+reports this; it surfaced only because the rename forced someone to read the
+assertion. Worth checking the negative half of any suite after a rename.
+
+**`65ac253` was authored outside this pipeline (via Cursor) and left the branch
+not compiling** -- it deleted `ANOMALY_BAND_FILL` from `lib/colors.ts` while
+`SensorTimeSeriesChart.tsx` still imported it (`tsc` TS2305). Its surviving work
+is sound. Two lessons: verify a branch tip compiles before trusting its
+commits, and re-check `HEAD` before every commit -- this checkout was switched
+to `feat/anomaly-detection-module-refactoring` by another session mid-task
+(see `project_agent_branch_drift`).
+
+**Canvas colours must be function-valued or they freeze.** uPlot cannot read CSS
+variables, so `chartTheme.ts` resolves tokens to concrete strings. But a colour
+resolved once inside a `useMemo` captures the theme active at build time:
+`UPlotChart` calls `subscribeToThemeChange(redraw)`, so axes repainted on a
+toggle while series strokes silently did not. Series `stroke` is now
+`() => channelColor(i)`, re-invoked per draw. `LIGHT_FALLBACK`'s 14 hex literals
+are deliberate (a canvas has no stylesheet during SSR or in jsdom) and the guard
+pins them against the light block -- they had already drifted once.
+
+**Open, deliberately:** `--border-strong` `#B9C9C4` is 1.72:1 on light
+`--bg-elevated`, so outlined controls read faintly; the spec's gate does not
+cover borders and the spec was followed as written. `web/app/apple-icon.png` is
+**derived**, not a designer export -- masked from `grovsen-icon-512.webp` to the
+`rx=112` shape inset 4px, flattened onto `#0D3631`. LightningCSS's `color-mix`
+fallback renders `--accent-soft`/`--accent-flash` at full opacity on a browser
+without `color-mix` support.
+
+**Not done in code:** G7 is a Railway variable only -- set `AUTH_RESEND_FROM` to
+a Grovsen sender on an owned domain. `lib/auth/emailProvider.ts` stays
+env-driven and must keep no domain literal (`emailProvider.test.ts:95-99` pins
+that, after the `ai-agronomist.app` NXDOMAIN incident).
+
+
 ## Task -- anomaly_episodes table, Part A: migration 026 + ORM model -- DONE (2026-10-06)
 
 **Goal:** general, detection-time, persisted table for fault windows (stuck
