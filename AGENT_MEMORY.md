@@ -80,6 +80,46 @@ cover borders and the spec was followed as written. `web/app/apple-icon.png` is
 fallback renders `--accent-soft`/`--accent-flash` at full opacity on a browser
 without `color-mix` support.
 
+**Four things the review added, worth keeping.**
+
+- **A colour's contrast must be measured against what it actually sits on.** The
+  Live button's status dot was `--sev-normal` on the *primary fill*, not on the
+  page background: 1.21:1 in dark, a mint dot on a mint button, invisible. Every
+  sweep had checked severities against `--bg`/`--bg-elevated`/`--bg-sidebar` and
+  none against a fill. It now uses `--accent-fg`, the token defined as ink on an
+  accent fill. The stale state read fine throughout, because it flips to
+  `secondary` as well as to `--sev-critical` -- so the *healthy* state was the
+  one that disappeared, which is the harder direction to notice.
+- **Hue separation, not mutual contrast, is the criterion for telling two
+  severities apart.** Every `--sev-*` pair measures ~1.0:1 against the others by
+  construction, since all are tuned to clear 4.5:1 against the same three
+  surfaces. `--sev-ok` vs `--sev-warning` is 1.01:1 and perfectly legible.
+  Anyone who sorts the scale by mutual contrast will "fix" four good pairs and
+  miss the real one.
+- **Adding a tree to a guard's scan and seeing it pass is not evidence the guard
+  works.** `features/` was missing from the raw-colour scan -- the one tree where
+  every literal this rebrand fixed had lived. Adding it flagged zero, because
+  the tree was by then clean. A pass there is equally consistent with a live
+  guard and one that silently matches nothing. The evidence is a deliberate
+  replant (`border-amber-500/30`) failing the scan, which was done.
+- **`docs/review/` is gitignored by design** (`.gitignore:33`'s `docs/*`, whose
+  comment names review reports explicitly). 32 reports sit there untracked; they
+  were tracked historically and deliberately stopped being. So a review document
+  is a local artefact -- `git status` stays clean after writing one, which looks
+  exactly like the accidental-ignore bug that bit `docs/handoff/` and
+  `docs/live_scada_connectors.md`, and is not it. Check `git check-ignore -v`
+  and the rule's comment before "fixing" it.
+
+**Role gap, unfixed:** `code-reviewer` is granted `docs/review/` in the
+ownership table but has `Read, Glob` only -- no `Write` -- so it cannot author
+its own deliverable, and no `Bash`, so it cannot run `git diff main..`,
+`git status --short`, or grep. Its review was therefore of working-tree state
+with "nothing else uses X" scoped to the files it opened by hand. The cost here
+was two wrong facts, both in the over-reporting direction. Route the write to
+the catch-all `claude` agent until the definition is changed, and note that per
+[[project_architect_agent_no_edit_tool]] a definition change needs a fresh
+session to take effect.
+
 **Not done in code:** G7 is a Railway variable only -- set `AUTH_RESEND_FROM` to
 a Grovsen sender on an owned domain. `lib/auth/emailProvider.ts` stays
 env-driven and must keep no domain literal (`emailProvider.test.ts:95-99` pins
