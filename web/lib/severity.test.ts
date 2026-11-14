@@ -237,4 +237,18 @@ describe("FAULT_LABELS", () => {
       expect(label).not.toMatch(/_/);
     }
   });
+
+  it("humidity_fault label is 'Humidity fault'", () => {
+    // Migration 029: psychrometric inconsistency — now emitted by the backend.
+    expect(FAULT_LABELS.humidity_fault).toBe("Humidity fault");
+  });
+
+  it("out_of_bounds label is 'Out of bounds'", () => {
+    // Previously never emitted by the backend; now actively used.
+    expect(FAULT_LABELS.out_of_bounds).toBe("Out of bounds");
+  });
+
+  it("thermodynamic_contradiction label is 'Thermodynamic contradiction'", () => {
+    expect(FAULT_LABELS.thermodynamic_contradiction).toBe("Thermodynamic contradiction");
+  });
 });
