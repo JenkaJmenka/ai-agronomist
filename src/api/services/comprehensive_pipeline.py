@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
@@ -145,8 +145,8 @@ _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
     "psychrometric_impossibility": "spike_fault",
     # humidity_fault is the documented psychrometric label (BACKLOG-20).
     # It is allowed by ck_incidents_fault_type as of migration 029.
-    # FaultType in src/models/fault_classifier.py does not list it yet
-    # (ml-engineer); the incident API unions it in until that enum grows.
+    # FaultType in src/models/fault_classifier.py now lists HUMIDITY_FAULT;
+    # the incident API also includes it in its union for compatibility.
     "psychrometric_inconsistency": "humidity_fault",
     "nocturnal_light": "spike_fault",
     "co2_out_of_range": "calibration_drift",
@@ -494,12 +494,15 @@ async def _load_operational_overrides_if_uncached(
 def enrichment_spike_mad_floor(sensor: str) -> Optional[float]:
     """MAD floor for the enrichment spike vote.
 
-    Light is skipped: a lighting step is not a probe spike. Temperature
-    uses ``UPLOAD_SPIKE_MAD_FLOOR``. Every other sensor keeps
-    ``SPIKE_MAD_FLOOR`` scaled by
-    ``UPLOAD_SPIKE_MAD_FLOOR["temperature"] / SPIKE_MAD_FLOOR["temperature"]``
-    so the upload temperature ratio (5× at the shipped defaults) applies
-    to humidity and CO₂ as well. ``None`` means do not vote that channel.
+    Light is skipped: a lighting step is not a probe spike.
+
+    When ``UPLOAD_SPIKE_MAD_FLOOR`` has an explicit key for the sensor,
+    that value is returned directly. This lets operators tune humidity,
+    CO₂, and future sensors independently of the live-scoring floor.
+
+    For sensors absent from ``UPLOAD_SPIKE_MAD_FLOOR``, the floor is
+    derived by scaling ``SPIKE_MAD_FLOOR`` by the upload/live temperature
+    ratio (5× at shipped defaults). ``None`` means do not vote that channel.
 
     This is not the live detector pair (``SPIKE_MAD_TUNING_C`` = 3,
     temperature floor 0.1 °C). Callers pair the returned floor with
@@ -507,6 +510,10 @@ def enrichment_spike_mad_floor(sensor: str) -> Optional[float]:
     """
     if sensor == "light":
         return None
+    # An explicit entry in the upload floor table is used as-is; the
+    # scaled-fallback rule only applies when the key is absent.
+    if sensor in UPLOAD_SPIKE_MAD_FLOOR:
+        return float(UPLOAD_SPIKE_MAD_FLOOR[sensor])
     live_floor = SPIKE_MAD_FLOOR.get(sensor)
     if live_floor is None:
         return None
@@ -595,21 +602,45 @@ async def _query_physical_history(
 ) -> np.ndarray:
     """Finite ``SensorReading`` rows over the diurnal trailing window.
 
-    ``before`` drops the reading under test when the sequence carries a
-    timestamp, so that point is not inside its own covariance fit.
+    ``before`` anchors the window end (and drops the reading under test
+    when the sequence carries a timestamp, so that point is not inside its
+    own covariance fit). When ``before`` is None, wall-clock now is used.
+
+    Synthetic rows (``source`` starting with ``"synthetic:"``) are excluded
+    so that injected test episodes do not distort the covariance estimate.
+    NULL source rows (CSV uploads, legacy rows) are kept.
+
+    The query selects only the four sensor columns (no full ORM rows) and
+    is capped at ``DIURNAL_PROFILE_HISTORY_DAYS * 288`` rows (5-minute
+    cadence, newest first) to bound memory and query time.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
-    stmt = select(SensorReading).where(
-        SensorReading.tenant_id == customer_id,
-        SensorReading.greenhouse_id == greenhouse_id,
-        SensorReading.timestamp >= since,
+    anchor = before if before is not None else datetime.now(timezone.utc)
+    since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
+    row_limit = DIURNAL_PROFILE_HISTORY_DAYS * 288
+    stmt = (
+        select(
+            SensorReading.temperature,
+            SensorReading.humidity,
+            SensorReading.co2,
+            SensorReading.light,
+        )
+        .where(
+            SensorReading.tenant_id == customer_id,
+            SensorReading.greenhouse_id == greenhouse_id,
+            SensorReading.timestamp >= since,
+            SensorReading.timestamp < anchor,
+        )
+        .where(
+            or_(
+                SensorReading.source.is_(None),
+                ~SensorReading.source.startswith("synthetic:"),
+            )
+        )
+        .order_by(SensorReading.timestamp.desc())
+        .limit(row_limit)
     )
-    if before is not None:
-        stmt = stmt.where(SensorReading.timestamp < before)
     result = await db.execute(stmt)
-    rows = result.scalars().all()
-    if not isinstance(rows, list):
-        raise TypeError("sensor history query did not return rows")
+    rows = result.all()
     return _finite_sensor_matrix(rows)
 
 
@@ -2108,16 +2139,33 @@ class ComprehensiveInferencePipeline:
         A slot that already holds a detector is the in-process state for
         this tenant, including an update that has not been saved yet.
         Replacing it with the row just read would drop that update.
+
+        Legacy EMA payloads (written when the pipeline fed normalised
+        values to the EMA, before ``EMABaselineEstimator.for_physical_series``
+        existed) carry an empty ``min_std_by_sensor`` map. Physical
+        estimators always serialise a non-empty map. Installing a
+        normalised-scale EMA into the physical pipeline produces repeated
+        false CUSUM alarms (measured: 37 in 300 clean samples). When the
+        marker is absent, neither the EMA nor the CUSUM accumulators are
+        restored, so the caller builds fresh physical ones instead.
         """
+        ema_data = state.get("ema_baseline_state")
+        # Non-empty min_std_by_sensor is the marker that this payload was
+        # written by EMABaselineEstimator.for_physical_series(); legacy
+        # payloads have an empty or absent map.
+        ema_is_physical = (
+            ema_data is not None
+            and isinstance(ema_data.get("min_std_by_sensor"), dict)
+            and bool(ema_data["min_std_by_sensor"])
+        )
         if customer_id not in self._cusum_cache:
             cusum_data = state.get("cusum_state")
-            if cusum_data is not None:
+            if cusum_data is not None and ema_is_physical:
                 self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
                     cusum_data
                 )
         if customer_id not in self._ema_cache:
-            ema_data = state.get("ema_baseline_state")
-            if ema_data is not None:
+            if ema_data is not None and ema_is_physical:
                 self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
                     ema_data
                 )
