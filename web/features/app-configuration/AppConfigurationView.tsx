@@ -114,6 +114,7 @@ function AppConfigurationBody() {
                 checked={effective[key]}
                 data-testid={`app-config-${key}`}
                 onChange={(e) => update({ [key]: e.target.checked })}
+                className="accent-accent"
               />
               <span>{label}</span>
             </label>
@@ -140,7 +141,7 @@ function AppConfigurationBody() {
               >
                 <input
                   type="checkbox"
-                  className="sr-only"
+                  className="sr-only accent-accent"
                   checked={checked}
                   data-testid={`app-config-channel-${channel}`}
                   onChange={() => toggleChannel(channel)}

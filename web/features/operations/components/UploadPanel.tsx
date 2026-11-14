@@ -81,6 +81,7 @@ export function UploadPanel({ tenant, gh }: UploadPanelProps) {
               value={value}
               checked={mode === value}
               onChange={() => setMode(value)}
+              className="accent-accent"
             />
             {MODE_LABELS[value]}
           </label>

@@ -22,7 +22,7 @@ export function ThresholdControl({ threshold, onChange }: ThresholdControlProps)
         step={STEP}
         value={threshold}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-48 accent-[var(--accent)]"
+        className="w-48 accent-accent"
       />
       <span className="w-14 font-medium tabular-nums">{threshold.toFixed(3)}</span>
     </label>

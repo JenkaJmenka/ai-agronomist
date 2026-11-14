@@ -44,6 +44,7 @@ export function VerdictForm({ incidentId, onSubmit, isSubmitting }: VerdictFormP
             name="verdict"
             checked={isTrueAnomaly}
             onChange={() => setIsTrueAnomaly(true)}
+            className="accent-accent"
           />
           True anomaly
         </label>
@@ -53,6 +54,7 @@ export function VerdictForm({ incidentId, onSubmit, isSubmitting }: VerdictFormP
             name="verdict"
             checked={!isTrueAnomaly}
             onChange={() => setIsTrueAnomaly(false)}
+            className="accent-accent"
           />
           False positive
         </label>
@@ -80,7 +82,7 @@ export function VerdictForm({ incidentId, onSubmit, isSubmitting }: VerdictFormP
             step={0.05}
             value={confidence}
             onChange={(e) => setConfidence(Number(e.target.value))}
-            className="mt-2 block w-40"
+            className="mt-2 block w-40 accent-accent"
           />
         </label>
       </div>
