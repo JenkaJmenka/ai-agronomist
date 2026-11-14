@@ -53,7 +53,25 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3991 passed, 35 skipped, 3 xfailed, 0 failed
+### Current baseline — 3997 passed, 35 skipped, 3 xfailed, 0 failed
+
+Measured 2026-11-14 by the orchestrator on `main` at `1211d9d` — the merge of
+the Grovsen rebrand — full suite in the foreground, 380.64s:
+`./venv/bin/python -m pytest tests/ -q`.
+
+The rebrand branch touches **no** Python: 48 files under `web/`, 15 under
+`assets/`, plus `CLAUDE.md`, `AGENT_MEMORY.md` and one `docs/` file. So the
+`+6` is not from it. It came from PR #106 (`b44f271`), BACKLOG-19's
+pipeline-model-isolation fix, which added `tests/api/test_pipeline_model_isolation.py`
+and **landed without updating this line** — the same omission `#86` made, and
+the reason the `3819` note below insists on corroborating rather than copying.
+`3991` was therefore already stale on `main` at `4556539` before this merge.
+
+Note the gate was run anyway, on a branch known to contain no Python, precisely
+because "it cannot have changed" is the reasoning this file exists to forbid —
+and it is what surfaced the stale figure.
+
+### Previous baseline — 3991 passed, 35 skipped, 3 xfailed, 0 failed
 
 Measured 2026-11-09 by the orchestrator on `main` at `94852a6` — the merge of
 BACKLOG-14's five PRs (#98, #99, #100, #102, #101) — full suite in the
