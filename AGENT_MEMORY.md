@@ -148,7 +148,8 @@ build, 663 unit tests and 76 Playwright specs were all green:
 **Not done in code:** G7 is a Railway variable only -- set `AUTH_RESEND_FROM` to
 a Grovsen sender on an owned domain. `lib/auth/emailProvider.ts` stays
 env-driven and must keep no domain literal (`emailProvider.test.ts:95-99` pins
-that, after the `ai-agronomist.app` NXDOMAIN incident).
+that, after the `ai-agronomist.app` NXDOMAIN incident). **Tracked as BACKLOG-35**,
+filed beside the auth-hardening section rather than with the detector items.
 
 
 ## Task -- anomaly_episodes table, Part A: migration 026 + ORM model -- DONE (2026-10-06)
@@ -4445,6 +4446,53 @@ phase-separate, not touched here).
 Done signal: not applicable (direct teammate task, not orchestrator dispatch).
 
 
+## BACKLOG-35 — the magic-link sender still names the old brand (Orchestrator, 2026-11-14)
+
+Placed here rather than with BACKLOG-33/34 because it belongs with the
+magic-link work above, not with the detector items.
+
+`AUTH_RESEND_FROM` on Railway's `web` service still carries the pre-rebrand
+sender name, so every magic-link email the Grovsen UI sends is signed as the
+old brand. The UI rebrand shipped on `feat/grovsen-rebrand`; this is the one
+user-visible surface it could not reach, because it is a deployment variable
+and not code.
+
+**Deliberately not fixable in the repo.** `web/lib/auth/emailProvider.ts:70,83`
+reads the value fresh from the environment on every call and has no fallback,
+by design: a previous deploy silently sent from `ai-agronomist.app`, a domain
+this project never registered (confirmed NXDOMAIN), because the file used to
+default when the var was unset. `emailProvider.test.ts:95-99` now pins that no
+domain literal appears in the provider source at all. So do **not** "fix" this
+by putting a Grovsen address in the code — that reintroduces the incident the
+test exists to prevent. It is also absent from `.railway/railway.ts`, which is
+correct: it is secret-adjacent config, not IaC.
+
+**What to set:** `AUTH_RESEND_FROM="Grovsen <no-reply@DOMAIN>"`, where DOMAIN is
+verified in the Resend account with the SPF/DKIM records Resend issues for it.
+`RAILWAY_HOSTING.md:127` spells out why that verification is load-bearing:
+until the domain is verified, Resend will only deliver to the account owner's
+own address via its shared `onboarding@resend.dev` sender, which cannot serve
+real operator logins. Picking a plausible-looking domain is therefore worse
+than leaving it alone — an unverified sender fails closed for every operator
+except one.
+
+**Why it is still open:** the orchestrator cannot do it. `railway variables` is
+permission-denied to the agent session (see [[project_railway_db_reads_need_user]],
+the same boundary that applies to production SQL), and the correct domain is
+external account state the agent cannot read. Hand over as:
+
+```
+railway variables --service web | grep AUTH_RESEND
+railway variables --service web --set 'AUTH_RESEND_FROM=Grovsen <no-reply@DOMAIN>'
+```
+
+Low risk, low effort, one command — but it stays visibly off-brand until it is
+run, and a wrong value breaks sign-in for everyone rather than degrading.
+
+Cosmetic follow-on, optional: `emailProvider.test.ts:60,70,76` still use
+`"AI Agronomist <no-reply@example.com>"` as fixture text. Harmless — it is a
+stubbed value that round-trips, not an assertion about the brand.
+
 ## Security audit Phase 2 — startup guard fail-open fix (Backend, 2026-09-28)
 
 Team lead caught a real bug in the Phase 2 fix above: `ENVIRONMENT` defaulted
@@ -6041,9 +6089,10 @@ sessions and 15 and 21 are renumbered survivors of that collision. See BACKLOG-1
 | 32 | unactioned review findings from BACKLOG-14 | OPEN | deliberately deferred at the user's direction, recorded so it is not read as oversight |
 | 33 | mutate-in-place contract belongs to the component | OPEN | successor to BACKLOG-19; triggers ADR-013 |
 | 34 | `clear_detector_cache()` does not clear the pipeline cache | OPEN | pre-existing, unchanged by BACKLOG-19 |
+| 35 | magic-link sender still names the old brand | OPEN | Railway var only; agent is permission-denied and the domain must be Resend-verified. Entry sits with the auth-hardening section, not with 33/34 |
 
 Tally: **5 done** (2, 5, 10, 14, 19), 1 closed as won't-fix (4), 1 adopted as
-practice (3), 1 partial (30), **26 open**.
+practice (3), 1 partial (30), **27 open**.
 
 One caveat on BACKLOG-10, because "DONE" could mislead: the item was specifically
 `learning.py` loading the dead baseline, and that is fixed. The **literal**
