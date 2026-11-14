@@ -232,11 +232,12 @@ class SetpointAwareScadaDetector:
             )
 
         if excess > SETPOINT_TEMP_DELTA_C:
+            # Excess is explained when EITHER solar radiation or outdoor
+            # temperature alone accounts for it.  When both values are
+            # missing neither condition is true and the rule can still fire.
             solar_driven = (
-                ctx.i_solar is not None
-                and ctx.t_outdoor is not None
-                and ctx.i_solar > OVERHEAT_SOLAR_WM2
-                and ctx.t_outdoor > OVERHEAT_OUTDOOR_TEMP_C
+                (ctx.i_solar is not None and ctx.i_solar > OVERHEAT_SOLAR_WM2)
+                or (ctx.t_outdoor is not None and ctx.t_outdoor > OVERHEAT_OUTDOOR_TEMP_C)
             )
             if not solar_driven:
                 observed: Dict[str, float] = {"T_gh": t_gh, "T_setpoint": sp}
@@ -369,8 +370,10 @@ class SetpointAwareScadaDetector:
                     observed_values={value_key: last},
                     reasoning=(
                         f"Sensor flatline anomaly: {sensor} constant at {last:.2f} "
-                        f"for ≥ {FLATLINE_IDENTICAL_STEPS} steps "
-                        f"(~2 h at 5-min sampling); "
+                        f"for {min(series.size, FLATLINE_IDENTICAL_STEPS)} of "
+                        f"{series.size} available samples "
+                        f"(checked {min(series.size, FLATLINE_IDENTICAL_STEPS)}, "
+                        f"threshold {FLATLINE_IDENTICAL_STEPS}); "
                         f"rolling variance over {FLATLINE_VARIANCE_WINDOW} "
                         f"≤ {FLATLINE_VARIANCE_EPS:g}²."
                     ),

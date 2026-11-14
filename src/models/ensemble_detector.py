@@ -154,7 +154,7 @@ class LstmVaeDetector:
         return _normalize_error(peak_error, self.threshold)
 
     def is_anomaly(self, score: float) -> bool:
-        return score >= 0.5
+        return score >= 1.0
 
 
 class IsolationForestDetector:
@@ -237,7 +237,7 @@ class StatisticalDetector:
         return _normalize_error(mahal, self.threshold)
 
     def is_anomaly(self, score: float) -> bool:
-        return score >= 0.5
+        return score >= 1.0
 
 
 class CorrelationDetector:
