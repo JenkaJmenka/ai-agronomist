@@ -1855,3 +1855,77 @@ ANOMALY_TREND_FLAT_DEADBAND: float = float(
 ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION: float = float(
     os.environ.get("ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION", "0.25")
 )
+
+# =============================================================================
+# Drift Watch — vendor-agnostic CUSUM on weather-removed residuals
+# (2026-11-14 measurement on tenant 1d year corpus)
+# =============================================================================
+
+# Rolling baseline fit window length (weeks).
+# Measured 2026-11-14: 8-week baseline captures enough weather variation
+# for stable residual statistics.
+DRIFT_WATCH_BASELINE_WEEKS: int = 8
+
+# Gap between the end of the fit window and the start of the calibration
+# period (weeks). Set to 0: the calibration window already uses
+# out-of-sample predictions (model fitted on the fit window only), so no
+# gap is needed. A non-zero gap shifts the calibration data, which changes
+# h and can degrade re-arm dynamics on the held-out period.
+# Validated 2026-11-14: gap=0 reproduces the measurement (k, h, FA, real
+# fault detection) exactly; gap=2 produced h=111.5 for R4 (vs 200.0) and
+# missed the real humidity fault.
+DRIFT_WATCH_GAP_WEEKS: int = 0
+
+# Minimum total history (weeks) before calibration is permitted.
+# Layout: 8 weeks baseline + 8 weeks calibration = 16 weeks.
+DRIFT_WATCH_MIN_HISTORY_WEEKS: int = 16
+
+# Target false-alarm budget (alarms per calendar month) used when
+# calibrating the CUSUM decision interval h.
+# Measured 2026-11-14: 1 FA/month achieved for R1, R2, R4 on held-out data.
+DRIFT_WATCH_FA_BUDGET_PER_MONTH: float = 1.0
+
+# Minimum detection rate a self-test fault must achieve for the input to be
+# ARMED (vs SHADOW). A rate below this means the input cannot reliably
+# detect its target shift at the chosen threshold.
+DRIFT_WATCH_DETECTION_RATE_THRESHOLD: float = 0.6
+
+# Upper bound on h during binary search.
+# Measured 2026-11-14: R4 (RH virtual sensor) required h=200 to approach
+# 1 FA/month on calibration data.
+DRIFT_WATCH_CALIBRATION_H_MAX: float = 200.0
+
+# CUSUM re-arm fraction: after an alarm, the statistic must drop below
+# h * REARM_FRACTION before the direction can fire again.
+# Measured 2026-11-14: 0.5 gives one alarm per excursion with reliable
+# re-arming on held-out data.
+DRIFT_WATCH_REARM_FRACTION: float = 0.5
+
+# Physics (Tetens) independence test: if the baseline residual sigma is at
+# or below this value (g/m^3), the humidity deficit is classified as
+# *derived* from temperature + RH (not an independent measurement).
+# Measured 2026-11-14: tenant 1d corpus baseline sigma = 0.043 g/m^3,
+# which is at the integer-rounding quantisation level. True independent
+# HD sensors (capacitive / chilled mirror) show sigma > 0.5 g/m^3.
+DRIFT_WATCH_PHYSICS_DERIVED_SIGMA_CEIL: float = 0.1
+
+# Schema version for serialised DriftInputState (bump on breaking changes).
+DRIFT_WATCH_SCHEMA_VERSION: int = 1
+
+# Default minimum-shift targets in native units (passed by the caller via
+# DriftInputSpec.min_shift; these are reference values for documentation).
+# Measured 2026-11-14: these shifts are reliably detected with the
+# calibrated CUSUM at <= 1 FA/month.
+DRIFT_WATCH_DEFAULT_SHIFT_TEMP_C: float = 0.5   # C
+DRIFT_WATCH_DEFAULT_SHIFT_RH_PCT: float = 2.0   # %RH
+DRIFT_WATCH_DEFAULT_SHIFT_HD_GM3: float = 0.3   # g/m^3
+
+# Self-test injection parameters.
+# Bias levels as multiples of min_shift (e.g. [1, 2, 4] -> 0.5, 1.0, 2.0 C).
+DRIFT_WATCH_INJECT_BIAS_LEVELS: Tuple[float, ...] = (1.0, 2.0, 4.0)
+# Drift rate as a multiple of min_shift per week.
+DRIFT_WATCH_INJECT_DRIFT_RATE: float = 1.0
+# Drift duration (weeks).
+DRIFT_WATCH_INJECT_DRIFT_WEEKS: int = 4
+# Number of injection start points spread across the calibration period.
+DRIFT_WATCH_INJECT_N_STARTS: int = 5
