@@ -16,7 +16,7 @@
   --bg-sidebar: #eef3f1;
 
   --border: #dce5e2;
-  --border-strong: #b9c9c4;
+  --border-strong: #748c86;
 
   --text: #0f1f1c;
   --text-muted: #566864;
@@ -38,6 +38,10 @@
 
   --sev-ok: #1a7a4c;
   --sev-normal: var(--sev-ok);
+  /* Reserved — not yet in the `Severity` union (lib/severity.ts), so it has no
+     `Chip` path and no current consumer. Add it to that union and give it a
+     `SEVERITY_CLASSES` entry before using it; don't hand-roll a text-sev-info
+     class, which is exactly what the rebrand's last phase removed. */
   --sev-info: #1d5fd1;
   --sev-warning: #9a5b00;
   --sev-critical: #c0262d;
@@ -80,7 +84,7 @@
   --bg-sidebar: #0b1d1a;
 
   --border: #1e3934;
-  --border-strong: #2c4d46;
+  --border-strong: #55796f;
 
   --text: #e4eeeb;
   --text-muted: #8da8a2;
@@ -134,7 +138,7 @@
     --bg-sidebar: #0b1d1a;
 
     --border: #1e3934;
-    --border-strong: #2c4d46;
+    --border-strong: #55796f;
 
     --text: #e4eeeb;
     --text-muted: #8da8a2;

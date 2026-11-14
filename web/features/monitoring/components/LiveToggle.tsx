@@ -56,6 +56,11 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   // applies to `resumed` for an unconfigured scope (live.py:183-186): a
   // toggle that reads "on" must not lie about data actually arriving.
   const isLiveButStale = live && freshness?.state === "live" && freshness.is_stale;
+  // Drives both the button variant and the dot colour below — they must not
+  // be able to diverge (that divergence is what made the dot invisible: a
+  // primary-variant button painted with a --sev-normal dot, mint-on-mint in
+  // dark mode at 1.21:1).
+  const isLivePrimary = live && !isLiveButStale;
 
   // The not_configured verdict is per-scope — it must not outlive the scope
   // it was about. LiveToggle does not remount when tenant/gh change (the URL
@@ -137,7 +142,7 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Button
-        variant={live && !isLiveButStale ? "primary" : "secondary"}
+        variant={isLivePrimary ? "primary" : "secondary"}
         size="sm"
         onClick={() => void handleClick()}
         aria-pressed={live}
@@ -149,8 +154,11 @@ export function LiveToggle({ pageId }: LiveToggleProps) {
           className={`inline-block h-2 w-2 shrink-0 rounded-full ${
             isLiveButStale
               ? "bg-sev-critical"
-              : live
-                ? "motion-safe:animate-pulse bg-sev-normal"
+              : isLivePrimary
+                ? // On the primary fill, not the page background — --sev-normal
+                  // reads 1.21:1 against --accent in dark mode (mint on mint).
+                  // --accent-fg is the ink defined to sit on an accent fill.
+                  "motion-safe:animate-pulse bg-accent-fg"
                 : "bg-text-muted"
           }`}
           aria-hidden="true"

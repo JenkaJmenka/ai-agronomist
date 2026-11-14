@@ -101,3 +101,61 @@ export function resolveColor(theme: Map<string, string>, property: string): stri
   const value = alias ? theme.get(alias[1]) : raw;
   return value !== undefined && HEX_COLOR.test(value) ? value : null;
 }
+
+/** True when a declared value is a hex literal rather than a var()/color-mix(). */
+export function isDirectHex(value: string): boolean {
+  return HEX_COLOR.test(value);
+}
+
+// ---------------------------------------------------------------------------
+// Hue — for telling severity colours apart from one another
+// ---------------------------------------------------------------------------
+
+const DEGREES_PER_TURN = 360;
+const SEXTANT = 60;
+
+interface HueAndChroma {
+  /** Position on the colour wheel, 0-360°; arbitrary when `saturation` is 0. */
+  readonly hue: number;
+  /** HSL saturation, 0-1. Near 0 means grey, where `hue` means nothing. */
+  readonly saturation: number;
+}
+
+/**
+ * HSL hue and saturation of a hex colour.
+ *
+ * Deliberately not contrast: every `--sev-*` is tuned to clear 4.5:1 against
+ * the same three surfaces, so they all sit near 1.0:1 against *each other* —
+ * `--sev-ok` vs `--sev-warning` is 1.01:1 and plainly distinguishable. Hue is
+ * what separates a severity palette; luminance is what makes it readable.
+ */
+export function hueAndChromaOf(hex: string): HueAndChroma {
+  const digits = hex.replace("#", "");
+  const sixDigit = digits.length === 3 ? digits.replace(/./g, (char) => char + char) : digits;
+  const [red, green, blue] = [0, 2, 4].map(
+    (offset) => Number.parseInt(sixDigit.slice(offset, offset + 2), 16) / 255,
+  );
+
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const chroma = max - min;
+  const lightness = (max + min) / 2;
+  if (chroma === 0) return { hue: 0, saturation: 0 };
+
+  // Which 60° sextant the dominant channel puts us in, then the offset within
+  // it. Guard-claused rather than a nested ternary.
+  function sextantsFromDominantChannel(): number {
+    if (max === red) return ((green - blue) / chroma) % 6;
+    if (max === green) return (blue - red) / chroma + 2;
+    return (red - green) / chroma + 4;
+  }
+
+  const hue = (sextantsFromDominantChannel() * SEXTANT + DEGREES_PER_TURN) % DEGREES_PER_TURN;
+  return { hue, saturation: chroma / (1 - Math.abs(2 * lightness - 1)) };
+}
+
+/** Shortest angular distance between two hues, 0-180°. */
+export function hueSeparation(first: number, second: number): number {
+  const direct = Math.abs(first - second) % DEGREES_PER_TURN;
+  return Math.min(direct, DEGREES_PER_TURN - direct);
+}

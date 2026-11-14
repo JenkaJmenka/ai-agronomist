@@ -1,30 +1,28 @@
 /**
- * Guard for the design-token contract (MIGRATION_PLAN §7.1, Grovsen rebrand).
+ * Guard for the design-token contract in `app/globals.css`
+ * (MIGRATION_PLAN §7.1, Grovsen rebrand).
  *
  * Every value is parsed from disk, never snapshotted: changing a token means
- * editing `app/globals.css` and nothing else. What is asserted are the
- * invariants no single file shows you — that the two dark blocks stay in step,
- * that every ink clears WCAG AA on every surface it is painted on, that no raw
- * colour literal has crept back into `app/` or `components/`, and that the
- * canvas fallback palette still mirrors the light block.
+ * editing `globals.css` and nothing else. What is asserted are the invariants
+ * reading one block cannot show you — that the two dark blocks stay in step,
+ * that every ink clears WCAG AA on each surface it is painted on, that a
+ * meaningful boundary clears 3:1, and that no two severity colours collapse
+ * into the same hue.
  *
- * It lives in `test/` rather than beside a component because it has no single
- * subject: its inputs are a stylesheet, two directory trees and the brand
- * assets. Parsing and the contrast maths are in `test/support/designTokens.ts`.
+ * How the *rest* of the tree consumes these tokens is
+ * `test/tokenAdoption.test.ts`. Parsing and the colour maths are in
+ * `test/support/designTokens.ts`.
  */
 
-import { readdirSync, statSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  CHART_THEME_TS,
   contrastRatio,
   customPropertiesOf,
-  GLOBALS_CSS,
-  LOGO_TSX,
+  hueAndChromaOf,
+  hueSeparation,
+  isDirectHex,
   propertiesOf,
-  readWebFile,
   resolveColor,
 } from "./support/designTokens";
 
@@ -168,118 +166,87 @@ describe("filled-surface contrast", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stragglers — raw colours that bypass the token layer
+// Component boundaries — a border is a graphic, not text
 // ---------------------------------------------------------------------------
 
-const SCANNED_TREES = ["app", "components"];
-const SCANNED_EXTENSIONS = [".ts", ".tsx", ".css", ".svg"];
+describe("component boundary contrast", () => {
+  // Only --border-strong. --border is a decorative hairline between rows and
+  // measures ~1.2:1 by design; WCAG 1.4.11 applies to boundaries that *carry*
+  // meaning — an input outline, a focused control — which is what
+  // --border-strong is for. Do not add --border here and then lower the gate.
+  const pairs = THEMES.flatMap((theme) =>
+    SURFACE_PROPERTIES.map((surface) => ({ theme: theme.name, tokens: theme.tokens, surface })),
+  );
+
+  it.each(pairs)("shows --border-strong on $surface in $theme", ({ tokens, surface }) => {
+    const borderHex = resolveColor(tokens, "--border-strong") as string;
+    const surfaceHex = resolveColor(tokens, surface) as string;
+    const ratio = contrastRatio(borderHex, surfaceHex);
+    expect(ratio, `${borderHex} on ${surfaceHex} is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(
+      AA_LARGE_GRAPHIC_RATIO,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Severity palette — hue separation
+// ---------------------------------------------------------------------------
 
 /**
- * Files allowed to hold raw colours, each for a reason that cannot be a token:
- * `globals.css` is the token layer itself; `icon.svg` is a static favicon with
- * no stylesheet to read from; `GrovsenLogo.tsx` paints a white sprout that is
- * correct in both themes; `chartTheme.ts` needs concrete colours for a canvas
- * during SSR — and rather than trust that last exemption, the mirror test
- * below asserts each of its literals still equals the light token it names.
+ * Minimum angular gap between any two severity hues.
+ *
+ * Read off the palette rather than taken from a standard. The tightest real
+ * pairs are 38.2° (light --sev-warning vs --sev-critical) and 37.5° (dark
+ * --sev-info vs --sev-urgent), while the defect this exists to catch — dark
+ * --sev-lstm shipping 8.9° from --sev-warning, which no gate noticed until a
+ * human looked — sat far below either. 30° leaves ~20% headroom over the real
+ * floor and still flags that class with 3x margin. Note a threshold of 40°
+ * would fail the palette as it stands, so this is not free to raise.
  */
-const RAW_COLOR_EXEMPTIONS = [GLOBALS_CSS, "app/icon.svg", LOGO_TSX, CHART_THEME_TS];
+const MIN_SEVERITY_HUE_SEPARATION = 30;
 
-const TAILWIND_PALETTE =
-  "slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose";
+/** Under this saturation a colour is grey and its hue is arbitrary. */
+const MIN_CHROMATIC_SATURATION = 0.3;
 
-const RAW_COLOR_PATTERNS: readonly { readonly label: string; readonly pattern: RegExp }[] = [
-  { label: "hex literal", pattern: /#[0-9a-fA-F]{3,8}\b/ },
-  { label: "rgb()/hsl() literal", pattern: /\b(?:rgba?|hsla?)\(/ },
-  {
-    label: "Tailwind palette class",
-    pattern: new RegExp(
-      `\\b(?:bg|text|border|fill|stroke|ring|from|via|to|divide|outline|shadow|decoration)-(?:${TAILWIND_PALETTE})-\\d{2,3}\\b`,
-    ),
-  },
-  {
-    label: "undefined or pre-rebrand token class",
-    pattern: /\b(?:text-white|bg-surface|bg-muted-foreground)\b/,
-  },
-];
-
-function scannedFiles(): string[] {
-  return SCANNED_TREES.flatMap((tree) =>
-    readdirSync(path.resolve(process.cwd(), tree), { recursive: true, encoding: "utf-8" })
-      .map((entry) => path.posix.join(tree, entry.split(path.sep).join("/")))
-      .filter((file) => SCANNED_EXTENSIONS.includes(path.extname(file)))
-      // Tests set and assert concrete colours on purpose — that is how token
-      // resolution gets exercised at all — so only shipped source is scanned.
-      .filter((file) => !/\.test\.tsx?$/.test(file))
-      .filter((file) => !RAW_COLOR_EXEMPTIONS.includes(file)),
-  );
-}
-
-describe("no raw colours outside the token layer", () => {
-  const files = scannedFiles();
-
-  it("walks both trees to their leaves", () => {
-    // A readdir that silently returned nothing, or only the top level, would
-    // make every assertion below vacuous. Asserted as a shape — files exist,
-    // and some of them are nested — rather than as a count, which would need
-    // editing every time a component is added or removed.
-    expect(files.length).toBeGreaterThan(0);
-    expect(files.some((file) => file.split("/").length >= 3)).toBe(true);
-  });
-
-  it("exempts only files that are still there", () => {
-    // A stale exemption is how a file quietly stops being scanned; the paths
-    // are matched exactly, so a moved file must be re-justified, not inherited.
-    for (const exemption of RAW_COLOR_EXEMPTIONS) {
-      expect(statSync(path.resolve(process.cwd(), exemption)).size, exemption).toBeGreaterThan(0);
-      expect(files, exemption).not.toContain(exemption);
-    }
-  });
-
-  it.each(RAW_COLOR_PATTERNS)("finds no $label", ({ pattern }) => {
-    const offenders = files.flatMap((file) => {
-      const found = readWebFile(file).match(pattern);
-      return found === null ? [] : [`${file}: ${found[0]}`];
-    });
-    expect(offenders).toEqual([]);
-  });
-});
-
-describe("canvas fallback palette", () => {
-  it("mirrors the light value of every token its comments name", () => {
-    // This pair drifted once already during the rebrand: light --text-muted
-    // moved and LIGHT_FALLBACK.text kept the old value, which only jsdom and
-    // SSR could see. Each literal is annotated with the token it mirrors, so
-    // the annotation is what gets checked — including that every literal in
-    // the block carries one.
-    const source = readWebFile(CHART_THEME_TS);
-    const start = source.indexOf("const LIGHT_FALLBACK");
-    const end = source.indexOf("} as const;", start);
-    expect(start, `${CHART_THEME_TS} has no LIGHT_FALLBACK block`).toBeGreaterThanOrEqual(0);
-    expect(end, "LIGHT_FALLBACK block is unterminated").toBeGreaterThan(start);
-
-    const block = source.slice(start, end);
-    const annotated = [...block.matchAll(/(\w+):\s*"(#[0-9a-fA-F]{3,8})",\s*\/\/\s*(--[\w-]+)/g)];
-    expect(annotated.length, "no annotated fallbacks parsed").toBeGreaterThan(0);
-    expect(annotated.length, "a fallback literal names no token").toBe(
-      (block.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).length,
+for (const theme of [
+  { name: "light", declarations: LIGHT },
+  { name: "dark", declarations: DARK },
+] as const) {
+  describe(`${theme.name} severity palette`, () => {
+    // Aliases are the same colour deliberately (--sev-normal is var(--sev-ok))
+    // and would register as a 0° collision, so only tokens declared as their
+    // own hex are compared.
+    const severities = theme.declarations.filter(
+      ([property, value]) => property.startsWith("--sev-") && isDirectHex(value),
     );
 
-    for (const [, key, literal, token] of annotated) {
-      expect(literal.toLowerCase(), `${key} mirrors ${token}`).toBe(
-        resolveColor(LIGHT_THEME, token)?.toLowerCase(),
-      );
-    }
-  });
-});
+    it("has more than one distinct severity colour to compare", () => {
+      // Guards the filter above: if aliasing changed and this collapsed to one
+      // entry, the pairwise assertion below would pass with nothing to check.
+      expect(severities.length).toBeGreaterThan(1);
+    });
 
-describe("brand assets", () => {
-  it.each(["app/icon.svg", "app/favicon.ico", "app/apple-icon.png"])("ships %s", (asset) => {
-    expect(statSync(path.resolve(process.cwd(), asset)).size).toBeGreaterThan(0);
-  });
+    it("keeps every severity colour chromatic enough for hue to mean anything", () => {
+      for (const [property, value] of severities) {
+        const { saturation } = hueAndChromaOf(value);
+        expect(saturation, `${property} ${value} sat=${saturation.toFixed(2)}`).toBeGreaterThan(
+          MIN_CHROMATIC_SATURATION,
+        );
+      }
+    });
 
-  it("gives the inline logo an accessible name", () => {
-    // biome's a11y/noSvgWithoutTitle is switched off repo-wide, so the <title>
-    // on the inline brand mark has no linter guarding it.
-    expect(readWebFile(LOGO_TSX)).toContain("<title>");
+    it(`separates every pair of severity hues by ${MIN_SEVERITY_HUE_SEPARATION} degrees`, () => {
+      const collisions = severities
+        .flatMap(([firstName, firstHex], index) =>
+          severities.slice(index + 1).map(([secondName, secondHex]) => ({
+            label: `${firstName} vs ${secondName}`,
+            separation: hueSeparation(hueAndChromaOf(firstHex).hue, hueAndChromaOf(secondHex).hue),
+          })),
+        )
+        .filter((pair) => pair.separation < MIN_SEVERITY_HUE_SEPARATION)
+        .map((pair) => `${pair.label}: ${pair.separation.toFixed(1)} degrees`);
+
+      expect(collisions).toEqual([]);
+    });
   });
-});
+}
