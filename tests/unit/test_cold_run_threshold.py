@@ -34,9 +34,9 @@ def test_pot_falls_back_when_flat():
     "COLD_RUN_ROBUST_GATE_ENABLED" in os.environ,
     reason="the gate is explicitly configured for this run",
 )
-def test_robust_gate_is_on_by_default():
-    """The gate is on when COLD_RUN_ROBUST_GATE_ENABLED is unset."""
-    assert cold_run_threshold.COLD_RUN_ROBUST_GATE_ENABLED is True
+def test_robust_gate_is_off_by_default():
+    """Enabling the gate is a per-deployment decision, not the default."""
+    assert cold_run_threshold.COLD_RUN_ROBUST_GATE_ENABLED is False
 
 
 # ---------------------------------------------------------------------------

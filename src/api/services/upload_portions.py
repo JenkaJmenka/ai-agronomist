@@ -204,8 +204,8 @@ def _calibrate_upload_threshold(scores: np.ndarray) -> tuple[float, str]:
     """File threshold for one upload.
 
     Returns ``calibrate_threshold`` unchanged. The robust gate follows that
-    function: it is on unless ``COLD_RUN_ROBUST_GATE_ENABLED`` is set off,
-    and it can only raise the cutoff.
+    function: it is off unless ``COLD_RUN_ROBUST_GATE_ENABLED`` enables it;
+    when enabled it can only raise the cutoff.
     """
     return calibrate_threshold(scores)
 

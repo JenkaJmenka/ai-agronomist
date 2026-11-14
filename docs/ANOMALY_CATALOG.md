@@ -716,8 +716,8 @@ with three checks and merges their hits:
 
 1. **LSTM scoring** — the tenant's active model, or a freshly cold-started
    one if none exists yet ("Option A" in the upload endpoint). The file
-   threshold uses `calibrate_threshold`, and the robust gate is on unless
-   `COLD_RUN_ROBUST_GATE_ENABLED` is set off. A raised cutoff is
+   threshold uses `calibrate_threshold`, and the robust gate is off by
+   default, opt-in per deployment via `COLD_RUN_ROBUST_GATE_ENABLED`. A raised cutoff is
    reported with method suffix `+robust_gate`.
 2. **Per-column rolling z-score** (`ColdRunStatisticalDetector`,
    `src/models/cold_run_detector.py`) — independent of whether a model

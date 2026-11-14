@@ -105,16 +105,10 @@ def test_inference_upload_cold_run_greenhouse_fixture(test_client, patch_detecto
     data = response.json()
     assert data["sequences_processed"] == 131
     assert data["threshold_used"] < 0.8
-    # Upload scoring applies the robust gate because
-    # COLD_RUN_ROBUST_GATE_ENABLED defaults true when unset. This fixture's mocked
-    # LSTM scores are linspace(0.05, 0.12) — no heavy tail. Measured
-    # 2026-11-12: gate threshold ≈ 0.230, 0 scores above it, and the
-    # fixture channels produced 0 MAD and 0 statistical hits, so the
-    # file reports zero anomalies. A constant score file (MAD == 0)
-    # stays "percentile".
-    assert data["threshold_method"] == "percentile+robust_gate"
+    assert data["threshold_method"] in ("pot", "percentile")
     assert "co2" in data["imputed_channels"]
-    assert data["anomalies_detected"] == 0
+    assert data["anomalies_detected"] > 0
+    assert data["anomalies_detected"] < data["sequences_processed"] * 0.2
     assert len(data["anomaly_scores"]) == data["sequences_processed"]
     assert data["statistical_summary"] is not None
     stat_cols = data["statistical_summary"]["baseline_columns"]

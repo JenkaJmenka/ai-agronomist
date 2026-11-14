@@ -4,7 +4,7 @@
 **Base:** `main` at `4556539` (PR #107)  
 **Date:** 2026-11-13  
 **Bar:** composite ≥ 0.90, defined as `0.5 × clean specificity + 0.5 × mean detection recall` on spike, noise, and two-channel level shift.  
-**Last measurement:** composite **0.9041916167664671** (clean specificity 80.84%, clean FPR 19.16% = 32/167, mean recall 1.0). Upload +6 °C spikes **12/12**, clean upload column hits **0**. Gate file: `tests/models/test_detection_accuracy.py`. The full suite has not been run on this branch. On `main` before this work it was 3997 passed / 35 skipped / 3 xfailed / 0 failed.
+**Last measurement:** composite **0.9041916167664671** (clean specificity 80.84%, clean FPR 19.16% = 32/167, mean recall 1.0). Upload +6 °C spikes **12/12**, clean upload column hits **0**. Gate file: `tests/models/test_detection_accuracy.py`. Full suite on 2026-11-14 in a Linux/Python 3.11 cloud environment (not the project venv): 3996 passed, 4 failed at `3493a7a` with the gate on; the four failures were LSTM determinism/parity tests with zero alerts to compare. On `main` before this work it was 3997 passed / 35 skipped / 3 xfailed / 0 failed.
 
 Canvases copied from the session artifacts:
 
@@ -20,7 +20,7 @@ Phase 1, accepted at 90% after the bar was lowered from 95%. The first gate was 
 - Enrichment votes the last timestep. Precedence is dropout/OOB, then BOCPD anywhere in the window, last-step MAD (temperature, humidity, CO₂; light skipped), noise, bias, correlation, diurnal, Mahalanobis, flatline, setpoint. Bands set `is_anomaly` only when the tenant has raw overrides.
 - Noise calibration can only loosen: `resolve_noise_baseline` keeps `max(calibrated, fixed)`. Ratio 20 is used only when clean windows are passed.
 - Live scorer keeps 32 non-overlapping clean windows and drops a window the fixed noise detector already flags. Empty ring passes `None`.
-- Upload MAD scores only `UPLOAD_SPIKE_MAD_FLOOR` (temperature 0.5 °C, c=8). The robust LSTM gate defaults on (`COLD_RUN_ROBUST_GATE_ENABLED`). CSV bounds match `OOB_LIMITS`.
+- Upload MAD scores only `UPLOAD_SPIKE_MAD_FLOOR` (temperature 0.5 °C, c=8). The robust LSTM gate was reverted to off by default on 2026-11-14: with it on, the LSTM raised zero alerts on both the July and December fixtures, breaking four determinism/parity tests. CSV bounds match `OOB_LIMITS`.
 - `out_of_bounds` is emitted. Migration `029` and `FaultType.HUMIDITY_FAULT` allow `humidity_fault`. `thermodynamic_contradiction` stays a separate member. Physics-confirmed `psychrometric_impossibility` still maps to `spike_fault`.
 - Flatline uses variance ≤ `FLATLINE_VARIANCE_EPS`² (`1e-4`) and drops light. Ensemble midpoint bias pre-check is gone. Stuck pre-check skips light.
 - Saved CUSUM and EMA load before the update. The residual is the denormalized last timestep via `for_physical_series()`, and `update_and_reset` records the sensor from the True return. Step 5a is still the only CUSUM vote.
@@ -46,7 +46,6 @@ The prototyped bundle was 97.9% composite and 4.2% FPR. That number scored only 
 - **Clean FPR 19.16%** is inside the accepted 0.90 bar. Another noise-tuning round was declined.
 - **Design items not done:** one scoring path for upload, live, and `/api/inference`; full denormalization before every physical rule (BACKLOG-23); a clean-tenant latent gallery; persisting `LearningState` so CUSUM accumulates inside one process rather than only across saved rows. The accuracy harness builds a new pipeline per window, so it does not show multi-call drift.
 - **Not re-reviewed** after the architect's ring-admission and variance-floor fixes. Code review before those fixes was PASS WITH NOTES.
-- `docs/architecture/anomaly_math_definitions.md` still says the robust gate is off by default.
 - The full pytest suite is the merge gate and has not been run here. Do not scale the API past one replica.
 
 ## How to resume

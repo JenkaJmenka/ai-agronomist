@@ -250,12 +250,13 @@ COLD_RUN_BASELINE_FRACTION: float = 0.2
 # far the tail sits from the bulk instead of how many rows there are: a clean
 # file then yields zero hits and a file with N genuine faults yields ~N.
 #
-# On unless the env var disables it.  An explicit value always wins, including
-# 0 / false / no / off; an unset variable leaves the gate enabled.  The gate
-# only ever RAISES the threshold, so it can never add anomalies, but it does
-# move the ADR-005 canonical anchor (canonical 0.5 == threshold) for every
-# score in the file.
-COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", True)
+# Disabled by default.  It only ever RAISES the threshold, so enabling it can
+# never add anomalies, but it does move the ADR-005 canonical anchor
+# (canonical 0.5 == threshold) for every score in the file; measured 2026-11-14:
+# with it enabled the LSTM produced 0 alerts on both tests/fixtures native July
+# and December files, so enable per deployment only after validating hit counts
+# against a labelled file.
+COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
 # Robust z-score a raw score must clear above the bulk of the distribution.
 # Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
 # "anomalous" starts.
