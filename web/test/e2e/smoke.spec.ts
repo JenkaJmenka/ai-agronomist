@@ -116,7 +116,7 @@ const NAV_TARGETS = [
 test("app boots and renders the Home page", async ({ page }) => {
   await setupBffMocks(page);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
   await expect(page.getByTestId("home-page")).toBeVisible();
   await expect(page.getByTestId("uplot-chart")).toBeVisible();
 });

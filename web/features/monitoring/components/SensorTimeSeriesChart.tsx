@@ -4,6 +4,7 @@ import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
 import { ChartResetButton } from "@/components/charts/ChartResetButton";
+import { chartTokens } from "@/components/charts/chartTheme";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -12,7 +13,7 @@ import {
 import { type ChartViewWindow, UPlotChart } from "@/components/charts/UPlotChart";
 import type { SensorRow } from "@/features/monitoring/api/readings";
 import { type AnomalyBand, computeAnomalyBands } from "@/features/monitoring/lib/anomalyBands";
-import { ANOMALY_BAND_FILL, channelColor } from "@/lib/colors";
+import { CHART_COLOR_COUNT, channelColor } from "@/lib/colors";
 
 interface SensorTimeSeriesChartProps {
   readonly rows: SensorRow[];
@@ -43,7 +44,8 @@ interface SensorTimeSeriesChartProps {
 function drawAnomalyBands(u: uPlot, bands: AnomalyBand[]): void {
   const { ctx, bbox } = u;
   ctx.save();
-  ctx.fillStyle = ANOMALY_BAND_FILL;
+  // Read per draw (not memoized) so a theme flip repaints the band.
+  ctx.fillStyle = chartTokens().anomalyBand;
   for (const [start, end] of bands) {
     const left = Math.max(u.valToPos(start, "x", true), bbox.left);
     const right = Math.min(u.valToPos(end, "x", true), bbox.left + bbox.width);
@@ -104,8 +106,14 @@ export function SensorTimeSeriesChart({
         {},
         ...channels.map((ch, i) => ({
           label: ch,
-          stroke: channelColor(i),
+          // Function, not a resolved string: uPlot re-evaluates this on every
+          // draw, so channelColor's theme lookup follows a theme toggle
+          // instead of freezing at whatever was active when options built.
+          stroke: () => channelColor(i),
           width: 1.5,
+          // Past the 8-slot palette, repeat chart1..8 dashed rather than add
+          // more hues — CHART_COLOR_COUNT is the single source for the wrap.
+          ...(i >= CHART_COLOR_COUNT ? { dash: [6, 4] } : {}),
           // Do not bridge multi-minute gaps — live lookback often has sparse
           // history and connecting them flattens the left side of the chart.
           spanGaps: false,

@@ -93,6 +93,11 @@ describe("LiveBadge paused sources", () => {
     const dot = screen.getByTestId("source-dot-climate");
     expect(dot).toHaveAttribute("aria-label", "climate: paused");
     // Muted, not a severity colour: a paused scope is off, not broken.
-    expect(dot.className).toContain("bg-muted-foreground/40");
+    // `bg-muted-foreground/40` stood here until the Grovsen rebrand, naming a
+    // token that never existed — Tailwind emitted no CSS for it, so the dot had
+    // no background at all. The `bg-sev-` half keeps the intent assertion real:
+    // STATUS_DOT does use severity classes for the other three states.
+    expect(dot.className).toContain("bg-text-muted/40");
+    expect(dot.className).not.toMatch(/bg-sev-/);
   });
 });

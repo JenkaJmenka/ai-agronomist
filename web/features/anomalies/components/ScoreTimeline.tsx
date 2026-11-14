@@ -4,6 +4,7 @@ import { useMemo, useRef } from "react";
 import type uPlot from "uplot";
 
 import { ChartResetButton } from "@/components/charts/ChartResetButton";
+import { chartTokens } from "@/components/charts/chartTheme";
 import {
   createRangeSelectHook,
   type RangeSelectHandler,
@@ -71,15 +72,17 @@ export function ScoreTimeline({
         {},
         {
           label: "Anomaly score",
-          // Canvas rendering — CSS variables do not resolve here; use the
-          // literal severity hex values (tokens §7.1).
-          stroke: "#ff8c00",
+          // Canvas rendering can't read CSS variables directly, but
+          // chartTokens() resolves them to concrete strings — a function
+          // here (not a resolved string) lets uPlot re-evaluate it on every
+          // draw, so the stroke follows a theme toggle instead of freezing.
+          stroke: () => chartTokens().sevLstm,
           width: 1.5,
           points: { show: false },
         },
         {
           label: "Threshold",
-          stroke: "#ef4444",
+          stroke: () => chartTokens().sevCritical,
           width: 1,
           dash: [6, 4],
           points: { show: false },

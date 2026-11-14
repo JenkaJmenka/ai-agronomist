@@ -55,14 +55,16 @@ function NavLinks() {
 export function Sidebar() {
   return (
     <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-bg-sidebar">
-      <div className="flex items-center justify-between gap-2 px-3 py-4">
-        <div className="flex min-w-0 flex-col gap-1">
-          <GrovsenLogo variant="full" height={26} />
-          <p className="text-[11px] uppercase tracking-wider text-text-muted">AI Agronomist</p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <ThemeToggle />
-          <SignOutButton />
+      <div className="flex flex-col gap-2 px-3 py-4">
+        <GrovsenLogo variant="full" height={26} />
+        <div className="flex items-center justify-between gap-2">
+          <p className="min-w-0 truncate text-[11px] uppercase tracking-wider text-text-muted">
+            AI Agronomist
+          </p>
+          <div className="flex shrink-0 items-center gap-1">
+            <ThemeToggle />
+            <SignOutButton />
+          </div>
         </div>
       </div>
       <Suspense>

@@ -88,7 +88,7 @@ test(`home cold load paints the chart under ${COLD_TTI_BUDGET_MS} ms`, async ({ 
   // that holds ROWS so the budget measures a full 2k-point paint.
   const startedAt = Date.now();
   await page.goto(`/?from=${HOME_WINDOW.from}&to=${HOME_WINDOW.to}`);
-  await expect(page.getByRole("heading", { name: "AI Agronomist" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
   // The chart is the content gate: it renders only once the readings land, so
   // a budget on it covers fetch + 2k-point uPlot init, not just the shell.
   await expect(page.getByTestId("uplot-chart")).toBeVisible();
