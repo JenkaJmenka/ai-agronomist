@@ -33,6 +33,7 @@ from src.config import (
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
+    OOB_LIMITS,
     UPLOAD_SPIKE_MAD_FLOOR,
     UPLOAD_SPIKE_MAD_TUNING_C,
 )
@@ -130,6 +131,7 @@ class PortionScores:
     stat_hits: list[StatisticalAnomalyDetail] = field(default_factory=list)
     stuck_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
     mad_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
+    oob_hits: list[UploadHighAnomalyDetail] = field(default_factory=list)
     rows_processed: int = 0
 
 
@@ -250,6 +252,99 @@ def _stuck_dict_to_high_detail(
 
 # Singleton: reused across score_portion calls (stateless — state is in StuckCarry).
 _WALLCLOCK_DETECTOR = WallclockStuckDetector()
+
+
+# ---------------------------------------------------------------------------
+# Out-of-bounds detection and clamping helpers (upload path only)
+# ---------------------------------------------------------------------------
+
+def _detect_oob_hits(
+    normalized_df: pd.DataFrame,
+) -> list[UploadHighAnomalyDetail]:
+    """Detect OOB sensor readings in new-row DataFrame.
+
+    Reports one UploadHighAnomalyDetail per (row, column) pair where a
+    finite numeric value is outside OOB_LIMITS.  Called on normalized_df
+    (the new rows of the current portion) BEFORE clamping, so the alert carries
+    the raw value.  The overlap tail from the previous portion is NOT passed
+    here — those rows were already reported with their own portion.
+    """
+    if normalized_df is None or normalized_df.empty:
+        return []
+    hits: list[UploadHighAnomalyDetail] = []
+    timestamps = normalized_df["timestamp"] if "timestamp" in normalized_df.columns else None
+    for col, (lo, hi) in OOB_LIMITS.items():
+        if col not in normalized_df.columns:
+            continue
+        series = normalized_df[col]
+        for idx in range(len(series)):
+            val = series.iloc[idx]
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(fval):
+                continue
+            if fval < lo or fval > hi:
+                ts: str = "unknown"
+                if timestamps is not None:
+                    ts_raw = timestamps.iloc[idx]
+                    ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
+                hits.append(
+                    UploadHighAnomalyDetail(
+                        score=1.0,
+                        timestamp=ts,
+                        detector="out_of_bounds",
+                        column=col,
+                        severity="high",
+                        method="oob",
+                        value=fval,
+                    )
+                )
+    return hits
+
+
+def _clamp_df_for_scoring(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with canonical sensor values clamped to OOB_LIMITS.
+
+    Only the four canonical sensor columns (temperature, humidity, co2, light)
+    are modified.  Used to prevent one hardware-fault reading from distorting
+    LSTM sequences, rolling-z, MAD and stuck detection.  Rows and timestamp
+    are never modified.
+    """
+    result = df.copy()
+    for col, (lo, hi) in OOB_LIMITS.items():
+        if col in result.columns:
+            result[col] = result[col].clip(lower=lo, upper=hi)
+    return result
+
+
+def _clamp_raw_rows_for_scoring(
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return copies of raw_rows with canonical sensor values clamped to OOB_LIMITS.
+
+    Does NOT modify the originals — the caller persists the originals.
+    Only the four canonical sensor channels (temperature, humidity, co2, light)
+    are clamped; all other columns are passed through unchanged.
+    """
+    if not raw_rows:
+        return raw_rows
+    result: list[dict[str, Any]] = []
+    for row in raw_rows:
+        clamped = dict(row)
+        for col, (lo, hi) in OOB_LIMITS.items():
+            val = clamped.get(col)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fval) and (fval < lo or fval > hi):
+                clamped[col] = max(lo, min(hi, fval))
+        result.append(clamped)
+    return result
 
 
 def _detect_stats_incremental(
@@ -660,8 +755,23 @@ def score_portion(
     """
     result = PortionScores(rows_processed=len(raw_rows))
 
+    # --- OOB detection + clamping (upload path only) ---
+    # Detect before stuck/MAD/LSTM to report raw values, then clamp for all
+    # downstream scoring (LSTM sequences, rolling-z, MAD, stuck).
+    # Detection is on normalized_df only (all of it = new rows of this portion);
+    # overlap rows from prev_overlap_df were already reported with their portion.
+    if normalized_df is not None and not normalized_df.empty:
+        result.oob_hits = _detect_oob_hits(normalized_df)
+        if result.oob_hits:
+            normalized_df = _clamp_df_for_scoring(normalized_df)
+
+    # Clamp raw_rows for stat detection (copy, originals are persisted as-is).
+    scoring_raw_rows = _clamp_raw_rows_for_scoring(raw_rows)
+
     # Run stuck detection FIRST (load-bearing order: stuck windows must
     # be known before baseline exclusion and statistical detection).
+    # Uses the clamped normalized_df so one OOB reading does not distort
+    # the freeze-duration computation.
     if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
         raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
         result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
@@ -669,21 +779,28 @@ def score_portion(
     # Baseline exclusion: NaN-out faulted-channel values in [onset, last_frozen]
     # (or [onset, +inf) for open emitted faults) so the rolling baseline is
     # not contaminated by frozen readings.  Applied to both stat_carry.rows
-    # (internal) and raw_rows (copied, not in-place).
-    stat_raw_rows = raw_rows
+    # (internal) and scoring_raw_rows (copied, not in-place).
+    stat_raw_rows = scoring_raw_rows
     if stuck_carry is not None:
-        stat_raw_rows = _exclude_faults_from_baseline(raw_rows, stat_carry, stuck_carry)
+        stat_raw_rows = _exclude_faults_from_baseline(scoring_raw_rows, stat_carry, stuck_carry)
 
     result.stat_hits = _detect_stats_incremental(stat_raw_rows, stat_carry)
 
     if normalized_df is None or normalized_df.empty:
         return result, prev_overlap_df
 
+    # Clamp the overlap tail too — in the async path the producer serialises
+    # unclamped rows, so prev_overlap_df may carry OOB values from an earlier
+    # portion.  In the sync path the tail was already clamped at the previous
+    # call, so this is a no-op for in-range values.
     if not prev_overlap_df.empty:
-        combined_df = pd.concat([prev_overlap_df, normalized_df], ignore_index=True)
+        prev_overlap_clamped = _clamp_df_for_scoring(prev_overlap_df)
+        combined_df = pd.concat([prev_overlap_clamped, normalized_df], ignore_index=True)
     else:
         combined_df = normalized_df
 
+    # Next-overlap uses the clamped normalized_df so the tail never carries
+    # raw OOB values into the following portion.
     if len(normalized_df) >= seq_len - 1:
         next_overlap = normalized_df.iloc[-(seq_len - 1):].copy()
     elif len(combined_df) >= seq_len - 1:
@@ -747,12 +864,14 @@ def finalize_scores(
     stat_details: list[StatisticalAnomalyDetail] = []
     stuck_details: list[UploadHighAnomalyDetail] = []
     mad_details: list[UploadHighAnomalyDetail] = []
+    oob_details: list[UploadHighAnomalyDetail] = []
     for portion in portions_in_order:
         anomaly_scores.extend(portion.scores)
         sequence_timestamps.extend(portion.sequence_timestamps)
         stat_details.extend(portion.stat_hits)
         stuck_details.extend(portion.stuck_hits)
         mad_details.extend(portion.mad_hits)
+        oob_details.extend(portion.oob_hits)
         if include_embeddings:
             embeddings.extend(portion.embeddings)
             uncertainties.extend(portion.uncertainties)
@@ -827,13 +946,15 @@ def finalize_scores(
 
     high_anomalies = _merge_by_timestamp(lstm_high, stat_high)
 
-    # Append stuck-fault and MAD-spike alerts (distinct detectors — no
+    # Append stuck-fault, MAD-spike, and OOB alerts (distinct detectors — no
     # timestamp merge with the LSTM/statistical pair).
     if stuck_details:
         high_anomalies.extend(stuck_details)
     if mad_details:
         high_anomalies.extend(mad_details)
-    if stuck_details or mad_details:
+    if oob_details:
+        high_anomalies.extend(oob_details)
+    if stuck_details or mad_details or oob_details:
         high_anomalies.sort(key=lambda h: h.timestamp)
 
     # Task 5: group contiguous per-channel alerts into episodes.

@@ -599,9 +599,17 @@ class CSVAdapter(DataSourceAdapter):
         result.attrs["light_source_unit"] = light_unit
         return result
 
-    def validate(self, data: pd.DataFrame) -> bool:
+    def validate(self, data: pd.DataFrame, *, allow_oob: bool = False) -> bool:
+        """Validate normalized data against canonical schema.
+
+        allow_oob=True is the opt-in used exclusively by the CSV upload
+        path.  When set, finite sensor readings outside OOB_LIMITS do not
+        raise — the OOB detector in score_portion labels them instead.
+        All structural failures (missing columns, non-numeric types, NaN values,
+        bad timestamps) still raise regardless of allow_oob.
+        """
         try:
-            return self.validate_canonical_schema(data)
+            return self.validate_canonical_schema(data, allow_oob=allow_oob)
         except DataValidationError as exc:
             raise exc
         except Exception as exc:

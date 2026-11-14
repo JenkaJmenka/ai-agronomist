@@ -193,6 +193,7 @@ def _portion_result_payload(
         "stat_hits": [hit.model_dump() for hit in portion.stat_hits],
         "stuck_hits": [hit.model_dump() for hit in portion.stuck_hits],
         "mad_hits": [hit.model_dump() for hit in portion.mad_hits],
+        "oob_hits": [hit.model_dump() for hit in portion.oob_hits],
         "rows_processed": portion.rows_processed,
         "stat_columns": None,  # filled below when known
         "sensor_rows": sensor_rows,
@@ -471,6 +472,11 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         mad_hits: list[UploadHighAnomalyDetail] = [
             UploadHighAnomalyDetail(**h) for h in stored.get("mad_hits", [])
         ]
+        # OOB hits scored on this portion. Absent on results written before
+        # the OOB gate was added — those portions contribute no OOB hits.
+        oob_hits: list[UploadHighAnomalyDetail] = [
+            UploadHighAnomalyDetail(**h) for h in stored.get("oob_hits", [])
+        ]
 
         portions.append(
             PortionScores(
@@ -479,6 +485,7 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 stat_hits=hits,
                 stuck_hits=stuck_hits,
                 mad_hits=mad_hits,
+                oob_hits=oob_hits,
                 rows_processed=stored.get("rows_processed", 0),
             )
         )
