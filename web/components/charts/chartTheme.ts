@@ -27,7 +27,7 @@ const LIGHT_FALLBACK = {
   chart6: "#65a30d", // --chart-6
   chart7: "#0891b2", // --chart-7
   chart8: "#475569", // --chart-8
-  sevLstm: "#b5450a", // --sev-lstm
+  sevLstm: "#a8197f", // --sev-lstm
   sevCritical: "#c0262d", // --sev-critical
 } as const;
 

@@ -41,7 +41,7 @@
   --sev-info: #1d5fd1;
   --sev-warning: #9a5b00;
   --sev-critical: #c0262d;
-  --sev-lstm: #b5450a;
+  --sev-lstm: #a8197f;
   --sev-urgent: #7c3aed;
 
   --chart-grid: #e6ecea;
@@ -101,7 +101,7 @@
   --sev-info: #6aa8ff;
   --sev-warning: #f5b942;
   --sev-critical: #f87171;
-  --sev-lstm: #ffa94d;
+  --sev-lstm: #ee9fe0;
   --sev-urgent: #c4b5fd;
 
   --chart-grid: #17302b;
@@ -155,7 +155,7 @@
     --sev-info: #6aa8ff;
     --sev-warning: #f5b942;
     --sev-critical: #f87171;
-    --sev-lstm: #ffa94d;
+    --sev-lstm: #ee9fe0;
     --sev-urgent: #c4b5fd;
 
     --chart-grid: #17302b;
