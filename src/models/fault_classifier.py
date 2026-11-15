@@ -26,6 +26,7 @@ class FaultType(str, Enum):
     CORRELATION_BREAKDOWN = "correlation_breakdown"
     DIURNAL_DEVIATION = "diurnal_deviation"
     THERMODYNAMIC_CONTRADICTION = "thermodynamic_contradiction"
+    HUMIDITY_FAULT = "humidity_fault"
     UNKNOWN = "unknown"
 
 
@@ -73,6 +74,9 @@ class FaultClassifier:
 
         if "thermodynamic" in lowered:
             return FaultType.THERMODYNAMIC_CONTRADICTION.value
+
+        if "humidity_fault" in lowered or "psychrometric" in lowered:
+            return FaultType.HUMIDITY_FAULT.value
 
         if "stuck" in lowered or "saturation" in lowered:
             return FaultType.STUCK_FAULT.value

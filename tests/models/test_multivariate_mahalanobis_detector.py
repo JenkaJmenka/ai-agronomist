@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.config import MAHALANOBIS_DETECT_MIN_SAMPLES
 from src.models.multivariate_mahalanobis_detector import (
     MultivariateMahalanobisDetector,
 )
@@ -42,7 +43,7 @@ class TestNormalWindows:
 class TestJointOutliers:
     def test_jointly_implausible_timestep_flagged(self, detector) -> None:
         """Each value is in range, but the combination breaks correlation."""
-        seq = _normal_window()
+        seq = _normal_window(n=MAHALANOBIS_DETECT_MIN_SAMPLES)
         # Hot AND humid AND CO2 crash at one timestep — individually all
         # within physical bounds, jointly far outside the fitted cloud.
         seq[10] = [29.5, 79.0, 320.0, 500.0]
@@ -51,12 +52,18 @@ class TestJointOutliers:
         assert sum(flags) == 1, "only the implausible timestep flags"
 
     def test_single_channel_spike_flagged(self, detector) -> None:
-        seq = _normal_window(seed=2)
+        seq = _normal_window(seed=2, n=MAHALANOBIS_DETECT_MIN_SAMPLES)
         seq[5, 0] = 29.9  # strong temperature-only deviation
         assert detector.detect(seq)[5] is True
 
 
 class TestEdgeCases:
+    def test_window_below_detect_minimum_returns_all_false(self, detector) -> None:
+        n = MAHALANOBIS_DETECT_MIN_SAMPLES - 1
+        seq = _normal_window(n=n)
+        seq[10] = [29.5, 79.0, 320.0, 500.0]  # would flag if self-fit were allowed
+        assert detector.detect(seq) == [False] * n
+
     def test_short_window_returns_all_false(self, detector) -> None:
         assert detector.detect(_normal_window(n=6)) == [False] * 6
 

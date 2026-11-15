@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.sensor_data import StatisticalAnomalyDetail, UploadHighAnomalyDetail
 from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
+from src.api.services.drift_watch_service import run_drift_watch_shadow
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
@@ -192,6 +193,8 @@ def _portion_result_payload(
         "sequence_timestamps": portion.sequence_timestamps,
         "stat_hits": [hit.model_dump() for hit in portion.stat_hits],
         "stuck_hits": [hit.model_dump() for hit in portion.stuck_hits],
+        "mad_hits": [hit.model_dump() for hit in portion.mad_hits],
+        "oob_hits": [hit.model_dump() for hit in portion.oob_hits],
         "rows_processed": portion.rows_processed,
         "stat_columns": None,  # filled below when known
         "sensor_rows": sensor_rows,
@@ -465,6 +468,16 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         stuck_hits: list[UploadHighAnomalyDetail] = [
             UploadHighAnomalyDetail(**h) for h in stored.get("stuck_hits", [])
         ]
+        # MAD spikes scored on this portion. Absent on results written before
+        # the upload MAD gate — those portions contribute no spike hits.
+        mad_hits: list[UploadHighAnomalyDetail] = [
+            UploadHighAnomalyDetail(**h) for h in stored.get("mad_hits", [])
+        ]
+        # OOB hits scored on this portion. Absent on results written before
+        # the OOB gate was added — those portions contribute no OOB hits.
+        oob_hits: list[UploadHighAnomalyDetail] = [
+            UploadHighAnomalyDetail(**h) for h in stored.get("oob_hits", [])
+        ]
 
         portions.append(
             PortionScores(
@@ -472,6 +485,8 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 sequence_timestamps=stored.get("sequence_timestamps", []),
                 stat_hits=hits,
                 stuck_hits=stuck_hits,
+                mad_hits=mad_hits,
+                oob_hits=oob_hits,
                 rows_processed=stored.get("rows_processed", 0),
             )
         )
@@ -551,6 +566,18 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 response.high_anomalies
             ),
         )
+        # Shadow drift-watch: calibrate/score after main persistence succeeds.
+        _dw_ts = [ts for p in portions for ts in p.sequence_timestamps]
+        if _dw_ts:
+            _dw_start = pd.Timestamp(min(_dw_ts)).to_pydatetime()
+            _dw_end = pd.Timestamp(max(_dw_ts)).to_pydatetime()
+            await run_drift_watch_shadow(
+                db,
+                job.tenant_id,
+                job.greenhouse_id or "default",
+                _dw_start,
+                _dw_end,
+            )
         response = response.model_copy(
             update={
                 "data_persisted": True,

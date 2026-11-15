@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List
+import math
+
 import pandas as pd
+
+from src.config import OOB_LIMITS
 
 # =============================================================================
 # Custom Exception Hierarchy
@@ -46,14 +50,18 @@ class DataSourceAdapter(ABC):
 
     Expected Canonical Schema columns:
     - `timestamp`: UTC datetime (datetime64[ns, UTC])
-    - `temperature`: float64 (Ambient temperature in degrees Celsius, [0.0, 50.0])
+    - `temperature`: float64 (Ambient temperature in degrees Celsius, [-40.0, 80.0])
     - `humidity`: float64 (Relative humidity percentage, [0.0, 100.0])
-    - `co2`: float64 (CO2 concentration in parts per million (ppm), [0.0, 1000.0])
-    - `light`: float64 (Light intensity in lux, [0.0, 2000.0])
+    - `co2`: float64 (CO2 concentration in parts per million (ppm), [0.0, 5000.0])
+    - `light`: float64 (Light intensity in W/m², [0.0, 2000.0])
+
+    Numeric bounds are ``OOB_LIMITS`` (src/config.py). A reading inside those
+    hard limits must not be rejected here; the out-of-bounds detector labels
+    it. CO₂ 1000–5000 ppm and temperatures outside 0–50 °C are valid.
 
     Error Handling strategy is fully specified:
     - Anticipated failures (such as connection timeouts, file-not-found, schema mismatch, etc.)
-      must raise specific, wrapped exceptions (e.g. `DataSourceConnectionError`, `DataReadError`, 
+      must raise specific, wrapped exceptions (e.g. `DataSourceConnectionError`, `DataReadError`,
       `NormalizationError`, `DataValidationError`) to decouple calling APIs from vendor-specific details.
     """
 
@@ -101,7 +109,7 @@ class DataSourceAdapter(ABC):
     @abstractmethod
     def normalize(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        Normalizes the raw DataFrame structure to standard canonical schema formatting (renaming columns, 
+        Normalizes the raw DataFrame structure to standard canonical schema formatting (renaming columns,
         timezone conversion to UTC, casting data types).
 
         Args:
@@ -170,13 +178,18 @@ class DataSourceAdapter(ABC):
             self.disconnect()
 
     @staticmethod
-    def validate_canonical_schema(data: pd.DataFrame) -> bool:
+    def validate_canonical_schema(data: pd.DataFrame, *, allow_oob: bool = False) -> bool:
         """
         Utility static helper to validate a DataFrame against the canonical schema constraints.
         Can be used by any concrete adapter in its `validate` method.
 
         Args:
             data: The DataFrame to validate.
+            allow_oob: When True, skip the out-of-bounds check on sensor values.
+                       Structural failures (missing columns, non-numeric types,
+                       NaN values, bad timestamps) still raise.  Use ``True``
+                       only on the CSV upload path; non-upload callers keep the
+                       default ``False`` so OOB values are still rejected there.
 
         Returns:
             True if valid.
@@ -185,7 +198,7 @@ class DataSourceAdapter(ABC):
             DataValidationError: If any validation rule is violated.
         """
         required_cols = ["timestamp", "temperature", "humidity", "co2", "light"]
-        
+
         # 1. Check for missing columns
         for col in required_cols:
             if col not in data.columns:
@@ -198,19 +211,20 @@ class DataSourceAdapter(ABC):
         # 3. Check and validate timestamp column
         if not pd.api.types.is_datetime64_any_dtype(data["timestamp"]):
             raise DataValidationError("Column 'timestamp' must be datetime-like (type datetime64)")
-            
+
         try:
             if getattr(data["timestamp"].dt, "tz", None) is None:
                 raise DataValidationError("Column 'timestamp' must have timezone-aware UTC values")
         except AttributeError:
             raise DataValidationError("Fail to parse 'timestamp' Series as datetime or access .dt namespace")
 
-        # 4. Check that numerical columns are numeric and within physical bounds:
+        # 4. Check that numerical columns are numeric and finite.
+        # Out-of-bounds value checking is conditional on ``allow_oob``: when
+        # True (upload path) the OOB detector labels the reading instead of
+        # discarding the whole chunk.
         bounds = {
-            "temperature": (0.0, 50.0),
-            "humidity": (0.0, 100.0),
-            "co2": (0.0, 1000.0),
-            "light": (0.0, 2000.0)
+            col: OOB_LIMITS[col]
+            for col in ("temperature", "humidity", "co2", "light")
         }
 
         for col, (min_val, max_val) in bounds.items():
@@ -220,22 +234,73 @@ class DataSourceAdapter(ABC):
             if data[col].isna().any():
                 raise DataValidationError(f"Column '{col}' contains values that are NaN")
 
-            # Check actual bounds and raise explicit DataValidationError on failure
-            out_of_bounds_low = data[data[col] < min_val]
-            out_of_bounds_high = data[data[col] > max_val]
-            
-            if not out_of_bounds_low.empty:
-                val = out_of_bounds_low[col].iloc[0]
-                raise DataValidationError(
-                    f"Column '{col}' contains values below allowed minimum of {min_val} (found: {val})"
-                )
-            if not out_of_bounds_high.empty:
-                val = out_of_bounds_high[col].iloc[0]
-                raise DataValidationError(
-                    f"Column '{col}' contains values above allowed maximum of {max_val} (found: {val})"
-                )
+            if not allow_oob:
+                # Check actual bounds and raise explicit DataValidationError on failure
+                out_of_bounds_low = data[data[col] < min_val]
+                out_of_bounds_high = data[data[col] > max_val]
+
+                if not out_of_bounds_low.empty:
+                    val = out_of_bounds_low[col].iloc[0]
+                    raise DataValidationError(
+                        f"Column '{col}' contains values below allowed minimum of {min_val} (found: {val})"
+                    )
+                if not out_of_bounds_high.empty:
+                    val = out_of_bounds_high[col].iloc[0]
+                    raise DataValidationError(
+                        f"Column '{col}' contains values above allowed maximum of {max_val} (found: {val})"
+                    )
 
         return True
+
+    @staticmethod
+    def collect_oob_hits(data: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Return per-row OOB reading info as dicts. Upload path only.
+
+        Each dict has keys ``column``, ``value`` (raw float), and
+        ``timestamp`` (ISO string or "unknown").  Only finite numeric sensor
+        values outside ``OOB_LIMITS`` are included.  Structural issues
+        (non-numeric types, NaN) are not reported here — they should have
+        been caught by ``validate_canonical_schema`` before this is called.
+
+        Returns an empty list when there are no out-of-bounds readings.
+        """
+        hits: List[Dict[str, Any]] = []
+        for col, (min_val, max_val) in OOB_LIMITS.items():
+            if col not in data.columns:
+                continue
+            series = data[col]
+            timestamps = data["timestamp"] if "timestamp" in data.columns else None
+            for idx in range(len(series)):
+                val = series.iloc[idx]
+                if not isinstance(val, (int, float)):
+                    continue
+                if not math.isfinite(float(val)):
+                    continue
+                fval = float(val)
+                if fval < min_val or fval > max_val:
+                    ts: str = "unknown"
+                    if timestamps is not None:
+                        ts_raw = timestamps.iloc[idx]
+                        if hasattr(ts_raw, "isoformat"):
+                            ts = ts_raw.isoformat()
+                        else:
+                            ts = str(ts_raw)
+                    hits.append({"column": col, "value": fval, "timestamp": ts})
+        return hits
+
+    @staticmethod
+    def clamp_to_oob_limits(data: pd.DataFrame) -> pd.DataFrame:
+        """Return a copy of ``data`` with OOB sensor values clamped to ``OOB_LIMITS`` bounds.
+
+        Only the four canonical sensor columns (temperature, humidity, co2,
+        light) are affected; all other columns including timestamp are
+        unchanged.  Rows are never added or removed.
+        """
+        result = data.copy()
+        for col, (min_val, max_val) in OOB_LIMITS.items():
+            if col in result.columns:
+                result[col] = result[col].clip(lower=min_val, upper=max_val)
+        return result
 
 
 # Alias to support AbstractVendorAdapter design naming conventions

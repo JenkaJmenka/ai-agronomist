@@ -237,7 +237,12 @@ class _NoEnrichment:
     ``tests/api/test_pipeline_model_isolation.py``.
     """
 
-    def spawn(self, window_array: Any, anomaly_seq: str) -> None:
+    def spawn(
+        self,
+        window_array: Any,
+        anomaly_seq: str,
+        noise_clean_windows: Any = None,
+    ) -> None:
         return None
 
     async def close(self) -> None:

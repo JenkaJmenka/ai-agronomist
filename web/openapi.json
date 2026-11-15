@@ -7754,7 +7754,14 @@
             "items": {
               "items": {
                 "items": {
-                  "type": "number"
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "type": "array"
               },
@@ -7763,7 +7770,7 @@
             "type": "array",
             "minItems": 1,
             "title": "Sequences",
-            "description": "List of sensor sequences"
+            "description": "List of sensor sequences.  JSON null is accepted for any sensor value and treated as a missing sample (NaN) before the pipeline."
           }
         },
         "type": "object",
@@ -8102,13 +8109,20 @@
           "sequence": {
             "items": {
               "items": {
-                "type": "number"
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "type": "array"
             },
             "type": "array",
             "title": "Sequence",
-            "description": "Sensor sequence [seq_len, input_dim]"
+            "description": "Sensor sequence [seq_len, input_dim].  JSON null is accepted for any sensor value and treated as a missing sample (NaN) before the pipeline \u2014 this is the expected representation for polling-dropout gaps.  NaN is also accepted (Pydantic coerces it from the JSON number token)."
           },
           "baseline_sequences": {
             "anyOf": [

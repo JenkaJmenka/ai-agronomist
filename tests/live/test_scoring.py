@@ -560,7 +560,9 @@ class TestEnrichment:
         detector.model = MagicMock(side_effect=model_fn)
 
         # Create enrichment that completes quickly
-        async def fast_enrichment(window_array, anomaly_seq):
+        async def fast_enrichment(
+            window_array, anomaly_seq, noise_clean_windows=None,
+        ):
             await asyncio.sleep(0.01)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -631,7 +633,9 @@ class TestEnrichment:
         detector.model = MagicMock(side_effect=model_fn)
 
         # Create a slow enrichment that will be in-flight
-        async def slow_enrichment(window_array, anomaly_seq):
+        async def slow_enrichment(
+            window_array, anomaly_seq, noise_clean_windows=None,
+        ):
             await asyncio.sleep(999)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -838,7 +842,7 @@ class TestEpisodeIdCorrelation:
         # Capture the anomaly_seq passed to enrichment
         episode_ids_passed: list[str] = []
 
-        def capture_spawn(window_array, anomaly_seq):
+        def capture_spawn(window_array, anomaly_seq, noise_clean_windows=None):
             episode_ids_passed.append(anomaly_seq)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):

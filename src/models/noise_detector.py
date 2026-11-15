@@ -6,11 +6,14 @@ Production (``use_highpass=True``, default) — hybrid algorithm:
     1. Pass signal through 2nd-order high-pass Butterworth filter to
        reject low-frequency trends (drift, diurnal cycles, setpoint
        changes).
-    2. Compute rolling variance of the filtered (noise-only) signal.
-    3. Divide by calibrated baseline noise variance.
+    2. Compute normalised second-difference variance of the filtered
+       signal — ``var(diff(hp, n=2)) / gain`` — which a linear or
+       quadratic ramp cannot inflate, and which estimates sigma^2 for
+       white noise (same scale as all fixed baselines and thresholds).
+    3. Divide by calibrated or fixed baseline variance.
     4. Flag when the ratio exceeds the configured threshold.
 
-Spec-faithful (``use_highpass=False``) — the framework spec §5 algorithm:
+Spec-faithful (``use_highpass=False``) — the framework spec S5 algorithm:
     plain rolling variance of the RAW signal divided by baseline variance,
     flag when the ratio exceeds ``theta_noise``.  No filtering step.  This
     path reproduces the spec's Table 5 verification dataset exactly.
@@ -21,7 +24,7 @@ is unavailable).
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from scipy.signal import butter, filtfilt
@@ -32,6 +35,7 @@ try:
         NOISE_BASELINE_VARIANCE,
         NOISE_HYBRID_WINDOW,
         NOISE_RATIO_THRESHOLD,
+        SENSOR_NAMES,
         SENSOR_NOISE_TARGETS,
     )
 except ImportError:  # pragma: no cover
@@ -50,10 +54,50 @@ except ImportError:  # pragma: no cover
         "light": 100.0,
     }
     NOISE_RATIO_THRESHOLD: float = 10.0  # type: ignore[no-redef]
+    SENSOR_NAMES: list[str] = [  # type: ignore[no-redef]
+        "temperature",
+        "humidity",
+        "co2",
+        "light",
+    ]
 
 # filtfilt with a 2nd-order Butterworth needs > 3 * max(len(a), len(b)) = 9
 # samples, so the high-pass path requires at least this many readings.
 _MIN_HIGHPASS_SAMPLES: int = 10
+
+# Second differences need at least 3 input samples to produce 1 value;
+# combined with the hp filter minimum the effective floor stays at 10.
+_MIN_D2_SAMPLES: int = 3
+
+# The second-difference filter has coefficients [1, -2, 1].  For white
+# noise with variance sigma^2 the variance of the filtered output is
+# sigma^2 * sum(c_i^2) = sigma^2 * (1 + 4 + 1) = 6 * sigma^2.
+# Dividing var(diff(x, 2)) by this gain normalises the statistic so it
+# estimates sigma^2 for white noise — every fixed baseline, noise target
+# and ratio threshold stays on the same sigma^2 scale.
+_D2_COEFFICIENTS: np.ndarray = np.array([1, -2, 1])
+_D2_WHITE_NOISE_GAIN: float = float(np.sum(_D2_COEFFICIENTS ** 2))  # 6.0
+
+
+def _highpass_filter(series: np.ndarray, cutoff: float) -> np.ndarray:
+    """Zero-phase 2nd-order Butterworth high-pass. Shared with calibration."""
+    b, a = butter(N=2, Wn=cutoff, btype="high")
+    return filtfilt(b, a, np.asarray(series, dtype=float))
+
+
+def _d2_var(signal: np.ndarray) -> float:
+    """Normalised second-difference variance — estimates sigma^2 for white noise.
+
+    Second differences of a linear ramp are identically zero; of a
+    quadratic trend, constant with zero variance.  Genuine sensor noise
+    (high-frequency jitter) produces large, variable second differences.
+
+    The raw ``var(diff(signal, 2))`` is ``_D2_WHITE_NOISE_GAIN`` (6)
+    times the input variance for white noise.  Dividing by that gain
+    returns the statistic to the sigma^2 scale so all fixed baselines,
+    noise targets and ratio thresholds keep their meaning.
+    """
+    return float(np.var(np.diff(signal, n=2))) / _D2_WHITE_NOISE_GAIN
 
 
 class NoiseDetector:
@@ -62,11 +106,11 @@ class NoiseDetector:
     Args:
         hp_cutoff: High-pass Butterworth cutoff (only used when
             ``use_highpass`` is True).
-        window: Rolling variance window ``w`` (spec §5: ``w = 5``).
+        window: Rolling variance window ``w`` (spec S5: ``w = 5``).
         baseline_variance: Per-sensor calibrated baseline noise variance
-            (spec §5: ``sigma_baseline^2 = 0.02``).
+            (spec S5: ``sigma_baseline^2 = 0.02``).
         ratio_threshold: Variance-ratio alarm threshold ``theta_noise``
-            (spec §5: ``theta_noise = 50.0``).
+            (spec S5: ``theta_noise = 50.0``).
         use_highpass: When True (default) apply the Butterworth high-pass
             filter before computing rolling variance (production behaviour).
             When False, compute the ratio on the RAW series — the
@@ -102,10 +146,15 @@ class NoiseDetector:
         falls back to the legacy fixed-threshold check when no baseline
         variance is configured for the sensor.
 
+        The calibrated path uses normalised second-difference variance
+        (``var(diff(hp, 2)) / gain``) so that actuation ramps leaking
+        through the Butterworth filter do not inflate the statistic,
+        while keeping the result on the sigma^2 scale.
+
         Args:
             series: 1-D float array of sensor readings (length = seq_len).
             sensor: Sensor name key.
-            target_override: Optional seasonal σ-scaled noise target
+            target_override: Optional seasonal sigma-scaled noise target
                 (physical units). When set, replaces SENSOR_NOISE_TARGETS.
 
         Returns:
@@ -120,7 +169,9 @@ class NoiseDetector:
 
         bv = self._baseline_var.get(sensor)
         if bv is not None and bv > 0:
-            signal_var = float(np.var(signal))
+            if len(signal) < _MIN_D2_SAMPLES:
+                return False
+            signal_var = _d2_var(signal)
             return signal_var / bv > self._ratio_threshold
 
         target = target_override if target_override is not None else SENSOR_NOISE_TARGETS.get(sensor)
@@ -141,6 +192,10 @@ class NoiseDetector:
         ``_MIN_HIGHPASS_SAMPLES`` readings (a ``filtfilt`` requirement);
         on the spec-faithful raw path only ``window`` readings are needed.
         The first ``window - 1`` entries are always ``False`` (warm-up).
+
+        Note: this method uses plain rolling variance (not second-
+        difference variance) because the rolling window (default 5
+        samples) is too short for meaningful second differences.
 
         Args:
             series: 1-D array of sensor readings.
@@ -180,5 +235,131 @@ class NoiseDetector:
 
     def _highpass(self, series: np.ndarray) -> np.ndarray:
         """Apply zero-phase Butterworth high-pass filter."""
-        b, a = butter(N=2, Wn=self._hp_cutoff, btype="high")
-        return filtfilt(b, a, series.astype(float))
+        return _highpass_filter(series, self._hp_cutoff)
+
+
+def _iter_windows(
+    windows: np.ndarray | Sequence[np.ndarray],
+) -> List[np.ndarray]:
+    """Normalize ``(n, seq, sensors)`` or a sequence of 2-D windows."""
+    if isinstance(windows, np.ndarray):
+        if windows.ndim == 3:
+            return [np.asarray(windows[i], dtype=float) for i in range(len(windows))]
+        if windows.ndim == 2:
+            return [np.asarray(windows, dtype=float)]
+        raise ValueError(
+            f"windows array must be 2-D or 3-D, got {windows.ndim}D"
+        )
+    return [np.asarray(window, dtype=float) for window in windows]
+
+
+def calibrate_noise_baseline(
+    windows: np.ndarray | Sequence[np.ndarray],
+    sensor_names: Sequence[str] | None = None,
+    *,
+    hp_cutoff: float = NoiseDetector.HP_CUTOFF,
+) -> Dict[str, float]:
+    """Per-sensor median normalised second-difference variance from clean windows.
+
+    High-pass each channel (2nd-order Butterworth, same cutoff as
+    :class:`NoiseDetector`), compute the normalised second-difference
+    variance (``var(diff(hp, 2)) / gain``), then the median across
+    windows.
+
+    The normalisation (dividing by ``_D2_WHITE_NOISE_GAIN``) keeps the
+    result on the sigma^2 scale, so calibrated baselines are directly
+    comparable to the fixed ``NOISE_BASELINE_VARIANCE`` entries and the
+    ``resolve_noise_baseline`` ``max(calibrated, fixed)`` merge works
+    on a single scale.
+
+    Args:
+        windows: ``(n_windows, seq_len, n_sensors)`` or a sequence of
+            ``(seq_len, n_sensors)`` arrays in physical units.
+        sensor_names: Column names. Defaults to ``SENSOR_NAMES``.
+        hp_cutoff: Butterworth cutoff. Default is the detector's.
+
+    Returns:
+        Map of sensor name to median normalised second-difference
+        variance (sigma^2 scale).  A channel with no usable window
+        (shorter than the filtfilt minimum, or non-finite) is omitted
+        so the caller can keep the fixed ``NOISE_BASELINE_VARIANCE``
+        entry for that sensor.
+
+    The pipeline should pass the merged map into
+    ``NoiseDetector(baseline_variance=..., ratio_threshold=NOISE_CALIBRATED_RATIO_TARGET)``.
+    ``NOISE_RATIO_THRESHOLD`` stays the cold-start ratio for the fixed
+    baselines; the calibrated target is a separate constant because
+    raising the cold-start ratio does not replace calibration.
+    """
+    names = list(sensor_names or SENSOR_NAMES)
+    if not names:
+        raise ValueError("sensor_names must be non-empty")
+    if not 0.0 < hp_cutoff < 1.0:
+        raise ValueError(f"hp_cutoff must be in (0, 1), got {hp_cutoff}")
+
+    samples: Dict[str, List[float]] = {name: [] for name in names}
+    for window in _iter_windows(windows):
+        if window.ndim != 2:
+            raise ValueError(
+                f"each window must be 2-D (seq_len, sensors), got {window.ndim}D"
+            )
+        n_cols = min(window.shape[1], len(names))
+        for idx in range(n_cols):
+            column = window[:, idx]
+            if column.size < _MIN_HIGHPASS_SAMPLES or not np.isfinite(column).all():
+                continue
+            filtered = _highpass_filter(column, hp_cutoff)
+            samples[names[idx]].append(_d2_var(filtered))
+
+    return {
+        name: float(np.median(values))
+        for name, values in samples.items()
+        if values
+    }
+
+
+def resolve_noise_baseline(
+    calibrated: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    """Overlay calibrated variances on the fixed cold-start map.
+
+    A finite positive calibration may only loosen a channel whose fixed
+    ``NOISE_BASELINE_VARIANCE`` entry exists and is positive: the stored
+    value is ``max(calibrated, fixed)``. A near-flat window (high-pass
+    variance far below that floor) must not replace the floor. Missing,
+    non-finite, or non-positive calibrations keep the fixed map. An
+    empty calibration therefore returns the fixed fallback unchanged.
+    A channel with no positive fixed entry still takes the calibrated
+    value.
+    """
+    merged = dict(NOISE_BASELINE_VARIANCE)
+    if not calibrated:
+        return merged
+    for name, value in calibrated.items():
+        try:
+            variance = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(variance) or variance <= 0.0:
+            continue
+        key = str(name)
+        fixed = _positive_fixed_variance(key)
+        if fixed is None:
+            merged[key] = variance
+            continue
+        merged[key] = max(variance, fixed)
+    return merged
+
+
+def _positive_fixed_variance(name: str) -> float | None:
+    """Positive ``NOISE_BASELINE_VARIANCE`` entry, or None when it is absent."""
+    raw = NOISE_BASELINE_VARIANCE.get(name)
+    if raw is None:
+        return None
+    try:
+        fixed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(fixed) or fixed <= 0.0:
+        return None
+    return fixed

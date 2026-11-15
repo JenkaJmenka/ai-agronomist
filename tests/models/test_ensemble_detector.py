@@ -69,10 +69,11 @@ class TestLstmVaeDetector:
         score = d.score(normal_sequence, baseline)
         assert 0.0 <= score <= 1.0
 
-    def test_is_anomaly_at_half(self, detector):
+    def test_is_anomaly_votes_at_normalised_threshold_of_one(self, detector):
         d = LstmVaeDetector(detector)
-        assert d.is_anomaly(0.5) is True
-        assert d.is_anomaly(0.49) is False
+        assert d.is_anomaly(1.0) is True
+        assert d.is_anomaly(0.99) is False
+        assert d.is_anomaly(0.5) is False
 
 
 class TestIsolationForestDetector:
@@ -227,7 +228,9 @@ class TestEnsembleEdgeCases:
 
     def test_statistical_is_anomaly(self):
         d = StatisticalDetector()
-        assert d.is_anomaly(0.6) is True
+        assert d.is_anomaly(1.0) is True
+        assert d.is_anomaly(0.99) is False
+        assert d.is_anomaly(0.6) is False
 
     def test_ensemble_result_frozen(self, detector, normal_sequence, baseline):
         result = EnsembleAnomalyDetector(LstmVaeDetector(detector)).detect(

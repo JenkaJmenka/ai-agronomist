@@ -5,6 +5,10 @@ jointly impossible (hot air + saturated humidity + low CO2 at noon). This
 detector fits a robust center/covariance over the sequence window and
 flags timesteps whose Mahalanobis distance exceeds a chi-square cutoff.
 
+``detect`` fits on the window it scores. ``score_last_against_history``
+fits on a caller-supplied history and scores only the window's last row.
+That path does not trim the window into the history.
+
 Robustness choices:
 - Trimmed refit: distances are computed with a median-centered covariance,
   the most extreme ~10% of timesteps are dropped, and center/covariance are
@@ -14,6 +18,12 @@ Robustness choices:
 - The covariance diagonal is floored at the per-sensor noise variance so
   near-constant windows cannot alarm on measurement noise (the same
   pathology the spike-MAD floor guards against).
+- The self-fit ``detect`` path requires at least
+  ``MAHALANOBIS_DETECT_MIN_SAMPLES`` rows (default 50) so it does not
+  fire on short auto-correlated windows where chi-square calibration
+  breaks down.  Measured 2026-11-15: on 20-step July clear-sky windows
+  it flagged 26/167 clean evaluation windows (16 % FPR at a nominal
+  p=0.001).  ``score_last_against_history`` is unaffected.
 """
 
 from __future__ import annotations
@@ -22,7 +32,12 @@ from typing import List, Optional
 
 import numpy as np
 
-from src.config import MAHALANOBIS_CHI2_THRESHOLD, SENSOR_NAMES, SENSOR_NOISE_TARGETS
+from src.config import (
+    MAHALANOBIS_CHI2_THRESHOLD,
+    MAHALANOBIS_DETECT_MIN_SAMPLES,
+    SENSOR_NAMES,
+    SENSOR_NOISE_TARGETS,
+)
 
 # Fraction of the window trimmed before the final covariance refit.
 _TRIM_FRACTION = 0.1
@@ -35,11 +50,13 @@ class MultivariateMahalanobisDetector:
         self,
         chi2_threshold: float = MAHALANOBIS_CHI2_THRESHOLD,
         noise_floors: Optional[dict[str, float]] = None,
+        min_self_fit_samples: int = MAHALANOBIS_DETECT_MIN_SAMPLES,
     ) -> None:
         if chi2_threshold <= 0:
             raise ValueError(f"chi2_threshold must be > 0, got {chi2_threshold}")
         self._threshold = chi2_threshold
         self._noise_floors = dict(noise_floors or SENSOR_NOISE_TARGETS)
+        self._min_self_fit_samples = min_self_fit_samples
 
     def _floor_vector(self, n_sensors: int) -> np.ndarray:
         floors = [
@@ -51,6 +68,14 @@ class MultivariateMahalanobisDetector:
     def detect(self, sequence: np.ndarray) -> List[bool]:
         """Flag each timestep whose joint reading is implausible.
 
+        Returns all-False when the window has fewer than
+        ``min_self_fit_samples`` rows (default
+        ``MAHALANOBIS_DETECT_MIN_SAMPLES``).  Chi-square calibration
+        assumes i.i.d. samples; a short auto-correlated sensor window
+        violates that assumption and the test over-fires.
+        ``score_last_against_history`` is the correct path for short
+        windows when external history is available.
+
         Args:
             sequence: 2-D array ``(seq_len, n_sensors)`` in physical units.
 
@@ -61,8 +86,12 @@ class MultivariateMahalanobisDetector:
         if seq.ndim != 2:
             raise ValueError(f"Expected 2-D (seq_len, sensors), got {seq.ndim}-D")
         n, dims = seq.shape
-        # Need clearly more samples than dimensions for a usable covariance.
-        if n < dims * 2 or not np.isfinite(seq).all():
+        # Need clearly more samples than dimensions for a usable covariance,
+        # AND enough rows to approximate i.i.d. chi-square calibration.
+        if (
+            n < max(dims * 2, self._min_self_fit_samples)
+            or not np.isfinite(seq).all()
+        ):
             return [False] * n
 
         floors = self._floor_vector(dims)
@@ -81,6 +110,53 @@ class MultivariateMahalanobisDetector:
             return [False] * n
 
         return [bool(value > self._threshold) for value in d2]
+
+    def score_last_against_history(
+        self,
+        window: np.ndarray,
+        history: np.ndarray,
+    ) -> bool:
+        """Whether the last row of ``window`` is implausible under ``history``.
+
+        Center and covariance are fit on the finite rows of ``history``
+        only. The window is not appended to that fit and is not trimmed.
+        The chi-square threshold and the diagonal noise floor are the
+        same ones :meth:`detect` uses.
+
+        Args:
+            window: Physical window, shape ``(seq_len, n_sensors)``.
+            history: Physical history, shape ``(n_history, n_sensors)``.
+
+        Returns:
+            True when the last row's squared Mahalanobis distance exceeds
+            the chi-square threshold. False when fewer than
+            ``2 * n_sensors`` history rows are finite, when the window is
+            not entirely finite, or when the covariance cannot be inverted.
+        """
+        seq = np.asarray(window, dtype=float)
+        hist = np.asarray(history, dtype=float)
+        if seq.ndim != 2 or hist.ndim != 2:
+            raise ValueError(
+                "Expected 2-D window and history, "
+                f"got {seq.ndim}-D and {hist.ndim}-D"
+            )
+        if seq.shape[1] != hist.shape[1]:
+            raise ValueError(
+                "Window and history sensor counts differ: "
+                f"{seq.shape[1]} vs {hist.shape[1]}"
+            )
+        n_rows, n_sensors = seq.shape
+        if n_rows == 0 or n_sensors == 0 or not np.isfinite(seq).all():
+            return False
+        finite_rows = hist[np.isfinite(hist).all(axis=1)]
+        if finite_rows.shape[0] < n_sensors * 2:
+            return False
+        distances = self._distances(
+            seq[-1:], finite_rows, self._floor_vector(n_sensors)
+        )
+        if distances is None:
+            return False
+        return bool(distances[0] > self._threshold)
 
     @staticmethod
     def _distances(

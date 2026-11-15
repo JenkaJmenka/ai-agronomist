@@ -143,7 +143,9 @@ async def produce_upload_portions(
         normalized_chunk_df = None
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
-            adapter.validate(normalized_chunk)
+            # allow_oob=True: OOB readings are reported by the worker's
+            # score_portion (oob_hits) instead of discarding the chunk.
+            adapter.validate(normalized_chunk, allow_oob=True)
             normalized_rows = _normalized_records(normalized_chunk)
             normalized_chunk_df = normalized_chunk  # keep reference for stuck detection
         except Exception:
@@ -159,8 +161,14 @@ async def produce_upload_portions(
         carry_state_before = stuck_carry.to_dict()
 
         # Advance the carry for this portion (sequential — producer reads in order).
+        # Use clamped values to match the worker's scoring path, so the carry
+        # state embedded in the message is consistent with what score_portion
+        # will produce on the worker side.
         if normalized_chunk_df is not None and not normalized_chunk_df.empty:
-            _WALLCLOCK_DETECTOR.detect_chunk(normalized_chunk_df, stuck_carry)
+            from src.vendors.base import DataSourceAdapter as _DSA
+            _WALLCLOCK_DETECTOR.detect_chunk(
+                _DSA.clamp_to_oob_limits(normalized_chunk_df), stuck_carry
+            )
 
         message = UploadPortionMessage(
             job_id=job_id,

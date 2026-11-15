@@ -32,13 +32,13 @@ ROWS = 130
 # values that outrun the inflating std keep z >= COLD_RUN_STAT_Z_MIN for the
 # COLD_RUN_STAT_MIN_CONSECUTIVE rows the detector requires.
 #
-# IMPORTANT: all values must be <= 50.0 °C — the upper bound enforced by
-# CSVAdapter.validate_canonical_schema (src/vendors/base.py).  Exceeding it
-# causes the adapter to reject the entire portion chunk, leaving those rows
-# absent from sensor_readings so apply_anomaly_scores cannot set trigger_channel.
+# IMPORTANT: values must stay inside OOB_LIMITS (temperature −40..80 °C),
+# which validate_canonical_schema now uses. Exceeding it rejects the whole
+# portion chunk, so those rows never reach sensor_readings and
+# apply_anomaly_scores cannot set trigger_channel.
 # Normal baseline mean ≈ 21.5 °C, std ≈ 1.0 °C; z-threshold = 5.5 → need ≥ 27 °C.
 # These values produce z-scores of ≈ 8.5, 13.5, 18.5, 23.5, 27.5 — all well
-# above the 5.5 threshold — while staying within the adapter's 50 °C cap.
+# above the 5.5 threshold — and stay inside the 80 °C hard limit.
 _FAULT_RAMP = (30.0, 35.0, 40.0, 45.0, 49.0)
 
 

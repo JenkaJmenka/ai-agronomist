@@ -58,6 +58,11 @@ class BOCPDDetector:
             posterior decided a change-point occurred at/just before ``t``
             after at least ``min_run`` stable steps, confirmed by the run
             length continuing to grow from ~0 (not snapping back).
+
+            Window-level votes should use :meth:`any_in_window`. Reading only
+            ``flags[-1]`` misses a shift the posterior already confirmed
+            earlier in a short window (prototype level-shift: last step
+            0/40, any flag in the window 40/40).
         """
         x = np.asarray(series, dtype=float)
         n = len(x)
@@ -78,6 +83,15 @@ class BOCPDDetector:
             ):
                 flags[t] = True
         return flags
+
+    def any_in_window(self, series: np.ndarray) -> bool:
+        """True when ``detect`` confirms a change-point anywhere in ``series``.
+
+        Same flags as :meth:`detect`. This is the vote for a short upload
+        or inference window, where the shift is not required to fall on
+        the last step. ``detect`` itself is unchanged.
+        """
+        return any(self.detect(series))
 
     def _reset_confirmed(self, map_runs, t: int) -> bool:
         """True if the MAP run keeps growing from ~0 after the reset at ``t``.

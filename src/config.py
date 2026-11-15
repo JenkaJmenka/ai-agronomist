@@ -252,9 +252,9 @@ COLD_RUN_BASELINE_FRACTION: float = 0.2
 #
 # Disabled by default.  It only ever RAISES the threshold, so enabling it can
 # never add anomalies, but it does move the ADR-005 canonical anchor
-# (canonical 0.5 == threshold) for every score in the file, and it changes what
-# tests/api/test_inference_upload_cold_run.py asserts about anomalies_detected
-# and threshold_method.  Enable per-deployment after validating the hit counts
+# (canonical 0.5 == threshold) for every score in the file; measured 2026-11-14:
+# with it enabled the LSTM produced 0 alerts on both tests/fixtures native July
+# and December files, so enable per deployment only after validating hit counts
 # against a labelled file.
 COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
 # Robust z-score a raw score must clear above the bulk of the distribution.
@@ -914,6 +914,14 @@ STUCK_WALLCLOCK_EPSILON: Dict[str, float] = {
 # because diurnal zero (nighttime darkness) is normal, not a stuck sensor.
 STUCK_WALLCLOCK_CHANNELS: Tuple[str, ...] = ("temperature", "humidity", "co2")
 
+# Ensemble sample-indexed stuck pre-check (EnsembleAnomalyDetector.detect).
+# Light is excluded for the same reason as STUCK_WALLCLOCK_CHANNELS: a
+# 20-step night window is legitimately ~0 W/m² and must not short-circuit
+# is_anomaly. Temperature, humidity, and CO2 still do. Callers of
+# StuckFaultDetector.detect that omit skip_channels, and detect_series on
+# a single channel, are unchanged.
+ENSEMBLE_STUCK_SKIP_CHANNELS: Tuple[str, ...] = ("light",)
+
 # Expected inter-sample cadence (seconds) and tolerance factor.
 # The cadence check flags input whose median interval deviates beyond
 # CADENCE_EXPECTED_SECONDS × CADENCE_TOLERANCE_FACTOR.
@@ -983,6 +991,12 @@ THERMAL_DIVERGENCE_SEVERE_C: float = float(
 # At 5-minute sampling, N=12 ≈ 1 h; 24 identical samples ≈ 2 h.
 FLATLINE_VARIANCE_WINDOW: int = int(os.environ.get("FLATLINE_VARIANCE_WINDOW", "12"))
 FLATLINE_IDENTICAL_STEPS: int = int(os.environ.get("FLATLINE_IDENTICAL_STEPS", "24"))
+# Near-zero tolerance. Exact ``== 0`` misses a frozen channel after a
+# normalize/denormalize round trip: on 40 stuck ideal windows the exact
+# check fired 17/40, and eps=1e-6 still fired 17/40. eps=1e-4 fired 40/40
+# (proto_upload_mad.json). Peak-to-peak is compared to this value; variance
+# is compared to its square, the scale of a series bounded by eps.
+FLATLINE_VARIANCE_EPS: float = float(os.environ.get("FLATLINE_VARIANCE_EPS", "1e-4"))
 
 # Column aliases for optional climate-computer / microclimate context.
 SETPOINT_COLUMN_ALIASES: Tuple[str, ...] = (
@@ -1221,6 +1235,20 @@ SPIKE_MAD_FLOOR: Dict[str, float] = {
     "co2": 10.0,          # ppm
     "light": 4.0,         # W/m² (was labelled lux; canonical unit is W/m²; numeric floor unchanged)
 }
+# Upload-path MAD. Live scoring keeps SPIKE_MAD_TUNING_C / SPIKE_MAD_FLOOR.
+# On the July clear-sky week (proto_upload_mad.json) c=8 and a 0.5 °C
+# temperature floor caught 12/12 injected +6 °C spikes (one sample and a
+# 15-minute hold) with 0 clean false hits. The live pair (c=3, floor=0.1 °C)
+# produced 267 clean false hits on that same week, so the upload gate must
+# not reuse it. Humidity, CO₂, and light were not in that sweep and are
+# omitted rather than given an unmeasured floor (callers treat a missing
+# key as mad_floor=0).
+UPLOAD_SPIKE_MAD_TUNING_C: float = float(
+    os.environ.get("UPLOAD_SPIKE_MAD_TUNING_C", "8.0")
+)
+UPLOAD_SPIKE_MAD_FLOOR: Dict[str, float] = {
+    "temperature": float(os.environ.get("UPLOAD_SPIKE_MAD_FLOOR_TEMP", "0.5")),
+}
 
 # Out-of-Bounds — hard physical / hardware limits per sensor.
 OOB_LIMITS: Dict[str, Tuple[float, float]] = {
@@ -1239,19 +1267,68 @@ STUCK_EPSILON: float = float(os.environ.get("STUCK_EPSILON", "1e-4"))
 
 # CUSUM drift — EMA baseline estimator smoothing factor.
 CUSUM_EMA_ALPHA: float = float(os.environ.get("CUSUM_EMA_ALPHA", "0.01"))
+# Per-sensor floor on the EMA standard deviation, in physical units.
+# Opt-in: ``EMABaselineEstimator.for_physical_series()`` or
+# ``min_std_by_sensor=CUSUM_EMA_MIN_STD``. The scalar ``min_std`` default
+# stays 1e-6 so existing callers (including the pipeline, which currently
+# feeds normalized last-steps) are unchanged. These floors are the wrong
+# scale for normalized model input.
+#
+# With alpha=0.01 the second sample's residual equals
+# 1/sqrt(alpha*(1-alpha)) ≈ 10 for any nonzero step, which exceeds CUSUM
+# H=4 immediately. A floor at the sensor's own noise scale stops that for
+# ordinary noise. Temperature 0.05 °C is the value the stationary prototype
+# used (SENSOR_NOISE_TARGETS). Humidity, CO₂, and light were not in that
+# run; they reuse the same noise-target table so a CO₂ residual is not
+# floored at 0.05 ppm. The prototype also reset the CUSUM after each alarm
+# (see ``CUSUMDriftDetector.update_and_reset``): floor alone does not clear
+# a latched accumulator.
+CUSUM_EMA_MIN_STD: Dict[str, float] = {
+    "temperature": float(os.environ.get("CUSUM_EMA_MIN_STD_TEMP", "0.05")),
+    "humidity": float(os.environ.get("CUSUM_EMA_MIN_STD_HUMIDITY", "0.1")),
+    "co2": float(os.environ.get("CUSUM_EMA_MIN_STD_CO2", "5.0")),
+    "light": float(os.environ.get("CUSUM_EMA_MIN_STD_LIGHT", "2.0")),
+}
 
 # Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
+# The detect statistic is normalised second-difference variance:
+#   var(diff(hp, n=2)) / gain,  gain = sum([1,-2,1]^2) = 6
+# which estimates sigma^2 for white noise.  All fixed baselines and ratio
+# thresholds below are on the sigma^2 scale and need no adjustment.
 NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
 NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     # spec ref: sigma_baseline^2=0.02 (docs/anomaly_framework_spec.md §5).
-    "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
-    "humidity": 0.04,      # (%)²
-    "co2": 25.0,           # (ppm)²
-    "light": 100.0,        # (W/m²)²
+    # These are sigma^2 values.  The normalised d2-var statistic estimates
+    # sigma^2 for white noise, so these keep their original meaning.
+    "temperature": 0.01,   # (deg C)^2 — calibrated sensor noise floor
+    "humidity": 0.04,      # (%)^2
+    "co2": 25.0,           # (ppm)^2
+    "light": 100.0,        # (W/m^2)^2
 }
-# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
+# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md S5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
+# This ratio pairs with the fixed NOISE_BASELINE_VARIANCE cold start.
+# Cold-start fires on July clearsky eval (167 windows, pipeline channels):
+#   plain var:         140/167 (84%), ring refused 127/167
+#   normalised d2-var:  81/167 (49%), ring refused  81/167
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
+# Ratio for the calibrated noise path (with calibrate_noise_baseline).
+# The normalised d2-var statistic is scale-free on the calibrated path
+# (numerator and denominator both divide by gain 6).  On the merged
+# (real) path, resolve_noise_baseline's max(calibrated, fixed) can
+# pick the fixed floor when calibrated < fixed (temperature: 0.0024
+# vs fixed 0.01), tightening sigma-0.5 recall.
+# Ratio sweep 2026-11-15, July clearsky, normalised d2-var (merged base):
+#   ratio | cal_fires | eval_fires | s1.0 r | s0.5 i/r  | s0.3 i/r
+#      30 |         0 |          0 |     40 |  40 / 16  |  26 /  0
+#      20 |         5 |          6 |     40 |  40 / 27  |  35 /  1
+#      15 |        11 |         14 |     40 |  40 / 33  |  40 /  4
+#      10 |        23 |         29 |     40 |  40 / 40  |  40 / 17
+#       5 |        43 |         57 |     40 |  40 / 40  |  40 / 34
+# Lowest ratio with zero cal fires: 30.  One-step margin: 30 (no higher).
+NOISE_CALIBRATED_RATIO_TARGET: float = float(
+    os.environ.get("NOISE_CALIBRATED_RATIO_TARGET", "30.0")
+)
 
 # Bias / Constant Offset — dual-sensor cross-difference.
 # spec ref: w=3, theta_bias=1.5°C (docs/anomaly_framework_spec.md §6);
@@ -1291,10 +1368,40 @@ DIURNAL_PROFILE_MIN_ROWS: int = int(
     os.environ.get("DIURNAL_PROFILE_MIN_ROWS", "288")
 )
 
+# Hour-of-day temperature residual (unwired). A multi-day level bias is
+# invisible to a rolling z-score. Each sample is compared to the median of
+# other days at the same clock hour, and a flag requires this many
+# consecutive hourly exceedances. Eight hours is longer than one afternoon
+# (about 12:00-18:00), so a single warm afternoon cannot complete a run.
+# 2.0°C is the temperature bias scale: a 2°C offset is a calibration fault,
+# and the upload gap is a multi-day +3°C bias, which clears it.
+HOUR_RESIDUAL_EXCESS_C: float = float(
+    os.environ.get("HOUR_RESIDUAL_EXCESS_C", "2.0")
+)
+HOUR_RESIDUAL_PERSISTENCE_HOURS: int = int(
+    os.environ.get("HOUR_RESIDUAL_PERSISTENCE_HOURS", "8")
+)
+# Other calendar days required at that clock hour before a center exists.
+HOUR_RESIDUAL_MIN_OTHER_DAYS: int = int(
+    os.environ.get("HOUR_RESIDUAL_MIN_OTHER_DAYS", "3")
+)
+
 # Multivariate joint-implausibility check (rolling-window Mahalanobis).
 # 18.47 = chi-square df=4 at p=0.999 — flags only strong joint outliers.
 MAHALANOBIS_CHI2_THRESHOLD: float = float(
     os.environ.get("MAHALANOBIS_CHI2_THRESHOLD", "18.47")
+)
+
+# Minimum sample count for the Mahalanobis self-fit path (detect()).
+# Chi-square calibration assumes i.i.d. samples.  A 20-step sensor
+# window has strong auto-correlation (diurnal ramp), so the effective
+# degrees of freedom are far below the row count and the test over-fires.
+# Measured 2026-11-15: detect() on 20-step July clear-sky windows flagged
+# 26/167 clean windows (16 % FPR at p=0.001); disabling the self-fit path
+# eliminated all 26.  score_last_against_history (external history) is
+# unaffected.  Override via MAHALANOBIS_DETECT_MIN_SAMPLES env var.
+MAHALANOBIS_DETECT_MIN_SAMPLES: int = int(
+    os.environ.get("MAHALANOBIS_DETECT_MIN_SAMPLES", "50")
 )
 
 # Bayesian online change-point detection (level shifts beside CUSUM).
@@ -1772,3 +1879,117 @@ ANOMALY_TREND_FLAT_DEADBAND: float = float(
 ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION: float = float(
     os.environ.get("ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION", "0.25")
 )
+
+# =============================================================================
+# Drift Watch — vendor-agnostic CUSUM on weather-removed residuals
+# (2026-11-14 measurement on tenant 1d year corpus)
+# =============================================================================
+
+# Rolling baseline fit window length (weeks).
+# Measured 2026-11-14: 8-week baseline captures enough weather variation
+# for stable residual statistics.
+DRIFT_WATCH_BASELINE_WEEKS: int = 8
+
+
+# Gap between the end of the fit window and the start of the calibration
+# or scoring period (weeks).  Decided on principle (2026-11-15):
+#
+# Q: Does a gap protect the baseline from a fault that has already
+#    started but not yet alarmed?
+# A: With the episode-based excursion logic and the rolling refit's
+#    elevated-z exclusion (|z| > ELEVATED_Z_CEIL hours dropped from
+#    refit), the baseline is already protected: early fault hours with
+#    high residuals are excluded from the refit window regardless of
+#    their temporal proximity. A fixed gap is therefore redundant for
+#    baseline protection.
+#
+# A gap still has one minor benefit: it prevents autocorrelation leakage
+# from the tail of the fit window into the first scored hours. For R4
+# (rho_1=0.89, e-folding ~9h), two weeks of gap is generous; for R2
+# (rho_1=0.84) it is similarly conservative. But the effect on measured
+# FA and detection is small (see gap sensitivity table in verification).
+#
+# Set to 0 as the default; callers may override per-tenant.
+DRIFT_WATCH_GAP_WEEKS: int = 0
+
+# Minimum total history (weeks) before calibration is permitted.
+# Layout: 8 weeks baseline + 8 weeks calibration = 16 weeks.
+DRIFT_WATCH_MIN_HISTORY_WEEKS: int = 16
+
+# Target false-alarm budget (alarms per calendar month) used when
+# calibrating the CUSUM decision interval h.
+# Measured 2026-11-14: 1 FA/month achieved for R1, R2, R4 on held-out data.
+DRIFT_WATCH_FA_BUDGET_PER_MONTH: float = 1.0
+
+# Minimum detection rate a self-test fault must achieve for the input to be
+# ARMED (vs SHADOW). A rate below this means the input cannot reliably
+# detect its target shift at the chosen threshold.
+DRIFT_WATCH_DETECTION_RATE_THRESHOLD: float = 0.6
+
+# Upper bound on h during binary search.
+# Measured 2026-11-14: R4 (RH virtual sensor) required h=200 to approach
+# 1 FA/month on calibration data.
+DRIFT_WATCH_CALIBRATION_H_MAX: float = 200.0
+
+# DEPRECATED: superseded by episode-based excursion logic (2026-11-15).
+# The old re-arm fraction governed when a direction could fire again
+# after an alarm. The new logic resets the accumulator to zero after
+# each alarm and uses QUIET_HOURS to separate episodes instead.
+# Kept for backward compatibility; not imported by drift_watch.py.
+DRIFT_WATCH_REARM_FRACTION: float = 0.5
+
+
+
+
+
+
+# Physics (Tetens) independence test: if the baseline residual sigma is at
+# or below this value (g/m^3), the humidity deficit is classified as
+# *derived* from temperature + RH (not an independent measurement).
+# Measured 2026-11-14: tenant 1d corpus baseline sigma = 0.043 g/m^3,
+# which is at the integer-rounding quantisation level. True independent
+# HD sensors (capacitive / chilled mirror) show sigma > 0.5 g/m^3.
+DRIFT_WATCH_PHYSICS_DERIVED_SIGMA_CEIL: float = 0.1
+
+# Schema version for serialised DriftInputState (bump on breaking changes).
+DRIFT_WATCH_SCHEMA_VERSION: int = 2
+
+# Default minimum-shift targets in native units (passed by the caller via
+# DriftInputSpec.min_shift; these are reference values for documentation).
+# Measured 2026-11-14: these shifts are reliably detected with the
+# calibrated CUSUM at <= 1 FA/month.
+DRIFT_WATCH_DEFAULT_SHIFT_TEMP_C: float = 0.5   # C
+DRIFT_WATCH_DEFAULT_SHIFT_RH_PCT: float = 2.0   # %RH
+DRIFT_WATCH_DEFAULT_SHIFT_HD_GM3: float = 0.3   # g/m^3
+
+# Self-test injection parameters.
+# Bias levels as multiples of min_shift (e.g. [1, 2, 4] -> 0.5, 1.0, 2.0 C).
+DRIFT_WATCH_INJECT_BIAS_LEVELS: Tuple[float, ...] = (1.0, 2.0, 4.0)
+# Drift rate as a multiple of min_shift per week.
+DRIFT_WATCH_INJECT_DRIFT_RATE: float = 1.0
+# Drift duration (weeks).
+DRIFT_WATCH_INJECT_DRIFT_WEEKS: int = 4
+# Number of injection start points spread across the calibration period.
+DRIFT_WATCH_INJECT_N_STARTS: int = 5
+
+# Episode-based excursion logic: after a CUSUM alarm, the accumulator
+# resets to zero and keeps accumulating. Consecutive alarms while the
+# residual stays shifted are reported as ONE ongoing episode. A new
+# episode starts only after the direction has been quiet (no alarm) for
+# this many hours.
+# 72 hours (3 days) separates noise-driven re-triggers from genuine
+# independent events: typical autocorrelation e-folding time for R4
+# (rho_1=0.89) is ~9 hours, so a noise excursion decays within 30 hours.
+DRIFT_WATCH_QUIET_HOURS: int = 72
+
+# Rolling baseline refit interval (weeks). For model-based inputs
+# (paired_probes, virtual_sensor), the Ridge model and residual scale
+# (mu, sigma) are refit on the trailing baseline window every this many
+# weeks. Physics inputs stay frozen (no model to refit).
+DRIFT_WATCH_REFIT_INTERVAL_WEEKS: int = 1
+
+# Elevated z-score ceiling for excluding hours from a rolling refit.
+# Hours where |z| > this threshold are excluded from the refit baseline
+# to prevent fault contamination. This is a robust-estimation proxy for
+# the coordinator's requirement that elevated/alarm hours be excluded.
+DRIFT_WATCH_ELEVATED_Z_CEIL: float = 3.0

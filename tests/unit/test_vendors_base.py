@@ -183,17 +183,17 @@ def test_canonical_schema_naive_timestamp():
 
 
 @pytest.mark.parametrize("col, val", [
-    ("temperature", -0.1),
-    ("temperature", 50.1),
+    ("temperature", -40.1),
+    ("temperature", 80.1),
     ("humidity", -0.1),
     ("humidity", 100.1),
     ("co2", -0.1),
-    ("co2", 1000.1),
+    ("co2", 5000.1),
     ("light", -0.1),
     ("light", 2000.1),
 ])
 def test_canonical_schema_out_of_bounds_values(col, val):
-    """Verifies that any values exceeding physical bounds are caught and report details."""
+    """Values outside OOB_LIMITS are rejected and the message names the side."""
     df_template = {
         "timestamp": pd.date_range("2026-06-09T10:00:00", periods=3, freq="h", tz="UTC"),
         "temperature": [22.5, 23.0, 22.0],
@@ -208,6 +208,23 @@ def test_canonical_schema_out_of_bounds_values(col, val):
     bound_type = "below allowed minimum" if val < 0 else "above allowed maximum"
     with pytest.raises(DataValidationError, match=f"Column '{col}' contains values {bound_type}"):
         DataSourceAdapter.validate_canonical_schema(df)
+
+
+def test_canonical_schema_accepts_values_inside_oob_limits():
+    """CO₂ above 1000 ppm and temperature outside 0–50 °C stay in the chunk.
+
+    Those used to fail validate_canonical_schema and drop the whole upload
+    before the out-of-bounds detector could label them. They are inside
+    OOB_LIMITS.
+    """
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-06-09T10:00:00", periods=3, freq="h", tz="UTC"),
+        "temperature": [22.5, 55.0, -10.0],
+        "humidity": [60.0, 62.0, 61.0],
+        "co2": [400.0, 1500.0, 405.0],
+        "light": [800.0, 810.0, 805.0],
+    })
+    assert DataSourceAdapter.validate_canonical_schema(df) is True
 
 
 def test_canonical_schema_non_numeric_types():

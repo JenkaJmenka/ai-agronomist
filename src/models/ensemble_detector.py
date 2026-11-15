@@ -23,13 +23,13 @@ from src.config import (
     ENSEMBLE_LSTM_VAE_THRESHOLD,
     ENSEMBLE_MIN_AGREEMENT,
     ENSEMBLE_STATISTICAL_THRESHOLD,
+    ENSEMBLE_STUCK_SKIP_CHANNELS,
     SENSOR_NAMES,
     TEMP_RANGE,
     HUMIDITY_RANGE,
     CO2_RANGE,
     LIGHT_RANGE,
 )
-from src.models.bias_detector import BiasOffsetDetector
 from src.models.inference import AnomalyDetector
 from src.models.stuck_fault_detector import StuckFaultDetector
 
@@ -37,12 +37,89 @@ logger = logging.getLogger(__name__)
 
 DETECTOR_NAMES = ("lstm_vae", "isolation_forest", "statistical", "correlation")
 
+# Night light is a legitimate flat channel. Built once so detect() does not
+# allocate the skip set on every window.
+_STUCK_PRECHECK_SKIP = frozenset(ENSEMBLE_STUCK_SKIP_CHANNELS)
+
 _SENSOR_BOUNDS = {
     "temperature": TEMP_RANGE,
     "humidity": HUMIDITY_RANGE,
     "co2": CO2_RANGE,
     "light": LIGHT_RANGE,
 }
+_PHYSICAL_RANGES = np.array(
+    [TEMP_RANGE, HUMIDITY_RANGE, CO2_RANGE, LIGHT_RANGE],
+    dtype=np.float64,
+)
+# Physical temperature is tens of °C and physical CO2 is hundreds of ppm.
+# Model-scale channels sit near [0, 1]. Both medians must clear this
+# ceiling before a window is treated as already physical, so one failed
+# channel cannot flip the decision.
+_MODEL_SCALE_CEILING = 10.0
+
+
+def _is_model_scale(sequence: np.ndarray) -> bool:
+    """True when ``sequence`` is normalized model input, not physical units."""
+    if sequence.ndim != 2 or sequence.shape[1] < 3:
+        return False
+    temp = sequence[:, 0]
+    co2 = sequence[:, 2]
+    temp_finite = temp[np.isfinite(temp)]
+    co2_finite = co2[np.isfinite(co2)]
+    if temp_finite.size == 0 or co2_finite.size == 0:
+        return False
+    return (
+        float(np.median(temp_finite)) < _MODEL_SCALE_CEILING
+        and float(np.median(co2_finite)) < _MODEL_SCALE_CEILING
+    )
+
+
+def _is_model_scale_3d(baseline: np.ndarray) -> bool:
+    """True when a 3-D baseline ``(n, seq_len, input_dim)`` is model-scale."""
+    if baseline.ndim != 3 or baseline.shape[2] < 3:
+        return False
+    flat = baseline.reshape(-1, baseline.shape[2])
+    return _is_model_scale(flat)
+
+
+def _to_physical_range_units(sequence: np.ndarray) -> np.ndarray:
+    """Physical copy for range checks. Already-physical windows pass through.
+
+    Correlation is affine-invariant, so the correlation term can stay in
+    whatever space the baseline was fit in. The range term compares against
+    ``_SENSOR_BOUNDS``, which are physical, and must not see model-scale
+    values (every in-range greenhouse window would count as out of range).
+    """
+    if not _is_model_scale(sequence):
+        return sequence
+    ncols = min(sequence.shape[1], _PHYSICAL_RANGES.shape[0])
+    physical = np.array(sequence, dtype=np.float64, copy=True)
+    mins = _PHYSICAL_RANGES[:ncols, 0]
+    spans = _PHYSICAL_RANGES[:ncols, 1] - mins
+    physical[:, :ncols] = physical[:, :ncols] * spans + mins
+    return physical
+
+
+def _normalize_baseline_to_model_scale(baseline: np.ndarray) -> np.ndarray:
+    """Normalize a physical-unit 3-D baseline to [0, 1] model scale.
+
+    The pipeline passes normalized sequences but ``build_default_baseline``
+    produces physical midpoints.  The IsolationForest and Statistical members
+    fit on the baseline and score the sequence, so a scale mismatch makes
+    their scores meaningless.  Measured 2026-11-15: statistical scored 1.0
+    on every clean July window due to this mismatch (Mahalanobis distance
+    between [0.5, 0.5, 0.5, 0.5] and [25.0, 65.0, 400.0, 600.0] is
+    enormous).  This function is called only when `detect()` identifies a
+    mismatch, so already-normalized baselines pass through unchanged.
+    """
+    ncols = min(baseline.shape[2], _PHYSICAL_RANGES.shape[0])
+    normalized = np.array(baseline, dtype=np.float64, copy=True)
+    mins = _PHYSICAL_RANGES[:ncols, 0]
+    spans = _PHYSICAL_RANGES[:ncols, 1] - mins
+    # Avoid division by zero for channels with zero span.
+    safe_spans = np.where(spans > 0, spans, 1.0)
+    normalized[:, :, :ncols] = (normalized[:, :, :ncols] - mins) / safe_spans
+    return normalized
 
 
 class DetectorProtocol(Protocol):
@@ -107,7 +184,7 @@ class LstmVaeDetector:
         return _normalize_error(peak_error, self.threshold)
 
     def is_anomaly(self, score: float) -> bool:
-        return score >= 0.5
+        return score >= 1.0
 
 
 class IsolationForestDetector:
@@ -190,7 +267,7 @@ class StatisticalDetector:
         return _normalize_error(mahal, self.threshold)
 
     def is_anomaly(self, score: float) -> bool:
-        return score >= 0.5
+        return score >= 1.0
 
 
 class CorrelationDetector:
@@ -216,8 +293,9 @@ class CorrelationDetector:
         sensor_subset = SENSOR_NAMES[:ncols]
         mins = np.array([_SENSOR_BOUNDS[s][0] for s in sensor_subset])
         maxs = np.array([_SENSOR_BOUNDS[s][1] for s in sensor_subset])
-        range_violations = int(np.sum((sequence < mins) | (sequence > maxs)))
-        total_checks = sequence.size
+        ranged = _to_physical_range_units(sequence)
+        range_violations = int(np.sum((ranged < mins) | (ranged > maxs)))
+        total_checks = ranged.size
 
         range_score = range_violations / max(total_checks, 1)
 
@@ -260,15 +338,12 @@ class EnsembleAnomalyDetector:
         self._anomaly_threshold = anomaly_threshold
         self._min_agreement = min_agreement
         self._baseline_cache: Optional[np.ndarray] = None
+        # Caller's physical baseline object and its model-scale form, so the
+        # same object passed twice yields the same normalised object (and
+        # therefore does not trigger a refit of the sklearn members).
+        self._raw_baseline_ref: Optional[np.ndarray] = None
+        self._normalized_baseline: Optional[np.ndarray] = None
         self._stuck_detector = StuckFaultDetector()
-        self._bias_detector = BiasOffsetDetector(
-            expected_ranges={
-                "temperature": TEMP_RANGE,
-                "humidity": HUMIDITY_RANGE,
-                "co2": CO2_RANGE,
-                "light": LIGHT_RANGE,
-            }
-        )
 
     def fit_baseline(self, baseline: np.ndarray) -> None:
         """Pre-fit sklearn/stat detectors on customer baseline."""
@@ -284,13 +359,35 @@ class EnsembleAnomalyDetector:
     ) -> EnsembleResult:
         """Score sequence and return ensemble result.
 
-        Runs stuck-fault and bias-offset pre-checks before the 4-detector
-        weighted vote.  A stuck sensor short-circuits to ``is_anomaly=True``
-        with ``fault_type="stuck_fault"``.  Bias detection sets a flag
-        propagated through the result for downstream classification.
+        Runs a stuck-fault pre-check before the 4-detector weighted vote.
+        A stuck temperature, humidity, or CO2 channel short-circuits to
+        ``is_anomaly=True`` with ``fault_type="stuck_fault"``. Light is
+        omitted (``ENSEMBLE_STUCK_SKIP_CHANNELS``): a 20-step night window
+        is legitimately ~0 W/m². ``StuckFaultDetector.detect`` without
+        ``skip_channels``, and ``detect_series`` on one channel, still
+        flag a flat light series.
+
+        The midpoint bias pre-check is intentionally absent. It compared
+        this sequence to physical range midpoints, but the pipeline passes
+        normalized model input, so the flag was true on every window.
+        Even on physical units the greenhouse operating point is not the
+        range midpoint (prototype: 82/100 clean windows still flagged).
+        Persistent offset stays with the pipeline's BiasEMA and dual-sensor
+        checks, which see physical units. ``bias_flag`` is always False.
+
+        When the sequence is in model scale ([0, 1]) but the baseline is
+        in physical units, the baseline is normalized to match.  Measured
+        2026-11-15: without this, the statistical member scored 1.0 on
+        every clean window (Mahalanobis distance between normalized
+        channel means ~0.5 and physical midpoints [25, 65, 400, 600]
+        is enormous) and the IsolationForest scored 0.0 or 1.0 depending
+        on the constant-baseline degenerate fit.
         """
-        # --- Pre-check: stuck fault ---
-        stuck_result = self._stuck_detector.detect(sequence)
+        # --- Pre-check: stuck fault (light excluded; night is legitimately flat) ---
+        stuck_result = self._stuck_detector.detect(
+            sequence,
+            skip_channels=_STUCK_PRECHECK_SKIP,
+        )
         has_stuck = any(stuck_result.values())
 
         if has_stuck:
@@ -304,13 +401,32 @@ class EnsembleAnomalyDetector:
                 stuck_sensors=stuck_result,
             )
 
-        # --- Pre-check: bias offset ---
-        bias_result = self._bias_detector.detect(sequence)
-        bias_flag = any(mag > 0.0 for mag in bias_result.values())
+        # --- Reconcile sequence / baseline scales ---
+        # The pipeline normalizes the sequence to [0, 1] but
+        # build_default_baseline() produces physical midpoints.
+        # IsolationForest and Statistical fit on the baseline and score the
+        # sequence, so a scale mismatch makes their outputs meaningless.
+        effective_baseline = baseline
+        if _is_model_scale(sequence) and not _is_model_scale_3d(baseline):
+            if (
+                self._raw_baseline_ref is not baseline
+                or self._normalized_baseline is None
+            ):
+                self._normalized_baseline = _normalize_baseline_to_model_scale(
+                    baseline
+                )
+                self._raw_baseline_ref = baseline
+            effective_baseline = self._normalized_baseline
+            logger.debug(
+                "Ensemble: normalized physical baseline to model scale "
+                "(seq median temp=%.2f, baseline median temp=%.2f)",
+                float(np.median(sequence[:, 0])),
+                float(np.median(baseline[:, :, 0])),
+            )
 
         # --- Standard 4-detector vote ---
-        if self._baseline_cache is None or baseline is not self._baseline_cache:
-            self.fit_baseline(baseline)
+        if self._baseline_cache is None or effective_baseline is not self._baseline_cache:
+            self.fit_baseline(effective_baseline)
 
         scores: Dict[str, float] = {}
         votes = 0
@@ -318,7 +434,7 @@ class EnsembleAnomalyDetector:
         weight_total = 0.0
 
         for detector in self._detectors:
-            raw = detector.score(sequence, baseline)
+            raw = detector.score(sequence, effective_baseline)
             scores[detector.name] = round(raw, 4)
             weight = self._weights.get(detector.name, 0.25)
             weighted_sum += weight * raw
@@ -337,5 +453,5 @@ class EnsembleAnomalyDetector:
             ensemble_score=round(ensemble_score, 4),
             agreement_count=votes,
             is_anomaly=is_anomaly,
-            bias_flag=bias_flag,
+            bias_flag=False,
         )

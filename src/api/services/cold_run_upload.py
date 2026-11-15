@@ -26,6 +26,7 @@ from src.api.services.csv_persist import (
     persist_readings_chunk,
 )
 from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
+from src.api.services.drift_watch_service import run_drift_watch_shadow
 from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
@@ -226,8 +227,12 @@ def _calibrate_ranges_from_head(
                 imputed_channels = sorted(imputed)
             try:
                 normalized_chunk = adapter.normalize(raw_chunk)
-                adapter.validate(normalized_chunk)
-                range_acc.update(normalized_chunk[SENSOR_COLS].to_numpy(dtype=np.float32))
+                adapter.validate(normalized_chunk, allow_oob=True)
+                # Use clamped values for the adaptive range so one hardware-fault
+                # reading does not inflate the LSTM normalisation bounds.
+                from src.vendors.base import DataSourceAdapter as _DSA
+                clamped_chunk = _DSA.clamp_to_oob_limits(normalized_chunk)
+                range_acc.update(clamped_chunk[SENSOR_COLS].to_numpy(dtype=np.float32))
                 valid_rows += len(normalized_chunk)
             except Exception:
                 pass
@@ -284,7 +289,7 @@ async def run_cold_run_upload(
         normalized_chunk: pd.DataFrame | None
         try:
             normalized_chunk = adapter.normalize(raw_chunk)
-            adapter.validate(normalized_chunk)
+            adapter.validate(normalized_chunk, allow_oob=True)
         except Exception:
             normalized_chunk = None
 
@@ -364,6 +369,15 @@ async def run_cold_run_upload(
                 response.high_anomalies
             ),
         )
+        # Shadow drift-watch: calibrate/score after main persistence succeeds.
+        # apply_anomaly_scores committed above; raw readings are now visible.
+        _dw_ts = [ts for p in portions for ts in p.sequence_timestamps]
+        if _dw_ts:
+            _dw_start = pd.Timestamp(min(_dw_ts)).to_pydatetime()
+            _dw_end = pd.Timestamp(max(_dw_ts)).to_pydatetime()
+            await run_drift_watch_shadow(
+                persist_db, tenant_id, greenhouse_id, _dw_start, _dw_end
+            )
         response = response.model_copy(
             update={
                 "data_persisted": True,

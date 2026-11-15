@@ -127,6 +127,36 @@ _ANOMALY_TYPE_TO_FAULT_TYPE: dict[str, str | None] = {
     **BAND_TYPE_TO_VOTE,
 }
 
+# Maps SensorReading.trigger_detector (written from UploadHighAnomalyDetail.detector
+# by build_trigger_data_by_timestamp / apply_anomaly_scores) to the
+# Incident.fault_type taxonomy.
+#
+# Detectors that carry deterministic rule evidence resolve directly:
+#   spike_mad      → spike_fault   (MAD spike on a physical-unit channel)
+#   out_of_bounds  → out_of_bounds (value outside OOB_LIMITS)
+#   stuck_fault    → stuck_fault   (wallclock freeze confirmed by WallclockStuckDetector)
+#
+# Detectors that have NO rule-level fault evidence resolve to "unknown" so the
+# caller does NOT fall through to _infer_fault_type_from_values, which checks
+# the NORMALISATION ranges (TEMP_RANGE 20–30 °C, etc.) rather than sensor
+# hardware limits and therefore mislabels a normal warm-afternoon reading at
+# 31 °C as "spike_fault".  An honest "unknown" beats a confident wrong answer.
+#
+# A None return means the caller should continue down the resolution chain
+# (anomaly_type → value-based fallback); it is used for unrecognised detector
+# strings and for the None case (no trigger_detector persisted on the row).
+_DETECTOR_TO_FAULT_TYPE: dict[str, str] = {
+    "spike_mad":        "spike_fault",
+    "out_of_bounds":    "out_of_bounds",
+    "stuck_fault":      "stuck_fault",
+    # LSTM-only, statistical rolling-z, and their combination carry anomaly
+    # scores but no rule-level fault evidence — return "unknown" rather than
+    # guessing from normalisation ranges.
+    "lstm":             _UNKNOWN_KEY,
+    "statistical":      _UNKNOWN_KEY,
+    "lstm+statistical": _UNKNOWN_KEY,
+}
+
 
 # ─── fault-type classification ───────────────────────────────────────────────
 
@@ -151,6 +181,29 @@ def _fault_type_from_anomaly_type(anomaly_type: str | None) -> str | None:
     return _ANOMALY_TYPE_TO_FAULT_TYPE.get(anomaly_type)
 
 
+def _fault_type_from_detector(trigger_detector: str | None) -> str | None:
+    """Map SensorReading.trigger_detector to the Incident.fault_type taxonomy.
+
+    Returns a fault_type string when the detector provides definitive evidence,
+    or None when trigger_detector is absent or not recognised (caller should
+    continue to _infer_fault_type_from_values).
+
+    "spike_mad" and "out_of_bounds" carry deterministic rule evidence and
+    resolve directly.  "stuck_fault" maps to stuck_fault.  "lstm",
+    "statistical", and "lstm+statistical" have no rule-level fault evidence,
+    so they return "unknown" to prevent _infer_fault_type_from_values from
+    labelling an ordinary in-band reading as "spike_fault" based on the LSTM
+    NORMALISATION ranges (20–30 °C, 50–80 %, etc.), which are model input
+    ranges, not hardware sensor limits.
+
+    None is returned for unrecognised detector strings and when
+    trigger_detector is None, so the caller can continue down the chain.
+    """
+    if trigger_detector is None:
+        return None
+    return _DETECTOR_TO_FAULT_TYPE.get(trigger_detector)
+
+
 def _infer_fault_type_from_values(
     temperature: float | None,
     humidity: float | None,
@@ -161,6 +214,14 @@ def _infer_fault_type_from_values(
 
     Above upper bound -> spike_fault; below lower bound -> spike_fault;
     in-range -> unknown (z-score path is unreachable; see inline comment).
+
+    NOTE: This is a last-resort fallback used only when neither anomaly_type
+    nor trigger_detector is available on the row (e.g. pre-migration rows that
+    pre-date the trigger_detector column).  The bounds checked here are the
+    LSTM NORMALISATION ranges (TEMP_RANGE 20–30 °C, etc.), NOT sensor hardware
+    limits, so this function mislabels an ordinary warm afternoon (31 °C) as
+    "spike_fault".  Prefer _fault_type_from_detector when trigger_detector is
+    persisted.
     """
     vals: dict[str, float | None] = {
         "temperature": temperature, "humidity": humidity,

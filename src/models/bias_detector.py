@@ -45,7 +45,10 @@ class BiasOffsetDetector:
         Args:
             sequence: Array of shape ``(seq_len, 4)`` with columns
                 ordered as ``[temperature, humidity, co2, light]``.
-                Values should be in physical (denormalized) units.
+                Values must be physical units. Normalized model input
+                against these ranges flags every window; the ensemble
+                does not call this method. Persistent offset is the
+                pipeline's BiasEMA / dual-sensor path.
 
         Returns:
             Dict mapping sensor name to bias magnitude in ``[0, 1]``

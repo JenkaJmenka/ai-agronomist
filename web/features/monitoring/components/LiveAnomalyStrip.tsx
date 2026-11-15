@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import type { LiveAnomalyItem } from "@/features/monitoring/hooks/useLiveReadings";
 import { pickDashboardSearchParams } from "@/lib/dashboardQuery";
 import { formatTime } from "@/lib/formatTime";
+import { FAULT_LABELS } from "@/lib/severity";
 
 interface LiveAnomalyStripProps {
   readonly anomalies: LiveAnomalyItem[];
@@ -87,7 +88,9 @@ export function LiveAnomalyStrip({ anomalies, threshold }: LiveAnomalyStripProps
               <span className="text-sev-warning">{a.affected_channels.join(", ")}</span>
               <span className="tabular-nums text-text-muted">score {a.score.toFixed(2)}</span>
               {a.fault_type && (
-                <span className="text-text-muted">{a.fault_type.replace(/_/g, " ")}</span>
+                <span className="text-text-muted">
+                  {FAULT_LABELS[a.fault_type] ?? a.fault_type.replace(/_/g, " ")}
+                </span>
               )}
               <a
                 href={href}
