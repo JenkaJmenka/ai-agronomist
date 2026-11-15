@@ -40,6 +40,8 @@ from src.config import (
     SENSOR_NOISE_TARGETS,
     SEQ_LEN,
     SENSOR_NAMES,
+    ENRICHMENT_SPIKE_CONFIRM_LAG,
+    ENRICHMENT_SPIKE_CONFIRMED_PAIRS,
     SPIKE_MAD_FLOOR,
     UPLOAD_SPIKE_MAD_FLOOR,
     UPLOAD_SPIKE_MAD_TUNING_C,
@@ -1139,27 +1141,45 @@ class ComprehensiveInferencePipeline:
                 db=db,
             )
 
-        # 0c. Spike (MAD). Enrichment scores the current reading, which is
-        # the last timestep. any(flags) over the whole window was the main
+        # 0c. Spike (MAD). any(flags) over the whole window was the main
         # clean-file FPR driver: a spike earlier in the window labelled the
-        # current (clean) sample.
-        # Light is excluded. Floors and c are the upload pair
-        # (UPLOAD_SPIKE_MAD_TUNING_C, enrichment_spike_mad_floor), not the
-        # live detector's c=3 / 0.1 °C floor. The shared instance stays on
-        # the live defaults for any caller that still wants them.
+        # current (clean) sample. So exactly one timestep votes.
+        # ENRICHMENT_SPIKE_CONFIRM_LAG = 0 (default): the last timestep
+        # votes, unconfirmed, with the upload pair
+        # (UPLOAD_SPIKE_MAD_TUNING_C, enrichment_spike_mad_floor).
+        # Lag d > 0: timestep t-d votes, and only if one of the d samples
+        # after it is back at the pre-event level (a step that stays is not
+        # a spike). That vote uses ENRICHMENT_SPIKE_CONFIRMED_PAIRS where a
+        # sensor has an entry and arrives d samples late.
+        # Light is excluded. Neither mode is the live detector's c=3 /
+        # 0.1 °C floor; the shared instance stays on the live defaults for
+        # any caller that still wants them.
         spike_alarmed: list[str] = []
-        _enrichment_spike = SpikeMADDetector(
-            tuning_c=float(UPLOAD_SPIKE_MAD_TUNING_C),
-        )
+        _spike_lag = max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG))
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             base_floor = enrichment_spike_mad_floor(s_name)
             if base_floor is None:
                 continue
-            spike_flags = _enrichment_spike.detect(
-                _denormed_for_noise[:, s_idx],
-                mad_floor=base_floor * _scaler.factor(_season_key, s_name),
-            )
-            if spike_flags and spike_flags[-1]:
+            spike_c = float(UPLOAD_SPIKE_MAD_TUNING_C)
+            if _spike_lag > 0 and s_name in ENRICHMENT_SPIKE_CONFIRMED_PAIRS:
+                spike_c, base_floor = (
+                    float(value) for value in ENRICHMENT_SPIKE_CONFIRMED_PAIRS[s_name]
+                )
+            _enrichment_spike = SpikeMADDetector(tuning_c=spike_c)
+            spike_floor = base_floor * _scaler.factor(_season_key, s_name)
+            spike_series = _denormed_for_noise[:, s_idx]
+            if _spike_lag > 0:
+                spike_offsets = _enrichment_spike.reversion_offsets(
+                    spike_series, mad_floor=spike_floor, horizon=_spike_lag
+                )
+                voted = (
+                    len(spike_offsets) > _spike_lag
+                    and spike_offsets[-1 - _spike_lag] is not None
+                )
+            else:
+                spike_flags = _enrichment_spike.detect(spike_series, mad_floor=spike_floor)
+                voted = bool(spike_flags and spike_flags[-1])
+            if voted:
                 spike_alarmed.append(s_name)
         if spike_alarmed:
             logger.warning(
