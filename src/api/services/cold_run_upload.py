@@ -26,6 +26,7 @@ from src.api.services.csv_persist import (
     persist_readings_chunk,
 )
 from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
+from src.api.services.drift_watch_service import run_drift_watch_shadow
 from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
@@ -368,6 +369,15 @@ async def run_cold_run_upload(
                 response.high_anomalies
             ),
         )
+        # Shadow drift-watch: calibrate/score after main persistence succeeds.
+        # apply_anomaly_scores committed above; raw readings are now visible.
+        _dw_ts = [ts for p in portions for ts in p.sequence_timestamps]
+        if _dw_ts:
+            _dw_start = pd.Timestamp(min(_dw_ts)).to_pydatetime()
+            _dw_end = pd.Timestamp(max(_dw_ts)).to_pydatetime()
+            await run_drift_watch_shadow(
+                persist_db, tenant_id, greenhouse_id, _dw_start, _dw_end
+            )
         response = response.model_copy(
             update={
                 "data_persisted": True,

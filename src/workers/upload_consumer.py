@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.sensor_data import StatisticalAnomalyDetail, UploadHighAnomalyDetail
 from src.api.services.anomaly_episode_writer import persist_stuck_fault_episodes
+from src.api.services.drift_watch_service import run_drift_watch_shadow
 from src.api.services.cold_run_upload import (
     build_anomaly_metadata_by_timestamp,
     build_anomaly_scores_by_timestamp,
@@ -565,6 +566,18 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 response.high_anomalies
             ),
         )
+        # Shadow drift-watch: calibrate/score after main persistence succeeds.
+        _dw_ts = [ts for p in portions for ts in p.sequence_timestamps]
+        if _dw_ts:
+            _dw_start = pd.Timestamp(min(_dw_ts)).to_pydatetime()
+            _dw_end = pd.Timestamp(max(_dw_ts)).to_pydatetime()
+            await run_drift_watch_shadow(
+                db,
+                job.tenant_id,
+                job.greenhouse_id or "default",
+                _dw_start,
+                _dw_end,
+            )
         response = response.model_copy(
             update={
                 "data_persisted": True,
