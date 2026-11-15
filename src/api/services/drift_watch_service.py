@@ -11,11 +11,6 @@ Environment flag
 to disable entirely; a disabled call returns immediately without touching the
 database.
 
-NOTE for ml-engineer: the ``DRIFT_WATCH_SHADOW_ENABLED`` env-var is read
-here via ``os.environ`` because ``src/config.py`` is ml-engineer's domain
-and was not modified.  Move this constant to ``src/config.py`` when
-convenient.
-
 Role mapping
 ------------
 The drift watch is vendor-agnostic.  Raw column names stored in
@@ -40,7 +35,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -54,6 +48,7 @@ from src.config import (
     DRIFT_WATCH_DEFAULT_SHIFT_RH_PCT,
     DRIFT_WATCH_DEFAULT_SHIFT_TEMP_C,
     DRIFT_WATCH_MIN_HISTORY_WEEKS,
+    DRIFT_WATCH_SHADOW_ENABLED,
     MEASURED_HD_COLUMN_ALIASES,
     OUTDOOR_TEMP_COLUMN_ALIASES,
     PLANT_TEMP_COLUMN_ALIASES,
@@ -71,12 +66,6 @@ from src.models.drift_watch import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Environment flag: set to "0", "false" or "no" to disable shadow drift-watch.
-# See module docstring — ml-engineer should move this to src/config.py.
-_SHADOW_ENABLED: bool = os.environ.get(
-    "DRIFT_WATCH_SHADOW_ENABLED", "1"
-).lower() not in ("0", "false", "no")
 
 # Canonical channel names always present in RawReading.data for a normalised upload.
 _CANONICAL_TEMP = "temperature"
@@ -275,7 +264,7 @@ async def run_drift_watch_shadow(
         upload_start: Earliest timestamp in the uploaded batch (UTC).
         upload_end: Latest timestamp in the uploaded batch (UTC).
     """
-    if not _SHADOW_ENABLED:
+    if not DRIFT_WATCH_SHADOW_ENABLED:
         return
     if upload_start is None or upload_end is None:
         return
