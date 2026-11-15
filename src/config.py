@@ -1993,3 +1993,8 @@ DRIFT_WATCH_REFIT_INTERVAL_WEEKS: int = 1
 # to prevent fault contamination. This is a robust-estimation proxy for
 # the coordinator's requirement that elevated/alarm hours be excluded.
 DRIFT_WATCH_ELEVATED_Z_CEIL: float = 3.0
+
+# Master switch for the shadow drift-watch run at the end of each CSV upload.
+# Default on; "0"/"false"/"no"/"off" disable it entirely (a disabled call
+# returns without touching the database).
+DRIFT_WATCH_SHADOW_ENABLED: bool = _env_flag("DRIFT_WATCH_SHADOW_ENABLED", True)
