@@ -1866,14 +1866,26 @@ ANOMALY_EPISODE_DEGRADED_VALUE_SPAN_FRACTION: float = float(
 # for stable residual statistics.
 DRIFT_WATCH_BASELINE_WEEKS: int = 8
 
+
 # Gap between the end of the fit window and the start of the calibration
-# period (weeks). Set to 0: the calibration window already uses
-# out-of-sample predictions (model fitted on the fit window only), so no
-# gap is needed. A non-zero gap shifts the calibration data, which changes
-# h and can degrade re-arm dynamics on the held-out period.
-# Validated 2026-11-14: gap=0 reproduces the measurement (k, h, FA, real
-# fault detection) exactly; gap=2 produced h=111.5 for R4 (vs 200.0) and
-# missed the real humidity fault.
+# or scoring period (weeks).  Decided on principle (2026-11-15):
+#
+# Q: Does a gap protect the baseline from a fault that has already
+#    started but not yet alarmed?
+# A: With the episode-based excursion logic and the rolling refit's
+#    elevated-z exclusion (|z| > ELEVATED_Z_CEIL hours dropped from
+#    refit), the baseline is already protected: early fault hours with
+#    high residuals are excluded from the refit window regardless of
+#    their temporal proximity. A fixed gap is therefore redundant for
+#    baseline protection.
+#
+# A gap still has one minor benefit: it prevents autocorrelation leakage
+# from the tail of the fit window into the first scored hours. For R4
+# (rho_1=0.89, e-folding ~9h), two weeks of gap is generous; for R2
+# (rho_1=0.84) it is similarly conservative. But the effect on measured
+# FA and detection is small (see gap sensitivity table in verification).
+#
+# Set to 0 as the default; callers may override per-tenant.
 DRIFT_WATCH_GAP_WEEKS: int = 0
 
 # Minimum total history (weeks) before calibration is permitted.
@@ -1895,11 +1907,17 @@ DRIFT_WATCH_DETECTION_RATE_THRESHOLD: float = 0.6
 # 1 FA/month on calibration data.
 DRIFT_WATCH_CALIBRATION_H_MAX: float = 200.0
 
-# CUSUM re-arm fraction: after an alarm, the statistic must drop below
-# h * REARM_FRACTION before the direction can fire again.
-# Measured 2026-11-14: 0.5 gives one alarm per excursion with reliable
-# re-arming on held-out data.
+# DEPRECATED: superseded by episode-based excursion logic (2026-11-15).
+# The old re-arm fraction governed when a direction could fire again
+# after an alarm. The new logic resets the accumulator to zero after
+# each alarm and uses QUIET_HOURS to separate episodes instead.
+# Kept for backward compatibility; not imported by drift_watch.py.
 DRIFT_WATCH_REARM_FRACTION: float = 0.5
+
+
+
+
+
 
 # Physics (Tetens) independence test: if the baseline residual sigma is at
 # or below this value (g/m^3), the humidity deficit is classified as
@@ -1910,7 +1928,7 @@ DRIFT_WATCH_REARM_FRACTION: float = 0.5
 DRIFT_WATCH_PHYSICS_DERIVED_SIGMA_CEIL: float = 0.1
 
 # Schema version for serialised DriftInputState (bump on breaking changes).
-DRIFT_WATCH_SCHEMA_VERSION: int = 1
+DRIFT_WATCH_SCHEMA_VERSION: int = 2
 
 # Default minimum-shift targets in native units (passed by the caller via
 # DriftInputSpec.min_shift; these are reference values for documentation).
@@ -1929,3 +1947,25 @@ DRIFT_WATCH_INJECT_DRIFT_RATE: float = 1.0
 DRIFT_WATCH_INJECT_DRIFT_WEEKS: int = 4
 # Number of injection start points spread across the calibration period.
 DRIFT_WATCH_INJECT_N_STARTS: int = 5
+
+# Episode-based excursion logic: after a CUSUM alarm, the accumulator
+# resets to zero and keeps accumulating. Consecutive alarms while the
+# residual stays shifted are reported as ONE ongoing episode. A new
+# episode starts only after the direction has been quiet (no alarm) for
+# this many hours.
+# 72 hours (3 days) separates noise-driven re-triggers from genuine
+# independent events: typical autocorrelation e-folding time for R4
+# (rho_1=0.89) is ~9 hours, so a noise excursion decays within 30 hours.
+DRIFT_WATCH_QUIET_HOURS: int = 72
+
+# Rolling baseline refit interval (weeks). For model-based inputs
+# (paired_probes, virtual_sensor), the Ridge model and residual scale
+# (mu, sigma) are refit on the trailing baseline window every this many
+# weeks. Physics inputs stay frozen (no model to refit).
+DRIFT_WATCH_REFIT_INTERVAL_WEEKS: int = 1
+
+# Elevated z-score ceiling for excluding hours from a rolling refit.
+# Hours where |z| > this threshold are excluded from the refit baseline
+# to prevent fault contamination. This is a robust-estimation proxy for
+# the coordinator's requirement that elevated/alarm hours be excluded.
+DRIFT_WATCH_ELEVATED_Z_CEIL: float = 3.0
