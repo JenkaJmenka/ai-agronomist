@@ -44,6 +44,7 @@ from src.api.routes import (
     anomalies,
     backfill,
     bootstrap,
+    drift_watch,
     feedback,
     feedback_integrated,
     gas_anomalies,
@@ -377,6 +378,7 @@ app.include_router(anomalies.router)
 app.include_router(operational_config.router)
 app.include_router(seasonal_baselines.router)
 app.include_router(backfill.router)
+app.include_router(drift_watch.router)
 
 
 @app.get("/metrics", include_in_schema=False)
