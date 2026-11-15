@@ -1250,6 +1250,77 @@ UPLOAD_SPIKE_MAD_FLOOR: Dict[str, float] = {
     "temperature": float(os.environ.get("UPLOAD_SPIKE_MAD_FLOOR_TEMP", "0.5")),
 }
 
+# Reversion confirmation for MAD spikes (SpikeMADDetector.reversion_offsets).
+# Measured 2026-11-15 on tests/fixtures/native_july_clearsky.csv (A) and on
+# March and July of the tenant year (B, 5-minute cadence, 8928 rows each);
+# pairs chosen on the first half of each, reported on the second half.
+#
+# Why: the unconfirmed pair above (c=8, 0.5 °C) is clean on A only. Over the
+# tenant year (21 Nov - 26 Dec excluded) it fires 122 times, 98 of them
+# between 17:00 and 20:00: evening cool-down steps (4-6.5 °C in March) that do not come
+# back. A causal trailing-median test cannot tell a step's first sample from
+# a spike, so no lower floor was clean (c*floor sweep, c in {4,5,6,8}, floor
+# in {0.1,0.2,0.3,0.5} °C: zero pairs with 0 clean hits on B-March).
+#
+# With confirmation (a flagged sample counts only if one of the next
+# `horizon` samples is back within SPIKE_REVERT_FRACTION of its deviation
+# from the pre-event median) the same pair gives 0 hits over the year, and
+# the sweep has zero-clean pairs on every choosing half:
+#
+#   confirmed clean hits, choosing halves A / B-Mar / B-Jul, horizon 3
+#   c \ floor   0.1        0.2        0.3       0.5
+#   4          5/25/33    4/12/19    1/6/6     0/0/1
+#   5          2/12/16    2/6/4      0/2/0     0/0/0
+#   6          1/5/8      1/2/2      0/1/0     0/0/0
+#   8          0/3/1      0/1/0      0/0/0     0/0/0
+#
+# Smallest zero pair is c=8 / 0.3 °C (2.4 °C); one step of margin gives
+# c=5 / 0.5 °C (2.5 °C). Reporting halves, c=5 / 0.5 °C, horizon 3: 0 clean
+# hits on A, B-Mar and B-Jul; 7 over the whole tenant year (was 122).
+# Injected single-sample spikes caught (60 sites): +3 °C 46, +4 °C 58,
+# +6 °C 59, -3 °C 40, -4 °C 52; 15-minute hold of +3 °C 48. Before (c=8,
+# unconfirmed): +3 °C 3, +4 °C 23, +6 °C 57, -4 °C 27. The misses at 3 °C are
+# daytime ramps where c*MAD, not c*floor, sets the threshold.
+#
+# SPIKE_REVERT_FRACTION 0.5 means "came at least half-way back". 0.25 was
+# also measured: it allows c=8 / 0.2 °C (1.6 °C) on the choosing halves but
+# caught fewer +3 °C spikes there (42 vs 52 of 60) and is not used.
+SPIKE_REVERT_FRACTION: float = float(os.environ.get("SPIKE_REVERT_FRACTION", "0.5"))
+# Upload path: the whole file is present, so confirmation looks ahead.
+# Horizon 3 = 15 minutes at 5-minute cadence, so a 3-sample hold still
+# confirms. 0 switches confirmation off and restores the unconfirmed pair
+# above. A deviation that does not revert is not a spike on this path; level
+# shifts belong to the change-point detector.
+UPLOAD_SPIKE_REVERT_HORIZON: int = int(os.environ.get("UPLOAD_SPIKE_REVERT_HORIZON", "3"))
+UPLOAD_SPIKE_CONFIRMED_TUNING_C: float = float(
+    os.environ.get("UPLOAD_SPIKE_CONFIRMED_TUNING_C", "5.0")
+)
+UPLOAD_SPIKE_CONFIRMED_FLOOR: Dict[str, float] = {
+    "temperature": float(os.environ.get("UPLOAD_SPIKE_CONFIRMED_FLOOR_TEMP", "0.5")),
+}
+# Pipeline enrichment: 0 keeps today's behaviour, an unconfirmed vote on the
+# LAST sample with the unconfirmed pair. d > 0 votes on sample t-d instead,
+# confirmed by the d samples after it, with the pairs below; spike alerts
+# then arrive d*5 minutes late. Measured at d=1: 0 clean votes on every
+# choosing and reporting half and 0 over the tenant year for temperature
+# (unconfirmed last-sample vote: 122), same single-sample detection as the
+# upload row above. Default stays 0 because the accuracy gate injects its
+# spike on the last sample of the window (tests/models/
+# test_detection_accuracy.py::_inject), which a t-d vote cannot see by
+# construction; changing the default needs the gate to inject at t-d.
+ENRICHMENT_SPIKE_CONFIRM_LAG: int = int(os.environ.get("ENRICHMENT_SPIKE_CONFIRM_LAG", "0"))
+# (c, floor) per sensor for the CONFIRMED enrichment vote only. Never used
+# when the lag is 0 and never used by the upload path. Humidity: unconfirmed,
+# no pair was clean (c=8 / 1.0 %RH: 35 and 15 clean votes on the B choosing
+# halves); confirmed, c=6 / 1.5 %RH (9 %RH, smallest zero pair c=8 / 1.0 plus
+# one step) has 0 clean votes on every choosing and reporting half at d=1 and
+# catches +10 %RH 39/60, +15 %RH 51/60, -15 %RH 54/60. A sensor absent here
+# keeps the unconfirmed pair and still has to revert.
+ENRICHMENT_SPIKE_CONFIRMED_PAIRS: Dict[str, Tuple[float, float]] = {
+    "temperature": (UPLOAD_SPIKE_CONFIRMED_TUNING_C, UPLOAD_SPIKE_CONFIRMED_FLOOR["temperature"]),
+    "humidity": (6.0, 1.5),
+}
+
 # Out-of-Bounds — hard physical / hardware limits per sensor.
 OOB_LIMITS: Dict[str, Tuple[float, float]] = {
     "temperature": (-40.0, 80.0),

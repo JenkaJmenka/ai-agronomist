@@ -34,8 +34,11 @@ from src.config import (
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
     OOB_LIMITS,
+    UPLOAD_SPIKE_CONFIRMED_FLOOR,
+    UPLOAD_SPIKE_CONFIRMED_TUNING_C,
     UPLOAD_SPIKE_MAD_FLOOR,
     UPLOAD_SPIKE_MAD_TUNING_C,
+    UPLOAD_SPIKE_REVERT_HORIZON,
 )
 from src.models.psychrometric_validator import validate_row as _psychro_validate_row
 from src.models.cold_run_detector import (
@@ -149,12 +152,18 @@ def _timestamp_label(value: Any) -> str:
 def _upload_mad_settings() -> tuple[float, dict[str, float]]:
     """Upload MAD constant and floors from config.
 
-    Only keys of ``UPLOAD_SPIKE_MAD_FLOOR`` are scored. Today that is
-    temperature (0.5 °C, c=8). The helper skips a sensor with no floor
-    key; it does not supply ``mad_floor`` 0.
+    With reversion confirmation on (``UPLOAD_SPIKE_REVERT_HORIZON`` > 0, the
+    default) this is the confirmed pair: temperature, c=5, 0.5 °C. With it
+    off, the unconfirmed pair (c=8, 0.5 °C). Only keys of the floor table
+    are scored; the helper skips a sensor with no floor key, it does not
+    supply ``mad_floor`` 0.
     """
-    floors = {str(name): float(floor) for name, floor in UPLOAD_SPIKE_MAD_FLOOR.items()}
-    return float(UPLOAD_SPIKE_MAD_TUNING_C), floors
+    if UPLOAD_SPIKE_REVERT_HORIZON > 0:
+        table, tuning_c = UPLOAD_SPIKE_CONFIRMED_FLOOR, UPLOAD_SPIKE_CONFIRMED_TUNING_C
+    else:
+        table, tuning_c = UPLOAD_SPIKE_MAD_FLOOR, UPLOAD_SPIKE_MAD_TUNING_C
+    floors = {str(name): float(floor) for name, floor in table.items()}
+    return float(tuning_c), floors
 
 
 def _detect_upload_mad_spikes(
@@ -169,10 +178,19 @@ def _detect_upload_mad_spikes(
     Flags inside the overlap were emitted with the previous portion.
     The overlap is ``seq_len - 1`` rows, which covers ``SPIKE_MAD_WINDOW_K``
     when ``seq_len`` is the production default (20) and the window is 10.
+
+    A flagged row is reported only if the series comes back within
+    ``UPLOAD_SPIKE_REVERT_HORIZON`` rows (see ``SPIKE_REVERT_FRACTION`` in
+    config): a step that stays is not a spike. A flagged row at the end of a
+    portion whose confirming row arrives with the next portion is reported
+    then, once: an overlap row is emitted only when its first reverting row
+    is a new row. The last rows of the final portion cannot be confirmed and
+    are not reported.
     """
     if combined_df.empty or "timestamp" not in combined_df.columns:
         return []
     tuning_c, floors = _upload_mad_settings()
+    horizon = int(UPLOAD_SPIKE_REVERT_HORIZON)
     detector = SpikeMADDetector(tuning_c=tuning_c)
     timestamps = combined_df["timestamp"].tolist()
     hits: list[UploadHighAnomalyDetail] = []
@@ -181,10 +199,21 @@ def _detect_upload_mad_spikes(
         if column not in combined_df.columns:
             continue
         values = combined_df[column].to_numpy(dtype=float)
-        flags = detector.detect(values, mad_floor=float(floor))
-        for idx in range(start, len(flags)):
-            if not flags[idx]:
-                continue
+        if horizon > 0:
+            offsets = detector.reversion_offsets(
+                values, mad_floor=float(floor), horizon=horizon
+            )
+            first = max(0, start - horizon)
+            emit = [
+                idx
+                for idx in range(first, len(offsets))
+                if offsets[idx] is not None
+                and (idx >= start or idx + int(offsets[idx] or 0) >= start)
+            ]
+        else:
+            flags = detector.detect(values, mad_floor=float(floor))
+            emit = [idx for idx in range(start, len(flags)) if flags[idx]]
+        for idx in emit:
             value = float(values[idx])
             if not math.isfinite(value):
                 continue
