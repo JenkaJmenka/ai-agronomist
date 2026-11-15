@@ -1240,6 +1240,14 @@ class ComprehensiveInferencePipeline:
         # timestep is the current reading under evaluation. Enough stored
         # history fits the covariance; a short or missing history keeps the
         # window fit and still votes on the last step only.
+        #
+        # NON-VOTING (2026-11-15): measured on a database seeded with real tenant
+        # history, the history-based path fired on 9 of 167 clean windows and
+        # added zero detections the other rules did not already make (the
+        # joint-implausibility fixture was caught 100 % without it).  The vote is
+        # suppressed until the reference distribution is conditioned on time of day
+        # and the cutoff is taken from the history's own distance distribution
+        # rather than a fixed chi-squared table.
         history = await self._load_mahalanobis_history(
             customer_id,
             greenhouse_id,
@@ -1262,10 +1270,10 @@ class ComprehensiveInferencePipeline:
             mahal_last = bool(mahal_flags and mahal_flags[-1])
         if mahal_last:
             logger.warning(
-                "Multivariate implausibility for tenant %s at current reading",
+                "Multivariate implausibility (non-voting) for tenant %s at current reading",
                 customer_id,
             )
-            rule_votes["multivariate"] = list(SENSOR_NAMES[: seq_array.shape[1]])
+            # rule_votes["multivariate"] intentionally omitted — non-voting; see comment above.
 
         # 0h. Change-point (BOCPD) — level shifts CUSUM's fixed K/H may miss.
         # A shift is only credible on multiple channels at once; a single

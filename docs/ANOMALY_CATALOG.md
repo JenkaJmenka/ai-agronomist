@@ -5,7 +5,7 @@ parameters control it, what you see in the UI, and what an operator should do.
 
 **Related docs:** [User Guide](USER_GUIDE.md) · [Framework spec](anomaly_framework_spec.md) · [README](../README.md)
 
-**Last verified:** 2026-11-14, against branch `feat/anomaly-detection-module-refactoring`.
+**Last verified:** 2026-11-15, against branch `feat/anomaly-detection-module-refactoring`.
 
 ---
 
@@ -329,18 +329,24 @@ sample-to-sample scatter has blown up. The mean is fine; the precision is gone.
 Typically a failing analogue front end, moisture ingress, or a degrading
 connector.
 
-**How it is detected.** Rolling variance amplification ratio on temperature,
-humidity, and CO₂. Light is skipped. Flag when
+**How it is detected.** The statistic is the variance of second differences of
+the high-passed signal, normalised by its white-noise gain. Flag when
 `σ²_w / σ²_baseline > θ`.
 
 Calibrated baselines run only when the caller passes `noise_clean_windows`.
 `build_noise_detector` then calls `calibrate_noise_baseline` and
 `resolve_noise_baseline`, and uses `NOISE_CALIBRATED_RATIO_TARGET`
-(default **20**). `LiveScorer` keeps up to
-**32** unflagged physical windows (`CLEAN_WINDOW_HISTORY` in
+(default **30**, `NOISE_CALIBRATED_RATIO_TARGET = 30`). `LiveScorer` keeps up
+to **32** unflagged physical windows (`CLEAN_WINDOW_HISTORY` in
 `src/live/scoring.py`); `EnrichmentRunner` passes that ring. An empty
 history is passed as `None`, which keeps the fixed `NOISE_BASELINE_VARIANCE`
 and the cold-start ratio **10**.
+
+**Measured performance (2026-11-15):** with calibration active on a real
+tenant baseline, clean noise flags drop from **6 to 0 of 167** windows.
+1.0 °C injected noise detects **40/40**; 0.5 °C noise detects **16/40** per real
+window. Cold start (no clean-window history): about half of clean windows are
+still flagged on humidity because the fixed humidity baseline is too low.
 
 **Parameters:**
 
@@ -349,12 +355,12 @@ and the cold-start ratio **10**.
 | `NOISE_HYBRID_WINDOW` | 5 | Rolling window |
 | `NOISE_BASELINE_VARIANCE` | per sensor | Fixed cold-start variance |
 | `NOISE_RATIO_THRESHOLD` | 10.0 | Cold-start amplification ratio |
-| `NOISE_CALIBRATED_RATIO_TARGET` | 20.0 | Ratio used only with clean-window calibration |
+| `NOISE_CALIBRATED_RATIO_TARGET` | 30.0 | Ratio used only with clean-window calibration |
 | `NOISE_ALPHA` | 3.0 | Noise model shaping constant |
 | `SENSOR_NOISE_TARGETS` | per sensor | Expected noise targets |
 
 > The spec quotes `θ_noise = 50.0` against `σ²_baseline = 0.02`. Cold start
-> stays at ratio **10** on the fixed variance map. Ratio **20** applies only
+> stays at ratio **10** on the fixed variance map. Ratio **30** applies only
 > when physical clean windows were passed.
 
 **In the UI.** Reasoning: *"Precision degradation: rolling variance on
@@ -692,14 +698,24 @@ high humidity with low light at midday, for example — each plausible alone,
 jointly impossible.
 
 **How it is detected.** Mahalanobis distance of the joint reading vector from the
-mean, using the covariance of recent tenant history. When the tenant has at least
-`2 × n_sensors` finite stored readings within the trailing
-`DIURNAL_PROFILE_HISTORY_DAYS` window (synthetic rows excluded, NULL-source rows
-kept), the last-step reading is scored against that history. When the history is
-too short or missing, the detector falls back to scoring the last step of the
-20-sample window against the window itself. The history is recent operational
-readings, not vetted clean data. Distance is compared against a χ²-derived
-cutoff.
+mean, using the covariance of recent tenant history. The detector requires at
+least `MAHALANOBIS_DETECT_MIN_SAMPLES` rows and no longer self-fits on a bare
+20-sample window. When the tenant has at least `2 × n_sensors` finite stored
+readings within the trailing `DIURNAL_PROFILE_HISTORY_DAYS` window (synthetic
+rows excluded, NULL-source rows kept), the last-step reading is scored against
+that history. When the history is too short or missing, the fallback
+`detect()` path runs but its result is currently **non-voting** (see below).
+The history is recent operational readings, not vetted clean data. Distance is
+compared against a χ²-derived cutoff.
+
+**Status (2026-11-15): non-voting.** Measured on a database seeded with real
+tenant history the history-based path fired on **9 of 167 clean windows** and
+added zero detections the other rules did not already make (the
+joint-implausibility fixture was caught 100 % without it). `mahal_last` is
+still computed and a non-voting warning is logged when it fires. The vote is
+suppressed until the reference distribution is conditioned on time of day and
+the cutoff is taken from the history’s own distance distribution rather than a
+fixed χ² table. Re-arm after recalibration.
 
 *Reasoning:* "Multivariate implausibility: the joint temperature, humidity
 reading exceeded the Mahalanobis distance cutoff — each channel is in range but
@@ -866,6 +882,13 @@ An anomaly is declared when the weighted score exceeds
 **critical** (red) chip in the UI. Two independent detectors agreeing is a much
 stronger signal than one detector scoring high.
 
+**Status (2026-11-15): inert without a tenant baseline.** On measured data the
+ensemble never reached two-member agreement and contributed no detections. With
+a real tenant baseline it flagged **19 of 167 clean windows** and still added
+none — the two-member bar was never met because the same windows that raised the
+ensemble score were already caught by rule votes. The ensemble is left without a
+tenant baseline (inert) pending rework.
+
 Before that vote, a stuck-fault pre-check short-circuits a flat temperature,
 humidity, or CO₂ channel. Light is skipped
 (`ENSEMBLE_STUCK_SKIP_CHANNELS`). The midpoint bias pre-check is not run.
@@ -891,6 +914,20 @@ Dynamic thresholds activate only after **50 stored incidents** for the tenant
 distribution to fit.
 
 ---
+
+---
+
+## Drift watch (not yet wired)
+
+`src/models/drift_watch.py` — residuals on hourly means with a rolling baseline
+feed a per-direction CUSUM. Per-tenant calibration arms an input only if it
+meets a false-alarm budget and detects injected faults; needs about 16 weeks of
+history. Measured on one tenant year: paired temperature probes armed at about
+1.15 false episodes per month (+1 °C caught in about 13 h), RH virtual sensor
+left in shadow, physics (humidity-deficit) input auto-disabled when the deficit
+is derived from temperature and RH.
+
+A result that is not an anomaly carries no fault label.
 
 # Part 5 — Gas anomalies
 

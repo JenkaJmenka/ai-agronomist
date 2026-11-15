@@ -66,3 +66,10 @@ The prototyped bundle was 97.9% composite and 4.2% FPR. That number scored only 
 - Ensemble vote thresholds: LSTM member votes at `ANOMALY_THRESHOLD` (0.8) and statistical member at 3.0 — previously documented at half those values.
 - CUSUM demoted to non-voting: at K=0.25, H=4 the in-control run length is ~35–41 samples on stationary noise (measured 2026-11-14, 20 runs of 5,000 samples); CUSUM state is still computed, logged, and persisted but no longer sets `is_anomaly` or `fault_type`.
 - QA (unit tests beyond the 30 added, hardened harness, full-suite gate) is deferred to the end of the initiative by the user's direction.
+
+## 2026-11-15 status
+
+- Accuracy gate on the empty-database harness: composite 0.9970, 1 clean window flagged of 167, recall 40/40 on spike, noise, level shift. One fixture week; synthetic fault windows.
+- The same evaluation with the database seeded with tenant history flagged more clean windows (history-based Mahalanobis 9 of 167); that vote is now non-voting. The gate needs a seeded mode (script kept outside the repo during the session; to be rebuilt in tests/ by QA).
+- Not done, in priority order: (1) full QA wave and hardened harness (seeded mode, recall on real windows, amplitude sweep, second fixture); (2) cold-start humidity noise baseline (about half of clean windows flagged before calibration); (3) small spikes (+1.5 °C not detected) and single-sensor bias; (4) Mahalanobis recalibration, then re-arm; (5) ensemble rework or removal; (6) drift watch: persistence and upload wiring in shadow mode, better residual model for RH; (7) upload LSTM percentile threshold; humidity and CO2 spikes on upload; (8) structural: one scoring path, denormalise before every physical rule (BACKLOG-23), VAE latent; (9) live climate rules blocked: live readings carry no setpoint or outdoor data; (10) code review and an ADR for the band-breach change were not done.
+- Parked experiments (not on the branch): same-file hour-of-day drift detector; drift confirmation rule; ensemble tenant baseline.
