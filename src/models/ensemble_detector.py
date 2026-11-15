@@ -338,6 +338,11 @@ class EnsembleAnomalyDetector:
         self._anomaly_threshold = anomaly_threshold
         self._min_agreement = min_agreement
         self._baseline_cache: Optional[np.ndarray] = None
+        # Caller's physical baseline object and its model-scale form, so the
+        # same object passed twice yields the same normalised object (and
+        # therefore does not trigger a refit of the sklearn members).
+        self._raw_baseline_ref: Optional[np.ndarray] = None
+        self._normalized_baseline: Optional[np.ndarray] = None
         self._stuck_detector = StuckFaultDetector()
 
     def fit_baseline(self, baseline: np.ndarray) -> None:
@@ -403,7 +408,15 @@ class EnsembleAnomalyDetector:
         # sequence, so a scale mismatch makes their outputs meaningless.
         effective_baseline = baseline
         if _is_model_scale(sequence) and not _is_model_scale_3d(baseline):
-            effective_baseline = _normalize_baseline_to_model_scale(baseline)
+            if (
+                self._raw_baseline_ref is not baseline
+                or self._normalized_baseline is None
+            ):
+                self._normalized_baseline = _normalize_baseline_to_model_scale(
+                    baseline
+                )
+                self._raw_baseline_ref = baseline
+            effective_baseline = self._normalized_baseline
             logger.debug(
                 "Ensemble: normalized physical baseline to model scale "
                 "(seq median temp=%.2f, baseline median temp=%.2f)",
