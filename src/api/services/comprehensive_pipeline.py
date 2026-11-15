@@ -1505,6 +1505,16 @@ class ComprehensiveInferencePipeline:
                 reason="psychrometric_consistent",
             )
 
+        # 5e. Non-anomalous result — clear fault label and fault-specific diagnosis.
+        # fault_type is computed unconditionally in _run_ensemble_classify from
+        # FaultClassifier.classify(pattern_type), which maps "saturation" and "drift"
+        # to "stuck_fault" even for clean windows (PatternDetector scores daytime
+        # light railing at ~1.0 normalized as saturation). When no detector, rule,
+        # or physics check confirmed an anomaly, the label is a pipeline artifact
+        # that must not appear in the response or any downstream consumer.
+        if not is_anomaly:
+            fault_type = None
+
         # 6. Persist updated tracker scores.
         try:
             if _ewma_tracker is not None and _pot_fitter is not None:
@@ -1548,6 +1558,20 @@ class ComprehensiveInferencePipeline:
             primary_rule = next(iter(rule_votes), None)
             if scada_anomalies and primary_rule in _SCADA_VOTE_KEYS:
                 root_cause_result["reasoning"] = scada_anomalies[0]["reasoning"]
+        # Non-anomalous results carry no fault-specific root cause, severity,
+        # urgency, or reasoning. The pattern-based analysis is only meaningful
+        # when an anomaly has been confirmed; for clean windows PatternDetector
+        # scores can produce misleading diagnosis labels (e.g. "saturation" on
+        # daytime light railing → root_cause="sensor_saturation_or_clamping").
+        if not is_anomaly:
+            root_cause_result = {
+                **root_cause_result,
+                "root_cause": "normal",
+                "severity": "low",
+                "urgency": "normal",
+                "reasoning": "",
+                "alternative_causes": [],
+            }
         recommendation_result = self.recommendation_engine.recommend(
             root_cause=root_cause_result["root_cause"],
             severity=root_cause_result.get("severity", "medium"),
