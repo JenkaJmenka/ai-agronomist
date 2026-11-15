@@ -35,6 +35,7 @@ from src.config import (
     POT_FPR,
     POT_Q,
     PSYCHROMETRIC_HD_TOLERANCE,
+    NOISE_CALIBRATED_RATIO_BY_SENSOR,
     NOISE_CALIBRATED_RATIO_TARGET,
     SENSOR_NOISE_TARGETS,
     SEQ_LEN,
@@ -426,7 +427,8 @@ def build_noise_detector(
     (fixed ``NOISE_BASELINE_VARIANCE`` and its cold-start ratio).
 
     A non-empty calibration uses ``resolve_noise_baseline`` and
-    ``NOISE_CALIBRATED_RATIO_TARGET``. The live scorer passes recent
+    ``NOISE_CALIBRATED_RATIO_BY_SENSOR`` (scalar ``NOISE_CALIBRATED_RATIO_TARGET``
+    for unlisted sensors). The live scorer passes recent
     physical windows it did not flag. ``None`` or an empty sequence
     keeps the fixed map.
     """
@@ -439,8 +441,12 @@ def build_noise_detector(
         hp_cutoff=detector._hp_cutoff,
         window=detector._window,
         baseline_variance=resolve_noise_baseline(calibrated),
-        ratio_threshold=float(NOISE_CALIBRATED_RATIO_TARGET),
+        ratio_threshold={
+            name: float(NOISE_CALIBRATED_RATIO_BY_SENSOR.get(name, NOISE_CALIBRATED_RATIO_TARGET))
+            for name in SENSOR_NAMES
+        },
         use_highpass=detector._use_highpass,
+        default_ratio=float(NOISE_CALIBRATED_RATIO_TARGET),
     )
 
 

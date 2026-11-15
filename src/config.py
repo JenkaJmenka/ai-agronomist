@@ -1349,6 +1349,27 @@ NOISE_CALIBRATED_RATIO_TARGET: float = float(
     os.environ.get("NOISE_CALIBRATED_RATIO_TARGET", "30.0")
 )
 
+# Per-sensor calibrated ratio, chosen from data 2026-11-15. Rule: lowest ratio
+# with zero clean flags on July clearsky's calibration half AND <= 1 % clean
+# flags on each one-week customer calibration window (Mar, Jul), then one
+# step up the list (5, 10, 15, 20, 30) as margin. Clean flags, calibration
+# half (evaluation half in brackets), recall on 20 injected windows:
+#   temp  ratio | July cal | Mar cal | Jul cal | recall s0.3 / 0.5 / 1.0
+#           10  |  2 (0)   |  0 (0)  |  1 (0)  |   6 / 19 / 20  (July)
+#           15  |  0 (0)   |  0 (0)  |  0 (0)  |   1 / 17 / 20  (July)
+#           20  |  0 (0)   |  0 (0)  |  0 (0)  |   0 / 12 / 20  (July)  <- ship
+#           30  |  0 (0)   |  0 (0)  |  0 (0)  |   0 /  5 / 20  (July)
+#   humi  ratio | July cal | Mar cal | Jul cal | recall s1 / 2 / 3 %RH
+#           20  |  5 (6)   |  0 (0)  |  0 (7)  |   1 /  8 / 19  (July)
+#           30  |  0 (0)   |  0 (0)  |  0 (2)  |   1 /  4 / 14  (July)  <- ship
+# Humidity qualifies only at 30 (July clearsky's calibration half flags 5 at
+# 20), so it stays at 30. CO2 (synthetic in the fixture) and light (never
+# scored) keep the scalar default.
+NOISE_CALIBRATED_RATIO_BY_SENSOR: Dict[str, float] = {
+    "temperature": 20.0,
+    "humidity": 30.0,
+}
+
 # Bias / Constant Offset — dual-sensor cross-difference.
 # spec ref: w=3, theta_bias=1.5°C (docs/anomaly_framework_spec.md §6);
 # production uses a longer window and a tighter threshold (3x more sensitive).
