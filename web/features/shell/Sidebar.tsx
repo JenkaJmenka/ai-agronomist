@@ -36,13 +36,18 @@ function NavLinks() {
                   if (isActive) return;
                   measureInteraction("ui.nav", { from: pathname, to: entry.href });
                 }}
-                className={`block rounded-[var(--radius-control)] border-l-2 px-2 py-1.5 text-sm ${
+                className={`flex items-center gap-1.5 rounded-[var(--radius-control)] border-l-2 px-2 py-1.5 text-sm ${
                   isActive
                     ? "border-accent bg-accent-soft font-medium text-accent"
                     : "border-transparent text-text hover:bg-border/50"
                 }`}
               >
-                {entry.label}
+                <span>{entry.label}</span>
+                {entry.badge ? (
+                  <span className="rounded-full bg-sev-warning/14 px-1.5 py-0.5 text-[10px] font-semibold text-sev-warning">
+                    {entry.badge}
+                  </span>
+                ) : null}
               </Link>
             );
           })}

@@ -3,6 +3,8 @@
 export interface NavEntry {
   readonly href: string;
   readonly label: string;
+  /** Optional short badge text shown after the label (e.g. "Beta"). */
+  readonly badge?: string;
 }
 
 export interface NavSection {
@@ -26,6 +28,7 @@ export const NAV_SECTIONS: readonly NavSection[] = [
       { href: "/anomalies", label: "Anomaly Detection" },
       { href: "/thresholds", label: "Thresholds" },
       { href: "/metrics", label: "System Metrics" },
+      { href: "/drift-watch", label: "Drift Watch", badge: "Beta" },
     ],
   },
   {
