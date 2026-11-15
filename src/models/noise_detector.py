@@ -33,6 +33,7 @@ try:
     from src.config import (
         NOISE_ALPHA,
         NOISE_BASELINE_VARIANCE,
+        NOISE_CALIBRATED_FLOOR_VARIANCE,
         NOISE_HYBRID_WINDOW,
         NOISE_RATIO_THRESHOLD,
         SENSOR_NAMES,
@@ -48,6 +49,12 @@ except ImportError:  # pragma: no cover
     }
     NOISE_HYBRID_WINDOW: int = 5  # type: ignore[no-redef]
     NOISE_BASELINE_VARIANCE: dict[str, float] = {  # type: ignore[no-redef]
+        "temperature": 0.01,
+        "humidity": 0.5,
+        "co2": 25.0,
+        "light": 100.0,
+    }
+    NOISE_CALIBRATED_FLOOR_VARIANCE: dict[str, float] = {  # type: ignore[no-redef]
         "temperature": 0.01,
         "humidity": 0.04,
         "co2": 25.0,
@@ -323,14 +330,14 @@ def resolve_noise_baseline(
 ) -> Dict[str, float]:
     """Overlay calibrated variances on the fixed cold-start map.
 
-    A finite positive calibration may only loosen a channel whose fixed
-    ``NOISE_BASELINE_VARIANCE`` entry exists and is positive: the stored
-    value is ``max(calibrated, fixed)``. A near-flat window (high-pass
-    variance far below that floor) must not replace the floor. Missing,
-    non-finite, or non-positive calibrations keep the fixed map. An
-    empty calibration therefore returns the fixed fallback unchanged.
-    A channel with no positive fixed entry still takes the calibrated
-    value.
+    A finite positive calibration is stored as ``max(calibrated, floor)``
+    where the floor is ``NOISE_CALIBRATED_FLOOR_VARIANCE`` (a lower bound
+    for calibrated baselines only, not the cold-start baseline), so a
+    near-flat window cannot produce a tiny baseline. Missing, non-finite,
+    or non-positive calibrations keep the cold-start
+    ``NOISE_BASELINE_VARIANCE`` value, so an uncalibrated channel behaves
+    exactly like cold start. A channel with no positive floor entry takes
+    the calibrated value as is.
     """
     merged = dict(NOISE_BASELINE_VARIANCE)
     if not calibrated:
@@ -343,23 +350,23 @@ def resolve_noise_baseline(
         if not np.isfinite(variance) or variance <= 0.0:
             continue
         key = str(name)
-        fixed = _positive_fixed_variance(key)
-        if fixed is None:
+        floor = _positive_floor_variance(key)
+        if floor is None:
             merged[key] = variance
             continue
-        merged[key] = max(variance, fixed)
+        merged[key] = max(variance, floor)
     return merged
 
 
-def _positive_fixed_variance(name: str) -> float | None:
-    """Positive ``NOISE_BASELINE_VARIANCE`` entry, or None when it is absent."""
-    raw = NOISE_BASELINE_VARIANCE.get(name)
+def _positive_floor_variance(name: str) -> float | None:
+    """Positive ``NOISE_CALIBRATED_FLOOR_VARIANCE`` entry, or None when absent."""
+    raw = NOISE_CALIBRATED_FLOOR_VARIANCE.get(name)
     if raw is None:
         return None
     try:
-        fixed = float(raw)
+        floor = float(raw)
     except (TypeError, ValueError):
         return None
-    if not np.isfinite(fixed) or fixed <= 0.0:
+    if not np.isfinite(floor) or floor <= 0.0:
         return None
-    return fixed
+    return floor
