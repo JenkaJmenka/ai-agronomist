@@ -1298,19 +1298,25 @@ UPLOAD_SPIKE_CONFIRMED_TUNING_C: float = float(
 UPLOAD_SPIKE_CONFIRMED_FLOOR: Dict[str, float] = {
     "temperature": float(os.environ.get("UPLOAD_SPIKE_CONFIRMED_FLOOR_TEMP", "0.5")),
 }
-# Pipeline enrichment: 0 keeps today's behaviour, an unconfirmed vote on the
-# LAST sample with the unconfirmed pair. d > 0 votes on sample t-d instead,
-# confirmed by the d samples after it, with the pairs below; spike alerts
-# then arrive d*5 minutes late. Measured at d=1: 0 clean votes on every
-# choosing and reporting half and 0 over the tenant year for temperature
-# (unconfirmed last-sample vote: 122), same single-sample detection as the
-# upload row above. Default stays 0 because the accuracy gate injects its
-# spike on the last sample of the window (tests/models/
-# test_detection_accuracy.py::_inject), which a t-d vote cannot see by
-# construction; changing the default needs the gate to inject at t-d.
-ENRICHMENT_SPIKE_CONFIRM_LAG: int = int(os.environ.get("ENRICHMENT_SPIKE_CONFIRM_LAG", "0"))
-# (c, floor) per sensor for the CONFIRMED enrichment vote only. Never used
-# when the lag is 0 and never used by the upload path. Humidity: unconfirmed,
+# Pipeline enrichment votes on sample t-d, confirmed by the d samples after
+# it, with the pairs below; a spike alert therefore arrives d*5 minutes after
+# the sample (d=1: 5 minutes). 0 restores the old behaviour: an unconfirmed
+# vote on the LAST sample with the unconfirmed pair, which fires on evening
+# cool-down steps (122 clean votes over the tenant year for temperature).
+# Measured at d=1: 0 clean temperature votes on every choosing and reporting
+# half and 0 over the tenant year, same single-sample detection as the
+# upload row above. Default 1 since 2026-11-15 (owner decision). The accuracy
+# gate injects its spike at the voted sample, index -1-d
+# (tests/models/test_detection_accuracy.py::_inject); a spike on the last
+# sample is not voted until the next reading arrives.
+# Known cost, measured the same day: on windows of pure 1 °C-sigma temperature
+# noise the confirmed vote labels 6 of 2000 (1 of the gate's 40) spike_fault
+# instead of accuracy_decline; they are still flagged. Requiring the deviation
+# to be 2x or 3x the largest other one in the window left 4 and 2 of 2000 and
+# cost detection on the choosing halves, so no isolation rule is applied.
+ENRICHMENT_SPIKE_CONFIRM_LAG: int = int(os.environ.get("ENRICHMENT_SPIKE_CONFIRM_LAG", "1"))
+# (c, floor) per sensor for the CONFIRMED enrichment vote only (lag > 0, the
+# default). Never used when the lag is 0 and never used by the upload path. Humidity: unconfirmed,
 # no pair was clean (c=8 / 1.0 %RH: 35 and 15 clean votes on the B choosing
 # halves); confirmed, c=6 / 1.5 %RH (9 %RH, smallest zero pair c=8 / 1.0 plus
 # one step) has 0 clean votes on every choosing and reporting half at d=1 and

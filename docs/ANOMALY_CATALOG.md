@@ -114,8 +114,18 @@ probe, or a genuine transient event like a heating valve slamming open.
 
 **How it is detected.** Rolling median absolute deviation. Over a window of
 `k` samples the detector computes `Δ_t = |x_t − median(W)|` and flags when
-`Δ_t > c · MAD_t`. MAD is used instead of standard deviation precisely because
-the spike itself would inflate a standard deviation and hide the event.
+`Δ_t > c · max(MAD_t, floor)`. MAD is used instead of standard deviation
+precisely because the spike itself would inflate a standard deviation and hide
+the event.
+
+**Reversion confirmation.** That test alone fires on the first sample of a
+step as well as of a spike: both leave the trailing median behind. A spike
+comes back; a step does not. So a flagged sample counts as a spike only if one
+of the following samples is back within `SPIKE_REVERT_FRACTION` (half) of its
+deviation from the pre-event median. A deviation that stays is left to the
+level-shift detectors. Without confirmation the temperature vote fired 122
+times over a clean tenant year, 98 of them on evening cool-down steps; with
+it, 0.
 
 **Parameters** (`src/config.py`):
 
@@ -124,22 +134,59 @@ the spike itself would inflate a standard deviation and hide the event.
 | `SPIKE_MAD_WINDOW_K` | 10 | Rolling window length |
 | `SPIKE_MAD_TUNING_C` | 3.0 | Live multiplier on MAD (spec minimum 2.5) |
 | `SPIKE_MAD_FLOOR` | temp 0.1 °C, humidity 0.2 %, CO₂ 10 ppm, light 4.0 | Live minimum MAD |
-| `UPLOAD_SPIKE_MAD_TUNING_C` | 8 | Enrichment and CSV-upload multiplier |
-| `UPLOAD_SPIKE_MAD_FLOOR` | temperature 0.5 °C | Upload scores only these keys |
+| `SPIKE_REVERT_FRACTION` | 0.5 | Share of the deviation a sample may keep and still count as back |
+| `UPLOAD_SPIKE_REVERT_HORIZON` | 3 | CSV upload: rows after the flagged one that may confirm (15 min). 0 = confirmation off |
+| `UPLOAD_SPIKE_CONFIRMED_TUNING_C` / `_FLOOR` | 5 / temperature 0.5 °C | CSV-upload pair with confirmation on (2.5 °C minimum deviation). Upload scores only these keys |
+| `ENRICHMENT_SPIKE_CONFIRM_LAG` | 1 | Enrichment: votes on the sample this many steps back, confirmed by the samples after it. 0 = old last-sample vote |
+| `ENRICHMENT_SPIKE_CONFIRMED_PAIRS` | temperature (5, 0.5 °C), humidity (6, 1.5 %) | Enrichment `(c, floor)` with confirmation on. Not used by upload |
+| `UPLOAD_SPIKE_MAD_TUNING_C` / `UPLOAD_SPIKE_MAD_FLOOR` | 8 / temperature 0.5 °C | Unconfirmed pair: enrichment CO₂, and everything when confirmation is switched off |
 | `SPIKE_DELTA_MAX` | per sensor | Used only by training bootstrap; not by spike detection |
 | `VELOCITY_LIMITS` | temp 2.0, humidity 5.0, CO₂ 50.0, light 200.0 | Used only by pattern scoring; not by spike detection |
 
-**Enrichment vote.** The pipeline flags the **last timestep only**
-(`spike_flags[-1]`) on temperature, humidity, and CO₂. Light is skipped.
-`tuning_c` is `UPLOAD_SPIKE_MAD_TUNING_C` (8). Floors are the live
-`SPIKE_MAD_FLOOR` scaled by
-`UPLOAD_SPIKE_MAD_FLOOR["temperature"] / SPIKE_MAD_FLOOR["temperature"]`:
-**0.5 °C**, **1.0 %**, **50 ppm** when the seasonal factor is 1. The live
-pair (`c` 3, temperature floor 0.1 °C) is unchanged.
+**Enrichment vote.** With the default lag of 1 the pipeline votes on the
+**second-to-last timestep**, and only if the last one has come back. A spike
+alert therefore appears **one reading (5 minutes) after the spike**, and a
+spike on the newest reading is not reported until the next reading arrives.
+Temperature uses `c` 5 with a 0.5 °C floor (2.5 °C minimum deviation),
+humidity `c` 6 with 1.5 % (9 %RH). CO₂ keeps `c` 8 and the scaled floor
+(`SPIKE_MAD_FLOOR` × `UPLOAD_SPIKE_MAD_FLOOR["temperature"]` /
+`SPIKE_MAD_FLOOR["temperature"]` = 50 ppm) and must also revert. Light is
+skipped. Floors are multiplied by the seasonal factor (0.5–2); the figures
+below are at factor 1. The live pair (`c` 3, temperature floor 0.1 °C) is
+unchanged.
 
 **CSV upload** (`_detect_upload_mad_spikes`) scores only keys of
-`UPLOAD_SPIKE_MAD_FLOOR`. Today that is temperature at 0.5 °C with the
-same `c` of 8. A missing key is not passed as floor 0.
+`UPLOAD_SPIKE_CONFIRMED_FLOOR`: temperature, `c` 5, 0.5 °C. The whole file is
+present, so a flagged row is confirmed by any of the next 3 rows; a 15-minute
+hold still counts. A flagged row at the end of one portion is reported with
+the next portion. A missing key is not passed as floor 0.
+
+**Measured** (2026-11-15; July clear-sky fixture, and March and July of a
+tenant year at 5-minute cadence; pairs chosen on the first half of each and
+reported on the second; 60 injected single-sample spikes per size):
+
+| | Clean votes, tenant year | Clean votes, reporting halves | Caught of 60 |
+|---|---|---|---|
+| Temperature, enrichment (lag 1) | 0 (was 122) | 0 | +2 °C 10 · +3 °C 46 · +4 °C 58 · +6 °C 59 · −3 °C 40 · −4 °C 52 |
+| Temperature, upload (3 rows) | 7 (was 122) | 0 | +2 °C 11 · +3 °C 46 · +4 °C 58 · +6 °C 59 · −3 °C 40 · −4 °C 52 · 15-min hold of +3 °C 48 |
+| Humidity, enrichment (lag 1) | 1 | 0 | +8 % 10 · +10 % 39 · +15 % 51 · −10 % 30 · −15 % 54 |
+
+**Known limits.**
+
+- The smallest temperature spike caught at least 90 % of the time is +4 °C
+  (before: +6 °C). Negative spikes reach 87 % at −4 °C. Spikes of 2 °C and
+  below are mostly missed; 3 °C is caught 77 % of the time. The misses are on
+  daytime ramps, where `c · MAD` rather than `c · floor` sets the threshold.
+- Humidity does not reach 90 % at 15 %RH (85 % up, 90 % down), and humidity
+  spikes are not scored on CSV upload at all.
+- A spike in the last 3 rows of an uploaded file cannot be confirmed and is
+  not reported. On the live path the same spike is reported one reading late.
+- A hold longer than the horizon (more than 1 reading live, more than 3 rows
+  on upload) is confirmed only on its last samples, or not at all if it never
+  returns.
+- On pure sensor noise (σ = 1 °C on temperature) about 0.3 % of windows
+  (6 of 2000) carry one sample that passes the confirmed test, and are
+  labelled *Spike fault* instead of *Accuracy decline*. They are still flagged.
 
 **In the UI.** Anomaly Detection → the row's *Fault* column reads "Spike fault";
 reasoning reads *"Transient spike: temperature deviated beyond the rolling
