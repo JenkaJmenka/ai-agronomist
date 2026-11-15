@@ -1291,31 +1291,43 @@ CUSUM_EMA_MIN_STD: Dict[str, float] = {
 }
 
 # Noise / Precision Degradation — hybrid Butterworth + variance-ratio.
+# The detect statistic is normalised second-difference variance:
+#   var(diff(hp, n=2)) / gain,  gain = sum([1,-2,1]^2) = 6
+# which estimates sigma^2 for white noise.  All fixed baselines and ratio
+# thresholds below are on the sigma^2 scale and need no adjustment.
 NOISE_HYBRID_WINDOW: int = int(os.environ.get("NOISE_HYBRID_WINDOW", "5"))
 NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     # spec ref: sigma_baseline^2=0.02 (docs/anomaly_framework_spec.md §5).
-    "temperature": 0.01,   # (°C)² — calibrated sensor noise floor
-    "humidity": 0.04,      # (%)²
-    "co2": 25.0,           # (ppm)²
-    "light": 100.0,        # (W/m²)²
+    # These are sigma^2 values.  The normalised d2-var statistic estimates
+    # sigma^2 for white noise, so these keep their original meaning.
+    "temperature": 0.01,   # (deg C)^2 — calibrated sensor noise floor
+    "humidity": 0.04,      # (%)^2
+    "co2": 25.0,           # (ppm)^2
+    "light": 100.0,        # (W/m^2)^2
 }
-# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md §5); production
+# spec ref: theta_noise=50.0 (docs/anomaly_framework_spec.md S5); production
 # uses 10.0 (5x more sensitive) for earlier precision-degradation alerts.
 # This ratio pairs with the fixed NOISE_BASELINE_VARIANCE cold start.
-# Do not raise it as a substitute for calibration: fixed baselines at
-# ratio 10 already false-alarm 76% of clean July windows.
+# Cold-start fires on July clearsky eval (167 windows, pipeline channels):
+#   plain var:         140/167 (84%), ring refused 127/167
+#   normalised d2-var:  81/167 (49%), ring refused  81/167
 NOISE_RATIO_THRESHOLD: float = float(os.environ.get("NOISE_RATIO_THRESHOLD", "10.0"))
-# Ratio to pass as ``NoiseDetector(ratio_threshold=...)`` only together
-# with a baseline from ``calibrate_noise_baseline``. The July prototype
-# (proto_noise_cal.json) swept calibrated high-pass variances:
-#   ratio 10 → clean FPR 9.6%, spike+noise composite 95.2%
-#   ratio 20 → clean FPR 3.6%, spike+noise composite 98.2%
-# The three-fault bundle (spike, noise, level_shift) at ratio 20 measured
-# clean FPR 4.2% and composite 97.9%. Ratio 5 sat outside this band
-# (clean FPR 29.3%). 20 is the production target inside the measured
-# 10–20 band; 10 remains the cold-start ratio above.
+# Ratio for the calibrated noise path (with calibrate_noise_baseline).
+# The normalised d2-var statistic is scale-free on the calibrated path
+# (numerator and denominator both divide by gain 6).  On the merged
+# (real) path, resolve_noise_baseline's max(calibrated, fixed) can
+# pick the fixed floor when calibrated < fixed (temperature: 0.0024
+# vs fixed 0.01), tightening sigma-0.5 recall.
+# Ratio sweep 2026-11-15, July clearsky, normalised d2-var (merged base):
+#   ratio | cal_fires | eval_fires | s1.0 r | s0.5 i/r  | s0.3 i/r
+#      30 |         0 |          0 |     40 |  40 / 16  |  26 /  0
+#      20 |         5 |          6 |     40 |  40 / 27  |  35 /  1
+#      15 |        11 |         14 |     40 |  40 / 33  |  40 /  4
+#      10 |        23 |         29 |     40 |  40 / 40  |  40 / 17
+#       5 |        43 |         57 |     40 |  40 / 40  |  40 / 34
+# Lowest ratio with zero cal fires: 30.  One-step margin: 30 (no higher).
 NOISE_CALIBRATED_RATIO_TARGET: float = float(
-    os.environ.get("NOISE_CALIBRATED_RATIO_TARGET", "20.0")
+    os.environ.get("NOISE_CALIBRATED_RATIO_TARGET", "30.0")
 )
 
 # Bias / Constant Offset — dual-sensor cross-difference.
