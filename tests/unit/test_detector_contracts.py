@@ -18,6 +18,7 @@ import pytest
 
 from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
 from src.models.multivariate_mahalanobis_detector import MultivariateMahalanobisDetector
+from src.config import NOISE_CALIBRATED_FLOOR_VARIANCE
 from src.models.noise_detector import NOISE_BASELINE_VARIANCE, resolve_noise_baseline
 
 
@@ -139,7 +140,7 @@ class TestResolveNoiseBaseline:
     def test_calibration_below_floor_keeps_floor(self):
         # temperature fixed floor is 0.01; pass a smaller calibration.
         result = resolve_noise_baseline({"temperature": 0.001})
-        assert result["temperature"] >= NOISE_BASELINE_VARIANCE["temperature"]
+        assert result["temperature"] >= NOISE_CALIBRATED_FLOOR_VARIANCE["temperature"]
 
     def test_calibration_above_floor_takes_calibration(self):
         result = resolve_noise_baseline({"temperature": 99.0})

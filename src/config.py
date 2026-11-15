@@ -1307,9 +1307,20 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     # 0.04: 44.7% / 19.5%; at 0.5: 1.8% / 0.7% (0.3 gave 7.5% / 2.0%).  Recall on
     # injected Gaussian noise (20 windows each, July / tenant): sigma 1.0 was
     # 20/20 / 20/20 at 0.04, now 2/20 / 0/20; sigma 2.0 now 7/20 / 6/20;
-    # sigma 3.0 now 19/20 / 20/20.  Also floors the calibrated path
-    # (resolve_noise_baseline max): July calibrated 0.213 < 0.5, so the floor dominates.
+    # sigma 3.0 now 19/20 / 20/20.  The calibrated path's floor
+    # (resolve_noise_baseline) is decoupled: see NOISE_CALIBRATED_FLOOR_VARIANCE.
     "humidity": 0.5,       # (%)^2
+    "co2": 25.0,           # (ppm)^2
+    "light": 100.0,        # (W/m^2)^2
+}
+# Lower bound applied only to a CALIBRATED noise baseline (see
+# resolve_noise_baseline: stored value is max(calibrated, floor)), so a
+# near-flat calibration window cannot produce a tiny baseline.  It is NOT the
+# cold-start baseline; NOISE_BASELINE_VARIANCE above is.  Values are the
+# pre-2026-11-15 fixed baselines.
+NOISE_CALIBRATED_FLOOR_VARIANCE: Dict[str, float] = {
+    "temperature": 0.01,   # (deg C)^2
+    "humidity": 0.04,      # (%)^2
     "co2": 25.0,           # (ppm)^2
     "light": 100.0,        # (W/m^2)^2
 }
