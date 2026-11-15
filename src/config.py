@@ -1380,6 +1380,18 @@ MAHALANOBIS_CHI2_THRESHOLD: float = float(
     os.environ.get("MAHALANOBIS_CHI2_THRESHOLD", "18.47")
 )
 
+# Minimum sample count for the Mahalanobis self-fit path (detect()).
+# Chi-square calibration assumes i.i.d. samples.  A 20-step sensor
+# window has strong auto-correlation (diurnal ramp), so the effective
+# degrees of freedom are far below the row count and the test over-fires.
+# Measured 2026-11-15: detect() on 20-step July clear-sky windows flagged
+# 26/167 clean windows (16 % FPR at p=0.001); disabling the self-fit path
+# eliminated all 26.  score_last_against_history (external history) is
+# unaffected.  Override via MAHALANOBIS_DETECT_MIN_SAMPLES env var.
+MAHALANOBIS_DETECT_MIN_SAMPLES: int = int(
+    os.environ.get("MAHALANOBIS_DETECT_MIN_SAMPLES", "50")
+)
+
 # Bayesian online change-point detection (level shifts beside CUSUM).
 # hazard_lambda = expected run length between changes; min_run = stable
 # steps required before a run-length collapse counts as a change-point.

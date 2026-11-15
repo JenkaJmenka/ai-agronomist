@@ -18,6 +18,12 @@ Robustness choices:
 - The covariance diagonal is floored at the per-sensor noise variance so
   near-constant windows cannot alarm on measurement noise (the same
   pathology the spike-MAD floor guards against).
+- The self-fit ``detect`` path requires at least
+  ``MAHALANOBIS_DETECT_MIN_SAMPLES`` rows (default 50) so it does not
+  fire on short auto-correlated windows where chi-square calibration
+  breaks down.  Measured 2026-11-15: on 20-step July clear-sky windows
+  it flagged 26/167 clean evaluation windows (16 % FPR at a nominal
+  p=0.001).  ``score_last_against_history`` is unaffected.
 """
 
 from __future__ import annotations
@@ -26,7 +32,12 @@ from typing import List, Optional
 
 import numpy as np
 
-from src.config import MAHALANOBIS_CHI2_THRESHOLD, SENSOR_NAMES, SENSOR_NOISE_TARGETS
+from src.config import (
+    MAHALANOBIS_CHI2_THRESHOLD,
+    MAHALANOBIS_DETECT_MIN_SAMPLES,
+    SENSOR_NAMES,
+    SENSOR_NOISE_TARGETS,
+)
 
 # Fraction of the window trimmed before the final covariance refit.
 _TRIM_FRACTION = 0.1
@@ -39,11 +50,13 @@ class MultivariateMahalanobisDetector:
         self,
         chi2_threshold: float = MAHALANOBIS_CHI2_THRESHOLD,
         noise_floors: Optional[dict[str, float]] = None,
+        min_self_fit_samples: int = MAHALANOBIS_DETECT_MIN_SAMPLES,
     ) -> None:
         if chi2_threshold <= 0:
             raise ValueError(f"chi2_threshold must be > 0, got {chi2_threshold}")
         self._threshold = chi2_threshold
         self._noise_floors = dict(noise_floors or SENSOR_NOISE_TARGETS)
+        self._min_self_fit_samples = min_self_fit_samples
 
     def _floor_vector(self, n_sensors: int) -> np.ndarray:
         floors = [
@@ -55,6 +68,14 @@ class MultivariateMahalanobisDetector:
     def detect(self, sequence: np.ndarray) -> List[bool]:
         """Flag each timestep whose joint reading is implausible.
 
+        Returns all-False when the window has fewer than
+        ``min_self_fit_samples`` rows (default
+        ``MAHALANOBIS_DETECT_MIN_SAMPLES``).  Chi-square calibration
+        assumes i.i.d. samples; a short auto-correlated sensor window
+        violates that assumption and the test over-fires.
+        ``score_last_against_history`` is the correct path for short
+        windows when external history is available.
+
         Args:
             sequence: 2-D array ``(seq_len, n_sensors)`` in physical units.
 
@@ -65,8 +86,12 @@ class MultivariateMahalanobisDetector:
         if seq.ndim != 2:
             raise ValueError(f"Expected 2-D (seq_len, sensors), got {seq.ndim}-D")
         n, dims = seq.shape
-        # Need clearly more samples than dimensions for a usable covariance.
-        if n < dims * 2 or not np.isfinite(seq).all():
+        # Need clearly more samples than dimensions for a usable covariance,
+        # AND enough rows to approximate i.i.d. chi-square calibration.
+        if (
+            n < max(dims * 2, self._min_self_fit_samples)
+            or not np.isfinite(seq).all()
+        ):
             return [False] * n
 
         floors = self._floor_vector(dims)

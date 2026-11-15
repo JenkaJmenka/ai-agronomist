@@ -74,6 +74,14 @@ def _is_model_scale(sequence: np.ndarray) -> bool:
     )
 
 
+def _is_model_scale_3d(baseline: np.ndarray) -> bool:
+    """True when a 3-D baseline ``(n, seq_len, input_dim)`` is model-scale."""
+    if baseline.ndim != 3 or baseline.shape[2] < 3:
+        return False
+    flat = baseline.reshape(-1, baseline.shape[2])
+    return _is_model_scale(flat)
+
+
 def _to_physical_range_units(sequence: np.ndarray) -> np.ndarray:
     """Physical copy for range checks. Already-physical windows pass through.
 
@@ -90,6 +98,28 @@ def _to_physical_range_units(sequence: np.ndarray) -> np.ndarray:
     spans = _PHYSICAL_RANGES[:ncols, 1] - mins
     physical[:, :ncols] = physical[:, :ncols] * spans + mins
     return physical
+
+
+def _normalize_baseline_to_model_scale(baseline: np.ndarray) -> np.ndarray:
+    """Normalize a physical-unit 3-D baseline to [0, 1] model scale.
+
+    The pipeline passes normalized sequences but ``build_default_baseline``
+    produces physical midpoints.  The IsolationForest and Statistical members
+    fit on the baseline and score the sequence, so a scale mismatch makes
+    their scores meaningless.  Measured 2026-11-15: statistical scored 1.0
+    on every clean July window due to this mismatch (Mahalanobis distance
+    between [0.5, 0.5, 0.5, 0.5] and [25.0, 65.0, 400.0, 600.0] is
+    enormous).  This function is called only when `detect()` identifies a
+    mismatch, so already-normalized baselines pass through unchanged.
+    """
+    ncols = min(baseline.shape[2], _PHYSICAL_RANGES.shape[0])
+    normalized = np.array(baseline, dtype=np.float64, copy=True)
+    mins = _PHYSICAL_RANGES[:ncols, 0]
+    spans = _PHYSICAL_RANGES[:ncols, 1] - mins
+    # Avoid division by zero for channels with zero span.
+    safe_spans = np.where(spans > 0, spans, 1.0)
+    normalized[:, :, :ncols] = (normalized[:, :, :ncols] - mins) / safe_spans
+    return normalized
 
 
 class DetectorProtocol(Protocol):
@@ -339,6 +369,14 @@ class EnsembleAnomalyDetector:
         range midpoint (prototype: 82/100 clean windows still flagged).
         Persistent offset stays with the pipeline's BiasEMA and dual-sensor
         checks, which see physical units. ``bias_flag`` is always False.
+
+        When the sequence is in model scale ([0, 1]) but the baseline is
+        in physical units, the baseline is normalized to match.  Measured
+        2026-11-15: without this, the statistical member scored 1.0 on
+        every clean window (Mahalanobis distance between normalized
+        channel means ~0.5 and physical midpoints [25, 65, 400, 600]
+        is enormous) and the IsolationForest scored 0.0 or 1.0 depending
+        on the constant-baseline degenerate fit.
         """
         # --- Pre-check: stuck fault (light excluded; night is legitimately flat) ---
         stuck_result = self._stuck_detector.detect(
@@ -358,9 +396,24 @@ class EnsembleAnomalyDetector:
                 stuck_sensors=stuck_result,
             )
 
+        # --- Reconcile sequence / baseline scales ---
+        # The pipeline normalizes the sequence to [0, 1] but
+        # build_default_baseline() produces physical midpoints.
+        # IsolationForest and Statistical fit on the baseline and score the
+        # sequence, so a scale mismatch makes their outputs meaningless.
+        effective_baseline = baseline
+        if _is_model_scale(sequence) and not _is_model_scale_3d(baseline):
+            effective_baseline = _normalize_baseline_to_model_scale(baseline)
+            logger.debug(
+                "Ensemble: normalized physical baseline to model scale "
+                "(seq median temp=%.2f, baseline median temp=%.2f)",
+                float(np.median(sequence[:, 0])),
+                float(np.median(baseline[:, :, 0])),
+            )
+
         # --- Standard 4-detector vote ---
-        if self._baseline_cache is None or baseline is not self._baseline_cache:
-            self.fit_baseline(baseline)
+        if self._baseline_cache is None or effective_baseline is not self._baseline_cache:
+            self.fit_baseline(effective_baseline)
 
         scores: Dict[str, float] = {}
         votes = 0
@@ -368,7 +421,7 @@ class EnsembleAnomalyDetector:
         weight_total = 0.0
 
         for detector in self._detectors:
-            raw = detector.score(sequence, baseline)
+            raw = detector.score(sequence, effective_baseline)
             scores[detector.name] = round(raw, 4)
             weight = self._weights.get(detector.name, 0.25)
             weighted_sum += weight * raw
