@@ -2112,9 +2112,9 @@ export interface components {
             greenhouse_id: string;
             /**
              * Sequences
-             * @description List of sensor sequences
+             * @description List of sensor sequences.  JSON null is accepted for any sensor value and treated as a missing sample (NaN) before the pipeline.
              */
-            sequences: number[][][];
+            sequences: (number | null)[][][];
         };
         /**
          * BatchInferenceResponse
@@ -2312,9 +2312,9 @@ export interface components {
             greenhouse_id: string;
             /**
              * Sequence
-             * @description Sensor sequence [seq_len, input_dim]
+             * @description Sensor sequence [seq_len, input_dim].  JSON null is accepted for any sensor value and treated as a missing sample (NaN) before the pipeline — this is the expected representation for polling-dropout gaps.  NaN is also accepted (Pydantic coerces it from the JSON number token).
              */
-            sequence: number[][];
+            sequence: (number | null)[][];
             /**
              * Baseline Sequences
              * @description Optional normal baseline sequences for pattern/attribution
