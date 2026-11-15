@@ -1301,7 +1301,15 @@ NOISE_BASELINE_VARIANCE: Dict[str, float] = {
     # These are sigma^2 values.  The normalised d2-var statistic estimates
     # sigma^2 for white noise, so these keep their original meaning.
     "temperature": 0.01,   # (deg C)^2 — calibrated sensor noise floor
-    "humidity": 0.04,      # (%)^2
+    # humidity 0.5 set 2026-11-15 from two datasets (normalised d2-var, ratio 10).
+    # Clean-window statistic medians: July clearsky 0.261 (p95 3.53), tenant year
+    # 0.114 (p95 1.87, Nov21-Dec26 excluded).  Clean humidity flags at the old
+    # 0.04: 44.7% / 19.5%; at 0.5: 1.8% / 0.7% (0.3 gave 7.5% / 2.0%).  Recall on
+    # injected Gaussian noise (20 windows each, July / tenant): sigma 1.0 was
+    # 20/20 / 20/20 at 0.04, now 2/20 / 0/20; sigma 2.0 now 7/20 / 6/20;
+    # sigma 3.0 now 19/20 / 20/20.  Also floors the calibrated path
+    # (resolve_noise_baseline max): July calibrated 0.213 < 0.5, so the floor dominates.
+    "humidity": 0.5,       # (%)^2
     "co2": 25.0,           # (ppm)^2
     "light": 100.0,        # (W/m^2)^2
 }
