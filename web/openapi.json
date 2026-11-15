@@ -7098,6 +7098,244 @@
           }
         }
       }
+    },
+    "/api/drift-watch/inputs": {
+      "get": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "List Drift Watch Inputs",
+        "description": "List drift-watch inputs (monitor specs) for the caller's tenant.\n\nReturns one entry per ``(tenant_id, greenhouse_id, input_id)`` triple,\nexposing the calibration status and summary metrics without the raw JSON\nblobs.",
+        "operationId": "list_drift_watch_inputs_api_drift_watch_inputs_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "greenhouse_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Greenhouse Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DriftWatchInputResponse"
+                  },
+                  "title": "Response List Drift Watch Inputs Api Drift Watch Inputs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/drift-watch/episodes": {
+      "get": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "List Drift Watch Episodes",
+        "description": "List drift episodes for the caller's tenant, newest first.\n\nThe ``ongoing`` flag in each episode is computed by comparing\n``last_confirmed_ts`` against the parent input's ``updated_at``:\nan episode is ongoing when the gap is at most ``DRIFT_WATCH_QUIET_HOURS``\nhours, meaning the drift was confirmed in the most recent upload batch.\n\n``since`` / ``until`` filter on ``first_detected_ts``.",
+        "operationId": "list_drift_watch_episodes_api_drift_watch_episodes_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "greenhouse_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Greenhouse Id"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DriftWatchEpisodeResponse"
+                  },
+                  "title": "Response List Drift Watch Episodes Api Drift Watch Episodes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8553,6 +8791,170 @@
         ],
         "title": "DriftStatus",
         "description": "Drift evaluation produced by the DriftDetector for one loss stream."
+      },
+      "DriftWatchEpisodeResponse": {
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "episode_id": {
+            "type": "string",
+            "title": "Episode Id"
+          },
+          "target_channel": {
+            "type": "string",
+            "title": "Target Channel"
+          },
+          "direction": {
+            "type": "string",
+            "title": "Direction"
+          },
+          "first_detected_ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Detected Ts"
+          },
+          "last_confirmed_ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Confirmed Ts"
+          },
+          "onset_estimate_ts": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Onset Estimate Ts"
+          },
+          "offset_estimate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset Estimate"
+          },
+          "peak_statistic": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Statistic"
+          },
+          "input_status_at_detection": {
+            "type": "string",
+            "title": "Input Status At Detection"
+          },
+          "ongoing": {
+            "type": "boolean",
+            "title": "Ongoing"
+          },
+          "armed": {
+            "type": "boolean",
+            "title": "Armed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_id",
+          "episode_id",
+          "target_channel",
+          "direction",
+          "first_detected_ts",
+          "last_confirmed_ts",
+          "input_status_at_detection",
+          "ongoing",
+          "armed"
+        ],
+        "title": "DriftWatchEpisodeResponse",
+        "description": "Public representation of one drift episode."
+      },
+      "DriftWatchInputResponse": {
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "target_channel": {
+            "type": "string",
+            "title": "Target Channel"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "status_reason": {
+            "type": "string",
+            "title": "Status Reason"
+          },
+          "calibrated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calibrated At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "false_alarm_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "False Alarm Rate"
+          },
+          "detection_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_id",
+          "kind",
+          "target_channel",
+          "status",
+          "status_reason",
+          "updated_at"
+        ],
+        "title": "DriftWatchInputResponse",
+        "description": "Public representation of one drift-watch input (monitor spec)."
       },
       "FeedbackMarkRequest": {
         "properties": {

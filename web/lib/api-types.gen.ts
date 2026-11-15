@@ -1808,6 +1808,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drift-watch/inputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Drift Watch Inputs
+         * @description List drift-watch inputs (monitor specs) for the caller's tenant.
+         *
+         *     Returns one entry per ``(tenant_id, greenhouse_id, input_id)`` triple,
+         *     exposing the calibration status and summary metrics without the raw JSON
+         *     blobs.
+         */
+        get: operations["list_drift_watch_inputs_api_drift_watch_inputs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drift-watch/episodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Drift Watch Episodes
+         * @description List drift episodes for the caller's tenant, newest first.
+         *
+         *     The ``ongoing`` flag in each episode is computed by comparing
+         *     ``last_confirmed_ts`` against the parent input's ``updated_at``:
+         *     an episode is ongoing when the gap is at most ``DRIFT_WATCH_QUIET_HOURS``
+         *     hours, meaning the drift was confirmed in the most recent upload batch.
+         *
+         *     ``since`` / ``until`` filter on ``first_detected_ts``.
+         */
+        get: operations["list_drift_watch_episodes_api_drift_watch_episodes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2489,6 +2540,69 @@ export interface components {
              * @description Set while the detector lacks enough history
              */
             warning?: string | null;
+        };
+        /**
+         * DriftWatchEpisodeResponse
+         * @description Public representation of one drift episode.
+         */
+        DriftWatchEpisodeResponse: {
+            /** Input Id */
+            input_id: string;
+            /** Episode Id */
+            episode_id: string;
+            /** Target Channel */
+            target_channel: string;
+            /** Direction */
+            direction: string;
+            /**
+             * First Detected Ts
+             * Format: date-time
+             */
+            first_detected_ts: string;
+            /**
+             * Last Confirmed Ts
+             * Format: date-time
+             */
+            last_confirmed_ts: string;
+            /** Onset Estimate Ts */
+            onset_estimate_ts?: string | null;
+            /** Offset Estimate */
+            offset_estimate?: number | null;
+            /** Peak Statistic */
+            peak_statistic?: number | null;
+            /** Input Status At Detection */
+            input_status_at_detection: string;
+            /** Ongoing */
+            ongoing: boolean;
+            /** Armed */
+            armed: boolean;
+        };
+        /**
+         * DriftWatchInputResponse
+         * @description Public representation of one drift-watch input (monitor spec).
+         */
+        DriftWatchInputResponse: {
+            /** Input Id */
+            input_id: string;
+            /** Kind */
+            kind: string;
+            /** Target Channel */
+            target_channel: string;
+            /** Status */
+            status: string;
+            /** Status Reason */
+            status_reason: string;
+            /** Calibrated At */
+            calibrated_at?: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** False Alarm Rate */
+            false_alarm_rate?: number | null;
+            /** Detection Rate */
+            detection_rate?: number | null;
         };
         /**
          * FeedbackMarkRequest
@@ -6971,6 +7085,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackfillScoresResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_drift_watch_inputs_api_drift_watch_inputs_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchInputResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_drift_watch_episodes_api_drift_watch_episodes_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+                greenhouse_id?: string | null;
+                since?: string | null;
+                until?: string | null;
+                limit?: number;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchEpisodeResponse"][];
                 };
             };
             /** @description Validation Error */

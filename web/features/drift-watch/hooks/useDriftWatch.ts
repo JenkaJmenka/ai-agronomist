@@ -1,0 +1,43 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+
+import {
+  type DriftWatchEpisode,
+  type DriftWatchInput,
+  fetchDriftWatchEpisodes,
+  fetchDriftWatchInputs,
+} from "@/features/drift-watch/api/driftWatch";
+import { STALE_TIME_MS } from "@/lib/query";
+
+/** Drift watch inputs (monitor specs) for the current tenant/greenhouse. */
+export function useDriftWatchInputs(tenant: string, gh: string) {
+  const query = useQuery<DriftWatchInput[], Error>({
+    queryKey: ["drift-watch", "inputs", tenant, gh],
+    queryFn: () => fetchDriftWatchInputs({ tenant, gh }),
+    staleTime: STALE_TIME_MS.anomaliesInWindow,
+  });
+
+  return {
+    inputs: query.data ?? [],
+    isLoading: query.isPending,
+    isError: query.isError,
+    error: query.error,
+  };
+}
+
+/** Drift watch episodes (newest first) for the current tenant/greenhouse. */
+export function useDriftWatchEpisodes(tenant: string, gh: string) {
+  const query = useQuery<DriftWatchEpisode[], Error>({
+    queryKey: ["drift-watch", "episodes", tenant, gh],
+    queryFn: () => fetchDriftWatchEpisodes({ tenant, gh }),
+    staleTime: STALE_TIME_MS.anomaliesInWindow,
+  });
+
+  return {
+    episodes: query.data ?? [],
+    isLoading: query.isPending,
+    isError: query.isError,
+    error: query.error,
+  };
+}
