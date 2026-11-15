@@ -43,7 +43,8 @@ Then, first match wins:
 1. **BOCPD** — `any_in_window` on temperature, humidity, or CO₂ (light
    skipped), and only when at least `BOCPD_MIN_SENSORS` of those channels
    confirm a change-point.
-2. **Spike** — MAD on the last timestep.
+2. **Spike** — MAD on the second-to-last timestep (lag 1), counted only if
+   the last timestep has come back (reversion-confirmed; 5 minutes late).
 3. **Noise**.
 4. **Dual-sensor bias**.
 5. **Correlation**.
