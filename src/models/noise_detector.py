@@ -24,7 +24,7 @@ is unavailable).
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 from scipy.signal import butter, filtfilt
@@ -117,7 +117,9 @@ class NoiseDetector:
         baseline_variance: Per-sensor calibrated baseline noise variance
             (spec S5: ``sigma_baseline^2 = 0.02``).
         ratio_threshold: Variance-ratio alarm threshold ``theta_noise``
-            (spec S5: ``theta_noise = 50.0``).
+            (spec S5: ``theta_noise = 50.0``). Either a float shared by
+            every sensor, or a mapping sensor -> ratio; a sensor missing
+            from the mapping uses ``default_ratio``.
         use_highpass: When True (default) apply the Butterworth high-pass
             filter before computing rolling variance (production behaviour).
             When False, compute the ratio on the RAW series — the
@@ -131,14 +133,25 @@ class NoiseDetector:
         hp_cutoff: float | None = None,
         window: int = NOISE_HYBRID_WINDOW,
         baseline_variance: Dict[str, float] | None = None,
-        ratio_threshold: float = NOISE_RATIO_THRESHOLD,
+        ratio_threshold: float | Mapping[str, float] = NOISE_RATIO_THRESHOLD,
         use_highpass: bool = True,
+        default_ratio: float = NOISE_RATIO_THRESHOLD,
     ) -> None:
         self._hp_cutoff = hp_cutoff or self.HP_CUTOFF
         self._window = window
         self._baseline_var = dict(baseline_variance or NOISE_BASELINE_VARIANCE)
-        self._ratio_threshold = ratio_threshold
+        if isinstance(ratio_threshold, Mapping):
+            self._ratio_by_sensor = {
+                str(k): float(v) for k, v in ratio_threshold.items()
+            }
+            self._ratio_threshold = float(default_ratio)
+        else:
+            self._ratio_by_sensor = {}
+            self._ratio_threshold = float(ratio_threshold)
         self._use_highpass = use_highpass
+
+    def _ratio_for(self, sensor: str) -> float:
+        return self._ratio_by_sensor.get(sensor, self._ratio_threshold)
 
     def detect(
         self,
@@ -179,7 +192,7 @@ class NoiseDetector:
             if len(signal) < _MIN_D2_SAMPLES:
                 return False
             signal_var = _d2_var(signal)
-            return signal_var / bv > self._ratio_threshold
+            return signal_var / bv > self._ratio_for(sensor)
 
         target = target_override if target_override is not None else SENSOR_NOISE_TARGETS.get(sensor)
         if target is None:
@@ -236,7 +249,7 @@ class NoiseDetector:
         for t in range(w - 1, n):
             window = signal[t - w + 1 : t + 1]
             var = float(np.var(window, ddof=1))
-            flags[t] = var / bv > self._ratio_threshold
+            flags[t] = var / bv > self._ratio_for(sensor)
 
         return flags
 
