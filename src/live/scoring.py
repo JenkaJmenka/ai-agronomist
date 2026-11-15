@@ -194,6 +194,30 @@ class LiveScorer:
         """Cancel and await all in-flight enrichment tasks."""
         await self._enrichment.close()
 
+    def seed_clean_windows(self, windows: "List[np.ndarray]") -> None:
+        """Populate the clean-window ring from stored history.
+
+        Applies the same admission rule as live admission: each window must
+        pass the fixed-baseline noise check (_fixed_baseline_noise_hit).
+        Windows that fail the noise check are silently dropped, matching the
+        behaviour of _remember_clean_window.
+
+        _clean_scored_count is intentionally NOT updated so the live stride
+        logic (store one window per full SEQ_LEN-step slide) is unaffected.
+        Call once at scorer start, before any live events arrive.
+
+        Parameters
+        ----------
+        windows:
+            Physical [SEQ_LEN × 4] arrays in ascending time order
+            (oldest first).  Produced by
+            src.live.ring_seed.load_seed_windows.
+        """
+        for w in windows:
+            if _fixed_baseline_noise_hit(w):
+                continue
+            self._clean_windows.append(np.array(w, dtype=np.float32, copy=True))
+
     # ------------------------------------------------------------------
     # Vector extraction
     # ------------------------------------------------------------------
