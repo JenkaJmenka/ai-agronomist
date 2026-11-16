@@ -1,5 +1,29 @@
 # Agent Memory
 
+## Task -- accuracy harness hardening -- PARTIAL (2026-11-16)
+
+Branch `test/accuracy-harness-hardening` off `main` at `2fb9742`. Tests and
+the 15 Nov handover only. `_COMPOSITE_BAR` stayed 0.90. No detector retune.
+
+Empty-database gate, now with a spike sweep and 12 real July windows:
+composite 0.997006 (1/167 clean flags). Enrichment spike recall at lag 1:
++2 °C 1/40, +3 °C 40/40, +4 °C 40/40, +6 °C 40/40. Only +6 °C is asserted,
+at the existing upload bar 0.95. Real-window +6 °C spike 12/12; the gated
+level shift on those same windows 4/12. Neither real-window rate is a gate.
+
+`ACCURACY_SEEDED=1` inserts 996 July calibration rows. History query sees
+996. Diurnal profiles build for all four sensors. Clean flags 59/167, of
+which 58 are `diurnal_deviation` (the other flag is the empty-gate
+`calibration_drift`). Seeded composite 0.823353, recorded, not compared to
+0.90. Default CI still skips this path.
+
+Band pin: a default tomato temperature breach with empty `get_raw_overrides`
+lands on `scada_anomalies` as `TEMP_BAND_HIGH` and leaves `is_anomaly` false.
+
+No second fixture. `native_dec_stuck_fault.csv` can build windows and is a
+stuck-humidity file with no clean half. Detail:
+`docs/handoff/handover-2026-11-15.md` section 12.
+
 ## Task -- humidity noise statistic -- NOT SHIPPED (2026-11-16)
 
 Branch `fix/humidity-noise-statistic` off `main` at `4d30778`. Four humidity

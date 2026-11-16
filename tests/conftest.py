@@ -45,6 +45,15 @@ from src.models.lstm_vae import LSTMVAE
 from src.config import MODEL_CONFIG
 
 
+def pytest_configure(config):
+    """Register opt-in markers that are not part of the default CI selection."""
+    config.addinivalue_line(
+        "markers",
+        "accuracy_seeded: opt-in July SensorReading accuracy gate "
+        "(set ACCURACY_SEEDED=1)",
+    )
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Clean up per-worker SQLite files created by xdist workers."""
     worker = os.environ.get("PYTEST_XDIST_WORKER")
