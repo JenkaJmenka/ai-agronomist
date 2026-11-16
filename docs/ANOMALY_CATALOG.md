@@ -5,7 +5,7 @@ parameters control it, what you see in the UI, and what an operator should do.
 
 **Related docs:** [User Guide](USER_GUIDE.md) · [Framework spec](anomaly_framework_spec.md) · [README](../README.md)
 
-**Last verified:** 2026-11-15, against branch `feat/anomaly-detection-module-refactoring`.
+**Last verified:** 2026-11-16, against branch `fix/ensemble-non-voting` (ensemble demoted to non-voting; earlier sections last checked 2026-11-15).
 
 ---
 
@@ -19,7 +19,7 @@ raised a finding tells you how much to trust it and how to act.
 | **Rule detectors** | Deterministic maths on the raw signal (MAD, CUSUM, variance, correlation, psychrometrics). Each has a closed-form threshold. | Deterministic. If it fires, the maths held. Tune the threshold, not the model. |
 | **Crop band breaches** | Comparison against the day/night setpoint bands you configured on the **Configuration** page. | As good as your setpoints. Wrong crop profile → noisy alarms. |
 | **LSTM-VAE (learned)** | Reconstruction error from a per-tenant sequence autoencoder trained on *your* clean history. | Statistical. Flags "unlike what I was trained on". Needs a trained model. |
-| **Ensemble / pattern** | Weighted vote across LSTM-VAE, Isolation Forest, Mahalanobis distance and correlation checks, plus a pattern classifier. | Highest confidence when detectors agree (`agreement_count ≥ 2`). |
+| **Ensemble / pattern** | Weighted score across LSTM-VAE, Isolation Forest, Mahalanobis distance and correlation checks, plus a pattern classifier. Computed on every window. | **Non-voting (2026-11-16).** Does not set `is_anomaly` or `fault_type`. `ensemble_score` and `agreement_count` stay on the response and still feed the confidence score. |
 
 Every stored incident carries a **`fault_type`** (the machine label), a
 **`root_cause`** (why it probably happened), a **`reasoning`** string naming the
@@ -28,10 +28,11 @@ page shows all four.
 
 ### Precedence
 
-Rule detectors **vote**; they do not short-circuit. The LSTM/ensemble path
+Rule detectors **vote**; they do not short-circuit. The LSTM path
 still runs, and the first fired rule in `_RULE_PRECEDENCE`
 (`src/api/services/comprehensive_pipeline.py`) supplies `fault_type`.
-Co-firing rules are appended as `"…; also flagged by: <root causes>"`.
+The ensemble score is computed on the same pass and returned; it does
+not vote. Co-firing rules are appended as `"…; also flagged by: <root causes>"`.
 
 Two checks return immediately:
 
@@ -59,7 +60,7 @@ Then, first match wins:
     rule already flagged is dropped.
 
 Physics confirmation keeps its own `fault_type` when it has already
-confirmed. CUSUM sits outside this list.
+confirmed. CUSUM and the ensemble sit outside this list.
 
 ---
 
@@ -253,7 +254,9 @@ values (two values count as the same when peak-to-peak is within
 **humidity**, and **plant canopy temperature** when the full plant-temp series
 is available; CO₂ and light are not checked here. A light-only flatline does
 not vote and is not attached to `scada_anomalies`. The ensemble stuck
-pre-check also skips light (`ENSEMBLE_STUCK_SKIP_CHANNELS`).
+pre-check still runs inside `ensemble.detect` and still skips light
+(`ENSEMBLE_STUCK_SKIP_CHANNELS`), but it does not set `is_anomaly` or
+`fault_type`. `stuck_fault` on this path is the flatline rule vote.
 
 Pipeline windows are 20 samples (`SEQ_LEN`), so on the `/api/inference/`
 path the check covers those 20 samples; `FLATLINE_IDENTICAL_STEPS` (24) is
@@ -913,7 +916,7 @@ Metrics page.
 
 ---
 
-## Ensemble vote
+## Ensemble score
 
 Four detectors vote, weighted (`ENSEMBLE_DETECTOR_WEIGHTS`):
 
@@ -924,24 +927,24 @@ Four detectors vote, weighted (`ENSEMBLE_DETECTOR_WEIGHTS`):
 | `statistical` (Mahalanobis) | `ENSEMBLE_STATISTICAL_THRESHOLD` | 3.0 (fixed 2026-11-14; previously listed at half) |
 | `correlation` | `ENSEMBLE_CORRELATION_THRESHOLD` | 0.35 |
 
-An anomaly is declared when the weighted score exceeds
+`EnsembleAnomalyDetector.detect` still scores every window. Internally it
+sets `EnsembleResult.is_anomaly` when the weighted score exceeds
 `ENSEMBLE_ANOMALY_THRESHOLD` (0.5) **and** at least `ENSEMBLE_MIN_AGREEMENT`
-(2) detectors agree. That agreement count is exactly what promotes a finding to a
-**critical** (red) chip in the UI. Two independent detectors agreeing is a much
-stronger signal than one detector scoring high.
+(2) members agree. That flag is not copied onto the pipeline result.
+`agreement_count` is still returned and still feeds the confidence score.
+It does not by itself set `is_anomaly` or promote a fault label.
 
-**Status (2026-11-15): inert without a tenant baseline.** On measured data the
-ensemble never reached two-member agreement and contributed no detections. With
-a real tenant baseline it flagged **19 of 167 clean windows** and still added
-none — the two-member bar was never met because the same windows that raised the
-ensemble score were already caught by rule votes. The ensemble is left without a
-tenant baseline (inert) pending rework.
-
-Before that vote, a stuck-fault pre-check short-circuits a flat temperature,
-humidity, or CO₂ channel. Light is skipped
-(`ENSEMBLE_STUCK_SKIP_CHANNELS`). The midpoint bias pre-check is not run.
-`bias_flag` stays false; a persistent offset is the pipeline EMA and
-dual-sensor checks.
+**Status (2026-11-16): non-voting.** Measured with a real tenant baseline,
+the ensemble flagged **19 of 167 clean July windows** and added zero
+detections the other rules did not already make. `ensemble.detect` still
+runs so `ensemble_score` and `agreement_count` stay on the response. They
+do not set `is_anomaly` or `fault_type`. There is no stuck exception:
+`stuck_fault` on this path comes from the setpoint flatline rule vote
+(temperature, humidity, plant canopy). The stuck pre-check still runs
+inside `detect` (light skipped via `ENSEMBLE_STUCK_SKIP_CHANNELS`) and can
+set `EnsembleResult.fault_type`; the pipeline ignores it. The midpoint
+bias pre-check is not run. `bias_flag` stays false; a persistent offset
+is the pipeline EMA and dual-sensor checks.
 
 ---
 
