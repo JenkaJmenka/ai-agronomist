@@ -1,5 +1,20 @@
 # Agent Memory
 
+## Task -- humidity noise statistic -- NOT SHIPPED (2026-11-16)
+
+Branch `fix/humidity-noise-statistic` off `main` at `4d30778`. Four humidity
+statistics, one pre-declared rule (ratio 30 to the calibration-half median;
+d2-var also keeps the 0.04 floor, which did not bind). Windows match the
+accuracy gate (seq 20, stride 6). Quiet recall is 20 ideal windows.
+
+July eval flags / quiet recall at 1, 2, 3 %RH: d2-var 0/167 and 0/2/14 of 20;
+high-pass variance 0/167 and 0/0/0; MAD variance 0/167 (1 cal flag) and 0/0/0;
+top-octave band energy 0/167 and 0/0/1. Nothing reached 10/20 at 2 %RH.
+#112's draw was 1/4/14; σ = 3 matches, σ = 2 was 4 there and 2 here.
+Temperature d2-var was not retuned: July eval 0/167, 10/20 at 0.5 °C, 19/20
+at 1.0 °C. Production code unchanged. Full table:
+`docs/handoff/handover-2026-11-15.md` section 10.
+
 ## Task -- Grovsen rebrand of the Next.js operator UI -- DONE (2026-11-14)
 
 Brand `#0D3631`, light + dark, across `web/`. Four commits on
