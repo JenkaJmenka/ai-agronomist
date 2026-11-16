@@ -1505,8 +1505,38 @@ HOUR_RESIDUAL_MIN_OTHER_DAYS: int = int(
 
 # Multivariate joint-implausibility check (rolling-window Mahalanobis).
 # 18.47 = chi-square df=4 at p=0.999 — flags only strong joint outliers.
+# Fallback for score_last_against_history when history is too short to
+# calibrate an empirical cutoff (below 2 rows per sensor, or a singular fit).
 MAHALANOBIS_CHI2_THRESHOLD: float = float(
     os.environ.get("MAHALANOBIS_CHI2_THRESHOLD", "18.47")
+)
+
+# Quantile of in-sample squared Mahalanobis distances on the fitted history.
+# Not a chi-square table value. Measured 2026-11-16 on
+# tests/fixtures/native_july_clearsky.csv: physical windows, seq_len 20,
+# stride 6, second-half evaluation (167). History is earlier calendar days
+# inside +/- MAHALANOBIS_HOUR_WINDOW, scored day left out of the fit.
+#   chi-square 18.47:                         19/167 clean flags
+#   in-sample quantile 0.999:                 35/167 clean flags,
+#                                             joint fault caught 158/167
+#   same distances at 0.9995 (one step):      35/167 clean flags,
+#                                             joint fault caught 157/167
+# 0.9995 sits on the same sample maximum (108-216 rows per band), so it
+# does not move the flag count. Leave-one-out at 0.999 was 31/167 clean
+# (fault 155/167); a 10% trimmed refit was 18/167 clean (fault 136/167).
+# No variant is at or under ~3/167. 0.999 stays the default because the
+# only allowed step did not reduce clean flags and dropped a fault catch.
+# This constant does not re-arm the pipeline vote. The joint fault is the
+# last sample shifted by +5 C and -15 %RH together, other channels kept.
+MAHALANOBIS_DISTANCE_QUANTILE: float = float(
+    os.environ.get("MAHALANOBIS_DISTANCE_QUANTILE", "0.999")
+)
+
+# Half-width, in clock hours, of the history band around the scored sample.
+# 1 keeps the reference hour and its two neighbours, wrapping midnight.
+# The hour is the timestamp's own wall clock; nothing is timezone-shifted.
+MAHALANOBIS_HOUR_WINDOW: int = int(
+    os.environ.get("MAHALANOBIS_HOUR_WINDOW", "1")
 )
 
 # Minimum sample count for the Mahalanobis self-fit path (detect()).

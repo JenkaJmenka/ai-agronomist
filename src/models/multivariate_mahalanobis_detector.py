@@ -7,7 +7,11 @@ flags timesteps whose Mahalanobis distance exceeds a chi-square cutoff.
 
 ``detect`` fits on the window it scores. ``score_last_against_history``
 fits on a caller-supplied history and scores only the window's last row.
-That path does not trim the window into the history.
+That path does not trim the window into the history. Pass ``cutoff`` to
+judge the last row against an empirical quantile instead of the chi-square
+table; omit it and the chi-square threshold is used, unchanged.
+``empirical_cutoff`` computes that quantile. ``select_hour_conditioned_rows``
+keeps history rows in a clock-hour band around the scored sample.
 
 Robustness choices:
 - Trimmed refit: distances are computed with a median-centered covariance,
@@ -35,9 +39,22 @@ import numpy as np
 from src.config import (
     MAHALANOBIS_CHI2_THRESHOLD,
     MAHALANOBIS_DETECT_MIN_SAMPLES,
+    MAHALANOBIS_DISTANCE_QUANTILE,
     SENSOR_NAMES,
     SENSOR_NOISE_TARGETS,
 )
+from src.models.mahalanobis_calibration import (
+    _MIN_ROWS_PER_SENSOR,
+    _squared_distances,
+    empirical_mahalanobis_cutoff,
+    select_hour_conditioned_rows,
+)
+
+__all__ = [
+    "MultivariateMahalanobisDetector",
+    "empirical_mahalanobis_cutoff",
+    "select_hour_conditioned_rows",
+]
 
 # Fraction of the window trimmed before the final covariance refit.
 _TRIM_FRACTION = 0.1
@@ -111,28 +128,61 @@ class MultivariateMahalanobisDetector:
 
         return [bool(value > self._threshold) for value in d2]
 
+    def empirical_cutoff(
+        self,
+        history: np.ndarray,
+        quantile: Optional[float] = None,
+    ) -> Optional[float]:
+        """Quantile of history distances under this detector's noise floors.
+
+        ``None`` means the history cannot be calibrated. The caller then
+        omits ``cutoff`` on :meth:`score_last_against_history` and the
+        chi-square threshold stays in force.
+
+        Args:
+            history: Physical history, shape ``(n_history, n_sensors)``.
+            quantile: Tail probability in ``(0, 1)``. Defaults to
+                ``MAHALANOBIS_DISTANCE_QUANTILE``.
+        """
+        rows = np.asarray(history, dtype=float)
+        if rows.ndim != 2:
+            raise ValueError(
+                f"Expected 2-D history (n, sensors), got {rows.ndim}-D"
+            )
+        level = (
+            MAHALANOBIS_DISTANCE_QUANTILE if quantile is None else quantile
+        )
+        return empirical_mahalanobis_cutoff(
+            rows,
+            self._floor_vector(int(rows.shape[1])),
+            level,
+        )
+
     def score_last_against_history(
         self,
         window: np.ndarray,
         history: np.ndarray,
+        cutoff: Optional[float] = None,
     ) -> bool:
         """Whether the last row of ``window`` is implausible under ``history``.
 
         Center and covariance are fit on the finite rows of ``history``
         only. The window is not appended to that fit and is not trimmed.
-        The chi-square threshold and the diagonal noise floor are the
-        same ones :meth:`detect` uses.
+        The diagonal noise floor matches :meth:`detect`.
 
         Args:
             window: Physical window, shape ``(seq_len, n_sensors)``.
             history: Physical history, shape ``(n_history, n_sensors)``.
+            cutoff: Squared-distance cutoff. Omit it to use the chi-square
+                threshold. A provided cutoff is used as-is.
 
         Returns:
             True when the last row's squared Mahalanobis distance exceeds
-            the chi-square threshold. False when fewer than
-            ``2 * n_sensors`` history rows are finite, when the window is
-            not entirely finite, or when the covariance cannot be inverted.
+            the cutoff. False when fewer than ``2 * n_sensors`` history
+            rows are finite, when the window is not entirely finite, or
+            when the covariance cannot be inverted.
         """
+        threshold = _resolve_cutoff(self._threshold, cutoff)
         seq = np.asarray(window, dtype=float)
         hist = np.asarray(history, dtype=float)
         if seq.ndim != 2 or hist.ndim != 2:
@@ -149,14 +199,14 @@ class MultivariateMahalanobisDetector:
         if n_rows == 0 or n_sensors == 0 or not np.isfinite(seq).all():
             return False
         finite_rows = hist[np.isfinite(hist).all(axis=1)]
-        if finite_rows.shape[0] < n_sensors * 2:
+        if finite_rows.shape[0] < n_sensors * _MIN_ROWS_PER_SENSOR:
             return False
         distances = self._distances(
             seq[-1:], finite_rows, self._floor_vector(n_sensors)
         )
         if distances is None:
             return False
-        return bool(distances[0] > self._threshold)
+        return bool(distances[0] > threshold)
 
     @staticmethod
     def _distances(
@@ -165,11 +215,14 @@ class MultivariateMahalanobisDetector:
         floors: np.ndarray,
     ) -> Optional[np.ndarray]:
         """Squared Mahalanobis distances of ``seq`` under a fit on ``fit_rows``."""
-        center = np.median(fit_rows, axis=0)
-        cov = np.cov(fit_rows.T) + np.diag(floors**2)
-        try:
-            inv_cov = np.linalg.inv(cov)
-        except np.linalg.LinAlgError:
-            return None
-        centered = seq - center
-        return np.einsum("ij,jk,ik->i", centered, inv_cov, centered)
+        return _squared_distances(seq, fit_rows, floors)
+
+
+def _resolve_cutoff(default: float, cutoff: Optional[float]) -> float:
+    """Chi-square threshold unless the caller supplied a positive cutoff."""
+    if cutoff is None:
+        return default
+    threshold = float(cutoff)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError(f"cutoff must be finite and > 0, got {cutoff}")
+    return threshold
