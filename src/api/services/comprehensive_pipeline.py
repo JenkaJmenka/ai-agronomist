@@ -1144,13 +1144,13 @@ class ComprehensiveInferencePipeline:
         # 0c. Spike (MAD). any(flags) over the whole window was the main
         # clean-file FPR driver: a spike earlier in the window labelled the
         # current (clean) sample. So exactly one timestep votes.
-        # ENRICHMENT_SPIKE_CONFIRM_LAG = 0 (default): the last timestep
-        # votes, unconfirmed, with the upload pair
+        # ENRICHMENT_SPIKE_CONFIRM_LAG = d > 0 (default 1): timestep t-d
+        # votes, and only if one of the d samples after it is back at the
+        # pre-event level (a step that stays is not a spike). That vote uses
+        # ENRICHMENT_SPIKE_CONFIRMED_PAIRS where a sensor has an entry and
+        # arrives d samples late.
+        # Lag 0: the last timestep votes, unconfirmed, with the upload pair
         # (UPLOAD_SPIKE_MAD_TUNING_C, enrichment_spike_mad_floor).
-        # Lag d > 0: timestep t-d votes, and only if one of the d samples
-        # after it is back at the pre-event level (a step that stays is not
-        # a spike). That vote uses ENRICHMENT_SPIKE_CONFIRMED_PAIRS where a
-        # sensor has an entry and arrives d samples late.
         # Light is excluded. Neither mode is the live detector's c=3 /
         # 0.1 °C floor; the shared instance stays on the live defaults for
         # any caller that still wants them.

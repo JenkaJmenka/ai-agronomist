@@ -10,6 +10,7 @@ whose scope is running, with rows at controlled ages.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from typing import Any, AsyncGenerator
 
@@ -25,6 +26,7 @@ from src.db.models import RawReading, SensorReading
 from src.db.session import get_db
 from src.live.scope_control import clear_all_suppressed_scopes
 from tests.api.live_boot_harness import (
+    FLUSH_INTERVAL_SECONDS,
     GREENHOUSE,
     TENANT,
     LiveBootHarness,
@@ -98,6 +100,28 @@ async def _get_status(harness: LiveBootHarness) -> dict[str, Any]:
     return response.json()
 
 
+async def _start_live_scope_without_new_rows(runtime: Any) -> None:
+    """Keep a scope live while its newest row stays under the test's control.
+
+    The mock connector keeps flushing after ``start_scope``. A row seeded
+    afterwards is the newest row only if nothing newer commits before the
+    status read — that race failed
+    ``test_live_scope_past_the_threshold_reports_stale`` once in CI.
+
+    ``suppress_persistence`` mutes publish and DB writes but leaves the
+    merger and connector tasks running, so state stays ``live``.
+    ``stop_scope`` would cancel those tasks and the scope would read as
+    ``paused``, and a paused scope is never stale.
+
+    A flush that already drained its buffer can still commit after the
+    mute. Two flush intervals is the settle the gating tests use for an
+    in-flight flush; the caller wipes after that, then seeds.
+    """
+    await runtime.start_scope(TENANT, GREENHOUSE)
+    runtime.suppress_persistence(TENANT, GREENHOUSE)
+    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 2)
+
+
 class TestStaleLiveScope:
     """Item 5: an old newest-row makes a live scope stale; a fresh one clears it."""
 
@@ -106,7 +130,7 @@ class TestStaleLiveScope:
         self, harness: LiveBootHarness
     ) -> None:
         async with harness.boot() as runtime:
-            await runtime.start_scope(TENANT, GREENHOUSE)
+            await _start_live_scope_without_new_rows(runtime)
             await harness.clear_reading_rows()
             await _seed_sensor_reading(
                 harness,
@@ -127,7 +151,7 @@ class TestStaleLiveScope:
         self, harness: LiveBootHarness
     ) -> None:
         async with harness.boot() as runtime:
-            await runtime.start_scope(TENANT, GREENHOUSE)
+            await _start_live_scope_without_new_rows(runtime)
             await harness.clear_reading_rows()
             await _seed_sensor_reading(
                 harness,
@@ -138,6 +162,8 @@ class TestStaleLiveScope:
             )
             assert (await _get_status(harness))["freshness"]["is_stale"] is True
 
+            # Persistence stays muted. The seeded fresh row is what clears
+            # the flag; resuming the connector would race this assertion.
             await _seed_sensor_reading(
                 harness,
                 _utc_now() - datetime.timedelta(seconds=_FRESH_AGE_SECONDS),
@@ -181,7 +207,7 @@ class TestStaleLiveScope:
         """
         age_seconds = LIVE_STALE_AFTER_SECONDS / 2
         async with harness.boot() as runtime:
-            await runtime.start_scope(TENANT, GREENHOUSE)
+            await _start_live_scope_without_new_rows(runtime)
             await harness.clear_reading_rows()
             await _seed_sensor_reading(
                 harness, _utc_now() - datetime.timedelta(seconds=age_seconds)

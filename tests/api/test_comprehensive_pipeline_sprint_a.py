@@ -230,7 +230,12 @@ class TestGateIncidentPersistence:
     async def test_spike_gate_stores_incident(self, pipeline, db_session):
         """A MAD-spike gate result carries a stored incident id."""
         sequence = np.asarray(_sample_sequence(), dtype=np.float32)
-        sequence[-1, 0] = 0.95  # ~+4.5°C temperature jump at the last step
+        # The spike vote is cast for sample t-lag and needs the samples after
+        # it back at the pre-event level, so the jump goes on that sample and
+        # the untouched ones after it are the reversion.
+        from src.config import ENRICHMENT_SPIKE_CONFIRM_LAG
+
+        sequence[-1 - max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG)), 0] = 0.95  # ~+4.5°C temperature jump
 
         result = await pipeline.run(
             customer_id="gate_incident",
@@ -266,7 +271,12 @@ class TestRuleVoteFusion:
         outranks rule votes, and the light channel trips nocturnal-light
         confirmation whenever the suite runs at night."""
         sequence = np.asarray(_sample_sequence(), dtype=np.float32)
-        sequence[-1, 0] = 0.95  # ~+4.5°C temperature jump at the last step
+        # The spike vote is cast for sample t-lag and needs the samples after
+        # it back at the pre-event level, so the jump goes on that sample and
+        # the untouched ones after it are the reversion.
+        from src.config import ENRICHMENT_SPIKE_CONFIRM_LAG
+
+        sequence[-1 - max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG)), 0] = 0.95  # ~+4.5°C temperature jump
 
         result = await pipeline.run(
             customer_id="fusion_spike",
@@ -295,7 +305,12 @@ class TestRuleVoteFusion:
         overridden but reasoning kept the RootCauseAnalyzer's unrelated text.
         """
         sequence = np.asarray(_sample_sequence(), dtype=np.float32)
-        sequence[-1, 0] = 0.95  # temperature spike → spike-MAD rule fires
+        # The spike vote is cast for sample t-lag and needs the samples after
+        # it back at the pre-event level, so the jump goes on that sample and
+        # the untouched ones after it are the reversion.
+        from src.config import ENRICHMENT_SPIKE_CONFIRM_LAG
+
+        sequence[-1 - max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG)), 0] = 0.95  # ~+4.5°C temperature jump
 
         result = await pipeline.run(
             customer_id="fusion_reason",

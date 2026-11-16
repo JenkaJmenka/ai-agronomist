@@ -1,7 +1,7 @@
 """Phase 1 accuracy gate. Bar is 90% composite, not a number to tune toward.
 
 Composite = 0.5 * clean_specificity + 0.5 * mean detection recall on three
-injected faults: a +6 °C spike on the last timestep, temperature noise
+injected faults: a +6 °C spike on the timestep the enrichment spike vote reads, temperature noise
 σ = 1 °C, and a two-channel level shift. Label correctness is recorded
 and is not part of the bar.
 
@@ -39,7 +39,7 @@ from src.api.services.upload_portions import (
     _detect_upload_mad_spikes,
     _timestamp_label,
 )
-from src.config import SENSOR_NAMES, SEQ_LEN
+from src.config import ENRICHMENT_SPIKE_CONFIRM_LAG, SENSOR_NAMES, SEQ_LEN
 from src.db.models import Base
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 from src.models.inference import AnomalyDetector
@@ -150,7 +150,11 @@ def _ideal_window(seed: int) -> np.ndarray:
 def _inject(kind: str, base: np.ndarray, seed: int) -> np.ndarray:
     window = base.copy()
     if kind == "spike":
-        window[-1, 0] += _SPIKE_DELTA_C
+        # The enrichment spike vote is cast for sample t-d, confirmed by the
+        # d samples after it (d = ENRICHMENT_SPIKE_CONFIRM_LAG; 0 = the last
+        # sample, unconfirmed). Inject on the sample that vote reads: a spike
+        # on the last sample is not voted until the next reading arrives.
+        window[-1 - max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG)), 0] += _SPIKE_DELTA_C
         return window
     if kind == "noise":
         noise = np.random.default_rng(1000 + seed).normal(0.0, _NOISE_SIGMA_C, SEQ_LEN)
