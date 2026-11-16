@@ -1055,7 +1055,8 @@ class ComprehensiveInferencePipeline:
         # Band breaches are process/climate deviations, NOT sensor-fault evidence.
         # Collected in band_findings (separate from rule_votes) to preserve
         # fault-type precedence:
-        #   (1) sensor-fault rule votes → (2) physics → (3) ensemble/LSTM → (4) band LAST
+        #   (1) sensor-fault rule votes → (2) physics → (3) LSTM → (4) band LAST
+        # Ensemble is non-voting and is not in this chain.
         # Sensor-trust gate and last-resort fusion happen after all sensor-fault
         # detectors have voted (step 5c-gate / 5c-last below).
         # An unconfigured tenant is on the default tomato profile. Those
@@ -1417,7 +1418,8 @@ class ComprehensiveInferencePipeline:
         except Exception:
             logger.warning("EWMA/POT tracker load skipped (non-critical)", exc_info=True)
 
-        # 5. Ensemble detection + fault classification.
+        # 5. Ensemble scores (non-voting, 2026-11-16) + fault classification.
+        # detect() still runs; is_anomaly / fault_type do not come from it.
         is_anomaly, fault_type, ensemble_result = self._run_ensemble_classify(
             seq_array=seq_array,
             baseline=baseline,
@@ -1497,7 +1499,8 @@ class ComprehensiveInferencePipeline:
         # overrides (an empty override dict is the default tomato profile,
         # and a summer afternoon above that profile is not a sensor fault),
         # physics did not suppress, no sensor-fault rule fired, and the
-        # ensemble/LSTM/CUSUM statistical path did not flag.
+        # LSTM path did not flag. Ensemble and CUSUM are non-voting and
+        # do not set is_anomaly.
         # The finding stays on scada_anomalies either way.
         # BAND_TYPE_TO_VOTE provides the fault_type lookup; the profile is set
         # on rule_profile so the root-cause block (step 8) picks up the band's
@@ -2060,6 +2063,11 @@ class ComprehensiveInferencePipeline:
     ) -> tuple[bool, str, Any]:
         """Run ensemble detection and fault classification.
 
+        The ensemble score is computed for the response. It does not vote:
+        ``is_anomaly`` here is the LSTM threshold and/or physics confirmation,
+        and ``fault_type`` comes from physics or ``FaultClassifier``. Stuck
+        labels stay with the setpoint flatline rule vote.
+
         Returns:
             (is_anomaly, fault_type, ensemble_result)
         """
@@ -2068,18 +2076,20 @@ class ComprehensiveInferencePipeline:
         is_lstm_anomaly = anomaly_score > effective_threshold
         physics_confirmed = physics_result.confirmed
 
-        if physics_confirmed:
-            is_anomaly = True
-        else:
-            is_anomaly = is_lstm_anomaly or ensemble_result.is_anomaly
+        # NON-VOTING (2026-11-16): measured with a real tenant baseline, the
+        # ensemble flagged 19 of 167 clean July windows and added zero
+        # detections the other rules did not already make. Scores and
+        # agreement stay on the response. ensemble_result.is_anomaly does
+        # not promote is_anomaly, and ensemble_result.fault_type does not
+        # set the label. Stuck already votes via the setpoint flatline rule
+        # (sensor_flatline → stuck_fault), so the ensemble stuck pre-check
+        # keeps no label exception.
+        is_anomaly = physics_confirmed or is_lstm_anomaly
 
         if physics_confirmed:
             fault_type: str = _PHYSICS_REASON_TO_FAULT.get(
                 physics_result.reason, "spike_fault"
             )
-        elif ensemble_result.fault_type is not None:
-            # Stuck-sensor short-circuit from ensemble pre-check.
-            fault_type = ensemble_result.fault_type
         else:
             fault_type = FaultClassifier.classify(
                 pattern_type=pattern_type,

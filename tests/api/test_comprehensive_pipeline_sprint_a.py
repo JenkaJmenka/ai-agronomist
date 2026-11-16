@@ -11,7 +11,7 @@ Also exercises all previously uncovered lines:
   265-271    – physics-suppressed early return
   305-307    – EWMA/POT load-exception warning
   305 (line) – finite dynamic threshold applied (_effective_threshold = _dynamic)
-  327        – ensemble stuck-fault type path
+  327        – ensemble score is non-voting (does not set is_anomaly / fault_type)
   337->345   – tracker None branch (update block skipped)
   341-342    – EWMA/POT update exception warning
   404-405    – online-learner exception handler
@@ -712,17 +712,21 @@ class TestFiniteDynamicThreshold:
 
 
 # ---------------------------------------------------------------------------
-# Line 327 – ensemble stuck-fault type path
+# Ensemble is non-voting (demoted 2026-11-16): scores stay, labels do not.
 # ---------------------------------------------------------------------------
 
 
-class TestEnsembleStuckFaultType:
+class TestEnsembleNonVoting:
     @pytest.mark.asyncio
-    async def test_stuck_fault_type_from_ensemble_used(
-        self, pipeline, db_session, patch_physics_neutral
+    async def test_ensemble_flag_does_not_promote_anomaly(
+        self, pipeline, db_session, patch_normal_score, patch_physics_neutral
     ):
-        """When ensemble.detect() returns fault_type='stuck_sensor', it's in result."""
-        stuck = EnsembleResult(
+        """ensemble.is_anomaly / fault_type do not set the pipeline result.
+
+        The sample is a normal window. A voting ensemble would force
+        is_anomaly and copy fault_type. Scores stay on the response.
+        """
+        voted = EnsembleResult(
             detector_scores={"lstm_vae": 0.9},
             ensemble_score=0.9,
             agreement_count=2,
@@ -731,20 +735,30 @@ class TestEnsembleStuckFaultType:
             fault_type="stuck_sensor",
         )
         pipeline._ensemble = MagicMock()
-        pipeline._ensemble.detect.return_value = stuck
+        pipeline._ensemble.detect.return_value = voted
 
-        result = await pipeline.run(
-            customer_id="stuck_fault",
-            sequence=_sample_sequence(),
-            db=db_session,
-        )
+        with patch(
+            "src.api.services.comprehensive_pipeline.BandBreachDetector.detect",
+            return_value=[],
+        ):
+            result = await pipeline.run(
+                customer_id="ensemble_non_voting",
+                sequence=_sample_sequence(),
+                db=db_session,
+            )
 
-        assert result["fault_type"] == "stuck_sensor"
+        assert result["is_anomaly"] is False
+        assert result["fault_type"] != "stuck_sensor"
+        assert result["ensemble_score"] == 0.9
+        assert result["ensemble_agreement"] == 2
+        pipeline._ensemble.detect.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_stuck_fault_bypasses_fault_classifier(self, pipeline, db_session):
-        """When ensemble sets fault_type, FaultClassifier.classify is NOT called."""
-        stuck = EnsembleResult(
+    async def test_ensemble_fault_type_does_not_bypass_classifier(
+        self, pipeline, db_session, patch_physics_neutral
+    ):
+        """Ensemble fault_type no longer skips FaultClassifier.classify."""
+        voted = EnsembleResult(
             detector_scores={},
             ensemble_score=0.85,
             agreement_count=1,
@@ -752,18 +766,19 @@ class TestEnsembleStuckFaultType:
             fault_type="stuck_sensor",
         )
         pipeline._ensemble = MagicMock()
-        pipeline._ensemble.detect.return_value = stuck
+        pipeline._ensemble.detect.return_value = voted
 
         with patch(
-            "src.api.services.comprehensive_pipeline.FaultClassifier.classify"
+            "src.api.services.comprehensive_pipeline.FaultClassifier.classify",
+            return_value="drift_fault",
         ) as mock_classify:
             await pipeline.run(
-                customer_id="stuck_bypass",
+                customer_id="ensemble_no_bypass",
                 sequence=_sample_sequence(),
                 db=db_session,
             )
 
-        mock_classify.assert_not_called()
+        mock_classify.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_none_fault_type_uses_classifier(
