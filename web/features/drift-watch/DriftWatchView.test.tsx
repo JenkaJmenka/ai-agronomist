@@ -218,3 +218,34 @@ describe("DriftWatchView — empty state", () => {
     );
   });
 });
+
+describe("DriftWatchView — display formatting", () => {
+  it("renders false_alarm_rate as per-month without scaling", async () => {
+    mockFetch([{ ...ARMED_INPUT, false_alarm_rate: 0.55 }], []);
+    render(createElement(DriftWatchView), { wrapper });
+    await waitFor(() => {
+      expect(screen.getByTestId("inputs-list")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("drift-input-row")).toHaveTextContent("0.55/mo false alarms");
+  });
+
+  it("renders a '-' episode magnitude with a minus sign", async () => {
+    mockFetch([], [{ ...SHADOW_EPISODE, direction: "-", offset_estimate: 1.637 }]);
+    render(createElement(DriftWatchView), { wrapper });
+    await waitFor(() => {
+      expect(screen.getByTestId("episodes-table")).toBeInTheDocument();
+    });
+    const row = screen.getByTestId("drift-episode-row");
+    expect(row).toHaveTextContent("-1.637");
+    expect(row).not.toHaveTextContent("+1.637");
+  });
+
+  it("renders a '+' episode magnitude with a plus sign", async () => {
+    mockFetch([], [{ ...ARMED_EPISODE, direction: "+", offset_estimate: 3.417 }]);
+    render(createElement(DriftWatchView), { wrapper });
+    await waitFor(() => {
+      expect(screen.getByTestId("episodes-table")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("drift-episode-row")).toHaveTextContent("+3.417");
+  });
+});

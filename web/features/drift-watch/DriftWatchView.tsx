@@ -58,9 +58,7 @@ function formatTs(iso: string): string {
 
 function InputRow({ input }: { readonly input: DriftWatchInput }) {
   const far =
-    input.false_alarm_rate != null
-      ? `${(input.false_alarm_rate * 30).toFixed(1)}/mo false alarms`
-      : null;
+    input.false_alarm_rate != null ? `${input.false_alarm_rate.toFixed(2)}/mo false alarms` : null;
   const dr =
     input.detection_rate != null ? `${(input.detection_rate * 100).toFixed(0)}% detection` : null;
 
@@ -99,11 +97,10 @@ function EpisodeRow({ episode }: { readonly episode: DriftWatchEpisode }) {
   const isShadow = !episode.armed;
   const rowClass = isShadow ? "opacity-60" : "";
 
+  // offset_estimate is a magnitude; the sign comes from episode.direction.
   const offsetStr =
     episode.offset_estimate != null
-      ? episode.offset_estimate > 0
-        ? `+${episode.offset_estimate.toFixed(3)}`
-        : episode.offset_estimate.toFixed(3)
+      ? `${episode.direction === "-" ? "-" : "+"}${Math.abs(episode.offset_estimate).toFixed(3)}`
       : null;
 
   return (
