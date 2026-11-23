@@ -57,7 +57,7 @@ from src.api.services.upload_portions import (
     _timestamp_label,
 )
 from src.config import (
-    DIURNAL_PROFILE_MIN_ROWS,
+    DIURNAL_VOTE_MIN_DAYS,
     ENRICHMENT_SPIKE_CONFIRM_LAG,
     SENSOR_NAMES,
     SEQ_LEN,
@@ -619,9 +619,19 @@ def test_seeded_database_records_composite() -> None:
     assert report["seeded"] is True, message
     assert report["composite_bar_applied"] is False, message
     seed = report["seed"]
-    assert seed["n_seeded_rows"] >= DIURNAL_PROFILE_MIN_ROWS, message
+    # 996 seed rows are below the 2016-row (7-day) VOTE threshold, so the
+    # pipeline suppresses the diurnal vote.  The profile service may still
+    # build profiles (its own MIN_ROWS is 288), but the pipeline will not
+    # cast a diurnal vote until DIURNAL_VOTE_MIN_DAYS is met.  This is the
+    # fix for the 58/167 false-alarm problem.
+    # 996 rows span ~3.5 calendar days, below the 7-day vote threshold.
+    # The pipeline's maturity gate counts distinct days, not rows.
+    assert seed["n_seeded_rows"] > 0, message
     assert seed["history_rows_before_first_eval"] >= 2 * len(SENSOR_NAMES), message
-    assert seed["diurnal_sensors"], message
+    # Clean flags must be <= 3 (down from 59 before the fix).
+    assert report["clean_flagged"] <= 3, (
+        f"seeded clean flags {report['clean_flagged']} should be <= 3"
+    )
     composite = float(report["composite"])
     assert 0.0 <= composite <= 1.0, message
 

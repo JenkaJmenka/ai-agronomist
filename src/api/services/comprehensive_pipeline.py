@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 import numpy as np
-from sqlalchemy import or_, select
+from sqlalchemy import distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
@@ -26,6 +26,7 @@ from src.config import (
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     DIURNAL_PROFILE_HISTORY_DAYS,
+    DIURNAL_VOTE_MIN_DAYS,
     DROPOUT_CONSECUTIVE_P,
     EWMA_ALPHA,
     EWMA_K,
@@ -764,7 +765,10 @@ class ComprehensiveInferencePipeline:
         self._ensemble: Optional[EnsembleAnomalyDetector] = None
         self._tracker_cache = LRUDict(
             max_size=100,
-            on_evict=lambda customer_id, _: self._cusum_cache.pop(customer_id, None),
+            on_evict=lambda customer_id, _: (
+                self._cusum_cache.pop(customer_id, None),
+                self._evict_diurnal_cache(customer_id),
+            ),
         )
         # Polling dropout detector (shared across tenants — stateless).
         self._dropout_detector = DropoutDetector()
@@ -786,8 +790,9 @@ class ComprehensiveInferencePipeline:
         self._bocpd_detector = BOCPDDetector()
         self._setpoint_scada_detector = SetpointAwareScadaDetector()
         self._band_breach_detector = BandBreachDetector()
-        # Per-tenant cached diurnal profiles: {customer_id: {sensor: {hour: (mean, std)}}}
-        self._diurnal_profiles_cache: dict[str, Dict[str, Dict[int, tuple]]] = {}
+        # Per-(tenant, greenhouse) cached diurnal profiles:
+        # {(customer_id, greenhouse_id): {sensor: {hour: (mean, std)}}}
+        self._diurnal_profiles_cache: dict[tuple[str, str], Dict[str, Dict[int, tuple]]] = {}
         # Physical history for the Mahalanobis fit, keyed by tenant and greenhouse.
         # A live reading builds a new pipeline, so a hit only repeats inside one run.
         self._mahalanobis_history_cache: dict[tuple[str, str], np.ndarray] = {}
@@ -1243,16 +1248,21 @@ class ComprehensiveInferencePipeline:
 
         # 0f. Diurnal profile check — hourly Z-score against historical stats.
         # Profiles auto-build from the tenant's stored history on first use.
+        # Light is excluded: the diurnal ramp and night zeros are the natural
+        # signal, not a fault signature (same rationale as the noise check).
         _diurnal_profiles = await self._ensure_diurnal_profiles(
-            customer_id, greenhouse_id, db
+            customer_id, greenhouse_id, db, anchor_ts=seq_ts,
         )
         if _diurnal_profiles:
             hour = seq_ts.hour
             diurnal_alarmed: list[str] = []
             for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
+                if s_name == "light":
+                    continue
                 profile = _diurnal_profiles.get(s_name)
                 if profile and self._diurnal_detector.detect(
                     float(_denormed_for_noise[-1, s_idx]), hour, profile,
+                    sensor_name=s_name,
                 ):
                     diurnal_alarmed.append(s_name)
             if diurnal_alarmed:
@@ -1918,6 +1928,8 @@ class ComprehensiveInferencePipeline:
         customer_id: str,
         greenhouse_id: str,
         db: AsyncSession,
+        *,
+        anchor_ts: Optional[datetime] = None,
     ) -> Dict[str, Dict[int, tuple]]:
         """Cached diurnal profiles, auto-built from stored history on miss.
 
@@ -1926,8 +1938,13 @@ class ComprehensiveInferencePipeline:
         query runs at most once per tenant per process; profiles restored
         from LearningState by ``_load_trackers`` take the same cache slot.
         Failures never block the pipeline — the diurnal check is skipped.
+
+        ``anchor_ts`` anchors the trailing window to the reading under
+        evaluation rather than to wall-clock time. Historical uploads
+        would otherwise fall outside the window and lose the vote.
         """
-        cached = self._diurnal_profiles_cache.get(customer_id)
+        cache_key = (customer_id, greenhouse_id)
+        cached = self._diurnal_profiles_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -1935,6 +1952,40 @@ class ComprehensiveInferencePipeline:
             build_diurnal_profiles,
             persist_diurnal_profiles,
         )
+
+        # Maturity gate: count distinct calendar days (cadence-independent)
+        # in the trailing window, excluding synthetic rows.  Profiles may
+        # build from DIURNAL_PROFILE_MIN_ROWS (288) but the diurnal vote
+        # requires DIURNAL_VOTE_MIN_DAYS (7) to avoid false alarms from
+        # under-estimated inter-day variance.
+        anchor = anchor_ts if anchor_ts is not None else datetime.now(timezone.utc)
+        since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
+        try:
+            days_stmt = (
+                select(func.count(distinct(func.date(SensorReading.timestamp))))
+                .where(
+                    SensorReading.tenant_id == customer_id,
+                    SensorReading.greenhouse_id == greenhouse_id,
+                    SensorReading.timestamp >= since,
+                    SensorReading.timestamp <= anchor,
+                    or_(
+                        SensorReading.source.is_(None),
+                        ~SensorReading.source.startswith("synthetic:"),
+                    ),
+                )
+            )
+            n_days = (await db.execute(days_stmt)).scalar() or 0
+            if n_days < DIURNAL_VOTE_MIN_DAYS:
+                self._diurnal_profiles_cache[cache_key] = {}
+                return {}
+        except Exception:
+            logger.debug(
+                "Diurnal maturity query failed for tenant %s (non-critical)",
+                customer_id,
+                exc_info=True,
+            )
+            self._diurnal_profiles_cache[cache_key] = {}
+            return {}
 
         profiles: Dict[str, Dict[int, tuple]] = {}
         try:
@@ -1947,7 +1998,7 @@ class ComprehensiveInferencePipeline:
                 customer_id,
                 exc_info=True,
             )
-        self._diurnal_profiles_cache[customer_id] = profiles
+        self._diurnal_profiles_cache[cache_key] = profiles
         if profiles:
             logger.info(
                 "Auto-built diurnal profiles for tenant %s (%d sensors)",
@@ -1965,6 +2016,15 @@ class ComprehensiveInferencePipeline:
                     exc_info=True,
                 )
         return profiles
+
+    def _evict_diurnal_cache(self, customer_id: str) -> None:
+        """Remove all diurnal cache entries for the evicted tenant."""
+        to_remove = [
+            key for key in self._diurnal_profiles_cache
+            if key[0] == customer_id
+        ]
+        for key in to_remove:
+            del self._diurnal_profiles_cache[key]
 
     # ── Private helpers extracted from _run_with_components ───────────────────
 
@@ -2305,12 +2365,11 @@ class ComprehensiveInferencePipeline:
                     # filled by this call's update must not be replaced by
                     # the state just read, which does not include it yet.
                     self._install_saved_cusum_ema(customer_id, state)
-                    diurnal_data = state.get("diurnal_profiles")
-                    if diurnal_data is not None and customer_id not in self._diurnal_profiles_cache:
-                        self._diurnal_profiles_cache[customer_id] = {
-                            sensor: {int(h): tuple(v) for h, v in hours.items()}
-                            for sensor, hours in diurnal_data.items()
-                        }
+                    # Diurnal profiles are keyed by (tenant, greenhouse) but
+                    # LearningState is tenant-level and does not record which
+                    # greenhouse the profiles were built for. Skip restore here;
+                    # _ensure_diurnal_profiles will auto-build per greenhouse on
+                    # first access, which is both correct and cached.
                     self._tracker_cache[customer_id] = (ewma, pot)
                     return ewma, pot
         except Exception:
