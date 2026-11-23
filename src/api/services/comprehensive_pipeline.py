@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 import numpy as np
-from sqlalchemy import func, or_, select
+from sqlalchemy import distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
@@ -26,6 +26,7 @@ from src.config import (
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     DIURNAL_PROFILE_HISTORY_DAYS,
+    DIURNAL_VOTE_MIN_DAYS,
     DROPOUT_CONSECUTIVE_P,
     EWMA_ALPHA,
     EWMA_K,
@@ -1250,7 +1251,7 @@ class ComprehensiveInferencePipeline:
         # Light is excluded: the diurnal ramp and night zeros are the natural
         # signal, not a fault signature (same rationale as the noise check).
         _diurnal_profiles = await self._ensure_diurnal_profiles(
-            customer_id, greenhouse_id, db
+            customer_id, greenhouse_id, db, anchor_ts=seq_ts,
         )
         if _diurnal_profiles:
             hour = seq_ts.hour
@@ -1927,6 +1928,8 @@ class ComprehensiveInferencePipeline:
         customer_id: str,
         greenhouse_id: str,
         db: AsyncSession,
+        *,
+        anchor_ts: Optional[datetime] = None,
     ) -> Dict[str, Dict[int, tuple]]:
         """Cached diurnal profiles, auto-built from stored history on miss.
 
@@ -1935,6 +1938,10 @@ class ComprehensiveInferencePipeline:
         query runs at most once per tenant per process; profiles restored
         from LearningState by ``_load_trackers`` take the same cache slot.
         Failures never block the pipeline — the diurnal check is skipped.
+
+        ``anchor_ts`` anchors the trailing window to the reading under
+        evaluation rather than to wall-clock time. Historical uploads
+        would otherwise fall outside the window and lose the vote.
         """
         cache_key = (customer_id, greenhouse_id)
         cached = self._diurnal_profiles_cache.get(cache_key)
@@ -1946,25 +1953,29 @@ class ComprehensiveInferencePipeline:
             persist_diurnal_profiles,
         )
 
-        # Maturity gate: count readings in the trailing window.  Profiles
-        # may build from DIURNAL_PROFILE_MIN_ROWS (288 = 1 day) but the
-        # diurnal vote requires DIURNAL_VOTE_MIN_ROWS (2016 = 7 days) to
-        # avoid false alarms from under-estimated inter-day variance.
-        # Failures skip the vote gracefully (same as the rest of the
-        # diurnal path).
-        from src.config import (  # noqa: PLC0415
-            DIURNAL_PROFILE_HISTORY_DAYS as _dph_days,
-            DIURNAL_VOTE_MIN_ROWS as _vote_min,
-        )
+        # Maturity gate: count distinct calendar days (cadence-independent)
+        # in the trailing window, excluding synthetic rows.  Profiles may
+        # build from DIURNAL_PROFILE_MIN_ROWS (288) but the diurnal vote
+        # requires DIURNAL_VOTE_MIN_DAYS (7) to avoid false alarms from
+        # under-estimated inter-day variance.
+        anchor = anchor_ts if anchor_ts is not None else datetime.now(timezone.utc)
+        since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
         try:
-            since = datetime.now(timezone.utc) - timedelta(days=_dph_days)
-            count_stmt = select(func.count()).select_from(SensorReading).where(
-                SensorReading.tenant_id == customer_id,
-                SensorReading.greenhouse_id == greenhouse_id,
-                SensorReading.timestamp >= since,
+            days_stmt = (
+                select(func.count(distinct(func.date(SensorReading.timestamp))))
+                .where(
+                    SensorReading.tenant_id == customer_id,
+                    SensorReading.greenhouse_id == greenhouse_id,
+                    SensorReading.timestamp >= since,
+                    SensorReading.timestamp <= anchor,
+                    or_(
+                        SensorReading.source.is_(None),
+                        ~SensorReading.source.startswith("synthetic:"),
+                    ),
+                )
             )
-            row_count = (await db.execute(count_stmt)).scalar() or 0
-            if row_count < _vote_min:
+            n_days = (await db.execute(days_stmt)).scalar() or 0
+            if n_days < DIURNAL_VOTE_MIN_DAYS:
                 self._diurnal_profiles_cache[cache_key] = {}
                 return {}
         except Exception:

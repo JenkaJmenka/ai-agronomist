@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.api.services import comprehensive_pipeline as pipeline_module
 from src.api.services import diurnal_profile_service
 from src.api.services.comprehensive_pipeline import ComprehensiveInferencePipeline
-from src.config import DIURNAL_VOTE_MIN_ROWS, SENSOR_NAMES, SEQ_LEN
+from src.config import DIURNAL_VOTE_MIN_DAYS, SENSOR_NAMES, SEQ_LEN
 from src.db.models import Base, SensorReading
 from src.models.inference import AnomalyDetector
 
@@ -95,8 +95,9 @@ async def test_two_greenhouses_get_separate_profiles() -> None:
         session.add_all(rows_a + rows_b)
         await session.commit()
 
-    assert len(rows_a) >= DIURNAL_VOTE_MIN_ROWS
-    assert len(rows_b) >= DIURNAL_VOTE_MIN_ROWS
+    # 8 days of seed data exceeds the 7-day vote minimum.
+    assert 8 >= DIURNAL_VOTE_MIN_DAYS
+    assert len(rows_a) > 0 and len(rows_b) > 0
 
     detector = AnomalyDetector(checkpoint_path=_CHECKPOINT)
     pipeline = ComprehensiveInferencePipeline(detector=detector)

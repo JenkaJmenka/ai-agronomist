@@ -1484,15 +1484,14 @@ DIURNAL_PROFILE_HISTORY_DAYS: int = int(
 DIURNAL_PROFILE_MIN_ROWS: int = int(
     os.environ.get("DIURNAL_PROFILE_MIN_ROWS", "288")
 )
-# Pipeline-side maturity gate: seven full days (2016 = 7 * 288 at 5-min
-# cadence) are needed before the diurnal vote is reliable.  The profile
-# builder uses a lower gate (DIURNAL_PROFILE_MIN_ROWS) so profiles are
-# available for persistence and inspection, but the pipeline will not
-# cast a diurnal vote until this higher bar is met.  With fewer than
-# seven days per hour bin, the per-bin std underestimates the true
-# inter-day spread and clean readings produce z > 2.5 false alarms.
-DIURNAL_VOTE_MIN_ROWS: int = int(
-    os.environ.get("DIURNAL_VOTE_MIN_ROWS", "2016")
+# Pipeline-side maturity gate: seven distinct calendar days with readings
+# are needed before the diurnal vote is reliable.  Counting days rather
+# than rows is cadence-independent (2016 rows = 7 days at 5-min but only
+# 1.4 days at 1-min).  The profile builder uses a lower gate
+# (DIURNAL_PROFILE_MIN_ROWS) so profiles can be persisted and inspected,
+# but the pipeline will not cast a vote until this bar is met.
+DIURNAL_VOTE_MIN_DAYS: int = int(
+    os.environ.get("DIURNAL_VOTE_MIN_DAYS", "7")
 )
 
 # Per-sensor std floor applied before computing the diurnal Z-score. Even with
