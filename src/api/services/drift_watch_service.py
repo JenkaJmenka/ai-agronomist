@@ -35,11 +35,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
@@ -48,6 +49,7 @@ from src.config import (
     DRIFT_WATCH_DEFAULT_SHIFT_RH_PCT,
     DRIFT_WATCH_DEFAULT_SHIFT_TEMP_C,
     DRIFT_WATCH_MIN_HISTORY_WEEKS,
+    DRIFT_WATCH_REFIT_INTERVAL_WEEKS,
     DRIFT_WATCH_SHADOW_ENABLED,
     MEASURED_HD_COLUMN_ALIASES,
     OUTDOOR_TEMP_COLUMN_ALIASES,
@@ -277,6 +279,182 @@ async def run_drift_watch_shadow(
             greenhouse_id,
             exc_info=True,
         )
+
+
+async def backfill_drift_watch(
+    db: AsyncSession,
+    tenant_id: str,
+    greenhouse_id: str,
+    *,
+    step_weeks: int = DRIFT_WATCH_REFIT_INTERVAL_WEEKS,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Calibrate and score drift watch for all stored raw readings in a scope.
+
+    Designed for tenants whose data was uploaded before the drift-watch feature
+    existed.  Walks the full raw-readings time span in ``step_weeks``-wide
+    chunks (default: ``DRIFT_WATCH_REFIT_INTERVAL_WEEKS`` = 1 week), calling
+    the same code path that a live upload triggers so calibration happens once
+    enough history exists and later chunks record episodes exactly as
+    consecutive uploads would.
+
+    Idempotency guarantee: existing ``DriftWatchInput`` and
+    ``DriftWatchEpisode`` rows for the scope are deleted before the walk
+    begins, so a second run always starts from a clean state and produces the
+    same final rows.  This is a full reset, not an incremental update; callers
+    should not run this alongside active uploads for the same scope.
+
+    Synthetic rows (``source`` starting with ``"synthetic:"``) are excluded
+    from the time-span query and from every calibration/scoring frame, matching
+    the filter used by the existing shadow service.
+
+    Args:
+        db: Async database session.  The function commits internally (once per
+            chunk plus an initial cleanup commit).  Callers should not hold
+            unflushed writes in the same session.
+        tenant_id: Tenant identifier.
+        greenhouse_id: Greenhouse identifier.
+        step_weeks: Chunk width in weeks.  Defaults to
+            ``DRIFT_WATCH_REFIT_INTERVAL_WEEKS`` (1 week).
+        dry_run: If ``True``, report the span and specs that would be built
+            but write nothing to the database.
+
+    Returns:
+        A dict with keys:
+        - ``dry_run`` (bool)
+        - ``data_start`` / ``data_end`` (ISO-8601 strings, or ``None`` if no data)
+        - ``data_span_weeks`` (float)
+        - ``specs_built`` / ``specs_would_be_built`` (list[str] of input_ids)
+        - ``chunks_processed`` / ``chunks_would_be_processed`` (int)
+        - ``episodes_recorded`` (int; always 0 for dry_run)
+        - ``inputs_status`` (dict[str, str]; empty for dry_run)
+        - ``elapsed_seconds`` (float)
+    """
+    t0 = time.monotonic()
+
+    # -- 1. Find the time span of non-synthetic raw readings ------------------
+    span_stmt = select(
+        func.min(RawReading.timestamp),
+        func.max(RawReading.timestamp),
+    ).where(
+        RawReading.tenant_id == tenant_id,
+        RawReading.greenhouse_id == greenhouse_id,
+        or_(
+            RawReading.source.is_(None),
+            ~RawReading.source.startswith("synthetic:"),
+        ),
+    )
+    span_result = await db.execute(span_stmt)
+    data_start_raw, data_end_raw = span_result.one()
+
+    if data_start_raw is None or data_end_raw is None:
+        elapsed = time.monotonic() - t0
+        return {
+            "dry_run": dry_run,
+            "data_start": None,
+            "data_end": None,
+            "data_span_weeks": 0.0,
+            "specs_built": [] if not dry_run else None,
+            "specs_would_be_built": [] if dry_run else None,
+            "chunks_processed": 0 if not dry_run else None,
+            "chunks_would_be_processed": 0 if dry_run else None,
+            "episodes_recorded": 0,
+            "inputs_status": {},
+            "elapsed_seconds": elapsed,
+        }
+
+    data_start: datetime = _ensure_utc(data_start_raw)
+    data_end: datetime = _ensure_utc(data_end_raw)
+    span_weeks = (data_end - data_start).total_seconds() / (7 * 24 * 3600)
+
+    # -- 2. Discover available columns and build specs ------------------------
+    available = await _discover_available_columns(db, tenant_id, greenhouse_id)
+    specs = build_specs(available) if available else []
+
+    # -- 3. Count chunks ------------------------------------------------------
+    chunk_count = 0
+    chunk_start = data_start
+    while chunk_start <= data_end:
+        chunk_count += 1
+        chunk_start = chunk_start + timedelta(weeks=step_weeks)
+
+    if dry_run:
+        elapsed = time.monotonic() - t0
+        return {
+            "dry_run": True,
+            "data_start": data_start.isoformat(),
+            "data_end": data_end.isoformat(),
+            "data_span_weeks": round(span_weeks, 2),
+            "specs_would_be_built": [s.input_id for s in specs],
+            "chunks_would_be_processed": chunk_count,
+            "episodes_recorded": 0,
+            "inputs_status": {},
+            "elapsed_seconds": time.monotonic() - t0,
+        }
+
+    # -- 4. Reset: delete existing state for this scope -----------------------
+    # Deleting both tables and committing before the walk ensures that a second
+    # run starts from a clean state and produces identical results.
+    await db.execute(
+        delete(DriftWatchEpisode).where(
+            DriftWatchEpisode.tenant_id == tenant_id,
+            DriftWatchEpisode.greenhouse_id == greenhouse_id,
+        )
+    )
+    await db.execute(
+        delete(DriftWatchInput).where(
+            DriftWatchInput.tenant_id == tenant_id,
+            DriftWatchInput.greenhouse_id == greenhouse_id,
+        )
+    )
+    await db.commit()
+
+    # -- 5. Walk forward in step_weeks chunks ---------------------------------
+    chunks_processed = 0
+    chunk_start = data_start
+    while chunk_start <= data_end:
+        chunk_end = chunk_start + timedelta(weeks=step_weeks)
+        logger.debug(
+            "backfill_drift_watch: chunk %d [%s, %s) for %s/%s",
+            chunks_processed + 1,
+            chunk_start.isoformat(),
+            chunk_end.isoformat(),
+            tenant_id,
+            greenhouse_id,
+        )
+        await _run_shadow(db, tenant_id, greenhouse_id, chunk_start, chunk_end)
+        chunks_processed += 1
+        chunk_start = chunk_end
+
+    # -- 6. Collect final state -----------------------------------------------
+    inputs_result = await db.execute(
+        select(DriftWatchInput.input_id, DriftWatchInput.status).where(
+            DriftWatchInput.tenant_id == tenant_id,
+            DriftWatchInput.greenhouse_id == greenhouse_id,
+        )
+    )
+    inputs_status = {row.input_id: row.status for row in inputs_result.all()}
+
+    ep_count_result = await db.execute(
+        select(func.count()).where(
+            DriftWatchEpisode.tenant_id == tenant_id,
+            DriftWatchEpisode.greenhouse_id == greenhouse_id,
+        )
+    )
+    episodes_recorded: int = ep_count_result.scalar_one()
+
+    elapsed = time.monotonic() - t0
+    return {
+        "dry_run": False,
+        "data_start": data_start.isoformat(),
+        "data_end": data_end.isoformat(),
+        "data_span_weeks": round(span_weeks, 2),
+        "specs_built": [s.input_id for s in specs],
+        "chunks_processed": chunks_processed,
+        "episodes_recorded": episodes_recorded,
+        "inputs_status": inputs_status,
+        "elapsed_seconds": round(elapsed, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
