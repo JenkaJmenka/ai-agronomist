@@ -198,14 +198,14 @@ because an agent contradicted the brief instead of accommodating it.
 
 | Agent | Model | Reason |
 |-------|-------|--------|
-| architect | claude-fable-5 | Complex design decisions; co-runs final reviews (user directive) |
+| architect | claude-opus-4-6 | Complex design decisions; co-runs final reviews (user directive). Was claude-fable-5 until 2026-11-23 (user switched to Opus) |
 | ml-engineer | claude-opus-4-6 | Complex PyTorch, LSTM-VAE |
 | backend-engineer | claude-sonnet-4-6 | Well-defined API patterns |
-| qa-engineer | claude-opus-4-6 | User directive: stronger test quality — never Sonnet, never Fable inline |
+| qa-engineer | claude-opus-4-6 | User directive: stronger test quality — never Sonnet |
 | code-reviewer | claude-opus-4-6 | Deep security/correctness analysis |
 | devops-lead | claude-sonnet-4-6 | Well-defined Docker patterns |
 | frontend-engineer | claude-sonnet-4-6 | Next.js/React work under web/ per web/AGENTS.md |
-| tech-lead | claude-fable-5 | Complex refactoring decisions; co-runs final reviews (user directive) |
+| tech-lead | claude-opus-4-6 | Complex refactoring decisions; co-runs final reviews (user directive). Was claude-fable-5 until 2026-11-23 (user switched to Opus) |
 
 ---
 
