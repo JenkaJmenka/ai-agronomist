@@ -176,6 +176,7 @@ class TestRobustOffset:
 
     def _faulted_episodes(
         self, frame: pd.DataFrame, calibration: CalibrationResult, bias: float,
+        refits: Optional[List[str]] = None,
     ) -> List:
         df = frame.copy()
         fault_start = _T0 + pd.Timedelta(weeks=18)
@@ -187,6 +188,8 @@ class TestRobustOffset:
         for week in range(3):
             chunk_end = fault_start + pd.Timedelta(weeks=week + 1)
             eps.extend(DriftWatch.update(state, df[df.index < chunk_end], _SPEC))
+            if refits is not None:
+                refits.append(state.last_refit_ts)
         return eps
 
     @pytest.mark.parametrize("bias", [2.0, -2.0])
@@ -208,10 +211,18 @@ class TestRobustOffset:
     def test_continuations_share_one_buffer(
         self, frame: pd.DataFrame, calibration: CalibrationResult,
     ) -> None:
-        eps = self._faulted_episodes(frame, calibration, 2.0)
+        refits: List[str] = []
+        eps = self._faulted_episodes(frame, calibration, 2.0, refits)
         pos = [e for e in eps if e.direction == "+"]
         assert pos[0].is_new and all(not e.is_new for e in pos[1:])
         assert len({e.first_detected_ts for e in pos}) == 1
+        # ADR-013 §4 "a refit never creates an alert": at least one rolling
+        # refit ran inside the episode, and it neither ended it nor opened a
+        # second one (the alert key is first_detected_ts).
+        assert any(
+            pos[0].first_detected_ts < pd.Timestamp(r) <= pos[-1].last_confirmed_ts
+            for r in refits if r is not None
+        ), refits
 
     def test_median_is_exact_over_onset_to_now(self) -> None:
         """Hand-built CUSUM: k=0, h=2.5, mu=0, sigma=1; residual = the series."""

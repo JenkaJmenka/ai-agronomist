@@ -278,3 +278,140 @@ def test_paired_probe_message_never_names_one_probe() -> None:
     assert build_drift_alert_message(rh, "-", -6.0) == (
         "RH reads 6.0 %RH below what temperature, CO₂ and light predict."
     )
+
+
+# ── ADR-013 step 8 gaps: unit-level, empty in-memory DB (no seeded scope) ──
+#
+# The seeded tests above exercise the real pipeline once per behaviour. The
+# cases below pin the writer rules those runs cannot isolate: recency, the
+# robust (not single-hour) offset limit, one alert across a refit/backfill
+# continuation, and stuck suppression on the target and on a predictor.
+
+from src.api.services.drift_watch_alerts import refresh_alert_state, write_drift_alerts
+
+_AS_OF = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+_TP_SPEC = DriftInputSpec(
+    input_id="temp_paired", kind=InputKind.PAIRED_PROBES, target_channel="temperature",
+    channels=["measured_plant_temp", "outdoor_temperature"], min_shift=0.5,
+)  # alert limit = 2 x 0.5 = 1.0 C
+_RH_SPEC = DriftInputSpec(
+    input_id="rh_virtual", kind=InputKind.VIRTUAL_SENSOR, target_channel="humidity",
+    channels=["temperature", "co2", "light"], min_shift=2.0,
+)  # alert limit = 4.0 %RH
+
+
+@pytest_asyncio.fixture
+async def empty_db() -> AsyncGenerator[AsyncSession, None]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+def _ep(
+    spec: DriftInputSpec, *, first: dt.datetime, last: dt.datetime,
+    robust: float | None, single_hour: float | None = None,
+    onset: dt.datetime | None = None, episode_id: str = "e_0", direction: str = "+",
+) -> DriftWatchEpisode:
+    return DriftWatchEpisode(
+        tenant_id=T, greenhouse_id=G, input_id=spec.input_id, episode_id=episode_id,
+        target_channel=spec.target_channel, direction=direction,
+        first_detected_ts=first, last_confirmed_ts=last,
+        onset_estimate_ts=onset or first - dt.timedelta(hours=6),
+        offset_estimate=single_hour, offset_robust=robust,
+        input_status_at_detection="armed",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("robust,single_hour,age,written", [
+    # Offset limit uses offset_robust, never offset_estimate (current_offset_native).
+    pytest.param(1.2, 0.3, dt.timedelta(days=1), True, id="robust-over-limit-single-hour-under"),
+    pytest.param(0.8, 7.6, dt.timedelta(days=1), False, id="robust-under-limit-single-hour-over"),
+    pytest.param(None, 7.6, dt.timedelta(days=1), False, id="robust-unknown"),
+    # Recency: last_confirmed within ALERT_RECENCY_DAYS (14) of the newest hour.
+    pytest.param(2.0, 2.0, dt.timedelta(days=14), True, id="recency-edge-inclusive"),
+    pytest.param(2.0, 2.0, dt.timedelta(days=14, hours=1), False, id="recency-just-outside"),
+])
+async def test_writer_robust_offset_limit_and_recency(
+    empty_db: AsyncSession, robust, single_hour, age, written
+) -> None:
+    assert config.DRIFT_WATCH_ALERT_RECENCY_DAYS == 14
+    last = _AS_OF - age
+    ep = _ep(_TP_SPEC, first=last - dt.timedelta(days=2), last=last,
+             robust=robust, single_hour=single_hour)
+    n = await write_drift_alerts(empty_db, T, G, _TP_SPEC, [ep], as_of_ts=str(_AS_OF))
+    alerts = await _alerts(empty_db)
+    assert (n, len(alerts)) == ((1, 1) if written else (0, 0))
+    if written:
+        assert alerts[0].trigger_value == pytest.approx(robust)
+
+
+@pytest.mark.asyncio
+async def test_writer_one_alert_across_refit_and_backfill_continuation(
+    empty_db: AsyncSession,
+) -> None:
+    """A continuation keeps first_detected_ts; a refit or backfill may move the
+    onset estimate and renumber episode_id. Still one alert, updated in place.
+    Only a new episode (after DRIFT_WATCH_QUIET_HOURS) adds a second alert."""
+    first = _AS_OF - dt.timedelta(days=6)
+    onset0 = first - dt.timedelta(hours=10)
+    e0 = _ep(_TP_SPEC, first=first, last=first + dt.timedelta(days=1), robust=1.5, onset=onset0)
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e0], as_of_ts=str(_AS_OF))
+
+    later_last = first + dt.timedelta(days=3)
+    e1 = _ep(_TP_SPEC, first=first, last=later_last, robust=2.0,
+             onset=first - dt.timedelta(hours=30), episode_id="temp_paired_7")
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1], as_of_ts=str(_AS_OF))
+    alerts = await _alerts(empty_db)
+    assert len(alerts) == 1
+    a = alerts[0]
+    assert a.trigger_value == pytest.approx(2.0)
+    assert a.end_ts.replace(tzinfo=dt.timezone.utc) == later_last
+    assert a.onset_ts.replace(tzinfo=dt.timezone.utc) == onset0  # not moved by the refit
+
+    new_first = later_last + dt.timedelta(hours=config.DRIFT_WATCH_QUIET_HOURS + 1)
+    e2 = _ep(_TP_SPEC, first=new_first, last=new_first, robust=1.5, episode_id="temp_paired_8")
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1, e2], as_of_ts=str(_AS_OF))
+    assert len(await _alerts(empty_db)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck_channel,suppressed", [
+    pytest.param("humidity", True, id="target"),
+    pytest.param("temperature", True, id="predictor"),
+    pytest.param("measured_plant_temp", False, id="channel-not-read-by-input"),
+])
+async def test_stuck_fault_suppression_on_target_and_predictor(
+    empty_db: AsyncSession, monkeypatch: pytest.MonkeyPatch, stuck_channel: str, suppressed: bool
+) -> None:
+    monkeypatch.setattr(config, "DRIFT_WATCH_ALERTS_ENABLED", True)
+    cal_end = _AS_OF - dt.timedelta(weeks=20)
+    row = DriftWatchInput(
+        tenant_id=T, greenhouse_id=G, input_id=_RH_SPEC.input_id, spec_json="{}",
+        calibration_json=json.dumps({"calibration_window_end": str(cal_end)}),
+        status="armed", alert_state="enabled",
+    )
+    last = _AS_OF - dt.timedelta(hours=2)
+    first = last - dt.timedelta(days=2)
+    empty_db.add_all([
+        row,
+        _ep(_RH_SPEC, first=first, last=last, robust=-6.0, single_hour=-6.0, direction="-"),
+        AnomalyEpisodeRecord(
+            id="stuck-u", tenant_id=T, greenhouse_id=G, channel=stuck_channel,
+            detector="stuck_fault", fault_type="stuck_fault",
+            onset_ts=first - dt.timedelta(days=1), end_ts=first + dt.timedelta(hours=3),
+            detected_ts=first, severity="critical", is_ongoing=False,
+            frozen_sample_count=10, raw_slot_count=10,
+        ),
+    ])
+    await empty_db.commit()
+
+    await refresh_alert_state(empty_db, T, G, _RH_SPEC, row, as_of_ts=str(_AS_OF))
+    ep = (await empty_db.execute(select(DriftWatchEpisode))).scalar_one()
+    assert row.alert_state == "enabled", row.alert_state_reason
+    assert ep.suppressed_by == ("stuck_fault" if suppressed else None)
+    assert len(await _alerts(empty_db)) == (0 if suppressed else 1)
