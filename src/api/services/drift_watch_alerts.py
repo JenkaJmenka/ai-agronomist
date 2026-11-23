@@ -268,6 +268,7 @@ async def _refresh(
         async with db.begin_nested():
             await write_drift_alerts(
                 db, tenant_id, greenhouse_id, spec, ep_rows, as_of_ts=as_of_ts,
+                calibration_window_end=cal_end,
             )
 
 
@@ -279,13 +280,20 @@ async def write_drift_alerts(
     ep_rows: Sequence[DriftWatchEpisode],
     *,
     as_of_ts: str,
+    calibration_window_end: Optional[str],
 ) -> int:
     """Upsert one ``anomaly_episodes`` row per qualifying episode.
 
     Qualifying: not suppressed, robust offset known and at least
     ``2 x min_shift``, last confirmed within ``DRIFT_WATCH_ALERT_RECENCY_DAYS``
-    of the newest scored hour. Returns the number of rows inserted or updated.
+    of the newest scored hour, and out-of-sample: ``first_detected_ts`` after
+    *calibration_window_end* (the gate does not count in-sample episodes, so
+    neither does the writer). An unknown *calibration_window_end* writes
+    nothing. Returns the number of rows inserted or updated.
     """
+    if not calibration_window_end:
+        return 0
+    cal_end = _utc(pd.Timestamp(calibration_window_end).to_pydatetime())
     as_of = _utc(pd.Timestamp(as_of_ts).to_pydatetime())
     recency_floor = as_of - timedelta(days=config.DRIFT_WATCH_ALERT_RECENCY_DAYS)
     quiet = timedelta(hours=config.DRIFT_WATCH_QUIET_HOURS)
@@ -299,6 +307,8 @@ async def write_drift_alerts(
         if last < recency_floor:
             continue
         first = _utc(ep.first_detected_ts)
+        if first <= cal_end:
+            continue
         onset = _utc(ep.onset_estimate_ts) if ep.onset_estimate_ts else first
         onset = min(onset, last)
         ongoing = last >= as_of - quiet

@@ -198,10 +198,11 @@ async def _report_input(
             missing += 1
         in_sample: Optional[bool] = None if cal_end is None else first <= cal_end
         # Mirrors write_drift_alerts: not suppressed, robust offset known and
-        # >= 2 x min_shift, last confirmed inside the recency window.
+        # >= 2 x min_shift, last confirmed inside the recency window, and
+        # out-of-sample (unknown calibration_window_end writes nothing).
         writer_ok = (
             suppressed is None and ep.offset_robust is not None
-            and passes and recent
+            and passes and recent and in_sample is False
         )
         if writer_ok:
             would_write += 1

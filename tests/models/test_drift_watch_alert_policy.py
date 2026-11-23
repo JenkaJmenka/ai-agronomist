@@ -147,16 +147,6 @@ class TestCalibrationWindowEnd:
         assert state.last_refit_ts is not None
         assert len(fit_ends) > 1, "refit never ran; the property was not exercised"
 
-    def test_direct_refit_preserves_field(
-        self, frame: pd.DataFrame, calibration: CalibrationResult,
-    ) -> None:
-        state = DriftWatch.init_state(calibration)
-        state.last_processed_ts = str(_T0 + pd.Timedelta(weeks=20))
-        before = copy.deepcopy(state.calibration)
-        _rolling_refit(state, frame, _SPEC)
-        assert state.calibration["fit_window_end"] != before["fit_window_end"]
-        assert state.calibration["calibration_window_end"] == before["calibration_window_end"]
-
     def test_refit_on_legacy_state_keeps_none(
         self, frame: pd.DataFrame, calibration: CalibrationResult,
     ) -> None:

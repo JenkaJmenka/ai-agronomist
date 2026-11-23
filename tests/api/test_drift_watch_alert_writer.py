@@ -326,24 +326,33 @@ def _ep(
     )
 
 
+_FAR_OOS = dt.timedelta(days=30)  # calibration window ended well before the episode
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("robust,single_hour,age,written", [
+@pytest.mark.parametrize("robust,single_hour,age,written,first_minus_cal_end", [
     # Offset limit uses offset_robust, never offset_estimate (current_offset_native).
-    pytest.param(1.2, 0.3, dt.timedelta(days=1), True, id="robust-over-limit-single-hour-under"),
-    pytest.param(0.8, 7.6, dt.timedelta(days=1), False, id="robust-under-limit-single-hour-over"),
-    pytest.param(None, 7.6, dt.timedelta(days=1), False, id="robust-unknown"),
+    pytest.param(1.2, 0.3, dt.timedelta(days=1), True, _FAR_OOS, id="robust-over-limit-single-hour-under"),
+    pytest.param(0.8, 7.6, dt.timedelta(days=1), False, _FAR_OOS, id="robust-under-limit-single-hour-over"),
+    pytest.param(None, 7.6, dt.timedelta(days=1), False, _FAR_OOS, id="robust-unknown"),
     # Recency: last_confirmed within ALERT_RECENCY_DAYS (14) of the newest hour.
-    pytest.param(2.0, 2.0, dt.timedelta(days=14), True, id="recency-edge-inclusive"),
-    pytest.param(2.0, 2.0, dt.timedelta(days=14, hours=1), False, id="recency-just-outside"),
+    pytest.param(2.0, 2.0, dt.timedelta(days=14), True, _FAR_OOS, id="recency-edge-inclusive"),
+    pytest.param(2.0, 2.0, dt.timedelta(days=14, hours=1), False, _FAR_OOS, id="recency-just-outside"),
+    # In-sample (ADR-013 §4): first_detected_ts at or before calibration_window_end.
+    pytest.param(2.0, 2.0, dt.timedelta(days=1), False, dt.timedelta(0), id="in-sample-at-window-end"),
+    pytest.param(2.0, 2.0, dt.timedelta(days=1), True, dt.timedelta(hours=1), id="out-of-sample-hour-after"),
 ])
 async def test_writer_robust_offset_limit_and_recency(
-    empty_db: AsyncSession, robust, single_hour, age, written
+    empty_db: AsyncSession, robust, single_hour, age, written, first_minus_cal_end
 ) -> None:
     assert config.DRIFT_WATCH_ALERT_RECENCY_DAYS == 14
     last = _AS_OF - age
-    ep = _ep(_TP_SPEC, first=last - dt.timedelta(days=2), last=last,
-             robust=robust, single_hour=single_hour)
-    n = await write_drift_alerts(empty_db, T, G, _TP_SPEC, [ep], as_of_ts=str(_AS_OF))
+    first = last - dt.timedelta(days=2)
+    ep = _ep(_TP_SPEC, first=first, last=last, robust=robust, single_hour=single_hour)
+    n = await write_drift_alerts(
+        empty_db, T, G, _TP_SPEC, [ep], as_of_ts=str(_AS_OF),
+        calibration_window_end=str(first - first_minus_cal_end),
+    )
     alerts = await _alerts(empty_db)
     assert (n, len(alerts)) == ((1, 1) if written else (0, 0))
     if written:
@@ -360,12 +369,14 @@ async def test_writer_one_alert_across_refit_and_backfill_continuation(
     first = _AS_OF - dt.timedelta(days=6)
     onset0 = first - dt.timedelta(hours=10)
     e0 = _ep(_TP_SPEC, first=first, last=first + dt.timedelta(days=1), robust=1.5, onset=onset0)
-    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e0], as_of_ts=str(_AS_OF))
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e0], as_of_ts=str(_AS_OF),
+        calibration_window_end=str(_AS_OF - dt.timedelta(weeks=20)))
 
     later_last = first + dt.timedelta(days=3)
     e1 = _ep(_TP_SPEC, first=first, last=later_last, robust=2.0,
              onset=first - dt.timedelta(hours=30), episode_id="temp_paired_7")
-    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1], as_of_ts=str(_AS_OF))
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1], as_of_ts=str(_AS_OF),
+        calibration_window_end=str(_AS_OF - dt.timedelta(weeks=20)))
     alerts = await _alerts(empty_db)
     assert len(alerts) == 1
     a = alerts[0]
@@ -375,7 +386,8 @@ async def test_writer_one_alert_across_refit_and_backfill_continuation(
 
     new_first = later_last + dt.timedelta(hours=config.DRIFT_WATCH_QUIET_HOURS + 1)
     e2 = _ep(_TP_SPEC, first=new_first, last=new_first, robust=1.5, episode_id="temp_paired_8")
-    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1, e2], as_of_ts=str(_AS_OF))
+    await write_drift_alerts(empty_db, T, G, _TP_SPEC, [e1, e2], as_of_ts=str(_AS_OF),
+        calibration_window_end=str(_AS_OF - dt.timedelta(weeks=20)))
     assert len(await _alerts(empty_db)) == 2
 
 

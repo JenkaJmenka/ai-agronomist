@@ -79,13 +79,10 @@ def test_feedback_upsert_and_episode_label(client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["label"] == "confirmed_drift"
     eps = client.get("/api/drift-watch/episodes", params={"tenant_id": "tenant_a"}, headers=KEY_A).json()
     assert [e["label"] for e in eps] == ["confirmed_drift"]
-
-
-def test_feedback_one_row_per_natural_key(client: TestClient) -> None:
-    for lbl in ("false_alarm", "confirmed_drift", "false_alarm"):
-        assert client.post(URL, json=_body(label=lbl), headers=KEY_A).status_code == 200
-    # An upsert, so the episode carries exactly the last label (no duplicates
-    # would make the unique key raise on the second POST).
+    # An upsert: re-posting an earlier label still leaves exactly one row (a
+    # duplicate would make the unique key raise on the second POST).
+    r = client.post(URL, json=_body(label="false_alarm"), headers=KEY_A)
+    assert r.status_code == 200 and r.json()["label"] == "false_alarm"
     eps = client.get("/api/drift-watch/episodes", params={"tenant_id": "tenant_a"}, headers=KEY_A).json()
     assert [e["label"] for e in eps] == ["false_alarm"]
 
