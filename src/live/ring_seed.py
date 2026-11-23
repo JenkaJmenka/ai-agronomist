@@ -251,3 +251,7 @@ async def seed_scorer(
             greenhouse_id,
             exc_info=True,
         )
+    finally:
+        # Always unblock the scorer so a new episode is never held beyond
+        # _SEED_WAIT_TIMEOUT_SECONDS even when this task fails or raises.
+        scorer.notify_seed_done()
