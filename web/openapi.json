@@ -7412,6 +7412,192 @@
           }
         }
       }
+    },
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/enable": {
+      "post": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "Enable Drift Watch Alerts",
+        "description": "Admin: enable alerts for one input (``eligible -> enabled``).\n\nNeeds the ``admin`` credential scope. 409 (with the reason) when alerts\nare off globally or the input is not ``eligible``; 404 for an unknown input.",
+        "operationId": "enable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_enable_post",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "greenhouse_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Greenhouse Id"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Input Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftWatchAlertStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/disable": {
+      "post": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "Disable Drift Watch Alerts",
+        "description": "Admin: disable alerts for one input (any state -> ``off``).\n\nNeeds the ``admin`` credential scope. 404 for an unknown input.",
+        "operationId": "disable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_disable_post",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "greenhouse_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Greenhouse Id"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Input Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftWatchAlertStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8867,6 +9053,46 @@
         ],
         "title": "DriftStatus",
         "description": "Drift evaluation produced by the DriftDetector for one loss stream."
+      },
+      "DriftWatchAlertStateResponse": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "title": "Tenant Id"
+          },
+          "greenhouse_id": {
+            "type": "string",
+            "title": "Greenhouse Id"
+          },
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "alert_state": {
+            "type": "string",
+            "title": "Alert State"
+          },
+          "alert_state_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert State Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "greenhouse_id",
+          "input_id",
+          "alert_state"
+        ],
+        "title": "DriftWatchAlertStateResponse",
+        "description": "Result of an admin alert enable/disable."
       },
       "DriftWatchEpisodeResponse": {
         "properties": {
