@@ -140,3 +140,24 @@ def test_upload_drops_step_and_unconfirmable_tail_and_reports_boundary_spike_onc
     )
     assert [hit.timestamp for hit in first] == [labels[30].isoformat()]
     assert [hit.timestamp for hit in second] == [labels[59].isoformat()]
+
+
+def test_upload_scores_neither_humidity_nor_co2() -> None:
+    """B2 (2026-11-23): no humidity floor kept tenant-year clean hits at 0, and
+    CO2 has no real data, so the upload MAD scores temperature only. A large
+    reverting spike on either channel must therefore not be reported. Adding
+    a key to UPLOAD_SPIKE_CONFIRMED_FLOOR must come with a new measurement
+    (see the comment under that table in src/config.py)."""
+    assert set(UPLOAD_SPIKE_CONFIRMED_FLOOR) == {"temperature"}
+    n = 60
+    frame = _frame(np.full(n, _LEVEL, dtype=float))
+    humidity = np.full(n, 70.0)
+    humidity[30] += 20.0
+    co2 = np.full(n, 600.0)
+    co2[40] += 400.0
+    frame["humidity"] = humidity
+    frame["co2"] = co2
+
+    hits = _detect_upload_mad_spikes(frame, new_row_start=0)
+
+    assert hits == []
