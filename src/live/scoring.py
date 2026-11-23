@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 # overlapping copies. A fixed-baseline noise hit on temperature, humidity,
 # or CO2 is refused. Light is ignored. The anomalous window is never appended.
 CLEAN_WINDOW_HISTORY: int = 32
+# Maximum time (seconds) a new anomaly episode waits for the ring-seed task
+# to finish before snapshotting the clean-window ring for enrichment.  Set
+# to cover a typical DB round-trip plus seeding computation while keeping
+# the first-episode delay imperceptible relative to LIVE_ANOMALY_REEMIT_SECONDS.
+_SEED_WAIT_TIMEOUT_SECONDS: float = 5.0
 _CLIMATE_NOISE_CHANNELS: tuple[str, ...] = ("temperature", "humidity", "co2")
 
 
@@ -133,6 +138,13 @@ class LiveScorer:
         self._in_episode: bool = False
         self._episode_id: str = ""
         self._last_anomaly_emit: float = 0.0
+
+        # Set by notify_seed_done() (called from src.live.ring_seed.seed_scorer,
+        # success or failure). A new anomaly episode awaits this with a bounded
+        # timeout before snapshotting the clean-window ring for enrichment.
+        # Starts set so scorers with no seeding task pending never wait.
+        self._seed_ready: asyncio.Event = asyncio.Event()
+        self._seed_ready.set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -218,6 +230,25 @@ class LiveScorer:
                 continue
             self._clean_windows.append(np.array(w, dtype=np.float32, copy=True))
 
+    def mark_seeding_started(self) -> None:
+        """Signal that a ring-seed task is about to start.
+
+        Clears _seed_ready so the next new anomaly episode waits for
+        seeding to finish before snapshotting the clean-window ring.  Called
+        by the runtime before creating the seed_scorer background task.
+        Idempotent: each call re-clears the event.
+        """
+        self._seed_ready.clear()
+
+    def notify_seed_done(self) -> None:
+        """Signal that ring seeding has finished (success or failure).
+
+        Sets _seed_ready so any new-episode wait can proceed.  Called
+        from src.live.ring_seed.seed_scorer in a finally block so it fires
+        even when the seed task fails.  Idempotent: safe to call more than once.
+        """
+        self._seed_ready.set()
+
     # ------------------------------------------------------------------
     # Vector extraction
     # ------------------------------------------------------------------
@@ -265,10 +296,26 @@ class LiveScorer:
         is_anomalous = score >= self._threshold
 
         if is_anomalous and not self._in_episode:
-            # New episode — generate a unique episode ID for correlation.
-            # Snapshot before any await: this window is anomalous and is
-            # not in the ring. An empty ring stays None so enrichment keeps
-            # the fixed noise map.
+            # New episode — wait briefly for ring seeding so the clean-window
+            # snapshot is well-calibrated.  Skip the wait entirely when seeding
+            # is already done (the common path once the first episode has
+            # occurred or when no seeding task was ever scheduled).
+            if not self._seed_ready.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._seed_ready.wait(),
+                        timeout=_SEED_WAIT_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Ring seed timed out after %.1fs for %s/%s — "
+                        "first-episode enrichment proceeds with partial ring",
+                        _SEED_WAIT_TIMEOUT_SECONDS,
+                        self._tenant_id,
+                        self._greenhouse_id,
+                    )
+            # Snapshot after the wait; seeded windows are now in the ring.
+            # An empty ring yields None so enrichment keeps the fixed noise map.
             clean_history = tuple(self._clean_windows) or None
             self._in_episode = True
             self._episode_id = uuid.uuid4().hex

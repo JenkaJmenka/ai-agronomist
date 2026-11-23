@@ -1,8 +1,8 @@
 # Anomaly detection refactor — summary
 
-**Status as of 2026-11-16.** Authoritative detail lives in [`handover-2026-11-15.md`](./handover-2026-11-15.md) (§0 progress board, §§9–12 measurements). This file is the short scoreboard only.
+**Status as of 2026-11-23.** Authoritative detail lives in [`handover-2026-11-15.md`](./handover-2026-11-15.md) (§0 progress board, §§9–12 measurements, §1 pause note). This file is the short scoreboard only.
 
-**Where the code is:** `main` at `9b6ee77` (merged **#108–#119**). The old branch `feat/anomaly-detection-module-refactoring` is historical.
+**Where the code is:** `main` at `7f7d284` (merged **#108–#119**, docs **#120**). No detector code after 2026-11-16. Next: second accuracy fixture. The old branch `feat/anomaly-detection-module-refactoring` is historical.
 
 **Bar / gate:** composite ≥ 0.90 = `0.5 × clean specificity + 0.5 × mean recall` (spike, noise, level-shift) on the empty-DB harness in `tests/models/test_detection_accuracy.py`.
 
