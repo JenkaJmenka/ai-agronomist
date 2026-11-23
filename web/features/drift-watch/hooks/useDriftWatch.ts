@@ -1,12 +1,14 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   type DriftWatchEpisode,
+  type DriftWatchFeedbackInput,
   type DriftWatchInput,
   fetchDriftWatchEpisodes,
   fetchDriftWatchInputs,
+  postDriftWatchFeedback,
 } from "@/features/drift-watch/api/driftWatch";
 import { STALE_TIME_MS } from "@/lib/query";
 
@@ -40,4 +42,17 @@ export function useDriftWatchEpisodes(tenant: string, gh: string) {
     isError: query.isError,
     error: query.error,
   };
+}
+
+/**
+ * Label an episode. No optimistic state: the label shown is always what the
+ * server returned on the refetch. The mutation stays pending until the
+ * refetch settles, so the buttons cannot be pressed against stale data.
+ */
+export function useDriftWatchFeedback() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, DriftWatchFeedbackInput>({
+    mutationFn: postDriftWatchFeedback,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["drift-watch"] }),
+  });
 }
