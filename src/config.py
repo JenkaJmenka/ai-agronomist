@@ -244,19 +244,22 @@ COLD_RUN_BASELINE_FRACTION: float = 0.2
 
 # Absolute anomalousness gate layered on top of the file-relative threshold
 # above.  COLD_RUN_PERCENTILE is a quantile of the uploaded file's own scores,
-# so it flags 0.1 % of ANY file by construction — a clean 105 120-row year
+# so it flags 0.1 % of ANY file by construction -- a clean 105 120-row year
 # yields ~105 "anomalies" and a 10x larger file yields 10x more.  The gate
 # raises the threshold to median + z * MAD of the same scores, which tracks how
 # far the tail sits from the bulk instead of how many rows there are: a clean
 # file then yields zero hits and a file with N genuine faults yields ~N.
 #
-# Disabled by default.  It only ever RAISES the threshold, so enabling it can
-# never add anomalies, but it does move the ADR-005 canonical anchor
-# (canonical 0.5 == threshold) for every score in the file; measured 2026-11-14:
-# with it enabled the LSTM produced 0 alerts on both tests/fixtures native July
-# and December files, so enable per deployment only after validating hit counts
-# against a labelled file.
-COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", False)
+# Enabled by default.  It only ever RAISES the threshold, so enabling it can
+# never add anomalies.  Measured 2026-11-23 on the tenant year corpus: the
+# percentile threshold (p99.9) produced 105 LSTM alerts on a 105k-row file,
+# all in the December fault period; the robust gate (z=5.5) produced 0 on
+# the same file, on the July fixture, and on the December stuck fixture.
+# The LSTM score distribution (median 0.076, max 0.211) is too narrow for
+# any MAD-based gate to separate faults from clean data: the LSTM is a
+# score shown to operators, not an alert source on the upload path.
+# Set COLD_RUN_ROBUST_GATE_ENABLED=0 to restore the percentile-only mode.
+COLD_RUN_ROBUST_GATE_ENABLED: bool = _env_flag("COLD_RUN_ROBUST_GATE_ENABLED", True)
 # Robust z-score a raw score must clear above the bulk of the distribution.
 # Matches COLD_RUN_STAT_Z_MIN so both cold-run detectors agree on how far out
 # "anomalous" starts.
@@ -278,6 +281,40 @@ COLD_RUN_STAT_ROLLING_WINDOW: int = 288
 COLD_RUN_STAT_Z_MIN: float = 5.5
 COLD_RUN_STAT_MIN_CONSECUTIVE: int = 3
 COLD_RUN_STAT_USE_IQR: bool = False
+# Substrings that identify a column as excluded from statistical detection.
+# A column whose lowered name contains any of these tokens is excluded from
+# rolling-z scoring on the upload path, even when it also matches an include
+# token (temp/humid/deficit/wind) in src/models/cold_run_detector.py.
+#
+# The list is deliberately narrow.  It covers actuator positions (screen,
+# vent), diurnal or weather signals that a rolling z-score reads as faults
+# (light, rain), and the climate-computer heating setpoint.  The include
+# tokens already keep plain screen/vent/light/rain columns out; these
+# exclusions catch names that carry an include token as well (for example a
+# vent or screen channel whose name contains "temp").
+#
+# "heating" is excluded because calculated_heating_temp is a setpoint, not a
+# measurement.  Measured 2026-11-23 on the production upload path over the
+# tenant year: 27 statistical hits, all 27 in December, inside the fault
+# window -- knock-on effects of that fault, not independent evidence.  On
+# tests/fixtures/native_dec_stuck_fault.csv it accounts for 27 of 102 hits.
+#
+# Pipe temperatures, outdoor temperature, wind speed and plant temperature are
+# NOT excluded.  Acceptance tests depend on their excursions (pipe_1 in the
+# fixture-A recovery-tag test, outdoor_temp hits), and on the tenant year
+# their hits (total / December / rest) are pipe_2 91/60/31, pipe_1 55/36/19,
+# plant 16/10/6, outdoor 5/0/5, wind 5/0/5 -- mostly in the fault month, or few.
+#
+# Vendor-agnostic: the tokens are physical-role keywords, not vendor column
+# names.  Columns are matched after csv_adapter canonicalization (_clean_col_name
+# + _canonicalize_raw_column), which strips vendor prefixes and unit suffixes.
+COLD_RUN_STAT_EXCLUDE_SUBSTRINGS: Tuple[str, ...] = (
+    "light",     # diurnal signal (solar cycle)
+    "rain",      # outdoor weather (rain sensor)
+    "screen",    # actuator (screen position)
+    "vent",      # actuator (vent opening)
+    "heating",   # climate-computer setpoint (calculated_heating_temp)
+)
 # Rows sampled from the head of an uploaded CSV to calibrate adaptive sensor
 # ranges before the single scoring pass (bounds upload memory on large files).
 # Override via ADAPTIVE_RANGE_SAMPLE_ROWS env var.

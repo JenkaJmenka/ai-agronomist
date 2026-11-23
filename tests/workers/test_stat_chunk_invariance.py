@@ -3,11 +3,11 @@
 Pins:
   a. final statistical hit sets ((timestamp, column) AND z-score) identical
      across chunk sizes 50, 288, 500, 5000, single (10**7)
-  b. pinned counts: 102 total, 0 humidity, 102 non-humidity on the
-     stuck-fault fixture.
+  b. pinned counts: 75 total, 0 humidity, 75 non-humidity on the
+     stuck-fault fixture (102 before calculated_heating_temp was excluded).
      NOTE: 111 is superseded — that was the count BEFORE baseline exclusion
      (task 1d-2) removed humidity hits within the stuck-fault suppression
-     window.  102 is the measured post-exclusion baseline at every chunk size.
+     window.  102 was the measured post-exclusion baseline at every chunk size.
   c. stuck control: 4 humidity onsets at expected timestamps, detected_ts =
      onset + 6 h, severity urgent.
   d. native_july_clearsky.csv at every size: zero stuck alerts, no
@@ -61,14 +61,16 @@ GH_ID = "gh_inv"
 
 CHUNK_SIZES = [50, 288, 500, 5000, 10**7]
 
-# Pinned: Task 1d-2 baseline (supersedes the old "111").
-# 102 total statistical hits, 0 humidity, 102 non-humidity, at every chunk
-# size.  These were measured after baseline exclusion + alert suppression
-# window were implemented.  The old 111 count included humidity hits that
-# are now correctly suppressed within the fault window.
-EXPECTED_STAT_TOTAL = 102
+# Pinned: channel-policy update (supersedes the old "102").
+# The statistical detector now excludes the heating setpoint
+# (calculated_heating_temp, via the "heating" token in
+# COLD_RUN_STAT_EXCLUDE_SUBSTRINGS).  On the December stuck fixture that
+# removes its 27 hits; the other 75 are unchanged: measured_pipe_2_temp 26,
+# measured_pipe_1_temp 23, measured_hd 23, measured_plant_temp 3.
+# 75 total statistical hits, 0 humidity, 75 non-humidity, at every chunk size.
+EXPECTED_STAT_TOTAL = 75
 EXPECTED_STAT_HUMIDITY = 0
-EXPECTED_STAT_NON_HUMIDITY = 102
+EXPECTED_STAT_NON_HUMIDITY = 75
 
 EXPECTED_ONSETS = [
     "2026-12-14T00:00:00+00:00",
@@ -252,12 +254,14 @@ class TestStatHitSetInvariance:
 
 
 class TestPinnedCounts:
-    """Pinned statistical hit counts (102 total, 0 humidity, 102 non-humidity).
+    """Pinned statistical hit counts (75 total, 0 humidity, 75 non-humidity).
 
-    These were measured after task 1d-2 (baseline exclusion + alert suppression
-    window).  The old count of 111 is superseded because it included humidity
-    hits that fell inside the stuck-fault suppression window.  After the window
-    suppresses those hits, the final count is 102 at every chunk size.
+    These were measured after the channel-policy update that excludes the
+    heating setpoint (calculated_heating_temp) from statistical detection via
+    COLD_RUN_STAT_EXCLUDE_SUBSTRINGS.  The old count of 102 is superseded
+    because it included 27 hits on calculated_heating_temp.  The remaining 75
+    are on measured_pipe_2_temp, measured_pipe_1_temp, measured_hd and
+    measured_plant_temp.
     """
 
     @pytest.mark.asyncio
@@ -388,24 +392,19 @@ class TestAsyncParity:
         assert [a["detected_ts"] for a in async_alerts] == [a["detected_ts"] for a in sync_alerts]
 
     @pytest.mark.asyncio
-    async def test_lstm_alerts_match_sync_async(self):
-        """LSTM alerts are identical between sync and async, and non-empty.
+    async def test_lstm_scores_match_sync_async(self):
+        """LSTM score arrays are identical between sync and async.
 
         The reparameterize guard (task 1e) makes LSTM inference deterministic,
-        so sync and async pipelines must produce identical LSTM alerts --
-        same timestamps, same scores, same count.
-
-        Both sides run the real epoch-72 checkpoint.  With _mock_detector()
-        this test measured zero LSTM alerts on both sides -- its constant 0.05
-        clears no threshold -- so the equality held for any behaviour, and a
-        constant score has no sampling noise for the guard to be deterministic
-        about.  The sync run is local and uncached on purpose: _run_sync_cached
-        keys on (fixture, chunk_size) only, so a real detector behind it would
-        leak into every other test sharing that key.
+        so sync and async pipelines must produce identical score arrays.
+        The robust gate (median + z*MAD) is on by default, so LSTM alerts
+        are empty on these fixtures; parity is verified on the full score
+        arrays instead.
         """
         if not CHECKPOINT_PATH.is_file():
             pytest.skip(f"Real checkpoint not found: {CHECKPOINT_PATH}")
         from src.models.inference import AnomalyDetector
+        import numpy as np
 
         det = AnomalyDetector(str(CHECKPOINT_PATH))
 
@@ -423,27 +422,17 @@ class TestAsyncParity:
             FIXTURE_A, 50, detector_override=det
         )
 
-        sync_lstm = sorted(
-            [
-                (h.timestamp, h.score)
-                for h in sync_resp.high_anomalies
-                if h.detector and h.detector.startswith("lstm")
-            ]
+        sync_scores = np.array(sync_resp.anomaly_scores, dtype=np.float64)
+        async_scores = np.array(
+            async_result.get("anomaly_scores", []), dtype=np.float64
         )
-        async_lstm = sorted(
-            [
-                (h["timestamp"], h["score"])
-                for h in async_result.get("high_anomalies", [])
-                if h.get("detector", "").startswith("lstm")
-            ]
+        assert len(sync_scores) > 0, (
+            f"No scores on either side: comparison passes vacuously "
+            f"(sync={len(sync_scores)}, async={len(async_scores)})"
         )
-        assert len(sync_lstm) > 0, (
-            f"No LSTM alerts on either side: the equality assertion below "
-            f"passes vacuously when both are empty "
-            f"(sync={len(sync_lstm)}, async={len(async_lstm)})"
-        )
-        assert sync_lstm == async_lstm, (
-            f"LSTM alerts differ: sync={sync_lstm}, async={async_lstm}"
+        assert np.array_equal(sync_scores, async_scores), (
+            f"Score arrays differ: max_diff="
+            f"{np.max(np.abs(sync_scores - async_scores))}"
         )
 
 
@@ -460,7 +449,7 @@ class TestAsyncParity:
         )
         async_alerts = _stuck_alerts(async_result)
         assert len(async_alerts) == 4, f"Expected 4 stuck alerts, got {len(async_alerts)}"
-        # Stat hit count should be 102 (invariant regardless of LSTM detector)
+        # Stat hit count should be 75 (invariant regardless of LSTM detector)
         async_stat = {
             (h["timestamp"], h["column"])
             for h in async_result.get("high_anomalies", [])

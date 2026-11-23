@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.config import (
     COLD_RUN_BASELINE_FRACTION,
+    COLD_RUN_STAT_EXCLUDE_SUBSTRINGS,
     COLD_RUN_STAT_MIN_CONSECUTIVE,
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_USE_IQR,
@@ -28,30 +29,32 @@ from src.models.gas_anomaly_detector import (
 
 _METADATA_KEYS = frozenset({"timestamp", "source"})
 
-# Actuators and diurnal channels produce false positives with rolling z-scores.
-# NOTE: "deficit" was removed — humidity deficit (measured_hd) is a derived
-# climate measurement computed from T_air and RH via the Tetens equation,
-# NOT an actuator output or diurnal signal.  Its variance tracks real
-# thermodynamic state and is valid input for rolling z-score detection.
-# Excluding it prevented psychrometric validation on the upload path.
-_COLD_RUN_STAT_EXCLUDE_SUBSTRINGS = (
-    "light",
-    "rain",
-    "screen",
-    "vent",
+# Include tokens: a column must contain at least one of these substrings (after
+# lowering) to be considered for rolling-z detection.  Columns that match an
+# include token but also match an exclude token (COLD_RUN_STAT_EXCLUDE_SUBSTRINGS
+# in config) are rejected -- the exclude check runs first.
+_COLD_RUN_STAT_INCLUDE_SUBSTRINGS: tuple[str, ...] = (
+    "temp", "humid", "humidity", "wind", "deficit", "measured_hd",
 )
 
 
 def is_cold_run_stat_column(name: str) -> bool:
-    """Continuous climate sensors suitable for rolling cold-run detection."""
+    """True when *name* is a sensor channel suitable for statistical detection.
+
+    A column qualifies when it matches at least one include token (temperature,
+    humidity, humidity-deficit or wind keywords) AND does not match any exclude
+    token from ``COLD_RUN_STAT_EXCLUDE_SUBSTRINGS`` (light, rain, screen and
+    vent positions, and the heating setpoint).  The policy is vendor-agnostic: tokens
+    are physical-role keywords applied after csv_adapter canonicalization.
+    """
     if name in _METADATA_KEYS or is_gas_column(name):
         return False
     norm = name.strip().lower()
-    if any(token in norm for token in _COLD_RUN_STAT_EXCLUDE_SUBSTRINGS):
+    if any(token in norm for token in COLD_RUN_STAT_EXCLUDE_SUBSTRINGS):
         return False
     return any(
         token in norm
-        for token in ("temp", "humid", "humidity", "wind", "deficit", "measured_hd")
+        for token in _COLD_RUN_STAT_INCLUDE_SUBSTRINGS
     )
 
 
