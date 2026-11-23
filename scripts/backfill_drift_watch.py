@@ -50,16 +50,37 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
+
+# Make the repo root importable when run as ``python scripts/...`` (only the
+# script directory is on sys.path by default). Must precede ``src`` imports.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.services.drift_watch_service import backfill_drift_watch
 from src.db.models import Base, RawReading
+from src.db.session import _normalize_database_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfill_drift_watch")
+
+
+def _engine_kwargs(database_url: str) -> dict:
+    """Normalise a provider URL (e.g. ``postgresql://``) for the async drivers.
+
+    Reuses the API's normaliser so the script and the service agree on driver
+    selection and on moving ``sslmode`` into asyncpg ``connect_args``.
+    """
+    url, extra = _normalize_database_url(database_url)
+    kwargs: dict = {"url": url, "echo": False}
+    if extra:
+        kwargs["connect_args"] = extra
+    return kwargs
 
 
 async def _list_scopes(session: AsyncSession) -> list[tuple[str, str]]:
@@ -86,7 +107,7 @@ async def run(
     dry_run: bool,
     database_url: str,
 ) -> None:
-    engine = create_async_engine(database_url, echo=False)
+    engine = create_async_engine(**_engine_kwargs(database_url))
     factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
     try:
