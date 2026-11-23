@@ -190,6 +190,17 @@ _SCADA_VOTE_KEYS: frozenset[str] = frozenset({
     "thermal_divergence",
 })
 
+# Maps SetpointAwareScadaDetector anomaly_type constants to rule-vote keys.
+# Defined once at module level instead of being rebuilt on every pipeline call.
+_SCADA_TYPE_TO_VOTE: Dict[Any, str] = {
+    UNDER_HEATING: "under_heating",
+    OVER_HEATING: "over_heating",
+    DEHUMIDIFICATION_FAILURE: "dehumidification_failure",
+    HUMIDITY_SATURATION_RISK: "humidity_saturation_risk",
+    THERMAL_DIVERGENCE: "thermal_divergence",
+    SENSOR_FLATLINE: "sensor_flatline",
+}
+
 # Fault profile per rule detector (fusion, plan P2). Rule detectors vote
 # instead of short-circuiting: the full LSTM/ensemble path still runs, and
 # the highest-precedence fired rule (``_RULE_PRECEDENCE``) takes fault-type
@@ -389,11 +400,28 @@ _RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Import-time consistency check: every key in _RULE_PRECEDENCE must have a
+# vote profile, so a new precedence entry never silently raises KeyError inside
+# build_rule_reasoning or the rule_profile lookup in _run_with_components.
+_missing_profile_keys = [k for k in _RULE_PRECEDENCE if k not in _RULE_VOTE_PROFILES]
+if _missing_profile_keys:
+    raise ImportError(
+        "comprehensive_pipeline: _RULE_PRECEDENCE keys have no vote profile: "
+        + str(_missing_profile_keys)
+        + " — add entries to _RULE_VOTE_PROFILES."
+    )
+
 # Sensor ranges in physical units for denormalization.
 _DENORM_RANGES = np.array(
     [TEMP_RANGE, HUMIDITY_RANGE, CO2_RANGE, LIGHT_RANGE],
     dtype=np.float32,
 )
+
+# When True, the history-based Mahalanobis path queries the DB and may vote.
+# False until the reference distribution is conditioned on time-of-day and
+# the cutoff derives from the history's own distance distribution (not a fixed
+# chi-squared table).  Re-arming is a one-line change here.
+_MAHALANOBIS_HISTORY_VOTE_ENABLED: bool = False
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
@@ -551,11 +579,17 @@ def build_rule_reasoning(rule_votes: Dict[str, List[str]]) -> str:
         return ""
     items = list(rule_votes.items())
     primary_name, primary_sensors = items[0]
-    template = _RULE_VOTE_PROFILES[primary_name]["reasoning"]
+    _primary_profile = _RULE_VOTE_PROFILES.get(primary_name)
+    if _primary_profile is not None:
+        template = _primary_profile["reasoning"]
+    else:
+        # Unknown vote key (not in _RULE_VOTE_PROFILES): return generic text
+        # so the caller gets a readable string rather than a KeyError.
+        template = "Anomaly rule '{}' flagged {{sensors}}".format(primary_name)
     reasoning = template.format(sensors=_humanize_sensors(primary_sensors))
     if len(items) > 1:
         others = ", ".join(
-            _RULE_VOTE_PROFILES[name]["root_cause"].replace("_", " ")
+            _RULE_VOTE_PROFILES.get(name, {}).get("root_cause", name).replace("_", " ")
             for name, _ in items[1:]
         )
         reasoning = f"{reasoning}; also flagged by: {others}"
@@ -766,7 +800,7 @@ class ComprehensiveInferencePipeline:
         self._tracker_cache = LRUDict(
             max_size=100,
             on_evict=lambda customer_id, _: (
-                self._cusum_cache.pop(customer_id, None),
+                self._evict_cusum_ema_caches(customer_id),
                 self._evict_diurnal_cache(customer_id),
             ),
         )
@@ -774,10 +808,12 @@ class ComprehensiveInferencePipeline:
         self._dropout_detector = DropoutDetector()
         # Noise / precision degradation detector (stateless, shared).
         self._noise_detector = NoiseDetector()
-        # Per-tenant CUSUM drift detectors (stateful, persisted in LearningState).
-        self._cusum_cache: dict[str, CUSUMDriftDetector] = {}
-        # Per-tenant EMA baseline estimators for CUSUM standardized residuals.
-        self._ema_cache: dict[str, EMABaselineEstimator] = {}
+        # Per-(tenant, greenhouse) CUSUM drift detectors (stateful, persisted in LearningState).
+        # Keyed by (customer_id, greenhouse_id) so each greenhouse has an independent
+        # drift accumulator; LearningState persistence remains at tenant level.
+        self._cusum_cache: dict[tuple[str, str], CUSUMDriftDetector] = {}
+        # Per-(tenant, greenhouse) EMA baseline estimators for CUSUM standardized residuals.
+        self._ema_cache: dict[tuple[str, str], EMABaselineEstimator] = {}
         # Phase B SCADA detectors (stateless, shared).
         self._spike_mad_detector = SpikeMADDetector()
         self._oob_detector = OutOfBoundsDetector()
@@ -790,9 +826,9 @@ class ComprehensiveInferencePipeline:
         self._bocpd_detector = BOCPDDetector()
         self._setpoint_scada_detector = SetpointAwareScadaDetector()
         self._band_breach_detector = BandBreachDetector()
-        # Per-(tenant, greenhouse) cached diurnal profiles:
-        # {(customer_id, greenhouse_id): {sensor: {hour: (mean, std)}}}
-        self._diurnal_profiles_cache: dict[tuple[str, str], Dict[str, Dict[int, tuple]]] = {}
+        # Per-(tenant, greenhouse, anchor_date) cached diurnal profiles:
+        # {(customer_id, greenhouse_id, date): {sensor: {hour: (mean, std)}}}
+        self._diurnal_profiles_cache: dict[tuple, Dict[str, Dict[int, tuple]]] = {}
         # Physical history for the Mahalanobis fit, keyed by tenant and greenhouse.
         # A live reading builds a new pipeline, so a hit only repeats inside one run.
         self._mahalanobis_history_cache: dict[tuple[str, str], np.ndarray] = {}
@@ -1019,14 +1055,7 @@ class ComprehensiveInferencePipeline:
             context=_climate_ctx,
             timestamp=seq_ts,
         )
-        _SCADA_TYPE_TO_VOTE = {
-            UNDER_HEATING: "under_heating",
-            OVER_HEATING: "over_heating",
-            DEHUMIDIFICATION_FAILURE: "dehumidification_failure",
-            HUMIDITY_SATURATION_RISK: "humidity_saturation_risk",
-            THERMAL_DIVERGENCE: "thermal_divergence",
-            SENSOR_FLATLINE: "sensor_flatline",
-        }
+        # _SCADA_TYPE_TO_VOTE is a module-level constant (defined near _SCADA_VOTE_KEYS).
         for finding in _scada_findings:
             # Night light sits at zero for hours. That is not a frozen probe,
             # so a light-only flatline neither votes nor lands in scada_anomalies.
@@ -1162,6 +1191,13 @@ class ComprehensiveInferencePipeline:
         # any caller that still wants them.
         spike_alarmed: list[str] = []
         _spike_lag = max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG))
+        # Build one SpikeMADDetector per distinct tuning_c so a new instance is
+        # not allocated for every sensor on every pipeline call (Finding 6).
+        _spike_detector_cache: dict[float, SpikeMADDetector] = {}
+        def _get_spike_detector(c: float) -> SpikeMADDetector:
+            if c not in _spike_detector_cache:
+                _spike_detector_cache[c] = SpikeMADDetector(tuning_c=c)
+            return _spike_detector_cache[c]
         for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             base_floor = enrichment_spike_mad_floor(s_name)
             if base_floor is None:
@@ -1171,7 +1207,7 @@ class ComprehensiveInferencePipeline:
                 spike_c, base_floor = (
                     float(value) for value in ENRICHMENT_SPIKE_CONFIRMED_PAIRS[s_name]
                 )
-            _enrichment_spike = SpikeMADDetector(tuning_c=spike_c)
+            _enrichment_spike = _get_spike_detector(spike_c)
             spike_floor = base_floor * _scaler.factor(_season_key, s_name)
             spike_series = _denormed_for_noise[:, s_idx]
             if _spike_lag > 0:
@@ -1278,39 +1314,39 @@ class ComprehensiveInferencePipeline:
         # history fits the covariance; a short or missing history keeps the
         # window fit and still votes on the last step only.
         #
-        # NON-VOTING (2026-11-15): measured on a database seeded with real tenant
-        # history, the history-based path fired on 9 of 167 clean windows and
-        # added zero detections the other rules did not already make (the
-        # joint-implausibility fixture was caught 100 % without it).  The vote is
-        # suppressed until the reference distribution is conditioned on time of day
-        # and the cutoff is taken from the history's own distance distribution
-        # rather than a fixed chi-squared table.
-        history = await self._load_mahalanobis_history(
-            customer_id,
-            greenhouse_id,
-            db,
-            before=history_before,
-        )
-        n_sensors = int(_denormed_for_noise.shape[1])
-        history_ready = (
-            history.ndim == 2
-            and history.shape[1] == n_sensors
-            and int(history.shape[0]) >= 2 * n_sensors
-        )
-        if history_ready:
-            mahal_last = self._mahalanobis_detector.score_last_against_history(
-                _denormed_for_noise,
-                history,
-            )
-        else:
-            mahal_flags = self._mahalanobis_detector.detect(_denormed_for_noise)
-            mahal_last = bool(mahal_flags and mahal_flags[-1])
-        if mahal_last:
-            logger.warning(
-                "Multivariate implausibility (non-voting) for tenant %s at current reading",
+        # NON-VOTING (2026-11-15): history-based path fired on 9/167 clean windows
+        # and added zero unique detections. Vote suppressed until the reference
+        # distribution is conditioned on time-of-day and the cutoff is taken from
+        # the history's own distance distribution rather than a fixed chi-squared
+        # table.  Controlled by _MAHALANOBIS_HISTORY_VOTE_ENABLED (False by default).
+        # When disabled, neither the DB query nor the covariance fit runs.
+        if _MAHALANOBIS_HISTORY_VOTE_ENABLED:
+            history = await self._load_mahalanobis_history(
                 customer_id,
+                greenhouse_id,
+                db,
+                before=history_before,
             )
-            # rule_votes["multivariate"] intentionally omitted — non-voting; see comment above.
+            n_sensors = int(_denormed_for_noise.shape[1])
+            history_ready = (
+                history.ndim == 2
+                and history.shape[1] == n_sensors
+                and int(history.shape[0]) >= 2 * n_sensors
+            )
+            if history_ready:
+                mahal_last = self._mahalanobis_detector.score_last_against_history(
+                    _denormed_for_noise,
+                    history,
+                )
+            else:
+                mahal_flags = self._mahalanobis_detector.detect(_denormed_for_noise)
+                mahal_last = bool(mahal_flags and mahal_flags[-1])
+            if mahal_last:
+                logger.warning(
+                    "Multivariate implausibility (non-voting) for tenant %s at current reading",
+                    customer_id,
+                )
+                # rule_votes["multivariate"] intentionally omitted — non-voting.
 
         # 0h. Change-point (BOCPD) — level shifts CUSUM's fixed K/H may miss.
         # A shift is only credible on multiple channels at once; a single
@@ -1351,11 +1387,12 @@ class ComprehensiveInferencePipeline:
         # empty afterwards. Step 5a is the only vote; CUSUM is not a rule.
         cusum_drift_alarm = False
         cusum_alarmed_sensors: list[str] = []
-        await self._restore_cusum_ema(customer_id, db)
-        _cusum = self._cusum_cache.get(customer_id)
+        await self._restore_cusum_ema(customer_id, greenhouse_id, db)
+        _cusum_key = (customer_id, greenhouse_id)
+        _cusum = self._cusum_cache.get(_cusum_key)
         if _cusum is None:
             _cusum = CUSUMDriftDetector(k=CUSUM_K_SIGMA, h=CUSUM_H_SIGMA)
-            self._cusum_cache[customer_id] = _cusum
+            self._cusum_cache[_cusum_key] = _cusum
         # Mutate H only (never rebuild) so LearningState round-trips stay valid.
         # Use mean factor across sensors as a single decision interval scale.
         _cusum_factors = [
@@ -1364,10 +1401,10 @@ class ComprehensiveInferencePipeline:
         _cusum.h = CUSUM_H_SIGMA * (
             sum(_cusum_factors) / len(_cusum_factors) if _cusum_factors else 1.0
         )
-        _ema = self._ema_cache.get(customer_id)
+        _ema = self._ema_cache.get(_cusum_key)
         if _ema is None:
             _ema = EMABaselineEstimator.for_physical_series()
-            self._ema_cache[customer_id] = _ema
+            self._ema_cache[_cusum_key] = _ema
         _physical_last = _denormed_for_noise[-1]
         for _idx, _sensor in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
             _residual, _ = _ema.update(_sensor, float(_physical_last[_idx]))
@@ -1423,7 +1460,7 @@ class ComprehensiveInferencePipeline:
         _effective_threshold = ANOMALY_THRESHOLD
         _ewma_tracker = _pot_fitter = None
         try:
-            _ewma_tracker, _pot_fitter = await self._load_trackers(customer_id, db)
+            _ewma_tracker, _pot_fitter = await self._load_trackers(customer_id, greenhouse_id, db)
             _dynamic = max(_ewma_tracker.get_threshold(), _pot_fitter.get_threshold())
             if math.isfinite(_dynamic):
                 _effective_threshold = _dynamic
@@ -1470,8 +1507,8 @@ class ComprehensiveInferencePipeline:
             is_anomaly = True
             if not physics_result.confirmed:
                 first_rule = next(iter(rule_votes))
-                rule_profile = _RULE_VOTE_PROFILES[first_rule]
-                fault_type = rule_profile["fault_type"]
+                rule_profile = _RULE_VOTE_PROFILES.get(first_rule, {})
+                fault_type = rule_profile.get("fault_type", "accuracy_decline")
 
         # 5c-gate. Sensor-trust gate: a band value measured by a sensor that a
         # sensor-fault detector flagged is untrustworthy — discard the finding.
@@ -1569,7 +1606,7 @@ class ComprehensiveInferencePipeline:
             if _ewma_tracker is not None and _pot_fitter is not None:
                 _ewma_tracker.update(anomaly_score)
                 _pot_fitter.update(anomaly_score)
-                await self._save_trackers(customer_id, _ewma_tracker, _pot_fitter, db)
+                await self._save_trackers(customer_id, greenhouse_id, _ewma_tracker, _pot_fitter, db)
         except Exception:
             logger.warning("EWMA/POT tracker update skipped (non-critical)", exc_info=True)
 
@@ -1943,7 +1980,11 @@ class ComprehensiveInferencePipeline:
         evaluation rather than to wall-clock time. Historical uploads
         would otherwise fall outside the window and lose the vote.
         """
-        cache_key = (customer_id, greenhouse_id)
+        # Include the anchor date in the cache key so profiles built for
+        # historical uploads (anchor = sequence timestamp) are not reused for
+        # a different day's pipeline call within the same instance.
+        anchor = anchor_ts if anchor_ts is not None else datetime.now(timezone.utc)
+        cache_key = (customer_id, greenhouse_id, anchor.date())
         cached = self._diurnal_profiles_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1958,7 +1999,7 @@ class ComprehensiveInferencePipeline:
         # build from DIURNAL_PROFILE_MIN_ROWS (288) but the diurnal vote
         # requires DIURNAL_VOTE_MIN_DAYS (7) to avoid false alarms from
         # under-estimated inter-day variance.
-        anchor = anchor_ts if anchor_ts is not None else datetime.now(timezone.utc)
+        # anchor is already set above (from anchor_ts or now()).
         since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
         try:
             days_stmt = (
@@ -1990,7 +2031,7 @@ class ComprehensiveInferencePipeline:
         profiles: Dict[str, Dict[int, tuple]] = {}
         try:
             profiles = await build_diurnal_profiles(
-                db, tenant_id=customer_id, greenhouse_id=greenhouse_id
+                db, tenant_id=customer_id, greenhouse_id=greenhouse_id, anchor=anchor
             )
         except Exception:
             logger.warning(
@@ -2016,6 +2057,13 @@ class ComprehensiveInferencePipeline:
                     exc_info=True,
                 )
         return profiles
+
+    def _evict_cusum_ema_caches(self, customer_id: str) -> None:
+        """Remove all CUSUM and EMA cache entries for the evicted tenant."""
+        for cache in (self._cusum_cache, self._ema_cache):
+            to_remove = [k for k in cache if k[0] == customer_id]
+            for k in to_remove:
+                del cache[k]
 
     def _evict_diurnal_cache(self, customer_id: str) -> None:
         """Remove all diurnal cache entries for the evicted tenant."""
@@ -2274,13 +2322,19 @@ class ComprehensiveInferencePipeline:
     def _install_saved_cusum_ema(
         self,
         customer_id: str,
+        greenhouse_id: str,
         state: Dict[str, Any],
     ) -> None:
         """Install persisted CUSUM and EMA into empty cache slots only.
 
         A slot that already holds a detector is the in-process state for
-        this tenant, including an update that has not been saved yet.
-        Replacing it with the row just read would drop that update.
+        this tenant/greenhouse, including an update that has not been saved
+        yet.  Replacing it with the row just read would drop that update.
+
+        LearningState is keyed at tenant level (one row per tenant), so the
+        same persisted blob is restored into whichever (tenant, greenhouse)
+        key requests it first.  In-memory state is keyed per-(tenant,
+        greenhouse) for isolation; persistence stays per-tenant.
 
         Legacy EMA payloads (written when the pipeline fed normalised
         values to the EMA, before ``EMABaselineEstimator.for_physical_series``
@@ -2300,21 +2354,23 @@ class ComprehensiveInferencePipeline:
             and isinstance(ema_data.get("min_std_by_sensor"), dict)
             and bool(ema_data["min_std_by_sensor"])
         )
-        if customer_id not in self._cusum_cache:
+        _key = (customer_id, greenhouse_id)
+        if _key not in self._cusum_cache:
             cusum_data = state.get("cusum_state")
             if cusum_data is not None and ema_is_physical:
-                self._cusum_cache[customer_id] = CUSUMDriftDetector.from_dict(
+                self._cusum_cache[_key] = CUSUMDriftDetector.from_dict(
                     cusum_data
                 )
-        if customer_id not in self._ema_cache:
+        if _key not in self._ema_cache:
             if ema_data is not None and ema_is_physical:
-                self._ema_cache[customer_id] = EMABaselineEstimator.from_dict(
+                self._ema_cache[_key] = EMABaselineEstimator.from_dict(
                     ema_data
                 )
 
     async def _restore_cusum_ema(
         self,
         customer_id: str,
+        greenhouse_id: str,
         db: AsyncSession,
     ) -> None:
         """Load ``cusum_state`` and ``ema_baseline_state`` before the update.
@@ -2323,7 +2379,8 @@ class ComprehensiveInferencePipeline:
         A failure leaves the slots empty so the caller can build a physical
         EMA instead of aborting the reading.
         """
-        if customer_id in self._cusum_cache and customer_id in self._ema_cache:
+        _key = (customer_id, greenhouse_id)
+        if _key in self._cusum_cache and _key in self._ema_cache:
             return
         try:
             result = await db.execute(
@@ -2332,7 +2389,7 @@ class ComprehensiveInferencePipeline:
             row: Optional[LearningState] = result.scalar_one_or_none()
             if row is None:
                 return
-            self._install_saved_cusum_ema(customer_id, row.state_json or {})
+            self._install_saved_cusum_ema(customer_id, greenhouse_id, row.state_json or {})
         except Exception:
             logger.warning(
                 "CUSUM/EMA state load failed for tenant %s (non-critical)",
@@ -2343,6 +2400,7 @@ class ComprehensiveInferencePipeline:
     async def _load_trackers(
         self,
         customer_id: str,
+        greenhouse_id: str,
         db: AsyncSession,
     ) -> tuple[EWMATracker, POTThresholdFitter]:
         """Load EWMA and POT trackers for a tenant from DB, falling back to cache then fresh."""
@@ -2364,7 +2422,7 @@ class ComprehensiveInferencePipeline:
                     # Same empty-slot rule as the pre-update restore. A slot
                     # filled by this call's update must not be replaced by
                     # the state just read, which does not include it yet.
-                    self._install_saved_cusum_ema(customer_id, state)
+                    self._install_saved_cusum_ema(customer_id, greenhouse_id, state)
                     # Diurnal profiles are keyed by (tenant, greenhouse) but
                     # LearningState is tenant-level and does not record which
                     # greenhouse the profiles were built for. Skip restore here;
@@ -2383,16 +2441,24 @@ class ComprehensiveInferencePipeline:
     async def _save_trackers(
         self,
         customer_id: str,
+        greenhouse_id: str,
         ewma: EWMATracker,
         pot: POTThresholdFitter,
         db: AsyncSession,
     ) -> None:
-        """Persist EWMA, POT, and CUSUM trackers for a tenant into LearningState.state_json."""
-        self._tracker_cache[customer_id] = (ewma, pot)
+        """Persist EWMA, POT, and CUSUM trackers for a tenant into LearningState.state_json.
 
+        CUSUM/EMA in-memory caches are keyed by (tenant, greenhouse_id).
+        LearningState persistence is per-tenant (one row per tenant), so the
+        last greenhouse to call _save_trackers wins in the DB for cusum/ema
+        state.  In-memory isolation is fully per-greenhouse; the DB is a
+        cold-start warm-up only.
+        """
+        self._tracker_cache[customer_id] = (ewma, pot)
+        _gh_key = (customer_id, greenhouse_id)
         tracker_payload = _json_safe({"ewma": ewma.to_dict(), "pot": pot.to_dict()})
-        _cusum = self._cusum_cache.get(customer_id)
-        _ema_bl = self._ema_cache.get(customer_id)
+        _cusum = self._cusum_cache.get(_gh_key)
+        _ema_bl = self._ema_cache.get(_gh_key)
         try:
             async with db.begin_nested():
                 result = await db.execute(

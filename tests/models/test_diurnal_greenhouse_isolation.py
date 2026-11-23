@@ -143,6 +143,10 @@ async def test_two_greenhouses_get_separate_profiles() -> None:
         f"greenhouse B mean ({mean_b:.1f})"
     )
 
-    # Verify cache keys are distinct
-    assert (_TENANT, _GH_A) in pipeline._diurnal_profiles_cache
-    assert (_TENANT, _GH_B) in pipeline._diurnal_profiles_cache
+    # Verify cache keys are distinct (key is (tenant, greenhouse, anchor_date))
+    assert any(k[0] == _TENANT and k[1] == _GH_A for k in pipeline._diurnal_profiles_cache), (
+        f"Expected key for {_GH_A!r} in diurnal cache, got {list(pipeline._diurnal_profiles_cache)}"
+    )
+    assert any(k[0] == _TENANT and k[1] == _GH_B for k in pipeline._diurnal_profiles_cache), (
+        f"Expected key for {_GH_B!r} in diurnal cache, got {list(pipeline._diurnal_profiles_cache)}"
+    )

@@ -57,9 +57,9 @@ class TestInstallSavedCusumEma:
                 "s_neg": {},
             },
         }
-        pipe._install_saved_cusum_ema("tenant-legacy", state)
-        assert "tenant-legacy" not in pipe._cusum_cache
-        assert "tenant-legacy" not in pipe._ema_cache
+        pipe._install_saved_cusum_ema("tenant-legacy", "default", state)
+        assert ("tenant-legacy", "default") not in pipe._cusum_cache
+        assert ("tenant-legacy", "default") not in pipe._ema_cache
 
     def test_legacy_state_missing_min_std_installs_neither(self):
         """ema_baseline_state with absent min_std_by_sensor installs nothing."""
@@ -78,9 +78,9 @@ class TestInstallSavedCusumEma:
                 "s_neg": {},
             },
         }
-        pipe._install_saved_cusum_ema("tenant-legacy2", state)
-        assert "tenant-legacy2" not in pipe._cusum_cache
-        assert "tenant-legacy2" not in pipe._ema_cache
+        pipe._install_saved_cusum_ema("tenant-legacy2", "default", state)
+        assert ("tenant-legacy2", "default") not in pipe._cusum_cache
+        assert ("tenant-legacy2", "default") not in pipe._ema_cache
 
     def test_physical_state_installs_both(self):
         """State written by for_physical_series().to_dict() installs both."""
@@ -98,19 +98,19 @@ class TestInstallSavedCusumEma:
             "ema_baseline_state": ema_dict,
             "cusum_state": cusum_dict,
         }
-        pipe._install_saved_cusum_ema("tenant-physical", state)
-        assert "tenant-physical" in pipe._cusum_cache
-        assert "tenant-physical" in pipe._ema_cache
-        assert isinstance(pipe._cusum_cache["tenant-physical"], CUSUMDriftDetector)
-        assert isinstance(pipe._ema_cache["tenant-physical"], EMABaselineEstimator)
+        pipe._install_saved_cusum_ema("tenant-physical", "default", state)
+        assert ("tenant-physical", "default") in pipe._cusum_cache
+        assert ("tenant-physical", "default") in pipe._ema_cache
+        assert isinstance(pipe._cusum_cache[("tenant-physical", "default")], CUSUMDriftDetector)
+        assert isinstance(pipe._ema_cache[("tenant-physical", "default")], EMABaselineEstimator)
 
     def test_filled_cache_slot_not_replaced(self):
         """An existing cache entry is not overwritten by _install_saved_cusum_ema."""
         pipe = self._make_pipeline()
         original_cusum = CUSUMDriftDetector(k=0.5, h=5.0)
         original_ema = EMABaselineEstimator(alpha=0.05)
-        pipe._cusum_cache["tenant-x"] = original_cusum
-        pipe._ema_cache["tenant-x"] = original_ema
+        pipe._cusum_cache[("tenant-x", "default")] = original_cusum
+        pipe._ema_cache[("tenant-x", "default")] = original_ema
 
         ema = EMABaselineEstimator.for_physical_series()
         ema.update("temperature", 22.0)
@@ -118,11 +118,11 @@ class TestInstallSavedCusumEma:
             "ema_baseline_state": ema.to_dict(),
             "cusum_state": CUSUMDriftDetector().to_dict(),
         }
-        pipe._install_saved_cusum_ema("tenant-x", state)
+        pipe._install_saved_cusum_ema("tenant-x", "default", state)
 
         # Should still be the original objects.
-        assert pipe._cusum_cache["tenant-x"] is original_cusum
-        assert pipe._ema_cache["tenant-x"] is original_ema
+        assert pipe._cusum_cache[("tenant-x", "default")] is original_cusum
+        assert pipe._ema_cache[("tenant-x", "default")] is original_ema
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,14 +61,20 @@ async def build_diurnal_profiles(
     *,
     tenant_id: str,
     greenhouse_id: str = "default",
+    anchor: Optional[datetime] = None,
 ) -> DiurnalProfiles:
     """Hourly (mean, std) per sensor from recent canonical readings.
 
     Returns {} when the tenant has fewer than ``DIURNAL_PROFILE_MIN_ROWS``
     readings in the trailing window — too little history for hourly
     baselines to mean anything.
+
+    anchor pins the trailing window end so that historical uploads are
+    evaluated against the history window that matched the pipeline's diurnal
+    maturity gate.  Defaults to wall-clock now.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
+    anchor = anchor or datetime.now(timezone.utc)
+    since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
     stmt = select(SensorReading).where(
         SensorReading.tenant_id == tenant_id,
         SensorReading.greenhouse_id == greenhouse_id,
