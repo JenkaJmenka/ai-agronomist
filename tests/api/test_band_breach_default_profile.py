@@ -88,3 +88,39 @@ def test_default_tomato_band_breach_does_not_raise_anomaly() -> None:
     assert "TEMP_BAND_HIGH" in report["scada_types"], message
     assert report["is_anomaly"] is False, message
     assert report["fault_type"] is None, message
+
+
+class _PinnedNow(datetime):
+    """``datetime`` whose ``now()`` returns a fixed instant."""
+
+    pinned: datetime = _NOON
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: D102
+        return cls.pinned if tz is not None else cls.pinned.replace(tzinfo=None)
+
+
+def test_result_depends_on_sequence_timestamp_not_wall_clock() -> None:
+    """Same input and sequence_timestamp give the same decision at any wall-clock now.
+
+    The nocturnal-light physics rule reads the hour of day. It must read the
+    sequence's hour, so a night-time run must not turn a noon window into a fault.
+    """
+    from src.api.services import comprehensive_pipeline as pipeline_module
+
+    original = pipeline_module.datetime
+    outcomes = []
+    try:
+        for now in (
+            datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc),
+            datetime(2026, 11, 23, 3, 0, tzinfo=timezone.utc),
+        ):
+            _PinnedNow.pinned = now
+            pipeline_module.datetime = _PinnedNow
+            report = asyncio.run(_score_default_profile())
+            outcomes.append(
+                (report["is_anomaly"], report["fault_type"], report["physics_validation"])
+            )
+    finally:
+        pipeline_module.datetime = original
+    assert outcomes[0] == outcomes[1], outcomes
