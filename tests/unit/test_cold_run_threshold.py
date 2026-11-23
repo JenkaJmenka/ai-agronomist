@@ -34,9 +34,11 @@ def test_pot_falls_back_when_flat():
     "COLD_RUN_ROBUST_GATE_ENABLED" in os.environ,
     reason="the gate is explicitly configured for this run",
 )
-def test_robust_gate_is_off_by_default():
-    """Enabling the gate is a per-deployment decision, not the default."""
-    assert cold_run_threshold.COLD_RUN_ROBUST_GATE_ENABLED is False
+def test_robust_gate_is_on_by_default():
+    """The gate is enabled by default: the percentile flags 0.1% of any file
+    by construction, so without the gate a clean 105k-row year yields ~105
+    LSTM 'anomalies'.  The gate (median + z*MAD) produces 0 on a clean file."""
+    assert cold_run_threshold.COLD_RUN_ROBUST_GATE_ENABLED is True
 
 
 # ---------------------------------------------------------------------------
