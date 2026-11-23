@@ -22,7 +22,7 @@ def test_tracker_and_cusum_eviction():
     for i in range(100):
         cust_id = f"cust_{i}"
         pipeline._tracker_cache[cust_id] = (ewma, pot)
-        pipeline._cusum_cache[cust_id] = CUSUMDriftDetector(h=5.0, k=0.5)
+        pipeline._cusum_cache[(cust_id, "default")] = CUSUMDriftDetector(h=5.0, k=0.5)
 
     # Verify everything is populated
     assert len(pipeline._tracker_cache) == 100
@@ -30,17 +30,17 @@ def test_tracker_and_cusum_eviction():
 
     # Verify the oldest item is "cust_0"
     assert "cust_0" in pipeline._tracker_cache
-    assert "cust_0" in pipeline._cusum_cache
+    assert ("cust_0", "default") in pipeline._cusum_cache
 
     # 3. Add a 101st customer, which should evict "cust_0"
     pipeline._tracker_cache["cust_100"] = (ewma, pot)
-    pipeline._cusum_cache["cust_100"] = CUSUMDriftDetector(h=5.0, k=0.5)
+    pipeline._cusum_cache[("cust_100", "default")] = CUSUMDriftDetector(h=5.0, k=0.5)
 
     # 4. Verify that "cust_0" has been evicted from both caches
     assert "cust_0" not in pipeline._tracker_cache
-    assert "cust_0" not in pipeline._cusum_cache
+    assert ("cust_0", "default") not in pipeline._cusum_cache
     assert "cust_100" in pipeline._tracker_cache
-    assert "cust_100" in pipeline._cusum_cache
+    assert ("cust_100", "default") in pipeline._cusum_cache
 
     # Verify size constraints
     assert len(pipeline._tracker_cache) == 100
