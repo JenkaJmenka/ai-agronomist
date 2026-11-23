@@ -1375,7 +1375,9 @@ class ComprehensiveInferencePipeline:
         # only quiets the model signal: a fired rule detector is direct
         # evidence of a sensor fault, so rule votes survive suppression
         # (pre-fusion, gates returned before physics ever ran).
-        physics_result = self._run_physics_check(seq_array, now, climate_context)
+        physics_result = self._run_physics_check(
+            seq_array, _as_utc(seq_ts), climate_context
+        )
         if physics_result.suppressed:
             if rule_votes:
                 logger.info(
