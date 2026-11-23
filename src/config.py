@@ -2239,3 +2239,57 @@ DRIFT_WATCH_ELEVATED_Z_CEIL: float = 3.0
 # Default on; "0"/"false"/"no"/"off" disable it entirely (a disabled call
 # returns without touching the database).
 DRIFT_WATCH_SHADOW_ENABLED: bool = _env_flag("DRIFT_WATCH_SHADOW_ENABLED", True)
+
+# -----------------------------------------------------------------------------
+# Drift Watch alert policy — ADR-013 (docs/architecture/ADR-013-drift-watch-
+# alert-policy.md). These govern when a drift-watch episode may become an
+# operator alert. The detector itself is unaffected: episodes are stored and
+# shown on the Drift Watch page whatever these say.
+# -----------------------------------------------------------------------------
+
+# Global kill switch for drift-watch alerts (ADR-013 §7). Default OFF: with it
+# off, no input's alert_state leaves ``off`` and no ``drift_watch`` row reaches
+# ``anomaly_episodes``. Per-scope enabling is a separate admin action on top of
+# this flag, so turning it on alone alerts nobody.
+DRIFT_WATCH_ALERTS_ENABLED: bool = _env_flag("DRIFT_WATCH_ALERTS_ENABLED", False)
+
+# Minimum |robust offset| for an alert, as a multiple of the input's min_shift
+# (ADR-013 §5): 2.0 -> 1.0 C, 4.0 %RH, 0.6 g/m^3 at the default shifts.
+# min_shift is a detection target chosen so the self-test can prove
+# sensitivity, not an action threshold: 0.5 C is inside normal probe
+# tolerance. 2x is the middle self-test bias level, so detection is proven
+# there, and it stays below the upload EMA bias limit (2 C, 5 %RH) so drift
+# watch still adds value under that detector. 1x was rejected (not
+# actionable), 4x was rejected (overlaps the bias detector).
+DRIFT_WATCH_ALERT_MIN_OFFSET_MULT: float = 2.0
+
+# Weeks of out-of-sample scored data (strictly after calibration_window_end)
+# an input needs before it can become alert-eligible (ADR-013 §3). The
+# calibration rate rests on about one episode in 1.84 months, in-sample and
+# one season; 12 weeks is close to one full rate window of independent
+# evidence before the rate is trusted.
+DRIFT_WATCH_ALERT_MIN_OOS_WEEKS: int = 12
+
+# Trailing window (weeks, about 3 months) over which the out-of-sample
+# false-alarm count is taken (ADR-013 §3). At the 1.0/month budget the mean
+# count per window is about 3, which the ENABLE/SUSPEND edges below assume.
+DRIFT_WATCH_ALERT_RATE_WINDOW_WEEKS: int = 13
+
+# off/suspended -> eligible needs a trailing-window OOS count <= this
+# (ADR-013 §3): 3 per 13 weeks is about 1.0/month, the FA budget
+# (DRIFT_WATCH_FA_BUDGET_PER_MONTH). Unlabelled episodes count, so the figure
+# is an upper bound on the true false-alarm rate.
+DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT: int = 3
+
+# enabled -> suspended (automatic) when the trailing-window OOS count is
+# >= this (ADR-013 §3). At a true rate equal to the budget (Poisson mean 3
+# per window), P(count >= 7) is about 3.4% per window, so a healthy input is
+# rarely suspended by chance; P(count >= 6) of about 8.4% was judged too
+# jumpy. The gap 3..7 is hysteresis so the state does not flap.
+DRIFT_WATCH_ALERT_SUSPEND_MIN_COUNT: int = 7
+
+# An alert is written only if the episode's last_confirmed_ts is within this
+# many days of the newest scored hour (ADR-013 §4). Uploading a year of
+# history then raises historical episodes on the page, not a burst of
+# alerts at once.
+DRIFT_WATCH_ALERT_RECENCY_DAYS: int = 14

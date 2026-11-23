@@ -32,7 +32,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple,
+)
 
 import numpy as np
 import pandas as pd
@@ -57,6 +59,11 @@ from src.config import (
     DRIFT_WATCH_QUIET_HOURS,
     DRIFT_WATCH_REFIT_INTERVAL_WEEKS,
     DRIFT_WATCH_ELEVATED_Z_CEIL,
+    DRIFT_WATCH_ALERT_MIN_OFFSET_MULT,
+    DRIFT_WATCH_ALERT_MIN_OOS_WEEKS,
+    DRIFT_WATCH_ALERT_RATE_WINDOW_WEEKS,
+    DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT,
+    DRIFT_WATCH_ALERT_SUSPEND_MIN_COUNT,
 )
 
 
@@ -116,9 +123,19 @@ class DriftEpisode:
         last_confirmed_ts: When the episode was last confirmed (updated).
         onset_estimate: Timestamp of the last time the CUSUM statistic
             was at zero before the current alarm.
-        current_offset_native: Estimated offset in physical units.
+        current_offset_native: Single-hour offset at the alarm hour,
+            ``|z| * sigma`` in native units (positive for both directions).
+            Kept for diagnosis only; ADR-013 §5 forbids alerting on it.
         peak_statistic: CUSUM statistic value at detection.
         is_new: ``True`` on first detection, ``False`` on continuation.
+        offset_robust: ADR-013 §5 robust offset: the median of
+            ``(residual - mu)`` over every scored hour from the episode's
+            first onset estimate to this event's ``last_confirmed_ts``,
+            inclusive, in native units. **Signed** (negative for a ``"-"``
+            episode), unlike ``current_offset_native``; the alert limit
+            compares its absolute value. ``mu`` is the value in force when
+            each hour was scored, so a mid-episode refit does not rewrite
+            earlier hours. ``None`` only when constructed without it.
     """
     input_id: str
     target_channel: str
@@ -130,6 +147,7 @@ class DriftEpisode:
     current_offset_native: float
     peak_statistic: float
     is_new: bool
+    offset_robust: Optional[float] = None
 
 
 @dataclass
@@ -168,6 +186,15 @@ class CalibrationResult:
         shadow_reason: Human-readable reason if status is ``SHADOW``.
         gap_weeks: Gap used during calibration (stored so rolling refit
             can use the same value).
+        calibration_window_end: ISO timestamp of the last hour of the
+            calibration window (the window ``h`` was chosen on and the
+            self-test injected into). Set once by :meth:`DriftWatch.calibrate`
+            and **never changed afterwards** -- :func:`_rolling_refit`
+            rewrites ``fit_window_start/end`` but must leave this alone.
+            ADR-013 §3: data strictly after it is out-of-sample; an episode
+            with ``first_detected_ts <=`` it is in-sample. ``None`` for a
+            payload serialised before the field existed (see
+            :meth:`from_dict`), meaning "out-of-sample start unknown".
     """
     input_id: str
     kind: str
@@ -188,6 +215,7 @@ class CalibrationResult:
     ceiling_hit: bool = False
     shadow_reason: Optional[str] = None
     gap_weeks: int = DRIFT_WATCH_GAP_WEEKS
+    calibration_window_end: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe dictionary."""
@@ -195,7 +223,20 @@ class CalibrationResult:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CalibrationResult":
-        """Reconstruct from a dictionary."""
+        """Reconstruct from a dictionary.
+
+        Back-compat for ``calibration_window_end``: a payload without it is
+        loaded with ``None``; the value is deliberately **not derived**.
+        The only candidate source is ``fit_window_end + gap + baseline``,
+        and the payload cannot say whether ``fit_window_end`` is still the
+        original one: the copy embedded in ``DriftInputState.calibration``
+        has been rewritten by every rolling refit, which would place the
+        derived boundary weeks or months too late and silently move
+        out-of-sample episodes into the uncounted in-sample set. That error
+        is optimistic, which ADR-013 §3 forbids. ``None`` instead makes the
+        alert gate treat the input as having no out-of-sample evidence, so
+        it stays ``off`` until it is recalibrated (a backfill does that).
+        """
         d = dict(d)
         d["self_test"] = [dict(s) for s in d.get("self_test", [])]
         # Backward compatibility
@@ -207,6 +248,8 @@ class CalibrationResult:
             d["shadow_reason"] = None
         if "gap_weeks" not in d:
             d["gap_weeks"] = DRIFT_WATCH_GAP_WEEKS
+        if "calibration_window_end" not in d:
+            d["calibration_window_end"] = None
         return cls(**d)
 
 
@@ -234,6 +277,17 @@ class DriftInputState:
         neg_last_alarm_ts: ISO timestamp of the last negative alarm.
         next_episode_seq: Monotonic counter for generating episode IDs.
         last_refit_ts: ISO timestamp of the last rolling refit.
+        pos_pending_devs: ``residual - mu`` (native units) for every scored
+            hour since ``s_pos`` was last zero, that hour included. Becomes
+            the episode buffer when a new positive episode is detected, so
+            the robust offset starts at the onset estimate (ADR-013 §5).
+        pos_episode_devs: ``residual - mu`` for every scored hour from the
+            open positive episode's first onset estimate up to the latest
+            scored hour. Cleared once the episode has been quiet for more
+            than ``DRIFT_WATCH_QUIET_HOURS`` (the episode can no longer
+            continue). Its median is ``DriftEpisode.offset_robust``.
+        neg_pending_devs: As ``pos_pending_devs`` for ``s_neg``.
+        neg_episode_devs: As ``pos_episode_devs`` for negative episodes.
     """
     schema_version: int
     input_id: str
@@ -253,6 +307,11 @@ class DriftInputState:
     next_episode_seq: int = 0
     # Rolling refit
     last_refit_ts: Optional[str] = None
+    # Robust-offset buffers (ADR-013 §5)
+    pos_pending_devs: List[float] = field(default_factory=list)
+    pos_episode_devs: List[float] = field(default_factory=list)
+    neg_pending_devs: List[float] = field(default_factory=list)
+    neg_episode_devs: List[float] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe dictionary."""
@@ -271,6 +330,12 @@ class DriftInputState:
         ]:
             if fld not in d:
                 d[fld] = default
+        # Backward compatibility: states written before the ADR-013 robust
+        # offset lack its buffers. An episode open across the upgrade then
+        # gets a robust offset over the hours scored since the upgrade only.
+        for fld in ("pos_pending_devs", "pos_episode_devs",
+                    "neg_pending_devs", "neg_episode_devs"):
+            d[fld] = [float(v) for v in (d.get(fld) or [])]
         # Drop v1 fields that no longer exist
         for old in ("pos_armed", "neg_armed", "pos_active", "neg_active"):
             d.pop(old, None)
@@ -412,6 +477,24 @@ def _reconstruct_model(
     return model, feat_names, fill_vals
 
 
+def _robust_offset(devs: Sequence[float], current_dev: float) -> float:
+    """Median of the episode's ``residual - mu`` values (ADR-013 §5).
+
+    Args:
+        devs: Per-hour ``residual - mu`` from the episode's first onset
+            estimate to the current alarm hour, inclusive.
+        current_dev: The alarm hour's own value, used only if *devs* is
+            empty (cannot happen on a state written by this version; it
+            guards a hand-built or truncated state).
+
+    Returns:
+        The signed median in native units.
+    """
+    if not devs:
+        return float(current_dev)
+    return float(np.median(np.asarray(devs, dtype=float)))
+
+
 # ── Rolling refit ────────────────────────────────────────────────────────
 
 def _rolling_refit(
@@ -501,7 +584,10 @@ def _rolling_refit(
     if new_sigma < 1e-9:
         return
 
-    # Update calibration in state (preserve k, h from initial calibration)
+    # Update calibration in state (preserve k, h from initial calibration).
+    # calibration_window_end is carried over untouched from the existing
+    # payload: it marks where out-of-sample data starts (ADR-013 §3) and
+    # must survive every refit. Only the fit window moves.
     cal_dict = dict(state.calibration)  # type: ignore[arg-type]
     cal_dict["scale_mu"] = new_mu
     cal_dict["scale_sigma"] = new_sigma
@@ -511,6 +597,7 @@ def _rolling_refit(
     cal_dict["model_fill_values"] = new_fill.tolist()
     cal_dict["fit_window_start"] = str(clean_baseline.index[0])
     cal_dict["fit_window_end"] = str(clean_baseline.index[-1])
+    cal_dict["calibration_window_end"] = cal.calibration_window_end
     state.calibration = cal_dict
     state.last_refit_ts = str(scoring_start)
 
@@ -653,6 +740,7 @@ class DriftWatch:
                     self_test=[],
                     derived_evidence=derived_evidence,
                     gap_weeks=gap_weeks,
+                    calibration_window_end=str(cal_data.index[-1]),
                 )
 
         # ── Scale from fit window ────────────────────────────────────────
@@ -773,6 +861,7 @@ class DriftWatch:
             ceiling_hit=ceiling_hit,
             shadow_reason=shadow_reason,
             gap_weeks=gap_weeks,
+            calibration_window_end=str(cal_data.index[-1]),
         )
 
     # ── State management ─────────────────────────────────────────────────
@@ -878,16 +967,40 @@ class DriftWatch:
 
         for ts, val in residual.items():
             z = (val - mu) / sigma
+            dev = float(val - mu)  # native units, signed (ADR-013 §5)
+
+            # Robust-offset buffers: an open episode absorbs every scored
+            # hour while it can still continue (last alarm within
+            # quiet_hours); once it cannot, its buffer is released.
+            for last_alarm, buf in (
+                (state.pos_last_alarm_ts, state.pos_episode_devs),
+                (state.neg_last_alarm_ts, state.neg_episode_devs),
+            ):
+                if last_alarm is None:
+                    buf.clear()
+                    continue
+                since = (ts - pd.Timestamp(last_alarm)).total_seconds() / 3600
+                if since <= quiet_hours:
+                    buf.append(dev)
+                else:
+                    buf.clear()
 
             # Update accumulators
             state.s_pos = max(0.0, state.s_pos + z - k)
             state.s_neg = max(0.0, state.s_neg - z - k)
 
-            # Track last-zero timestamps
+            # Track last-zero timestamps. The pending buffer restarts at the
+            # zero hour, which is the onset estimate a later alarm reports.
             if state.s_pos <= 0.0:
                 state.last_zero_pos_ts = str(ts)
+                state.pos_pending_devs = [dev]
+            else:
+                state.pos_pending_devs.append(dev)
             if state.s_neg <= 0.0:
                 state.last_zero_neg_ts = str(ts)
+                state.neg_pending_devs = [dev]
+            else:
+                state.neg_pending_devs.append(dev)
 
             # ── Positive direction episode logic ─────────────────────────
             if state.s_pos > h:
@@ -904,6 +1017,7 @@ class DriftWatch:
                     ep_id = f"{spec.input_id}_{state.next_episode_seq}"
                     state.pos_episode_id = ep_id
                     state.pos_episode_start = str(ts)
+                    state.pos_episode_devs = list(state.pos_pending_devs)
                 else:
                     ep_id = state.pos_episode_id  # type: ignore[assignment]
 
@@ -923,11 +1037,13 @@ class DriftWatch:
                     current_offset_native=z * sigma,
                     peak_statistic=state.s_pos,
                     is_new=is_new_episode,
+                    offset_robust=_robust_offset(state.pos_episode_devs, dev),
                 ))
 
                 state.pos_last_alarm_ts = str(ts)
                 state.s_pos = 0.0
                 state.last_zero_pos_ts = str(ts)
+                state.pos_pending_devs = [dev]
 
             # ── Negative direction episode logic ─────────────────────────
             if state.s_neg > h:
@@ -944,6 +1060,7 @@ class DriftWatch:
                     ep_id = f"{spec.input_id}_{state.next_episode_seq}"
                     state.neg_episode_id = ep_id
                     state.neg_episode_start = str(ts)
+                    state.neg_episode_devs = list(state.neg_pending_devs)
                 else:
                     ep_id = state.neg_episode_id  # type: ignore[assignment]
 
@@ -963,11 +1080,13 @@ class DriftWatch:
                     current_offset_native=-z * sigma,
                     peak_statistic=state.s_neg,
                     is_new=is_new_episode,
+                    offset_robust=_robust_offset(state.neg_episode_devs, dev),
                 ))
 
                 state.neg_last_alarm_ts = str(ts)
                 state.s_neg = 0.0
                 state.last_zero_neg_ts = str(ts)
+                state.neg_pending_devs = [dev]
 
         state.last_processed_ts = str(residual.index[-1])
         return episodes
@@ -1111,3 +1230,451 @@ def _find_index_at_or_after(
     if pos >= len(index):
         return None
     return int(pos)
+
+
+# ── Alert policy (ADR-013 §3 / §5) ───────────────────────────────────────
+#
+# Pure functions only: no I/O, no clock, no global flag read. The caller
+# (the backend alert writer, ADR-013 §8 step 5) loads the episodes, labels,
+# calibration and current alert_state, passes them in, and persists the
+# returned state with its reason and a timestamp.
+
+
+class AlertState(str, Enum):
+    """Per-input alert state (ADR-013 §3). Separate from :class:`InputStatus`."""
+    OFF = "off"
+    ELIGIBLE = "eligible"
+    ENABLED = "enabled"
+    SUSPENDED = "suspended"
+
+
+class FeedbackLabel(str, Enum):
+    """Operator label on a drift episode (ADR-013 §4, ``drift_watch_feedback``).
+
+    Only ``CONFIRMED_DRIFT`` takes an episode out of the false-alarm count.
+    ``FALSE_ALARM``, no label, and any unrecognised label string all count.
+    """
+    CONFIRMED_DRIFT = "confirmed_drift"
+    FALSE_ALARM = "false_alarm"
+
+
+class DriftEpisodeKey(NamedTuple):
+    """ADR-013 §4 natural key of a drift episode.
+
+    ``(tenant_id, greenhouse_id, input_id, direction, first_detected_ts)``.
+    Unlike ``episode_id`` it survives a backfill, because
+    ``first_detected_ts`` depends only on the data. Build it with
+    :func:`episode_natural_key` so the timestamp is normalised to UTC and
+    two keys for the same episode compare equal.
+    """
+    tenant_id: str
+    greenhouse_id: str
+    input_id: str
+    direction: str
+    first_detected_ts: pd.Timestamp
+
+
+@dataclass(frozen=True)
+class GateEpisode:
+    """One stored drift episode as seen by the §3 alert gate.
+
+    Attributes:
+        key: The episode's natural key (one input, one scope).
+        offset_robust: ADR-013 §5 robust offset (signed, native units), or
+            ``None`` if not known (an episode stored before the field
+            existed). An unknown offset is treated as passing the §5 limit,
+            so it is counted: the count must stay an upper bound.
+        suppressed: ``True`` if the §6 suppression rule (an overlapping
+            ``stuck_fault`` on any channel the input reads) withheld the
+            alert. Decided by the caller, which has the database.
+    """
+    key: DriftEpisodeKey
+    offset_robust: Optional[float] = None
+    suppressed: bool = False
+
+
+class AlertGateDecision(NamedTuple):
+    """Result of :func:`evaluate_alert_gate`: ``(count, next_state, reason)``."""
+    count: int
+    next_state: AlertState
+    reason: str
+
+
+class OosEpisodeCounts(NamedTuple):
+    """Result of :func:`count_oos_false_alarms`.
+
+    Attributes:
+        count: Alert-eligible OOS episodes in the trailing window that do
+            not carry ``confirmed_drift`` -- the figure the gate uses.
+        raw_count: All OOS episodes in the trailing window, before the §5
+            and §6 filters and before labels. Diagnosis only.
+    """
+    count: int
+    raw_count: int
+
+
+_WEEK_SECONDS: float = 7 * 24 * 3600.0
+
+
+def _to_utc(ts: Any) -> pd.Timestamp:
+    """Coerce *ts* to a tz-aware UTC ``pd.Timestamp`` (naive is read as UTC).
+
+    Naive is read as UTC because that is how the backend reads SQLite rows
+    (``_aware`` in ``src/api/routes/drift_watch.py``).
+
+    Raises:
+        ValueError: If *ts* is ``None`` or NaT.
+    """
+    if ts is None:
+        raise ValueError("timestamp is None")
+    out = pd.Timestamp(ts)
+    if pd.isna(out):
+        raise ValueError("timestamp is NaT")
+    if out.tzinfo is None:
+        return out.tz_localize("UTC")
+    return out.tz_convert("UTC")
+
+
+def episode_natural_key(
+    tenant_id: str,
+    greenhouse_id: str,
+    input_id: str,
+    direction: str,
+    first_detected_ts: Any,
+) -> DriftEpisodeKey:
+    """Build a normalised :class:`DriftEpisodeKey` (ADR-013 §4).
+
+    Args:
+        tenant_id: Tenant identifier.
+        greenhouse_id: Greenhouse identifier.
+        input_id: Drift input identifier (e.g. ``"temp_paired"``).
+        direction: ``"+"`` or ``"-"``.
+        first_detected_ts: Episode first-detection time; ``datetime``,
+            ``pd.Timestamp`` or ISO string. Naive is read as UTC.
+
+    Returns:
+        The key with ``first_detected_ts`` as a UTC ``pd.Timestamp``.
+
+    Raises:
+        ValueError: If *direction* is not ``"+"``/``"-"`` or the timestamp
+            is missing.
+    """
+    if direction not in ("+", "-"):
+        raise ValueError(f"direction must be '+' or '-', got {direction!r}")
+    return DriftEpisodeKey(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        input_id=input_id,
+        direction=direction,
+        first_detected_ts=_to_utc(first_detected_ts),
+    )
+
+
+def _normalise_key(key: DriftEpisodeKey) -> DriftEpisodeKey:
+    """Re-normalise a key built without :func:`episode_natural_key`."""
+    return episode_natural_key(*key)
+
+
+def passes_alert_min_offset(
+    offset_robust: Optional[float],
+    min_shift: float,
+    *,
+    min_offset_mult: float = DRIFT_WATCH_ALERT_MIN_OFFSET_MULT,
+) -> bool:
+    """ADR-013 §5: ``|robust offset| >= min_offset_mult * min_shift``.
+
+    Shared by the gate count and (step 5) the alert writer, so both apply
+    the same rule. An unknown (``None`` or NaN) offset returns ``True``:
+    for the count that is the conservative choice. The alert writer always
+    has a robust offset from :meth:`DriftWatch.update`, so it never relies
+    on this branch.
+
+    Args:
+        offset_robust: Signed robust offset in native units, or ``None``.
+        min_shift: The input's ``DriftInputSpec.min_shift`` (native units).
+        min_offset_mult: Multiplier on *min_shift*.
+
+    Returns:
+        Whether the episode passes the minimum-offset limit.
+
+    Raises:
+        ValueError: If *min_shift* is not a positive finite number.
+    """
+    if not (math.isfinite(min_shift) and min_shift > 0):
+        raise ValueError(f"min_shift must be positive and finite, got {min_shift!r}")
+    if offset_robust is None or not math.isfinite(offset_robust):
+        return True
+    return abs(offset_robust) >= min_offset_mult * min_shift
+
+
+def count_oos_false_alarms(
+    episodes: Iterable[GateEpisode],
+    labels: Mapping[DriftEpisodeKey, str],
+    *,
+    calibration_window_end: Optional[Any],
+    as_of: Any,
+    min_shift: float,
+    rate_window_weeks: int = DRIFT_WATCH_ALERT_RATE_WINDOW_WEEKS,
+    min_offset_mult: float = DRIFT_WATCH_ALERT_MIN_OFFSET_MULT,
+) -> OosEpisodeCounts:
+    """ADR-013 §3 out-of-sample false-alarm count for one input.
+
+    An episode is counted when all of these hold:
+
+    - it is out-of-sample: ``first_detected_ts > calibration_window_end``
+      (in-sample episodes are never counted, in either direction);
+    - it is new in the trailing window:
+      ``as_of - rate_window_weeks < first_detected_ts <= as_of``;
+    - it passes the alert filters: §5 minimum robust offset and not §6
+      suppressed;
+    - its label is not ``confirmed_drift`` (no label counts).
+
+    Episodes are de-duplicated on the natural key, so passing continuation
+    events of one episode counts it once (the first record seen wins for
+    ``offset_robust``/``suppressed``; pass one record per episode).
+
+    Args:
+        episodes: Stored episodes of ONE input in ONE scope.
+        labels: Operator labels keyed on the natural key.
+        calibration_window_end: ``CalibrationResult.calibration_window_end``.
+            ``None`` (unknown) means no episode can be shown to be
+            out-of-sample, so both counts are 0; the gate separately refuses
+            eligibility in that case.
+        as_of: The newest scored hour (``DriftInputState.last_processed_ts``).
+        min_shift: The input's ``min_shift`` in native units.
+        rate_window_weeks: Trailing window length.
+        min_offset_mult: §5 multiplier.
+
+    Returns:
+        ``OosEpisodeCounts(count, raw_count)``.
+
+    Raises:
+        ValueError: If episodes span more than one input/scope, if any
+            episode is after *as_of* (the caller passed the wrong as-of), or
+            if *min_shift* is invalid.
+    """
+    if not (math.isfinite(min_shift) and min_shift > 0):
+        raise ValueError(f"min_shift must be positive and finite, got {min_shift!r}")
+    as_of_utc = _to_utc(as_of)
+    window_start = as_of_utc - pd.Timedelta(weeks=rate_window_weeks)
+    cal_end = None if calibration_window_end is None else _to_utc(calibration_window_end)
+    # Enum members are read by value: str() of a str-mixin Enum is
+    # "FeedbackLabel.CONFIRMED_DRIFT", which would never match and would
+    # silently count a confirmed episode as a false alarm.
+    norm_labels = {
+        _normalise_key(k): (v.value if isinstance(v, Enum) else str(v))
+        for k, v in labels.items()
+    }
+
+    seen: Dict[DriftEpisodeKey, GateEpisode] = {}
+    scope: Optional[Tuple[str, str, str]] = None
+    for ep in episodes:
+        key = _normalise_key(ep.key)
+        ep_scope = (key.tenant_id, key.greenhouse_id, key.input_id)
+        if scope is None:
+            scope = ep_scope
+        elif ep_scope != scope:
+            raise ValueError(
+                f"episodes span more than one input/scope: {scope} vs {ep_scope}"
+            )
+        if key.first_detected_ts > as_of_utc:
+            raise ValueError(
+                f"episode first detected at {key.first_detected_ts} is after "
+                f"as_of {as_of_utc}; as_of must be the newest scored hour"
+            )
+        if key not in seen:
+            seen[key] = ep
+
+    if cal_end is None:
+        return OosEpisodeCounts(count=0, raw_count=0)
+
+    count = 0
+    raw = 0
+    for key, ep in seen.items():
+        ts = key.first_detected_ts
+        if ts <= cal_end:
+            continue  # in-sample: never counted
+        if not (window_start < ts <= as_of_utc):
+            continue
+        raw += 1
+        if ep.suppressed:
+            continue
+        if not passes_alert_min_offset(
+            ep.offset_robust, min_shift, min_offset_mult=min_offset_mult,
+        ):
+            continue
+        if norm_labels.get(key) == FeedbackLabel.CONFIRMED_DRIFT.value:
+            continue
+        count += 1
+    return OosEpisodeCounts(count=count, raw_count=raw)
+
+
+def evaluate_alert_gate(
+    episodes: Iterable[GateEpisode],
+    labels: Mapping[DriftEpisodeKey, str],
+    *,
+    current_state: AlertState,
+    input_status: str,
+    calibration_window_end: Optional[Any],
+    as_of: Any,
+    min_shift: float,
+    alerts_enabled: bool,
+    min_oos_weeks: int = DRIFT_WATCH_ALERT_MIN_OOS_WEEKS,
+    rate_window_weeks: int = DRIFT_WATCH_ALERT_RATE_WINDOW_WEEKS,
+    enable_max_count: int = DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT,
+    suspend_min_count: int = DRIFT_WATCH_ALERT_SUSPEND_MIN_COUNT,
+    min_offset_mult: float = DRIFT_WATCH_ALERT_MIN_OFFSET_MULT,
+) -> AlertGateDecision:
+    """Evaluate the ADR-013 §3 automatic alert-state transitions for one input.
+
+    Transitions (``count`` from :func:`count_oos_false_alarms`; "ready"
+    means ``input_status == armed`` AND a known ``calibration_window_end``
+    AND at least ``min_oos_weeks`` of OOS data AND ``count <=
+    enable_max_count``):
+
+    =============  =========================================  ============
+    from           condition                                  to
+    =============  =========================================  ============
+    any            ``alerts_enabled`` is False                ``off``
+    ``off``        ready                                      ``eligible``
+    ``off``        not ready                                  ``off``
+    ``eligible``   ready                                      ``eligible``
+    ``eligible``   not ready                                  ``off`` (*)
+    ``enabled``    not armed                                  ``suspended``
+    ``enabled``    ``count >= suspend_min_count``             ``suspended``
+    ``enabled``    OOS evidence lost (*)                      ``suspended``
+    ``enabled``    otherwise (incl. count 4..6)               ``enabled``
+    ``suspended``  ready (so count <= 3)                      ``eligible``
+    ``suspended``  otherwise (incl. count 4..6)               ``suspended``
+    =============  =========================================  ============
+
+    ``eligible -> enabled`` is never returned: it is manual only (the
+    admin endpoint, ADR-013 §8 step 6). Rows marked (*) are readings of cases the
+    ADR does not state, chosen as the safer option:
+
+    - ``eligible`` whose entry conditions lapse goes back to ``off``, so an
+      admin cannot enable an input that no longer meets the gate.
+      ``off``/``eligible`` write no alerts, so this cannot flap alerts.
+    - ``enabled`` with an unknown ``calibration_window_end`` or fewer than
+      ``min_oos_weeks`` of OOS data (only possible after a recalibration
+      moved the boundary) is suspended: the OOS evidence the enable rested
+      on was about the old ``k``/``h``.
+    - ``suspended -> eligible`` needs every ``off -> eligible`` condition,
+      not only the count, so an input suspended for leaving ``armed`` does
+      not become eligible while still unarmed.
+    - The global flag off forces ``off`` from every state, so turning the
+      flag back on never silently resumes alerts; re-enabling stays manual.
+
+    Args:
+        episodes: Stored episodes of this input (see
+            :func:`count_oos_false_alarms`).
+        labels: Operator labels keyed on the natural key.
+        current_state: The persisted ``alert_state``.
+        input_status: The input's calibration status (``armed``/``shadow``/
+            ``derived``, or the backend's ``uncalibrated``).
+        calibration_window_end: Immutable OOS boundary, or ``None``.
+        as_of: The newest scored hour.
+        min_shift: The input's ``min_shift`` in native units.
+        alerts_enabled: ``DRIFT_WATCH_ALERTS_ENABLED``, passed explicitly so
+            this function reads no global state.
+        min_oos_weeks: OOS weeks needed for eligibility.
+        rate_window_weeks: Trailing count window.
+        enable_max_count: Count at or below which an input is eligible.
+        suspend_min_count: Count at or above which ``enabled`` suspends.
+        min_offset_mult: §5 multiplier.
+
+    Returns:
+        ``AlertGateDecision(count, next_state, reason)``. ``reason`` is a
+        short human-readable sentence to store with the transition.
+
+    Raises:
+        ValueError: On invalid inputs (see :func:`count_oos_false_alarms`),
+            or if ``enable_max_count >= suspend_min_count`` (no hysteresis).
+    """
+    if enable_max_count >= suspend_min_count:
+        raise ValueError(
+            f"enable_max_count ({enable_max_count}) must be < "
+            f"suspend_min_count ({suspend_min_count})"
+        )
+    state = AlertState(current_state)
+    counts = count_oos_false_alarms(
+        episodes, labels,
+        calibration_window_end=calibration_window_end,
+        as_of=as_of,
+        min_shift=min_shift,
+        rate_window_weeks=rate_window_weeks,
+        min_offset_mult=min_offset_mult,
+    )
+    count = counts.count
+
+    if not alerts_enabled:
+        return AlertGateDecision(
+            count, AlertState.OFF, "drift-watch alerts are disabled globally",
+        )
+
+    armed = input_status == InputStatus.ARMED.value
+    oos_weeks: Optional[float] = None
+    if calibration_window_end is not None:
+        span = _to_utc(as_of) - _to_utc(calibration_window_end)
+        oos_weeks = max(span.total_seconds() / _WEEK_SECONDS, 0.0)
+    oos_ok = oos_weeks is not None and oos_weeks >= min_oos_weeks
+
+    # Why the input is not ready, in priority order (first failure wins).
+    not_ready: Optional[str] = None
+    if not armed:
+        not_ready = f"input status is {input_status!r}, not 'armed'"
+    elif oos_weeks is None:
+        not_ready = "calibration window end unknown; recalibration needed"
+    elif not oos_ok:
+        not_ready = (
+            f"{oos_weeks:.1f} weeks of out-of-sample data < {min_oos_weeks} required"
+        )
+    elif count > enable_max_count:
+        not_ready = (
+            f"out-of-sample count {count} in trailing {rate_window_weeks} weeks "
+            f"> {enable_max_count}"
+        )
+    ready_reason = (
+        f"armed, {oos_weeks:.1f} weeks out-of-sample, count {count} "
+        f"<= {enable_max_count} in trailing {rate_window_weeks} weeks"
+        if not_ready is None else ""
+    )
+
+    if state is AlertState.OFF:
+        if not_ready is None:
+            return AlertGateDecision(count, AlertState.ELIGIBLE, ready_reason)
+        return AlertGateDecision(count, AlertState.OFF, not_ready)
+
+    if state is AlertState.ELIGIBLE:
+        if not_ready is None:
+            return AlertGateDecision(count, AlertState.ELIGIBLE, ready_reason)
+        return AlertGateDecision(count, AlertState.OFF, not_ready)
+
+    if state is AlertState.ENABLED:
+        if not armed:
+            return AlertGateDecision(
+                count, AlertState.SUSPENDED,
+                f"input status is {input_status!r}, not 'armed'",
+            )
+        if count >= suspend_min_count:
+            return AlertGateDecision(
+                count, AlertState.SUSPENDED,
+                f"out-of-sample count {count} in trailing {rate_window_weeks} "
+                f"weeks >= {suspend_min_count}",
+            )
+        if not oos_ok:
+            return AlertGateDecision(
+                count, AlertState.SUSPENDED,
+                not_ready or "out-of-sample evidence lost",
+            )
+        return AlertGateDecision(
+            count, AlertState.ENABLED,
+            f"count {count} < {suspend_min_count} in trailing "
+            f"{rate_window_weeks} weeks",
+        )
+
+    # SUSPENDED
+    if not_ready is None:
+        return AlertGateDecision(count, AlertState.ELIGIBLE, ready_reason)
+    return AlertGateDecision(count, AlertState.SUSPENDED, not_ready)
+
