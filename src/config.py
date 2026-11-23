@@ -1335,6 +1335,42 @@ UPLOAD_SPIKE_CONFIRMED_TUNING_C: float = float(
 UPLOAD_SPIKE_CONFIRMED_FLOOR: Dict[str, float] = {
     "temperature": float(os.environ.get("UPLOAD_SPIKE_CONFIRMED_FLOOR_TEMP", "0.5")),
 }
+# Humidity and CO2 are NOT keys above, so the upload path does not score
+# them at all (_upload_mad_settings skips a sensor with no key). Plan item
+# B2 measured both on 2026-11-23. Neither met the bar, so neither is added.
+#
+# Humidity. Production upload MAD (horizon 3) on the July fixture and the
+# tenant year. Clean hits = humidity spike_mad hits on the uninjected files;
+# today both are 0. Every (c, floor) in c {4,5,6,8} x floor {0.5..4.0} %RH
+# adds tenant-year hits. The fewest is 1 (c=6/4.0, c=8/3.0, c=8/4.0, which
+# are thresholds of 24-32 %RH). Selected rows (c=5 is the only c that a
+# config key can use, because the upload c is shared by all sensors):
+#
+#   c / floor   clean July / year   recall +10 / +15 / +20 %RH, 1 sample
+#                                   tenant quiet (60)    July quiet (8)
+#   5 / 1.5        2 / 48           58 / 60 / 60         8 / 8 / 8
+#   5 / 2.0        0 / 17           35 / 60 / 60         6 / 8 / 8
+#   5 / 2.5        0 /  5            5 / 58 / 60         0 / 8 / 8
+#   5 / 3.0        0 /  3            0 / 35 / 60         0 / 6 / 8
+#   5 / 3.6        0 /  2            0 /  2 / 57         0 / 0 / 8
+#   5 / 4.0        0 /  2            0 /  0 / 35         0 / 0 / 6
+#
+# +5 %RH is never caught at a floor that is clean on July. 2- and 3-sample
+# holds move these counts by at most 6. On non-quiet tenant sites (60,
+# no step filter) the best +20 recall is 52/60. The remaining tenant hits
+# are 2026-05-19 21:00 (a -18 %RH dip) and 2026-11-24 14:10/14:15 (+30 %RH
+# over three samples, then a step). They have no label, so they count as
+# clean hits. Full tables: the B2 measurement commit message.
+#
+# CO2. No fixture and no tenant file has a CO2 column (the tenant CO2 is
+# imputed at a constant 400 ppm, which never flags). The only generator is
+# the live mock (MockScadaSource co2: diurnal dip + Gaussian noise, sd 5
+# ppm). On that trace every floor from 5 to 30 ppm (c=5 and c=8) gives 0
+# clean hits over a synthetic year, so the trace cannot choose a floor;
+# recall only follows c*floor. Not validated on real data, so no key and
+# no flag. Also, csv_adapter fills NaN in a PRESENT co2 column with 400 ppm:
+# one missing sample at 800 ppm then reads as a reverting -400 ppm spike.
+# A CO2 key needs that fill kept out of the MAD path first.
 # Pipeline enrichment votes on sample t-d, confirmed by the d samples after
 # it, with the pairs below; a spike alert therefore arrives d*5 minutes after
 # the sample (d=1: 5 minutes). 0 restores the old behaviour: an unconfirmed
