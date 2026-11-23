@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -476,7 +477,7 @@ def _to_float_or_nan(val: Any) -> float:
         return float("nan")
     try:
         f = float(val)
-        return f if (f == f) else float("nan")  # NaN check
+        return f if math.isfinite(f) else float("nan")  # exclude ±inf and NaN
     except (TypeError, ValueError):
         return float("nan")
 

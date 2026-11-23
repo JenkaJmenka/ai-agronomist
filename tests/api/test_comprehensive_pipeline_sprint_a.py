@@ -948,7 +948,7 @@ class TestLoadTrackersDBException:
         mock_db.execute.side_effect = RuntimeError("DB connection lost")
 
         with caplog.at_level(logging.WARNING):
-            ewma, pot = await pipeline._load_trackers("db_ex_tenant", mock_db)
+            ewma, pot = await pipeline._load_trackers("db_ex_tenant", "default", mock_db)
 
         assert isinstance(ewma, EWMATracker)
         assert isinstance(pot, POTThresholdFitter)
@@ -963,7 +963,7 @@ class TestLoadTrackersDBException:
         mock_db = AsyncMock(spec=AsyncSession)
         mock_db.execute.side_effect = RuntimeError("DB error")
 
-        await pipeline._load_trackers("fallback_cached", mock_db)
+        await pipeline._load_trackers("fallback_cached", "default", mock_db)
 
         assert "fallback_cached" in pipeline._tracker_cache
 
@@ -975,7 +975,7 @@ class TestLoadTrackersDBException:
         pipeline._tracker_cache["cached_tenant"] = (ewma, pot)
 
         mock_db = AsyncMock(spec=AsyncSession)
-        result = await pipeline._load_trackers("cached_tenant", mock_db)
+        result = await pipeline._load_trackers("cached_tenant", "default", mock_db)
 
         assert result == (ewma, pot)
         mock_db.execute.assert_not_called()
@@ -1003,7 +1003,7 @@ class TestLoadTrackersDBException:
 
         pipeline._tracker_cache.clear()
         loaded_ewma, loaded_pot = await pipeline._load_trackers(
-            "db_row_tenant", db_session
+            "db_row_tenant", "default", db_session
         )
 
         assert isinstance(loaded_ewma, EWMATracker)
@@ -1037,7 +1037,7 @@ class TestSaveTrackersDBException:
         mock_db.rollback = AsyncMock()
 
         with caplog.at_level(logging.WARNING):
-            await pipeline._save_trackers("save_fail_tenant", ewma, pot, mock_db)
+            await pipeline._save_trackers("save_fail_tenant", "default", ewma, pot, mock_db)
 
         warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("EWMA/POT DB save failed" in msg for msg in warning_msgs)
@@ -1054,7 +1054,7 @@ class TestSaveTrackersDBException:
         mock_db.execute.side_effect = RuntimeError("DB error")
         mock_db.rollback = AsyncMock()
 
-        await pipeline._save_trackers("cache_on_fail", ewma, pot, mock_db)
+        await pipeline._save_trackers("cache_on_fail", "default", ewma, pot, mock_db)
 
         assert "cache_on_fail" in pipeline._tracker_cache
         assert pipeline._tracker_cache["cache_on_fail"] == (ewma, pot)
@@ -1069,7 +1069,7 @@ class TestSaveTrackersDBException:
             ewma.update(0.3)
         pot = POTThresholdFitter()
 
-        await pipeline._save_trackers("save_ok_tenant", ewma, pot, db_session)
+        await pipeline._save_trackers("save_ok_tenant", "default", ewma, pot, db_session)
 
         result = await db_session.execute(
             select(LearningState).where(LearningState.customer_id == "save_ok_tenant")
