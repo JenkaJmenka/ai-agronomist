@@ -1484,6 +1484,28 @@ DIURNAL_PROFILE_HISTORY_DAYS: int = int(
 DIURNAL_PROFILE_MIN_ROWS: int = int(
     os.environ.get("DIURNAL_PROFILE_MIN_ROWS", "288")
 )
+# Pipeline-side maturity gate: seven full days (2016 = 7 * 288 at 5-min
+# cadence) are needed before the diurnal vote is reliable.  The profile
+# builder uses a lower gate (DIURNAL_PROFILE_MIN_ROWS) so profiles are
+# available for persistence and inspection, but the pipeline will not
+# cast a diurnal vote until this higher bar is met.  With fewer than
+# seven days per hour bin, the per-bin std underestimates the true
+# inter-day spread and clean readings produce z > 2.5 false alarms.
+DIURNAL_VOTE_MIN_ROWS: int = int(
+    os.environ.get("DIURNAL_VOTE_MIN_ROWS", "2016")
+)
+
+# Per-sensor std floor applied before computing the diurnal Z-score. Even with
+# seven or more days, some hour bins may have artificially tight distributions
+# (e.g. temperature-controlled greenhouses). The floor prevents a one-degree
+# natural shift from producing a z > 2.5 alert.  Values reflect the minimum
+# realistic day-to-day variation for each channel in a production greenhouse.
+DIURNAL_STD_FLOOR: Dict[str, float] = {
+    "temperature": 1.5,   # C  - inter-day weather variation
+    "humidity": 4.0,      # %  - inter-day weather variation
+    "co2": 10.0,          # ppm - ventilation pattern variation
+    "light": 50.0,        # W/m2 - cloud cover variation
+}
 
 # Hour-of-day temperature residual (unwired). A multi-day level bias is
 # invisible to a rolling z-score. Each sample is compared to the median of
