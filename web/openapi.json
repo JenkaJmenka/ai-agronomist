@@ -7336,6 +7336,82 @@
           }
         }
       }
+    },
+    "/api/drift-watch/feedback": {
+      "post": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "Post Drift Watch Feedback",
+        "description": "Label a drift episode ``confirmed_drift`` or ``false_alarm`` (upsert).\n\nThe episode is addressed by its natural key (ADR-013 \u00a74), not\n``episode_id``, so the label survives a backfill. 404 when no such episode\nexists in the caller's tenant.",
+        "operationId": "post_drift_watch_feedback_api_drift_watch_feedback_post",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriftWatchFeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftWatchFeedbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8865,6 +8941,50 @@
           "armed": {
             "type": "boolean",
             "title": "Armed"
+          },
+          "offset_robust": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset Robust"
+          },
+          "suppressed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppressed By"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "alert_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Message"
           }
         },
         "type": "object",
@@ -8881,6 +9001,149 @@
         ],
         "title": "DriftWatchEpisodeResponse",
         "description": "Public representation of one drift episode."
+      },
+      "DriftWatchFeedbackRequest": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Tenant Id"
+          },
+          "greenhouse_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Greenhouse Id"
+          },
+          "input_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Input Id"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "+",
+              "-"
+            ],
+            "title": "Direction"
+          },
+          "first_detected_ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Detected Ts"
+          },
+          "label": {
+            "type": "string",
+            "enum": [
+              "confirmed_drift",
+              "false_alarm"
+            ],
+            "title": "Label"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "greenhouse_id",
+          "input_id",
+          "direction",
+          "first_detected_ts",
+          "label"
+        ],
+        "title": "DriftWatchFeedbackRequest",
+        "description": "Operator label on a drift episode, addressed by its natural key."
+      },
+      "DriftWatchFeedbackResponse": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "title": "Tenant Id"
+          },
+          "greenhouse_id": {
+            "type": "string",
+            "title": "Greenhouse Id"
+          },
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "direction": {
+            "type": "string",
+            "title": "Direction"
+          },
+          "first_detected_ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Detected Ts"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "greenhouse_id",
+          "input_id",
+          "direction",
+          "first_detected_ts",
+          "label",
+          "created_at"
+        ],
+        "title": "DriftWatchFeedbackResponse",
+        "description": "Stored label."
       },
       "DriftWatchInputResponse": {
         "properties": {
@@ -8942,6 +9205,53 @@
               }
             ],
             "title": "Detection Rate"
+          },
+          "greenhouse_id": {
+            "type": "string",
+            "title": "Greenhouse Id",
+            "default": "default"
+          },
+          "alert_state": {
+            "type": "string",
+            "title": "Alert State",
+            "default": "off"
+          },
+          "alert_state_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert State Reason"
+          },
+          "oos_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oos Count"
+          },
+          "raw_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Count"
+          },
+          "budget": {
+            "type": "integer",
+            "title": "Budget"
           }
         },
         "type": "object",
@@ -8951,7 +9261,8 @@
           "target_channel",
           "status",
           "status_reason",
-          "updated_at"
+          "updated_at",
+          "budget"
         ],
         "title": "DriftWatchInputResponse",
         "description": "Public representation of one drift-watch input (monitor spec)."

@@ -1859,6 +1859,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drift-watch/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Drift Watch Feedback
+         * @description Label a drift episode ``confirmed_drift`` or ``false_alarm`` (upsert).
+         *
+         *     The episode is addressed by its natural key (ADR-013 §4), not
+         *     ``episode_id``, so the label survives a backfill. 404 when no such episode
+         *     exists in the caller's tenant.
+         */
+        post: operations["post_drift_watch_feedback_api_drift_watch_feedback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2576,6 +2600,75 @@ export interface components {
             ongoing: boolean;
             /** Armed */
             armed: boolean;
+            /** Offset Robust */
+            offset_robust?: number | null;
+            /** Suppressed By */
+            suppressed_by?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Alert Message */
+            alert_message?: string | null;
+        };
+        /**
+         * DriftWatchFeedbackRequest
+         * @description Operator label on a drift episode, addressed by its natural key.
+         */
+        DriftWatchFeedbackRequest: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id: string;
+            /** Input Id */
+            input_id: string;
+            /**
+             * Direction
+             * @enum {string}
+             */
+            direction: "+" | "-";
+            /**
+             * First Detected Ts
+             * Format: date-time
+             */
+            first_detected_ts: string;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "confirmed_drift" | "false_alarm";
+            /** Note */
+            note?: string | null;
+            /** Created By */
+            created_by?: string | null;
+        };
+        /**
+         * DriftWatchFeedbackResponse
+         * @description Stored label.
+         */
+        DriftWatchFeedbackResponse: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id: string;
+            /** Input Id */
+            input_id: string;
+            /** Direction */
+            direction: string;
+            /**
+             * First Detected Ts
+             * Format: date-time
+             */
+            first_detected_ts: string;
+            /** Label */
+            label: string;
+            /** Note */
+            note?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
         };
         /**
          * DriftWatchInputResponse
@@ -2603,6 +2696,24 @@ export interface components {
             false_alarm_rate?: number | null;
             /** Detection Rate */
             detection_rate?: number | null;
+            /**
+             * Greenhouse Id
+             * @default default
+             */
+            greenhouse_id: string;
+            /**
+             * Alert State
+             * @default off
+             */
+            alert_state: string;
+            /** Alert State Reason */
+            alert_state_reason?: string | null;
+            /** Oos Count */
+            oos_count?: number | null;
+            /** Raw Count */
+            raw_count?: number | null;
+            /** Budget */
+            budget: number;
         };
         /**
          * FeedbackMarkRequest
@@ -7158,6 +7269,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DriftWatchEpisodeResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_drift_watch_feedback_api_drift_watch_feedback_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DriftWatchFeedbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchFeedbackResponse"];
                 };
             };
             /** @description Validation Error */

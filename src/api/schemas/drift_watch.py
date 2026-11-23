@@ -9,9 +9,9 @@ calibration/state JSON blobs to avoid leaking internal model state.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DriftWatchInputResponse(BaseModel):
@@ -62,6 +62,28 @@ class DriftWatchInputResponse(BaseModel):
     Minimum self-test detection rate across all injected fault scenarios.
     ``None`` when not yet calibrated.
     """
+
+    greenhouse_id: str = "default"
+    """Greenhouse the input belongs to."""
+
+    alert_state: str = "off"
+    """ADR-013 alert state: ``off``, ``eligible``, ``enabled`` or ``suspended``."""
+
+    alert_state_reason: Optional[str] = None
+    """Why the input is in ``alert_state`` (set on each transition)."""
+
+    oos_count: Optional[int] = None
+    """
+    Out-of-sample false-alarm count in the trailing window (alert-eligible
+    episodes without a ``confirmed_drift`` label). ``None`` when not scored.
+    """
+
+    raw_count: Optional[int] = None
+    """All out-of-sample episodes in the trailing window; diagnosis only."""
+
+    budget: int
+    """Count at or below which an input may become eligible
+    (``DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT``)."""
 
 
 class DriftWatchEpisodeResponse(BaseModel):
@@ -116,3 +138,44 @@ class DriftWatchEpisodeResponse(BaseModel):
     distinguishing operationally significant episodes from shadow/informational
     ones.
     """
+
+    offset_robust: Optional[float] = None
+    """ADR-013 robust offset (signed, native units); ``None`` for old rows."""
+
+    suppressed_by: Optional[str] = None
+    """Detector that withheld the alert (e.g. ``stuck_fault``), if any."""
+
+    label: Optional[str] = None
+    """Operator label: ``confirmed_drift`` or ``false_alarm``; ``None`` if none."""
+
+    alert_message: Optional[str] = None
+    """ADR-013 §4 operator wording. Paired probes never name one probe."""
+
+
+class DriftWatchFeedbackRequest(BaseModel):
+    """Operator label on a drift episode, addressed by its natural key."""
+
+    tenant_id: str = Field(min_length=1)
+    greenhouse_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    direction: Literal["+", "-"]
+    first_detected_ts: datetime
+    label: Literal["confirmed_drift", "false_alarm"]
+    note: Optional[str] = Field(default=None, max_length=2000)
+    created_by: Optional[str] = Field(default=None, max_length=255)
+
+
+class DriftWatchFeedbackResponse(BaseModel):
+    """Stored label."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tenant_id: str
+    greenhouse_id: str
+    input_id: str
+    direction: str
+    first_detected_ts: datetime
+    label: str
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime

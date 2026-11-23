@@ -19,15 +19,29 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import enforce_tenant_access, require_api_key
-from src.config import DRIFT_WATCH_MIN_HISTORY_WEEKS, DRIFT_WATCH_QUIET_HOURS
-from src.db.models import DriftWatchEpisode, DriftWatchInput
+from src.api.services.drift_watch_alerts import (
+    build_drift_alert_message,
+    oos_counts_for_input,
+)
+from src.config import (
+    DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT,
+    DRIFT_WATCH_MIN_HISTORY_WEEKS,
+    DRIFT_WATCH_QUIET_HOURS,
+)
+from src.db.models import DriftWatchEpisode, DriftWatchFeedback, DriftWatchInput
+from src.models.drift_watch import DriftInputSpec, InputKind
 from src.db.session import get_db
-from src.api.schemas.drift_watch import DriftWatchEpisodeResponse, DriftWatchInputResponse
+from src.api.schemas.drift_watch import (
+    DriftWatchEpisodeResponse,
+    DriftWatchFeedbackRequest,
+    DriftWatchFeedbackResponse,
+    DriftWatchInputResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +59,11 @@ def _aware(dt: datetime) -> datetime:
     return dt
 
 
-def _input_to_response(row: DriftWatchInput) -> DriftWatchInputResponse:
+def _input_to_response(
+    row: DriftWatchInput,
+    oos_count: Optional[int] = None,
+    raw_count: Optional[int] = None,
+) -> DriftWatchInputResponse:
     """Build a ``DriftWatchInputResponse`` from an ORM row."""
     spec: dict = json.loads(row.spec_json)
     kind: str = spec.get("kind", "")
@@ -99,12 +117,20 @@ def _input_to_response(row: DriftWatchInput) -> DriftWatchInputResponse:
         updated_at=row.updated_at,
         false_alarm_rate=false_alarm_rate,
         detection_rate=detection_rate,
+        greenhouse_id=row.greenhouse_id,
+        alert_state=row.alert_state,
+        alert_state_reason=row.alert_state_reason,
+        oos_count=oos_count,
+        raw_count=raw_count,
+        budget=DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT,
     )
 
 
 def _episode_to_response(
     ep: DriftWatchEpisode,
     input_updated_at: datetime,
+    spec_json: Optional[str] = None,
+    label: Optional[str] = None,
 ) -> DriftWatchEpisodeResponse:
     """Build a ``DriftWatchEpisodeResponse`` from an ORM row.
 
@@ -119,6 +145,24 @@ def _episode_to_response(
     delta_hours = abs((upd_at - last_confirmed).total_seconds()) / 3600.0
     ongoing = delta_hours <= DRIFT_WATCH_QUIET_HOURS
 
+    alert_message: Optional[str] = None
+    if spec_json is not None and ep.offset_robust is not None:
+        try:
+            sd = json.loads(spec_json)
+            alert_message = build_drift_alert_message(
+                DriftInputSpec(
+                    input_id=sd["input_id"],
+                    kind=InputKind(sd["kind"]),
+                    target_channel=sd["target_channel"],
+                    channels=list(sd["channels"]),
+                    min_shift=float(sd["min_shift"]),
+                ),
+                ep.direction,
+                ep.offset_robust,
+            )
+        except (KeyError, ValueError, TypeError):
+            alert_message = None
+
     return DriftWatchEpisodeResponse(
         input_id=ep.input_id,
         episode_id=ep.episode_id,
@@ -132,6 +176,10 @@ def _episode_to_response(
         input_status_at_detection=ep.input_status_at_detection,
         ongoing=ongoing,
         armed=ep.input_status_at_detection == "armed",
+        offset_robust=ep.offset_robust,
+        suppressed_by=ep.suppressed_by,
+        label=label,
+        alert_message=alert_message,
     )
 
 
@@ -160,7 +208,11 @@ async def list_drift_watch_inputs(
 
     result = await db.execute(stmt)
     rows = result.scalars().all()
-    return [_input_to_response(row) for row in rows]
+    out: List[DriftWatchInputResponse] = []
+    for row in rows:
+        count, raw = await oos_counts_for_input(db, row)
+        out.append(_input_to_response(row, count, raw))
+    return out
 
 
 @router.get("/episodes", response_model=List[DriftWatchEpisodeResponse])
@@ -185,7 +237,7 @@ async def list_drift_watch_episodes(
     enforce_tenant_access(auth_tenant, tenant_id)
 
     stmt = (
-        select(DriftWatchEpisode, DriftWatchInput.updated_at)
+        select(DriftWatchEpisode, DriftWatchInput.updated_at, DriftWatchInput.spec_json)
         .join(
             DriftWatchInput,
             and_(
@@ -207,4 +259,84 @@ async def list_drift_watch_episodes(
 
     result = await db.execute(stmt)
     rows = result.all()
-    return [_episode_to_response(ep, input_updated_at) for ep, input_updated_at in rows]
+
+    fb_stmt = select(DriftWatchFeedback).where(DriftWatchFeedback.tenant_id == tenant_id)
+    if greenhouse_id is not None:
+        fb_stmt = fb_stmt.where(DriftWatchFeedback.greenhouse_id == greenhouse_id)
+    labels = {
+        (f.greenhouse_id, f.input_id, f.direction, _aware(f.first_detected_ts)): f.label
+        for f in (await db.execute(fb_stmt)).scalars().all()
+    }
+    return [
+        _episode_to_response(
+            ep,
+            input_updated_at,
+            spec_json,
+            labels.get(
+                (ep.greenhouse_id, ep.input_id, ep.direction, _aware(ep.first_detected_ts))
+            ),
+        )
+        for ep, input_updated_at, spec_json in rows
+    ]
+
+
+@router.post("/feedback", response_model=DriftWatchFeedbackResponse)
+async def post_drift_watch_feedback(
+    body: DriftWatchFeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+) -> DriftWatchFeedbackResponse:
+    """Label a drift episode ``confirmed_drift`` or ``false_alarm`` (upsert).
+
+    The episode is addressed by its natural key (ADR-013 §4), not
+    ``episode_id``, so the label survives a backfill. 404 when no such episode
+    exists in the caller's tenant.
+    """
+    enforce_tenant_access(auth_tenant, body.tenant_id)
+    first_ts = _aware(body.first_detected_ts).astimezone(timezone.utc)
+
+    ep = (
+        await db.execute(
+            select(DriftWatchEpisode).where(
+                DriftWatchEpisode.tenant_id == body.tenant_id,
+                DriftWatchEpisode.greenhouse_id == body.greenhouse_id,
+                DriftWatchEpisode.input_id == body.input_id,
+                DriftWatchEpisode.direction == body.direction,
+                DriftWatchEpisode.first_detected_ts == first_ts,
+            )
+        )
+    ).scalars().first()
+    if ep is None:
+        raise HTTPException(status_code=404, detail="Drift episode not found")
+
+    row = (
+        await db.execute(
+            select(DriftWatchFeedback).where(
+                DriftWatchFeedback.tenant_id == body.tenant_id,
+                DriftWatchFeedback.greenhouse_id == body.greenhouse_id,
+                DriftWatchFeedback.input_id == body.input_id,
+                DriftWatchFeedback.direction == body.direction,
+                DriftWatchFeedback.first_detected_ts == first_ts,
+            )
+        )
+    ).scalars().first()
+    if row is None:
+        row = DriftWatchFeedback(
+            tenant_id=body.tenant_id,
+            greenhouse_id=body.greenhouse_id,
+            input_id=body.input_id,
+            direction=body.direction,
+            first_detected_ts=first_ts,
+            label=body.label,
+            note=body.note,
+            created_by=body.created_by,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+    else:
+        row.label = body.label
+        row.note = body.note
+        row.created_by = body.created_by
+    await db.commit()
+    await db.refresh(row)
+    return DriftWatchFeedbackResponse.model_validate(row)

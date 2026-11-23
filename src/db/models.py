@@ -890,6 +890,63 @@ class AnomalyEpisodeRecord(Base):
         )
 
 
+class DriftWatchFeedback(Base):
+    """Operator label on a drift episode (ADR-013 §4).
+
+    Keyed on the episode's natural key, NOT ``episode_id`` or a foreign key to
+    ``drift_watch_episodes``: ``backfill_drift_watch`` deletes and recreates
+    episode rows, and a label must survive that. Nothing deletes this table.
+
+    Migration: 031_drift_alert_policy.py
+    """
+
+    __tablename__ = "drift_watch_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    greenhouse_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="default"
+    )
+    input_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    direction: Mapped[str] = mapped_column(String(4), nullable=False)
+    first_detected_ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # "confirmed_drift" | "false_alarm"
+    label: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "greenhouse_id",
+            "input_id",
+            "direction",
+            "first_detected_ts",
+            name="uq_drift_watch_feedback_natural_key",
+        ),
+        CheckConstraint(
+            "label IN ('confirmed_drift', 'false_alarm')",
+            name="ck_drift_watch_feedback_label",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DriftWatchFeedback(tenant_id={self.tenant_id!r},"
+            f" input_id={self.input_id!r}, direction={self.direction!r},"
+            f" first_detected_ts={self.first_detected_ts!r},"
+            f" label={self.label!r})>"
+        )
+
+
 class LiveScopeState(Base):
     """Operator-chosen desired state for one live (tenant, greenhouse) scope.
 
@@ -992,6 +1049,17 @@ class DriftWatchInput(Base):
         default=func.now(),
         server_default=func.now(),
     )
+    # ADR-013 §3: "off" | "eligible" | "enabled" | "suspended". Separate from
+    # ``status`` (calibration meaning). Migration 031.
+    alert_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="off", server_default="off"
+    )
+    alert_state_reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    alert_state_changed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1047,6 +1115,13 @@ class DriftWatchEpisode(Base):
     # Estimated offset in native sensor units (from DriftEpisode.current_offset_native).
     offset_estimate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     peak_statistic: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # ADR-013 §5 robust offset (signed, native units). NULL for rows stored
+    # before migration 031.
+    offset_robust: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # ADR-013 §6: detector that withheld the alert (e.g. "stuck_fault").
+    suppressed_by: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
     # Status of the drift input (armed/shadow/derived) at first detection.
     input_status_at_detection: Mapped[str] = mapped_column(
         String(32), nullable=False
