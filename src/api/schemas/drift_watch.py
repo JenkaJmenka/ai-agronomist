@@ -179,3 +179,13 @@ class DriftWatchFeedbackResponse(BaseModel):
     note: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
+
+
+class DriftWatchAlertStateResponse(BaseModel):
+    """Result of an admin alert enable/disable."""
+
+    tenant_id: str
+    greenhouse_id: str
+    input_id: str
+    alert_state: str
+    alert_state_reason: Optional[str] = None

@@ -1883,6 +1883,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable Drift Watch Alerts
+         * @description Admin: enable alerts for one input (``eligible -> enabled``).
+         *
+         *     Needs the ``admin`` credential scope. 409 (with the reason) when alerts
+         *     are off globally or the input is not ``eligible``; 404 for an unknown input.
+         */
+        post: operations["enable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Drift Watch Alerts
+         * @description Admin: disable alerts for one input (any state -> ``off``).
+         *
+         *     Needs the ``admin`` credential scope. 404 for an unknown input.
+         */
+        post: operations["disable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2564,6 +2609,22 @@ export interface components {
              * @description Set while the detector lacks enough history
              */
             warning?: string | null;
+        };
+        /**
+         * DriftWatchAlertStateResponse
+         * @description Result of an admin alert enable/disable.
+         */
+        DriftWatchAlertStateResponse: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Greenhouse Id */
+            greenhouse_id: string;
+            /** Input Id */
+            input_id: string;
+            /** Alert State */
+            alert_state: string;
+            /** Alert State Reason */
+            alert_state_reason?: string | null;
         };
         /**
          * DriftWatchEpisodeResponse
@@ -7305,6 +7366,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DriftWatchFeedbackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_enable_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path: {
+                tenant_id: string;
+                greenhouse_id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchAlertStateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_drift_watch_alerts_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__alerts_disable_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path: {
+                tenant_id: string;
+                greenhouse_id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchAlertStateResponse"];
                 };
             };
             /** @description Validation Error */

@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         dest="scopes",
-        help="Optional scope string (repeatable).",
+        help="Optional scope string (repeatable). Use 'admin' for credentials "
+        "allowed to enable/disable drift-watch alerts.",
     )
     args = parser.parse_args(argv)
 

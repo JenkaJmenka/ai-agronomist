@@ -23,8 +23,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.auth import enforce_tenant_access, require_api_key
+from src.api.auth import (
+    ADMIN_SCOPE,
+    CallerIdentity,
+    enforce_tenant_access,
+    require_api_key,
+    require_scope,
+)
 from src.api.services.drift_watch_alerts import (
+    AlertEnableError,
+    set_alert_state_manually,
     build_drift_alert_message,
     oos_counts_for_input,
 )
@@ -41,6 +49,7 @@ from src.api.schemas.drift_watch import (
     DriftWatchFeedbackRequest,
     DriftWatchFeedbackResponse,
     DriftWatchInputResponse,
+    DriftWatchAlertStateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -340,3 +349,100 @@ async def post_drift_watch_feedback(
     await db.commit()
     await db.refresh(row)
     return DriftWatchFeedbackResponse.model_validate(row)
+
+
+async def _set_alert_state(
+    *,
+    enable: bool,
+    tenant_id: str,
+    greenhouse_id: str,
+    input_id: str,
+    db: AsyncSession,
+    auth_tenant: str | None,
+    caller: Optional[CallerIdentity],
+) -> DriftWatchAlertStateResponse:
+    """Shared body of the admin enable/disable endpoints."""
+    enforce_tenant_access(auth_tenant, tenant_id)
+    row = (
+        await db.execute(
+            select(DriftWatchInput).where(
+                DriftWatchInput.tenant_id == tenant_id,
+                DriftWatchInput.greenhouse_id == greenhouse_id,
+                DriftWatchInput.input_id == input_id,
+            )
+        )
+    ).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Drift-watch input not found")
+    previous = row.alert_state
+    try:
+        await set_alert_state_manually(db, row, enable=enable)
+    except AlertEnableError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "drift-watch alert %s: tenant=%s greenhouse=%s input=%s %s -> %s "
+        "by credential=%s (%s) at %s",
+        "enabled" if enable else "disabled",
+        tenant_id,
+        greenhouse_id,
+        input_id,
+        previous,
+        row.alert_state,
+        caller.key_id if caller else "auth-disabled",
+        caller.name if caller else "auth-disabled",
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return DriftWatchAlertStateResponse(
+        tenant_id=tenant_id,
+        greenhouse_id=greenhouse_id,
+        input_id=input_id,
+        alert_state=row.alert_state,
+        alert_state_reason=row.alert_state_reason,
+    )
+
+
+@router.post(
+    "/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/enable",
+    response_model=DriftWatchAlertStateResponse,
+)
+async def enable_drift_watch_alerts(
+    tenant_id: str,
+    greenhouse_id: str,
+    input_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+    caller: Optional[CallerIdentity] = Depends(require_scope(ADMIN_SCOPE)),
+) -> DriftWatchAlertStateResponse:
+    """Admin: enable alerts for one input (``eligible -> enabled``).
+
+    Needs the ``admin`` credential scope. 409 (with the reason) when alerts
+    are off globally or the input is not ``eligible``; 404 for an unknown input.
+    """
+    return await _set_alert_state(
+        enable=True, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        input_id=input_id, db=db, auth_tenant=auth_tenant, caller=caller,
+    )
+
+
+@router.post(
+    "/inputs/{tenant_id}/{greenhouse_id}/{input_id}/alerts/disable",
+    response_model=DriftWatchAlertStateResponse,
+)
+async def disable_drift_watch_alerts(
+    tenant_id: str,
+    greenhouse_id: str,
+    input_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+    caller: Optional[CallerIdentity] = Depends(require_scope(ADMIN_SCOPE)),
+) -> DriftWatchAlertStateResponse:
+    """Admin: disable alerts for one input (any state -> ``off``).
+
+    Needs the ``admin`` credential scope. 404 for an unknown input.
+    """
+    return await _set_alert_state(
+        enable=False, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        input_id=input_id, db=db, auth_tenant=auth_tenant, caller=caller,
+    )

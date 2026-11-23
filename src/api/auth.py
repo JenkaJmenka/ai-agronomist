@@ -25,11 +25,12 @@ ever receive an HTTP error, never a resolved tenant that happens to be
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import secrets
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from src.config import (
     AUTH_ENABLED,
@@ -51,8 +52,10 @@ def _hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
-def _resolve_credential(api_key: Optional[str]) -> Optional[ApiCredential]:
-    """Look up the credential matching a presented raw key, or None.
+def _resolve_credential_entry(
+    api_key: Optional[str],
+) -> Optional[tuple[str, ApiCredential]]:
+    """Look up ``(key_id, credential)`` matching a presented raw key, or None.
 
     Compares the presented key's hash against every stored hash in constant
     time (`secrets.compare_digest`) so a mismatch can't be timed to learn
@@ -61,10 +64,16 @@ def _resolve_credential(api_key: Optional[str]) -> Optional[ApiCredential]:
     if not api_key:
         return None
     presented_hash = _hash_key(api_key)
-    for credential in API_CREDENTIALS.values():
+    for key_id, credential in API_CREDENTIALS.items():
         if secrets.compare_digest(presented_hash, credential.key_hash):
-            return credential
+            return key_id, credential
     return None
+
+
+def _resolve_credential(api_key: Optional[str]) -> Optional[ApiCredential]:
+    """Look up the credential matching a presented raw key, or None."""
+    entry = _resolve_credential_entry(api_key)
+    return entry[1] if entry is not None else None
 
 
 def _tenant_for_integration(credential: ApiCredential) -> str:
@@ -155,6 +164,58 @@ def enforce_tenant_access(auth_tenant: Optional[str], requested_tenant: str) -> 
         )
 
 
+ADMIN_SCOPE = "admin"
+"""Credential scope that proves admin rights (e.g. drift-watch alert toggles)."""
+
+
+@dataclasses.dataclass(frozen=True)
+class CallerIdentity:
+    """Who made an authorised call; safe to log (never holds the key)."""
+
+    key_id: str
+    name: str
+
+
+def require_scope(
+    scope: str,
+) -> Callable[..., Awaitable[Optional[CallerIdentity]]]:
+    """Build a FastAPI dependency that requires *scope* on the caller's credential.
+
+    It depends on ``require_api_key`` (so 401/400/403 from authentication come
+    first, and the same resolved tenant is shared with the route), then reads
+    the matching credential's ``scopes``. A credential without *scope* gets
+    403. Routes that do not use this dependency are unaffected, and a
+    credential with no scopes keeps working on them.
+
+    Returns the caller's identity for audit logging, or ``None`` when
+    ``AUTH_ENABLED`` is False (the same dev/test no-op as
+    ``enforce_tenant_access``; production cannot run with auth disabled).
+    """
+
+    async def _dependency(
+        _auth_tenant: Optional[str] = Depends(require_api_key),
+        x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    ) -> Optional[CallerIdentity]:
+        if not AUTH_ENABLED:
+            return None
+        entry = _resolve_credential_entry(x_api_key)
+        if entry is None:
+            # require_api_key already rejected this; fail closed regardless.
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing API key",
+            )
+        key_id, credential = entry
+        if scope not in credential.scopes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required scope: {scope}",
+            )
+        return CallerIdentity(key_id=key_id, name=credential.name)
+
+    return _dependency
+
+
 def assert_auth_configured() -> None:
     """Refuse to start when running deployed with auth disabled.
 
@@ -191,7 +252,11 @@ def assert_auth_configured() -> None:
 
 
 def register_test_api_key(
-    tenant_id: str, api_key: str, *, name: str = "test-integration"
+    tenant_id: str,
+    api_key: str,
+    *,
+    name: str = "test-integration",
+    scopes: frozenset[str] = frozenset(),
 ) -> None:
     """Test helper: register a single-tenant ``integration`` credential.
 
@@ -205,11 +270,16 @@ def register_test_api_key(
         caller_type="integration",
         name=name,
         tenant_ids=frozenset({tenant_id}),
+        scopes=scopes,
     )
 
 
 def register_test_web_api_key(
-    api_key: str, *, tenant_ids: frozenset[str] | str = "*", name: str = "test-web"
+    api_key: str,
+    *,
+    tenant_ids: frozenset[str] | str = "*",
+    name: str = "test-web",
+    scopes: frozenset[str] = frozenset(),
 ) -> None:
     """Test helper: register a ``web`` credential (tenant via X-Tenant-Id)."""
     key_id = f"test-web:{api_key}"
@@ -218,6 +288,7 @@ def register_test_web_api_key(
         caller_type="web",
         name=name,
         tenant_ids=tenant_ids,
+        scopes=scopes,
     )
 
 
