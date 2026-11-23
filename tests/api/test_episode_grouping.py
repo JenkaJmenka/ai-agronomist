@@ -165,17 +165,45 @@ class TestFixtureAEpisodes:
 
         Task 3 acceptance 1.  The alerts that follow the final release are
         contiguous 5-minute samples; emitting one episode per alert row is
-        the defect this guards.  Measured on fixture A: 36 alert rows
-        collapse into 2 episodes (``measured_hd`` and
-        ``calculated_heating_temp``).
+        the defect this guards.  Measured on fixture A: 9 contiguous
+        ``measured_hd`` alert rows (09:10-09:50) collapse into 1 episode.
+
+        ``calculated_heating_temp`` is deliberately absent.  It is a
+        climate-computer setpoint, not a sensor, so it is excluded from
+        cold-run statistical scoring by ``COLD_RUN_STAT_EXCLUDE_SUBSTRINGS``
+        ("heating", orchestrator decision 2026-11-23).  Before that change
+        it contributed 27 more post-release rows and a second episode, all
+        knock-on effects of the stuck fault that ``stuck_fault`` already
+        reports.  The separate setpoint assertion at the end catches a
+        regression that re-includes setpoints.
         """
-        assert len(self.post_release_episodes) == 2, (
-            f"Expected 2 post-release episodes, got "
-            f"{[(e.channel, e.start_ts) for e in self.post_release_episodes]}"
+        episodes = [(e.channel, e.start_ts) for e in self.post_release_episodes]
+        assert len(self.post_release_episodes) == 1, (
+            f"Expected 1 post-release episode, got {episodes}"
+        )
+        assert self.post_release_episodes[0].channel == "measured_hd", (
+            f"Expected the post-release episode on measured_hd, got {episodes}"
         )
         total_samples = sum(e.sample_count for e in self.post_release_episodes)
-        assert total_samples == 36, (
-            f"Expected 36 grouped alert rows, got {total_samples}"
+        assert total_samples == 9, (
+            f"Expected 9 grouped alert rows, got {total_samples}"
+        )
+        # The property itself: rows are grouped, not one episode per row.
+        assert total_samples > len(self.post_release_episodes), (
+            f"{total_samples} alert rows produced "
+            f"{len(self.post_release_episodes)} episodes -- not grouped"
+        )
+        # Setpoints stay excluded.  Checked over every statistical episode,
+        # not only post-release ones, so a regression that re-includes
+        # setpoints fails here in whichever window it shows up.
+        setpoint_episodes = [
+            (e.channel, e.start_ts)
+            for e in self.statistical_episodes
+            if e.channel == "calculated_heating_temp"
+        ]
+        assert setpoint_episodes == [], (
+            f"Setpoint calculated_heating_temp produced statistical "
+            f"episodes: {setpoint_episodes}"
         )
 
     def test_episode_has_start_end_duration(self):
