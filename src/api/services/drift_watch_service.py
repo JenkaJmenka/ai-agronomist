@@ -57,6 +57,7 @@ from src.config import (
     PLANT_TEMP_COLUMN_ALIASES,
     SETPOINT_COLUMN_ALIASES,
 )
+from src.api.services.drift_watch_alerts import refresh_alert_state
 from src.db.models import DriftWatchEpisode, DriftWatchInput, RawReading
 from src.db.upsert import dialect_insert
 from src.models.drift_watch import (
@@ -393,7 +394,22 @@ async def backfill_drift_watch(
             "elapsed_seconds": time.monotonic() - t0,
         }
 
+    # -- 4a. Remember each input's alert state (the rows are recreated) -------
+    prior_alert: dict[str, tuple[str, Optional[str], Optional[datetime]]] = {
+        r.input_id: (r.alert_state, r.alert_state_reason, r.alert_state_changed_at)
+        for r in (
+            await db.execute(
+                select(DriftWatchInput).where(
+                    DriftWatchInput.tenant_id == tenant_id,
+                    DriftWatchInput.greenhouse_id == greenhouse_id,
+                )
+            )
+        ).scalars().all()
+    }
+
     # -- 4. Reset: delete existing state for this scope -----------------------
+    # drift_watch_feedback is deliberately NOT deleted: labels are keyed on the
+    # episode natural key (ADR-013 §4) so they survive this reset.
     # Deleting both tables and committing before the walk ensures that a second
     # run starts from a clean state and produces identical results.
     await db.execute(
@@ -423,9 +439,44 @@ async def backfill_drift_watch(
             tenant_id,
             greenhouse_id,
         )
-        await _run_shadow(db, tenant_id, greenhouse_id, chunk_start, chunk_end)
+        # Backfill writes no alerts and evaluates the gate once, below.
+        await _run_shadow(
+            db, tenant_id, greenhouse_id, chunk_start, chunk_end,
+            refresh_gate=False,
+        )
         chunks_processed += 1
         chunk_start = chunk_end
+
+    # -- 5b. Recompute alert_state once, from the prior state -----------------
+    # No alerts are written here (write_alerts=False); the next upload writes
+    # any that qualify.
+    for row in (
+        await db.execute(
+            select(DriftWatchInput).where(
+                DriftWatchInput.tenant_id == tenant_id,
+                DriftWatchInput.greenhouse_id == greenhouse_id,
+            )
+        )
+    ).scalars().all():
+        prior = prior_alert.get(row.input_id)
+        if prior is not None:
+            row.alert_state, row.alert_state_reason, row.alert_state_changed_at = prior
+        if row.state_json is None:
+            continue
+        spec_d = json.loads(row.spec_json)
+        spec = DriftInputSpec(
+            input_id=spec_d["input_id"],
+            kind=InputKind(spec_d["kind"]),
+            target_channel=spec_d["target_channel"],
+            channels=list(spec_d["channels"]),
+            min_shift=float(spec_d["min_shift"]),
+        )
+        last_ts = json.loads(row.state_json).get("last_processed_ts")
+        await refresh_alert_state(
+            db, tenant_id, greenhouse_id, spec, row,
+            as_of_ts=last_ts, write_alerts=False,
+        )
+    await db.commit()
 
     # -- 6. Collect final state -----------------------------------------------
     inputs_result = await db.execute(
@@ -585,6 +636,7 @@ async def _upsert_episode(
         "onset_estimate_ts": _ts(ep.onset_estimate) if ep.onset_estimate is not None else None,
         "offset_estimate": float(ep.current_offset_native) if ep.current_offset_native is not None else None,
         "peak_statistic": float(ep.peak_statistic) if ep.peak_statistic is not None else None,
+        "offset_robust": float(ep.offset_robust) if ep.offset_robust is not None else None,
         "input_status_at_detection": input_status,
         "created_at": now,
         "updated_at": now,
@@ -596,6 +648,7 @@ async def _upsert_episode(
             "last_confirmed_ts": values["last_confirmed_ts"],
             "offset_estimate": values["offset_estimate"],
             "peak_statistic": values["peak_statistic"],
+            "offset_robust": values["offset_robust"],
             "updated_at": now,
         },
     )
@@ -611,8 +664,13 @@ async def _score_new_data(
     state: DriftInputState,
     upload_end: datetime,
     need_cols: list[str],
+    refresh_gate: bool = True,
 ) -> None:
     """Load update frame and run CUSUM scoring; persist state and episodes.
+
+    With ``refresh_gate`` the ADR-013 alert gate is re-evaluated afterwards
+    (and, for an ``enabled`` input with the global flag on, alerts written).
+    ``backfill_drift_watch`` passes False and evaluates once at the end.
 
     Called both immediately after calibration (scoring the current upload's
     data for the first time) and on the update path for subsequent uploads.
@@ -634,6 +692,13 @@ async def _score_new_data(
 
     for ep in episodes:
         await _upsert_episode(db, tenant_id, greenhouse_id, ep, input_row.status)
+    await db.flush()
+
+    if refresh_gate:
+        await refresh_alert_state(
+            db, tenant_id, greenhouse_id, spec, input_row,
+            as_of_ts=state.last_processed_ts,
+        )
 
 
 async def _run_shadow(
@@ -642,6 +707,7 @@ async def _run_shadow(
     greenhouse_id: str,
     upload_start: datetime,
     upload_end: datetime,
+    refresh_gate: bool = True,
 ) -> None:
     """Inner (non-guarded) implementation of :func:`run_drift_watch_shadow`."""
     upload_start = _ensure_utc(upload_start)
@@ -707,7 +773,7 @@ async def _run_shadow(
             # episodes from its own data.
             await _score_new_data(
                 db, tenant_id, greenhouse_id, spec, input_row, state,
-                upload_end, need_cols,
+                upload_end, need_cols, refresh_gate,
             )
 
         else:
@@ -715,7 +781,7 @@ async def _run_shadow(
             state = DriftInputState.from_dict(json.loads(input_row.state_json))  # type: ignore[arg-type]
             await _score_new_data(
                 db, tenant_id, greenhouse_id, spec, input_row, state,
-                upload_end, need_cols,
+                upload_end, need_cols, refresh_gate,
             )
 
     # Commit all flushed rows.  In production the calling upload path's
