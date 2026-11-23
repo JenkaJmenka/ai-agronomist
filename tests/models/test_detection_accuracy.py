@@ -170,13 +170,18 @@ def _as_utc(value) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _load_july() -> pd.DataFrame:
-    adapter = CSVAdapter({"filepath": str(_JULY)})
+def _load_csv(path: Path) -> pd.DataFrame:
+    """Read and normalize *path* through ``CSVAdapter``, as the July gate does."""
+    adapter = CSVAdapter({"filepath": str(path)})
     adapter.connect()
     try:
         return adapter.normalize(adapter.read())
     finally:
         adapter.disconnect()
+
+
+def _load_july() -> pd.DataFrame:
+    return _load_csv(_JULY)
 
 
 def _plausible_co2(n_rows: int) -> np.ndarray:
@@ -293,8 +298,18 @@ async def _seed_calibration_rows(
     return len(readings)
 
 
-async def _measure_pipeline(seeded: bool = False) -> dict:
-    frame = _load_july()
+async def _measure_pipeline(
+    seeded: bool = False,
+    frame: pd.DataFrame | None = None,
+) -> dict:
+    """Score the composite on *frame*, or on the July fixture when omitted.
+
+    ``frame`` is an adapter-normalized climate week. The env-gated tenant
+    module (``test_detection_accuracy_tenant.py``) passes its own weeks; the
+    July gate passes nothing and is unchanged.
+    """
+    if frame is None:
+        frame = _load_july()
     co2 = frame["co2"].to_numpy(dtype=float)
     co2_span = float(np.ptp(co2))
     if co2_span <= 1e-6:
