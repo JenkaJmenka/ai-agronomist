@@ -25,8 +25,8 @@ asserted, and only against the upload recall bar already used below.
 
 ``ACCURACY_SEEDED=1`` (marker ``accuracy_seeded``) repeats the same
 composite after inserting the July calibration rows as ``SensorReading``.
-That path is skipped unless the env var is set. It does not replace the
-empty-database gate and it is not compared to ``_COMPOSITE_BAR``.
+That path is skipped unless the env var is set. It asserts composite >=
+``_COMPOSITE_BAR``, the same bar as the empty-database gate.
 """
 
 from __future__ import annotations
@@ -468,7 +468,7 @@ async def _measure_pipeline(seeded: bool = False) -> dict:
         "mean_detection_recall": mean_recall,
         "composite": composite,
         "composite_bar": _COMPOSITE_BAR,
-        "composite_bar_applied": not seeded,
+        "composite_bar_applied": True,
     }
     if seeded:
         report["seed"] = seed_meta
@@ -610,14 +610,14 @@ def test_real_window_recall_is_recorded(pipeline_gate: dict) -> None:
 def test_seeded_database_records_composite() -> None:
     """Same composite after July calibration rows are in the database.
 
-    Clean-flag and composite are recorded beside the empty-database gate.
-    They are not compared to ``_COMPOSITE_BAR``.
+    Clean-flag and composite are gated at the same ``_COMPOSITE_BAR``
+    as the empty-database run.
     """
     report = asyncio.run(_measure_pipeline(seeded=True))
     _record("pipeline_seeded", report)
     message = json.dumps(report, indent=2)
     assert report["seeded"] is True, message
-    assert report["composite_bar_applied"] is False, message
+    assert report["composite_bar_applied"] is True, message
     seed = report["seed"]
     # 996 seed rows are below the 2016-row (7-day) VOTE threshold, so the
     # pipeline suppresses the diurnal vote.  The profile service may still
@@ -633,7 +633,7 @@ def test_seeded_database_records_composite() -> None:
         f"seeded clean flags {report['clean_flagged']} should be <= 3"
     )
     composite = float(report["composite"])
-    assert 0.0 <= composite <= 1.0, message
+    assert composite >= _COMPOSITE_BAR, message
 
 
 def test_upload_mad_july_spikes() -> None:

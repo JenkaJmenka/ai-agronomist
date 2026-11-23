@@ -64,6 +64,8 @@ jobs:
           # conftest.py pins DATABASE_URL to a local SQLite file; set here too
           # so a runner with a stray value cannot redirect the suite.
           DATABASE_URL: sqlite+aiosqlite:///./test_global.db
+          # Run the seeded accuracy gate (marker accuracy_seeded) in CI.
+          ACCURACY_SEEDED: "1"
         run: |
           # python -m pytest, not bare pytest: it puts the repo root on
           # sys.path so `import src...` resolves.
