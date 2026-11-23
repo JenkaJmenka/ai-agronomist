@@ -230,6 +230,9 @@ class LiveRuntime:
         # readings.  A failure must not prevent the scope from starting.
         if scope.scorer is not None:
             from src.live.ring_seed import seed_scorer as _seed_scorer
+            # Mark seeding in-progress BEFORE creating the task so the scorer's
+            # _seed_ready event is clear before any anomaly can arrive.
+            scope.scorer.mark_seeding_started()
             asyncio.create_task(
                 _seed_scorer(scope.scorer, scope.tenant_id, scope.greenhouse_id),
                 name=f"seed_ring_{scope.tenant_id}_{scope.greenhouse_id}",
