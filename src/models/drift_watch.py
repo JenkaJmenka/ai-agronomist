@@ -434,6 +434,58 @@ def _compute_residual_virtual(
     return df[target_col] - pred
 
 
+def _residual_with_reference(
+    df: pd.DataFrame,
+    spec: DriftInputSpec,
+    model: Optional[Ridge],
+    feat_names: Optional[List[str]],
+    fill_vals: Optional[pd.Series],
+) -> Tuple[pd.Series, pd.Series]:
+    """Compute the residual for *spec* on *df* and the reference it subtracts.
+
+    The residual is computed by exactly the same expressions as before this
+    helper existed, so :func:`_recompute_residual` (which returns only the
+    first element) is unchanged. The reference is defined so that
+    ``target - reference`` is the residual:
+
+    - *physics*: the Tetens humidity deficit from temperature and RH.
+    - *paired_probes*: ``second_probe + ridge_prediction`` -- the value the
+      target is expected to read given the second probe and covariates.
+    - *virtual_sensor*: the ridge prediction of the target.
+
+    Args:
+        df: Frame with the channels named in *spec* (and ``hour`` for
+            model-based inputs).
+        spec: Input specification.
+        model: Ridge model, or ``None`` for physics inputs.
+        feat_names: Ordered model feature names, or ``None``.
+        fill_vals: Per-feature NaN fill values, or ``None``.
+
+    Returns:
+        ``(residual, reference)``, both indexed like *df*.
+
+    Raises:
+        ValueError: If ``spec.kind`` is not a known :class:`InputKind`.
+    """
+    if spec.kind == InputKind.PHYSICS:
+        temp_c, rh_c, hd_c = spec.channels[0], spec.channels[1], spec.channels[2]
+        tetens = pd.Series(
+            _tetens_hd(df[temp_c].values, df[rh_c].values), index=df.index,
+        )
+        return _compute_residual_physics(df, temp_c, rh_c, hd_c), tetens
+    elif spec.kind == InputKind.PAIRED_PROBES:
+        second_col = spec.channels[0]
+        delta = df[spec.target_channel] - df[second_col]
+        pred = _predict_ridge(model, df, feat_names, fill_vals)  # type: ignore[arg-type]
+        # Same expression as _compute_residual_paired.
+        return delta - pred, df[second_col] + pred
+    elif spec.kind == InputKind.VIRTUAL_SENSOR:
+        pred = _predict_ridge(model, df, feat_names, fill_vals)  # type: ignore[arg-type]
+        # Same expression as _compute_residual_virtual.
+        return df[spec.target_channel] - pred, pred
+    raise ValueError(f"Unknown kind: {spec.kind}")
+
+
 def _recompute_residual(
     df: pd.DataFrame,
     spec: DriftInputSpec,
@@ -442,20 +494,7 @@ def _recompute_residual(
     fill_vals: Optional[pd.Series],
 ) -> pd.Series:
     """Compute the residual for *spec* on (possibly faulted) *df*."""
-    if spec.kind == InputKind.PHYSICS:
-        temp_c, rh_c, hd_c = spec.channels[0], spec.channels[1], spec.channels[2]
-        return _compute_residual_physics(df, temp_c, rh_c, hd_c)
-    elif spec.kind == InputKind.PAIRED_PROBES:
-        second_col = spec.channels[0]
-        return _compute_residual_paired(
-            df, spec.target_channel, second_col,
-            spec.channels[1:], model, feat_names, fill_vals,  # type: ignore[arg-type]
-        )
-    elif spec.kind == InputKind.VIRTUAL_SENSOR:
-        return _compute_residual_virtual(
-            df, spec.target_channel, model, feat_names, fill_vals,  # type: ignore[arg-type]
-        )
-    raise ValueError(f"Unknown kind: {spec.kind}")
+    return _residual_with_reference(df, spec, model, feat_names, fill_vals)[0]
 
 
 def _reconstruct_model(
@@ -600,6 +639,237 @@ def _rolling_refit(
     cal_dict["calibration_window_end"] = cal.calibration_window_end
     state.calibration = cal_dict
     state.last_refit_ts = str(scoring_start)
+
+
+def _maybe_rolling_refit(
+    state: DriftInputState,
+    hourly_df: pd.DataFrame,
+    spec: DriftInputSpec,
+    cal: CalibrationResult,
+) -> CalibrationResult:
+    """Run :func:`_rolling_refit` if one is due; return the calibration in force.
+
+    The schedule shared by :meth:`DriftWatch.update` and :func:`replay_series`:
+    model-based inputs only, never before the first scored hour, and then
+    whenever ``DRIFT_WATCH_REFIT_INTERVAL_WEEKS`` have elapsed between
+    ``state.last_refit_ts`` and ``state.last_processed_ts`` (or no refit has
+    succeeded yet).
+
+    Args:
+        state: Mutable state; ``calibration`` and ``last_refit_ts`` change
+            when a refit runs.
+        hourly_df: Frame with history for the trailing baseline window.
+        spec: The input specification.
+        cal: The calibration currently decoded from ``state.calibration``.
+
+    Returns:
+        *cal* unchanged if no refit was due, otherwise the calibration
+        decoded from the (possibly refitted) state.
+    """
+    if (cal.kind == InputKind.PHYSICS.value
+            or state.last_processed_ts is None):
+        return cal
+    needs_refit = False
+    if state.last_refit_ts is None:
+        needs_refit = True
+    else:
+        last_refit = pd.Timestamp(state.last_refit_ts)
+        weeks_since = (
+            pd.Timestamp(state.last_processed_ts) - last_refit
+        ).total_seconds() / (7 * 24 * 3600)
+        if weeks_since >= DRIFT_WATCH_REFIT_INTERVAL_WEEKS:
+            needs_refit = True
+    if not needs_refit:
+        return cal
+    _rolling_refit(state, hourly_df, spec)
+    return CalibrationResult.from_dict(state.calibration)  # type: ignore[arg-type]
+
+
+class _HourTrace(NamedTuple):
+    """Per-hour CUSUM trace recorded by :func:`_score_hours` on request.
+
+    Attributes:
+        ts: The scored hour.
+        dev: ``residual - mu`` with the ``mu`` in force that hour.
+        s_pos: Positive accumulator after the update, before any alarm reset.
+        s_neg: Negative accumulator after the update, before any alarm reset.
+        alarm_dir: ``"+"``, ``"-"`` or ``None``.
+    """
+    ts: pd.Timestamp
+    dev: float
+    s_pos: float
+    s_neg: float
+    alarm_dir: Optional[str]
+
+
+def _score_hours(
+    state: DriftInputState,
+    residual: pd.Series,
+    spec: DriftInputSpec,
+    cal: CalibrationResult,
+    trace: Optional[List[_HourTrace]] = None,
+) -> List[DriftEpisode]:
+    """Run the episode CUSUM over *residual*, updating *state* in place.
+
+    The single per-hour scoring body behind :meth:`DriftWatch.update` and
+    :func:`replay_series`.
+
+    Args:
+        state: Mutable CUSUM/episode state.
+        residual: Non-empty, NaN-free residuals in time order.
+        spec: The input specification.
+        cal: Calibration supplying ``scale_mu``, ``scale_sigma``, ``k``, ``h``.
+        trace: If given, one :class:`_HourTrace` per hour is appended.
+
+    Returns:
+        Episode events emitted in this run (may be empty).
+    """
+    mu = cal.scale_mu
+    sigma = cal.scale_sigma
+    k = cal.k
+    h = cal.h
+    quiet_hours = DRIFT_WATCH_QUIET_HOURS
+
+    episodes: List[DriftEpisode] = []
+
+    for ts, val in residual.items():
+        z = (val - mu) / sigma
+        dev = float(val - mu)  # native units, signed (ADR-013 §5)
+
+        # Robust-offset buffers: an open episode absorbs every scored
+        # hour while it can still continue (last alarm within
+        # quiet_hours); once it cannot, its buffer is released.
+        for last_alarm, buf in (
+            (state.pos_last_alarm_ts, state.pos_episode_devs),
+            (state.neg_last_alarm_ts, state.neg_episode_devs),
+        ):
+            if last_alarm is None:
+                buf.clear()
+                continue
+            since = (ts - pd.Timestamp(last_alarm)).total_seconds() / 3600
+            if since <= quiet_hours:
+                buf.append(dev)
+            else:
+                buf.clear()
+
+        # Update accumulators
+        state.s_pos = max(0.0, state.s_pos + z - k)
+        state.s_neg = max(0.0, state.s_neg - z - k)
+        s_pos_pre_reset = state.s_pos
+        s_neg_pre_reset = state.s_neg
+        alarm_dir: Optional[str] = None
+
+        # Track last-zero timestamps. The pending buffer restarts at the
+        # zero hour, which is the onset estimate a later alarm reports.
+        if state.s_pos <= 0.0:
+            state.last_zero_pos_ts = str(ts)
+            state.pos_pending_devs = [dev]
+        else:
+            state.pos_pending_devs.append(dev)
+        if state.s_neg <= 0.0:
+            state.last_zero_neg_ts = str(ts)
+            state.neg_pending_devs = [dev]
+        else:
+            state.neg_pending_devs.append(dev)
+
+        # ── Positive direction episode logic ─────────────────────────
+        if state.s_pos > h:
+            is_new_episode = True
+            if state.pos_last_alarm_ts is not None:
+                hours_since = (
+                    ts - pd.Timestamp(state.pos_last_alarm_ts)
+                ).total_seconds() / 3600
+                if hours_since <= quiet_hours:
+                    is_new_episode = False
+
+            if is_new_episode:
+                state.next_episode_seq += 1
+                ep_id = f"{spec.input_id}_{state.next_episode_seq}"
+                state.pos_episode_id = ep_id
+                state.pos_episode_start = str(ts)
+                state.pos_episode_devs = list(state.pos_pending_devs)
+            else:
+                ep_id = state.pos_episode_id  # type: ignore[assignment]
+
+            onset = (pd.Timestamp(state.last_zero_pos_ts)
+                     if state.last_zero_pos_ts else ts)
+            episodes.append(DriftEpisode(
+                input_id=spec.input_id,
+                target_channel=spec.target_channel,
+                direction="+",
+                episode_id=ep_id,
+                first_detected_ts=(
+                    pd.Timestamp(state.pos_episode_start)
+                    if state.pos_episode_start else ts
+                ),
+                last_confirmed_ts=ts,
+                onset_estimate=onset,
+                current_offset_native=z * sigma,
+                peak_statistic=state.s_pos,
+                is_new=is_new_episode,
+                offset_robust=_robust_offset(state.pos_episode_devs, dev),
+            ))
+
+            alarm_dir = "+"
+            state.pos_last_alarm_ts = str(ts)
+            state.s_pos = 0.0
+            state.last_zero_pos_ts = str(ts)
+            state.pos_pending_devs = [dev]
+
+        # ── Negative direction episode logic ─────────────────────────
+        if state.s_neg > h:
+            is_new_episode = True
+            if state.neg_last_alarm_ts is not None:
+                hours_since = (
+                    ts - pd.Timestamp(state.neg_last_alarm_ts)
+                ).total_seconds() / 3600
+                if hours_since <= quiet_hours:
+                    is_new_episode = False
+
+            if is_new_episode:
+                state.next_episode_seq += 1
+                ep_id = f"{spec.input_id}_{state.next_episode_seq}"
+                state.neg_episode_id = ep_id
+                state.neg_episode_start = str(ts)
+                state.neg_episode_devs = list(state.neg_pending_devs)
+            else:
+                ep_id = state.neg_episode_id  # type: ignore[assignment]
+
+            onset = (pd.Timestamp(state.last_zero_neg_ts)
+                     if state.last_zero_neg_ts else ts)
+            episodes.append(DriftEpisode(
+                input_id=spec.input_id,
+                target_channel=spec.target_channel,
+                direction="-",
+                episode_id=ep_id,
+                first_detected_ts=(
+                    pd.Timestamp(state.neg_episode_start)
+                    if state.neg_episode_start else ts
+                ),
+                last_confirmed_ts=ts,
+                onset_estimate=onset,
+                current_offset_native=-z * sigma,
+                peak_statistic=state.s_neg,
+                is_new=is_new_episode,
+                offset_robust=_robust_offset(state.neg_episode_devs, dev),
+            ))
+
+            # Both directions cannot cross in one hour while k > 0 (an
+            # hour that raises s_pos lowers s_neg); "-" wins if they did.
+            alarm_dir = "-"
+            state.neg_last_alarm_ts = str(ts)
+            state.s_neg = 0.0
+            state.last_zero_neg_ts = str(ts)
+            state.neg_pending_devs = [dev]
+
+        if trace is not None:
+            trace.append(_HourTrace(
+                ts=ts, dev=dev, s_pos=s_pos_pre_reset,
+                s_neg=s_neg_pre_reset, alarm_dir=alarm_dir,
+            ))
+
+    state.last_processed_ts = str(residual.index[-1])
+    return episodes
 
 
 # ── Main class ───────────────────────────────────────────────────────────
@@ -931,22 +1201,7 @@ class DriftWatch:
             return []
 
         # Rolling refit for model-based inputs
-        if (cal.kind != InputKind.PHYSICS.value
-                and state.last_processed_ts is not None):
-            needs_refit = False
-            if state.last_refit_ts is None:
-                needs_refit = True
-            else:
-                last_refit = pd.Timestamp(state.last_refit_ts)
-                weeks_since = (
-                    pd.Timestamp(state.last_processed_ts) - last_refit
-                ).total_seconds() / (7 * 24 * 3600)
-                if weeks_since >= DRIFT_WATCH_REFIT_INTERVAL_WEEKS:
-                    needs_refit = True
-
-            if needs_refit:
-                _rolling_refit(state, hourly_df, spec)
-                cal = CalibrationResult.from_dict(state.calibration)  # type: ignore[arg-type]
+        cal = _maybe_rolling_refit(state, hourly_df, spec, cal)
 
         # Reconstruct model
         model, feat_names, fill_vals = _reconstruct_model(cal)
@@ -957,139 +1212,146 @@ class DriftWatch:
         if len(residual) == 0:
             return []
 
-        mu = cal.scale_mu
-        sigma = cal.scale_sigma
-        k = cal.k
-        h = cal.h
-        quiet_hours = DRIFT_WATCH_QUIET_HOURS
+        return _score_hours(state, residual, spec, cal)
 
-        episodes: List[DriftEpisode] = []
 
-        for ts, val in residual.items():
-            z = (val - mu) / sigma
-            dev = float(val - mu)  # native units, signed (ADR-013 §5)
+# ── Read-only replay (Drift Watch chart) ─────────────────────────────────
 
-            # Robust-offset buffers: an open episode absorbs every scored
-            # hour while it can still continue (last alarm within
-            # quiet_hours); once it cannot, its buffer is released.
-            for last_alarm, buf in (
-                (state.pos_last_alarm_ts, state.pos_episode_devs),
-                (state.neg_last_alarm_ts, state.neg_episode_devs),
-            ):
-                if last_alarm is None:
-                    buf.clear()
-                    continue
-                since = (ts - pd.Timestamp(last_alarm)).total_seconds() / 3600
-                if since <= quiet_hours:
-                    buf.append(dev)
-                else:
-                    buf.clear()
+REPLAY_COLUMNS: Tuple[str, ...] = (
+    "ts", "target", "reference", "residual", "dev", "s_pos", "s_neg", "alarm_dir",
+)
+"""Column order of the frame returned by :func:`replay_series`."""
 
-            # Update accumulators
-            state.s_pos = max(0.0, state.s_pos + z - k)
-            state.s_neg = max(0.0, state.s_neg - z - k)
 
-            # Track last-zero timestamps. The pending buffer restarts at the
-            # zero hour, which is the onset estimate a later alarm reports.
-            if state.s_pos <= 0.0:
-                state.last_zero_pos_ts = str(ts)
-                state.pos_pending_devs = [dev]
-            else:
-                state.pos_pending_devs.append(dev)
-            if state.s_neg <= 0.0:
-                state.last_zero_neg_ts = str(ts)
-                state.neg_pending_devs = [dev]
-            else:
-                state.neg_pending_devs.append(dev)
+def _bound_ts(value: Any, index: pd.DatetimeIndex) -> pd.Timestamp:
+    """Coerce a ``start``/``end`` bound to compare with *index*.
 
-            # ── Positive direction episode logic ─────────────────────────
-            if state.s_pos > h:
-                is_new_episode = True
-                if state.pos_last_alarm_ts is not None:
-                    hours_since = (
-                        ts - pd.Timestamp(state.pos_last_alarm_ts)
-                    ).total_seconds() / 3600
-                    if hours_since <= quiet_hours:
-                        is_new_episode = False
+    A naive bound against a tz-aware index is read as UTC (the module's
+    convention, see :func:`_to_utc`); an aware bound is converted to the
+    index's zone.
+    """
+    out = pd.Timestamp(value)
+    tz = getattr(index, "tz", None)
+    if tz is not None:
+        out = out.tz_localize("UTC") if out.tzinfo is None else out
+        out = out.tz_convert(tz)
+    return out
 
-                if is_new_episode:
-                    state.next_episode_seq += 1
-                    ep_id = f"{spec.input_id}_{state.next_episode_seq}"
-                    state.pos_episode_id = ep_id
-                    state.pos_episode_start = str(ts)
-                    state.pos_episode_devs = list(state.pos_pending_devs)
-                else:
-                    ep_id = state.pos_episode_id  # type: ignore[assignment]
 
-                onset = (pd.Timestamp(state.last_zero_pos_ts)
-                         if state.last_zero_pos_ts else ts)
-                episodes.append(DriftEpisode(
-                    input_id=spec.input_id,
-                    target_channel=spec.target_channel,
-                    direction="+",
-                    episode_id=ep_id,
-                    first_detected_ts=(
-                        pd.Timestamp(state.pos_episode_start)
-                        if state.pos_episode_start else ts
-                    ),
-                    last_confirmed_ts=ts,
-                    onset_estimate=onset,
-                    current_offset_native=z * sigma,
-                    peak_statistic=state.s_pos,
-                    is_new=is_new_episode,
-                    offset_robust=_robust_offset(state.pos_episode_devs, dev),
-                ))
+def replay_series(
+    hourly_df: pd.DataFrame,
+    spec: DriftInputSpec,
+    calibration: CalibrationResult,
+    *,
+    start: Any = None,
+    end: Any = None,
+) -> pd.DataFrame:
+    """Replay the per-hour drift statistics from a calibration, read-only.
 
-                state.pos_last_alarm_ts = str(ts)
-                state.s_pos = 0.0
-                state.last_zero_pos_ts = str(ts)
-                state.pos_pending_devs = [dev]
+    A cold replay for charting: it starts from
+    ``DriftWatch.init_state(calibration)`` and scores every row of
+    *hourly_df* in time order through the same helpers as
+    :meth:`DriftWatch.update` (:func:`_maybe_rolling_refit`,
+    :func:`_residual_with_reference` and :func:`_score_hours`), as if
+    ``update`` were called once per hour with the frame up to that hour.
+    The refit schedule therefore follows ``DRIFT_WATCH_REFIT_INTERVAL_WEEKS``
+    at hourly resolution.
 
-            # ── Negative direction episode logic ─────────────────────────
-            if state.s_neg > h:
-                is_new_episode = True
-                if state.neg_last_alarm_ts is not None:
-                    hours_since = (
-                        ts - pd.Timestamp(state.neg_last_alarm_ts)
-                    ).total_seconds() / 3600
-                    if hours_since <= quiet_hours:
-                        is_new_episode = False
+    The result is exactly what hour-by-hour ``update`` calls would produce.
+    A stored state built by larger ``update`` batches (one per upload) can
+    differ slightly, because ``update`` checks for a refit only at the start
+    of each call; a first batch after calibration also never refits. Episode
+    bands for a chart should therefore come from stored episodes, not from
+    ``alarm_dir``.
 
-                if is_new_episode:
-                    state.next_episode_seq += 1
-                    ep_id = f"{spec.input_id}_{state.next_episode_seq}"
-                    state.neg_episode_id = ep_id
-                    state.neg_episode_start = str(ts)
-                    state.neg_episode_devs = list(state.neg_pending_devs)
-                else:
-                    ep_id = state.neg_episode_id  # type: ignore[assignment]
+    Pure: no I/O, no wall clock; neither *hourly_df* nor *calibration* is
+    modified.
 
-                onset = (pd.Timestamp(state.last_zero_neg_ts)
-                         if state.last_zero_neg_ts else ts)
-                episodes.append(DriftEpisode(
-                    input_id=spec.input_id,
-                    target_channel=spec.target_channel,
-                    direction="-",
-                    episode_id=ep_id,
-                    first_detected_ts=(
-                        pd.Timestamp(state.neg_episode_start)
-                        if state.neg_episode_start else ts
-                    ),
-                    last_confirmed_ts=ts,
-                    onset_estimate=onset,
-                    current_offset_native=-z * sigma,
-                    peak_statistic=state.s_neg,
-                    is_new=is_new_episode,
-                    offset_robust=_robust_offset(state.neg_episode_devs, dev),
-                ))
+    Args:
+        hourly_df: Hourly frame indexed by timestamp (same schema as
+            :meth:`DriftWatch.calibrate`). Rows before *start* are scored
+            too, and serve as rolling-refit history.
+        spec: The input specification.
+        calibration: The calibration to replay from (normally the immutable
+            one stored at calibration time, not the refitted state copy).
+        start: Optional inclusive lower bound on the returned ``ts``.
+        end: Optional inclusive upper bound on the returned ``ts``.
 
-                state.neg_last_alarm_ts = str(ts)
-                state.s_neg = 0.0
-                state.last_zero_neg_ts = str(ts)
-                state.neg_pending_devs = [dev]
+    Returns:
+        One row per scored hour (residual not NaN) in ``[start, end]``, with
+        columns :data:`REPLAY_COLUMNS`:
 
-        state.last_processed_ts = str(residual.index[-1])
-        return episodes
+        - ``target``: the monitored channel's value.
+        - ``reference``: what the model subtracts from it -- *physics*: the
+          Tetens HD; *paired_probes*: second probe plus ridge prediction;
+          *virtual_sensor*: the ridge prediction. ``target - reference``
+          equals ``residual``.
+        - ``dev``: ``residual - mu`` with the ``mu`` in force that hour.
+        - ``s_pos``/``s_neg``: accumulators after the update, before any
+          alarm reset.
+        - ``alarm_dir``: ``"+"``, ``"-"`` or ``None``.
+
+        For a ``DERIVED`` input (which ``update`` never scores) the CUSUM
+        columns are NaN/``None`` and ``dev`` uses the calibration ``mu``.
+    """
+    state = DriftWatch.init_state(calibration)  # to_dict() deep-copies
+    cal = CalibrationResult.from_dict(state.calibration)  # type: ignore[arg-type]
+
+    df = hourly_df.copy()
+    if "hour" not in df.columns:
+        df["hour"] = df.index.hour
+
+    rows: List[Dict[str, Any]] = []
+    n = len(df)
+    derived = cal.status == InputStatus.DERIVED.value
+
+    seg_offset = 0
+    seg_residual: Optional[pd.Series] = None
+    seg_reference: Optional[pd.Series] = None
+    trace: List[_HourTrace] = []
+    for i in range(n):
+        if not derived:
+            refitted = _maybe_rolling_refit(state, df, spec, cal)
+            if refitted is not cal:
+                cal = refitted
+                seg_residual = None
+        if seg_residual is None:
+            # Residuals are row-wise, so one vectorised pass per model
+            # segment equals scoring each hour separately.
+            model, feat_names, fill_vals = _reconstruct_model(cal)
+            seg_residual, seg_reference = _residual_with_reference(
+                df.iloc[i:], spec, model, feat_names, fill_vals,
+            )
+            seg_offset = i
+        val = seg_residual.iloc[i - seg_offset]
+        if pd.isna(val):
+            continue
+        ts = df.index[i]
+        ref = float(seg_reference.iloc[i - seg_offset])  # type: ignore[union-attr]
+        if derived:
+            hour = _HourTrace(ts, float(val - cal.scale_mu),
+                              float("nan"), float("nan"), None)
+        else:
+            trace.clear()
+            _score_hours(state, pd.Series([val], index=[ts]), spec, cal, trace)
+            hour = trace[0]
+        rows.append({
+            "ts": ts,
+            "target": float(df[spec.target_channel].iloc[i]),
+            "reference": ref,
+            "residual": float(val),
+            "dev": hour.dev,
+            "s_pos": hour.s_pos,
+            "s_neg": hour.s_neg,
+            "alarm_dir": hour.alarm_dir,
+        })
+
+    out = pd.DataFrame(rows, columns=list(REPLAY_COLUMNS))
+    if len(out) and start is not None:
+        out = out[out["ts"] >= _bound_ts(start, df.index)]
+    if len(out) and end is not None:
+        out = out[out["ts"] <= _bound_ts(end, df.index)]
+    return out.reset_index(drop=True)
 
 
 # ── Internal CUSUM (episode-list only, for calibration) ────────────────
