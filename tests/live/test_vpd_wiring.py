@@ -245,7 +245,7 @@ class TestScoringUnaffectedByExtraChannels:
             )
             detector = MagicMock()
             detector.model = MagicMock(
-                side_effect=lambda t: (torch.zeros_like(t), None, None, None)
+                side_effect=lambda t: (torch.zeros_like(t), torch.zeros(len(t), 8), torch.zeros(len(t), 8), None)
             )
 
             scores: list[float] = []

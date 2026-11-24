@@ -223,7 +223,7 @@ def _context(case: dict[str, Any], profile: Any) -> ScoringContext:
 # --------------------------------------------------------------------------
 
 
-_FACTOR_MODULES = ("src.models.inference", "src.live.attribution", "src.api.services.upload_portions")
+_FACTOR_MODULES = ("src.models.inference", "src.api.services.upload_portions")
 
 
 def _scaling_factor(monkeypatch: pytest.MonkeyPatch, factor: Optional[float]) -> None:

@@ -41,6 +41,8 @@ from src.live.events import LiveAnomalyEvent, LiveReadingEvent
 from src.live.hub import LiveHub
 from src.models.data_utils import SENSOR_RANGES, normalize_data
 from src.models.noise_detector import NoiseDetector
+from src.models.scoring import STREAM_PROFILE
+from src.models.scoring.lstm import lstm_flag
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +173,9 @@ class LiveScorer:
         if len(self._window) < SEQ_LEN:
             return event  # window not full
 
+        # Phase B (not fixed here): B4 - the rule detectors run only in
+        # enrichment, behind this LSTM gate; B1 - no row timestamp reaches
+        # the pipeline (sequence_timestamp missing).
         detector = await self._resolver.resolve()
         if detector is None:
             return event
@@ -293,7 +298,10 @@ class LiveScorer:
     ) -> None:
         """Start / debounced re-emit / end anomaly episodes."""
         now = time.monotonic()
-        is_anomalous = score >= self._threshold
+        # Core decision for the stream profile (``>=``); the threshold is the
+        # scorer's own so a caller override still applies. OQ4 unchanged: the
+        # score is raw / ANOMALY_SCALING_FACTOR against LIVE_ANOMALY_THRESHOLD.
+        is_anomalous = lstm_flag(score, self._threshold, STREAM_PROFILE)
 
         if is_anomalous and not self._in_episode:
             # New episode — wait briefly for ring seeding so the clean-window
