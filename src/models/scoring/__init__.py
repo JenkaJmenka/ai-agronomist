@@ -8,8 +8,10 @@ A4a (#154) ``ComprehensiveInferencePipeline._run_with_components``
 (live enrichment and the inference API) gets its window votes and LSTM
 cutoff from the core; its inline vote copies are gone. Step A4b adds
 ``precedence`` (OQ1(a)): the precedence and label table, vote ordering,
-rule reasoning and band promotion, which the pipeline switches to next. The
-upload path does not call the core yet (A6 / A7). The package must stay free of
+rule reasoning and band promotion, which the pipeline switches to next. Step
+A7 adds ``stream_stages``: the upload stream detectors (OOB clamp-and-mark,
+duration stuck, rolling z, batch spike look-ahead) as pure stages with
+explicit carried state; the upload path switches to them in A7's backend half. The package must stay free of
 ``src.api`` / ``src.db`` / ``src.live`` imports and of wall-clock reads
 (ADR-014 §2.1, §3 invariant 2).
 """

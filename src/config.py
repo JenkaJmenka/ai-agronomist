@@ -2327,9 +2327,15 @@ LEGACY_NORMALISATION: Dict[str, str] = {
     "api": "caller_normalised",
 }
 
-# §1 row 4, converges in A6. Live scores every tick with its own MSE copy
-# of the LSTM forward pass (live/attribution.py) instead of
-# models/inference.py, and enrichment then runs a second pass.
+# §1 row 4. A6 (#158) removed live's own MSE copy: attribution.py's
+# forward_pass_sync is now ModelScorer (models/inference.py), so the tick
+# score is the core's maths. "stream" stays True because a second forward
+# pass still runs on that path: live enrichment builds the pipeline, and
+# ComprehensiveInferencePipeline._run_lstm_vae scores the same window again
+# through AnomalyDetector.predict_batch_enriched (a separate copy of the
+# maths, proved bit-equal to ModelScorer by the A3 tests). Batch and API run
+# one pass per window. Converges when live hands its one score to the core
+# instead of re-scoring in enrichment (B2/B4).
 LEGACY_DUPLICATE_LSTM_FORWARD: Dict[str, bool] = {
     "batch": False,
     "stream": True,
@@ -2398,17 +2404,19 @@ LEGACY_WALLCLOCK: Dict[str, str] = {
     "api": "when_timestamp_absent",
 }
 
-# §1 row 17 (verdict ?), stream-stage candidate in A7. The 288-row rolling
-# z-score over all raw columns needs history and runs on upload only.
+# §1 row 17 (verdict ?). The 288-row rolling z-score over all raw columns
+# needs history and runs on upload only. Since A7 its core form is
+# src/models/scoring/stream_stages.rolling_z_stage (gated by this field).
 LEGACY_ROLLING_Z_ENABLED: Dict[str, bool] = {
     "batch": True,
     "stream": False,
     "api": False,
 }
 
-# §1 row 18, converges in A7/B4. The 6 h duration-based stuck detector
+# §1 row 18, converges in B4. The 6 h duration-based stuck detector
 # (StuckCarry, data timestamps) runs on upload only; live and the API see
 # only the 20-sample setpoint flatline, so a long freeze is invisible there.
+# Since A7 its core form is stream_stages.duration_stuck_stage (gated here).
 LEGACY_DURATION_STUCK_ENABLED: Dict[str, bool] = {
     "batch": True,
     "stream": False,

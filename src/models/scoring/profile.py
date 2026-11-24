@@ -211,15 +211,15 @@ class ScoringProfile:
 
     # --- Accidental differences held at today's value (ADR-014 §2.3) -----
     legacy_normalisation: LegacyNormalisation  # row 1 (until B5)
-    legacy_duplicate_lstm_forward: bool  # row 4 (until A6)
+    legacy_duplicate_lstm_forward: bool  # row 4 (MSE copy gone in A6; 2nd pass until B2/B4)
     legacy_rules_behind_lstm: bool  # rows 2, 6-9, 12-13, 18 (until B4)
     legacy_window_rules_enabled: bool  # rows 6, 7, 8, 12, 13 (B7)
     legacy_spike_floor_seasonal_scaling: bool  # row 9 (until B8)
     legacy_sensor_pairs_supported: bool  # row 11
     legacy_pipeline_per_episode: bool  # rows 12, 15, 25 (until B2)
     legacy_wallclock: LegacyWallclock  # rows 12, 16, 26 (until B1)
-    legacy_rolling_z_enabled: bool  # row 17 (A7)
-    legacy_duration_stuck_enabled: bool  # row 18 (A7 / B4)
+    legacy_rolling_z_enabled: bool  # row 17 (core stage since A7)
+    legacy_duration_stuck_enabled: bool  # row 18 (core stage since A7; B4)
     legacy_precedence: LegacyPrecedence  # row 20 (A4 / A8)
     legacy_labelling: LegacyLabelling  # row 21 (A8)
     legacy_episode_grouping: LegacyEpisodeGrouping  # row 22
