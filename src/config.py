@@ -2293,3 +2293,171 @@ DRIFT_WATCH_ALERT_SUSPEND_MIN_COUNT: int = 7
 # history then raises historical episodes on the page, not a burst of
 # alerts at once.
 DRIFT_WATCH_ALERT_RECENCY_DAYS: int = 14
+
+# =============================================================================
+# ADR-014 step A2 -- scoring-profile ``legacy_*`` values
+# =============================================================================
+# docs/architecture/ADR-014-one-scoring-path.md §2.3: during migration every
+# ACCIDENTAL difference between the three scoring paths is held as a
+# temporary profile field named ``legacy_*`` whose value is today's
+# behaviour. The values live here, one dict per field, keyed by profile name
+# (``batch`` = upload sync + async, ``stream`` = live, ``api`` = the
+# inference routes); src/models/scoring/profiles.py turns them into the
+# three ScoringProfile instances. Intentional differences (spike horizon vs
+# lag, spike pairs, OOB policy, LSTM decision, explain policy) are NOT here:
+# they are built from the existing constants they come from today.
+#
+# Nothing reads a profile yet (A2 adds types only), so changing a value
+# below changes no behaviour until the core is wired in (A3-A8). Each
+# convergence PR in Phase B flips one field to the shared value and then
+# deletes the dict. Do not add per-deployment env overrides: these record
+# what the code does, they are not tuning knobs.
+#
+# String values are enum member values of the matching type in
+# src/models/scoring/profile.py; an unknown string fails at import.
+
+# §1 row 1 (verdict ?), converges in B5. Upload computes file-adaptive
+# ranges from a head sample (cold_run_upload.py); live normalises with the
+# fixed SENSOR_RANGES; the API is sent an already-normalised window and the
+# pipeline denormalises with config ranges. The checkpoint does not record
+# its training ranges (OQ3), so no path can be called correct yet.
+LEGACY_NORMALISATION: Dict[str, str] = {
+    "batch": "file_adaptive",
+    "stream": "fixed_sensor_ranges",
+    "api": "caller_normalised",
+}
+
+# §1 row 4, converges in A6. Live scores every tick with its own MSE copy
+# of the LSTM forward pass (live/attribution.py) instead of
+# models/inference.py, and enrichment then runs a second pass.
+LEGACY_DUPLICATE_LSTM_FORWARD: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": False,
+}
+
+# §1 rows 2, 6-9, 12-13, 18 (§1 summary item 1), converges in B4. Live runs
+# the rule detectors only after its LSTM score crosses
+# LIVE_ANOMALY_THRESHOLD; upload (#130) and the API run them regardless of
+# the LSTM. Live therefore never checks a spike, band breach or OOB row that
+# the LSTM scores low.
+LEGACY_RULES_BEHIND_LSTM: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": False,
+}
+
+# §1 rows 6 (upload), 7, 8 (upload), 12, 13, decided per detector in B7.
+# The window rules (setpoint/climate, band breach, noise, diurnal, BOCPD)
+# exist only inside the comprehensive pipeline, which upload never calls.
+# B7 may keep some of them off on upload, but only after a measurement.
+LEGACY_WINDOW_RULES_ENABLED: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": True,
+}
+
+# §1 row 9 ("seasonal scaling on one path A"), converges in B8. The
+# pipeline multiplies the MAD spike floor by the seasonal scaler factor; the
+# upload MAD stage uses the configured floor as-is.
+LEGACY_SPIKE_FLOOR_SEASONAL_SCALING: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": True,
+}
+
+# §1 row 11 (verdict ?). Dual-sensor bias / correlation runs only when the
+# caller passes ``sensor_pairs``, which only the comprehensive API routes
+# accept; upload has paired columns but never passes them, live has none.
+LEGACY_SENSOR_PAIRS_SUPPORTED: Dict[str, bool] = {
+    "batch": False,
+    "stream": False,
+    "api": True,
+}
+
+# §1 rows 12, 15, 25, converges in B2. Live enrichment builds a NEW
+# pipeline per episode (live/enrichment.py), so diurnal, CUSUM/EMA and
+# every other cache start cold each time; CUSUM/EMA is also only updated on
+# LSTM-flagged windows. Upload holds per-upload carries; the API keeps one
+# cached pipeline.
+LEGACY_PIPELINE_PER_EPISODE: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": False,
+}
+
+# §1 rows 12, 16, 26, converges in B1. When no sequence_timestamp reaches
+# the pipeline it reads the wall clock for day/night bands, diurnal hour,
+# season and the nocturnal-light check (#123 is fixed only where a timestamp
+# is passed). Upload uses data timestamps ("never"); live enrichment never
+# passes one ("always"); /comprehensive passes one but /batch does not, and
+# /api/inference stamps high_anomalies with now() ("when_timestamp_absent").
+LEGACY_WALLCLOCK: Dict[str, str] = {
+    "batch": "never",
+    "stream": "always",
+    "api": "when_timestamp_absent",
+}
+
+# §1 row 17 (verdict ?), stream-stage candidate in A7. The 288-row rolling
+# z-score over all raw columns needs history and runs on upload only.
+LEGACY_ROLLING_Z_ENABLED: Dict[str, bool] = {
+    "batch": True,
+    "stream": False,
+    "api": False,
+}
+
+# §1 row 18, converges in A7/B4. The 6 h duration-based stuck detector
+# (StuckCarry, data timestamps) runs on upload only; live and the API see
+# only the 20-sample setpoint flatline, so a long freeze is invisible there.
+LEGACY_DURATION_STUCK_ENABLED: Dict[str, bool] = {
+    "batch": True,
+    "stream": False,
+    "api": False,
+}
+
+# §1 row 20, converges in A4/A8. Upload picks the trigger per timestamp by
+# anomaly_rank_key (cold_run_upload.py); the pipeline uses
+# _RULE_PRECEDENCE with band breach last.
+LEGACY_PRECEDENCE: Dict[str, str] = {
+    "batch": "upload_rank_key",
+    "stream": "rule_precedence",
+    "api": "rule_precedence",
+}
+
+# §1 row 21, converges in A8. Upload labels at READ time from
+# trigger_detector (fault_classification.py); a live tick carries
+# attribution only and fault_type arrives later on anomaly-detail; the
+# comprehensive API returns fault_type in the response.
+LEGACY_LABELLING: Dict[str, str] = {
+    "batch": "read_time_trigger_map",
+    "stream": "deferred_anomaly_detail",
+    "api": "in_response",
+}
+
+# §1 row 22. Upload groups alerts with group_alerts_into_episodes and
+# persists stuck episodes; live keeps an in-memory LSTM episode (uuid,
+# monotonic debounce, not persisted); the API has no episodes.
+LEGACY_EPISODE_GROUPING: Dict[str, str] = {
+    "batch": "upload_grouper",
+    "stream": "in_memory_lstm_episode",
+    "api": "none",
+}
+
+# §1 row 24, converges in B6. Drift watch runs from the on-upload hook
+# only; a live-only scope gets drift episodes only from the manual backfill.
+LEGACY_DRIFT_WATCH_HOOK: Dict[str, bool] = {
+    "batch": True,
+    "stream": False,
+    "api": False,
+}
+
+# §1 row 25, converges in B3. The pipeline's EWMA/POT tracker cache and
+# its LearningState row are keyed by tenant only (comprehensive_pipeline
+# _load_trackers), so greenhouses of one tenant share an adaptive threshold
+# and the last greenhouse to save wins. Live reaches the same code through
+# its per-episode pipeline. Upload has no EWMA/POT.
+LEGACY_TRACKER_KEY_TENANT_ONLY: Dict[str, bool] = {
+    "batch": False,
+    "stream": True,
+    "api": True,
+}
