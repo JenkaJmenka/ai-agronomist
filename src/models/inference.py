@@ -1,8 +1,10 @@
+from dataclasses import dataclass
+
 import torch
 import numpy as np
 from typing import Optional, List, Tuple, Union
 from src.models.lstm_vae import LSTMVAE
-from src.config import DEVICE, MAX_OBSERVE_BATCH
+from src.config import ANOMALY_SCALING_FACTOR, DEVICE, MAX_OBSERVE_BATCH
 
 
 class MissingCheckpointError(RuntimeError):
@@ -148,4 +150,118 @@ class AnomalyDetector:
             np.concatenate(all_scores),
             np.concatenate(all_mu),
             np.concatenate(all_uncertainties)
+        )
+
+
+@dataclass(frozen=True)
+class ModelScores:
+    """Output of one LSTM-VAE forward pass over a batch of windows (ADR-014 A3).
+
+    Arrays keep the model's float32 dtype so every path can derive its value
+    exactly as it does today.
+
+    Attributes:
+        raw: ``(n,)`` per-window reconstruction MSE over sequence and channels.
+        per_channel: ``(n, input_dim)`` per-channel MSE over the sequence.
+        embeddings: ``(n, latent_dim)`` encoder means (mu).
+        uncertainties: ``(n,)`` mean of ``exp(0.5 * logvar)`` over latent dims.
+    """
+
+    raw: np.ndarray
+    per_channel: np.ndarray
+    embeddings: np.ndarray
+    uncertainties: np.ndarray
+
+    def scaled_array(self) -> np.ndarray:
+        """Vectorised scaled scores, as upload and ``/api/inference`` compute them.
+
+        Returns:
+            ``clip(raw / ANOMALY_SCALING_FACTOR, 0, 1)`` on the float32 array.
+        """
+        return np.clip(self.raw / ANOMALY_SCALING_FACTOR, 0.0, 1.0)
+
+    def scaled_scalar(self, index: int) -> float:
+        """One scaled score, as live and the comprehensive pipeline compute it.
+
+        Args:
+            index: Window index in the batch.
+
+        Returns:
+            ``clip(float(raw[index]) / ANOMALY_SCALING_FACTOR, 0, 1)`` in
+            Python float arithmetic.
+        """
+        return float(np.clip(float(self.raw[index]) / ANOMALY_SCALING_FACTOR, 0.0, 1.0))
+
+
+class ModelScorer:
+    """The one LSTM-VAE forward pass for every scoring path (ADR-014 §2.1, A3).
+
+    Replaces three copies of the same maths: ``AnomalyDetector.predict_batch_enriched``
+    (upload, API), ``ComprehensiveInferencePipeline._run_lstm_vae`` and the live
+    ``forward_pass_sync`` (``src/live/attribution.py``). Batches are chunked at
+    ``MAX_OBSERVE_BATCH`` exactly like ``predict_batch_enriched``, so a single
+    window is a batch of one, as on live; results are bit-identical to each
+    path. Normalisation and the decision rule are not here: they are
+    ``src.models.scoring.lstm``.
+    """
+
+    def __init__(self, model: LSTMVAE) -> None:
+        """Wrap a loaded model.
+
+        Args:
+            model: An LSTM-VAE in eval mode (``AnomalyDetector.model``).
+        """
+        self.model = model
+
+    @classmethod
+    def from_detector(cls, detector: AnomalyDetector) -> "ModelScorer":
+        """Build a scorer over an ``AnomalyDetector``'s loaded model.
+
+        Args:
+            detector: A detector whose checkpoint is already loaded.
+
+        Returns:
+            A scorer sharing the detector's model instance.
+        """
+        return cls(detector.model)
+
+    def predict_with_channel_errors(
+        self, windows: Union[List[np.ndarray], np.ndarray]
+    ) -> ModelScores:
+        """Run ONE forward pass and return every per-window model output.
+
+        Args:
+            windows: List of ``(seq_len, input_dim)`` model-input windows, or a
+                stacked ``(n, seq_len, input_dim)`` array.
+
+        Returns:
+            ``ModelScores`` with float32 arrays. An empty batch returns empty
+            arrays.
+
+        Raises:
+            ValueError: If the batch is not 3-D or holds NaN / Inf.
+        """
+        stacked = np.stack(windows) if isinstance(windows, list) else windows
+        AnomalyDetector._validate_batch(stacked)
+        raw: List[np.ndarray] = []
+        per_channel: List[np.ndarray] = []
+        mus: List[np.ndarray] = []
+        stds: List[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(stacked), MAX_OBSERVE_BATCH):
+                batch = torch.from_numpy(stacked[start:start + MAX_OBSERVE_BATCH]).float()
+                reconstructed, mu, logvar, _ = self.model(batch)
+                error = (batch - reconstructed) ** 2
+                raw.append(error.mean(dim=[1, 2]).numpy())
+                per_channel.append(error.mean(dim=1).numpy())
+                mus.append(mu.numpy())
+                stds.append(torch.exp(0.5 * logvar).mean(dim=1).numpy())
+        if not raw:
+            empty = np.array([], dtype=np.float32)
+            return ModelScores(empty, empty, empty, empty)
+        return ModelScores(
+            raw=np.concatenate(raw),
+            per_channel=np.concatenate(per_channel),
+            embeddings=np.concatenate(mus),
+            uncertainties=np.concatenate(stds),
         )
