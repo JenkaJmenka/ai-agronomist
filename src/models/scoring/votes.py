@@ -2,10 +2,10 @@
 
 Each vote is copied, unchanged in behaviour, from
 ``ComprehensiveInferencePipeline._run_with_components``
-(``src/api/services/comprehensive_pipeline.py``, steps 0a noise and 0c spike)
-or, for the batch look-ahead spike, from
-``upload_portions._detect_upload_mad_spikes``. The other window votes
-(OOB, diurnal, BOCPD, setpoint / flatline, band, dual sensor) follow in A3b.
+(``src/api/services/comprehensive_pipeline.py``, steps 0a noise, 0b OOB,
+0c spike, 0f diurnal, 0h BOCPD) or, for the batch look-ahead spike, from
+``upload_portions._detect_upload_mad_spikes``. Setpoint / flatline, band and
+dual-sensor votes are in ``window_rules``.
 The originals stay where they are until A4 / A7 switch their callers;
 ``tests/models/test_scoring_core_a3.py`` proves the copies equal on the
 parity corpus and on seeded random windows.
@@ -33,6 +33,7 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from src.config import (
+    BOCPD_MIN_SENSORS,
     NOISE_CALIBRATED_RATIO_BY_SENSOR,
     NOISE_CALIBRATED_RATIO_TARGET,
     SENSOR_NAMES,
@@ -41,19 +42,21 @@ from src.config import (
     UPLOAD_SPIKE_MAD_FLOOR,
     UPLOAD_SPIKE_MAD_TUNING_C,
 )
+from src.models.bocpd_detector import BOCPDDetector
+from src.models.diurnal_profile_detector import DiurnalProfileDetector
 from src.models.noise_detector import (
     NoiseDetector,
     calibrate_noise_baseline,
     resolve_noise_baseline,
 )
 from src.models.operational_config_store import default_operational_config
+from src.models.out_of_bounds_detector import OutOfBoundsDetector
 from src.models.scoring.context import ScoringContext
 from src.models.scoring.profile import NoiseBaseline, ScoringProfile, SpikeConfirmMode
 from src.models.seasonal_scaler import SeasonalScaler
 from src.models.spike_mad_detector import SpikeMADDetector
 
-#: Sensor the noise and spike votes skip (and, in the pipeline, diurnal and
-#: BOCPD): the diurnal ramp
+#: Sensor the noise, diurnal, BOCPD and spike votes skip: the diurnal ramp
 #: and night zeros are the natural signal, not a probe fault.
 LIGHT_SENSOR: str = "light"
 
@@ -64,6 +67,9 @@ _DEFAULT_SEASON: str = "winter"
 #: Vote keys (the pipeline's ``rule_votes`` names).
 SPIKE_VOTE: str = "spike_mad"
 NOISE_VOTE: str = "noise"
+OOB_VOTE: str = "out_of_bounds"
+CHANGE_POINT_VOTE: str = "change_point"
+DIURNAL_VOTE: str = "diurnal"
 
 
 @dataclass(frozen=True)
@@ -372,3 +378,87 @@ def noise_vote(
         if detector.detect(window[:, idx], sensor, target_override=target):
             alarmed.append(sensor)
     return _single(NOISE_VOTE, alarmed)
+
+
+# --- Out of bounds, §1 row 2 -------------------------------------------------
+
+
+def oob_vote(
+    window: np.ndarray,
+    context: ScoringContext,
+    profile: ScoringProfile,
+    state: Optional[WindowState] = None,
+) -> VoteResult:
+    """Sensors with any reading outside ``OOB_LIMITS`` (pipeline step 0b).
+
+    Only the detection. What a hit does (gate the window, or clamp and
+    continue on batch) is ``profile.oob_policy``, applied by A4 / A7.
+    """
+    del context, profile, state  # the limits are the same on every path
+    detector = OutOfBoundsDetector()
+    alarmed = [
+        sensor
+        for idx, sensor in enumerate(_sensors(window))
+        if any(detector.detect_series(window[:, idx], sensor))
+    ]
+    return _single(OOB_VOTE, alarmed)
+
+
+# --- Diurnal, §1 row 12 ------------------------------------------------------
+
+
+def diurnal_vote(
+    window: np.ndarray,
+    context: ScoringContext,
+    profile: ScoringProfile,
+    state: Optional[WindowState] = None,
+) -> VoteResult:
+    """Last reading vs its hourly profile, light excluded (pipeline step 0f).
+
+    The hour is ``context.sequence_timestamp.hour`` as given (no time-zone
+    conversion), as the pipeline reads ``seq_ts.hour``.
+    """
+    if not profile.legacy_window_rules_enabled:
+        return VoteResult()
+    st = state if state is not None else window_state(context)
+    if not st.diurnal_profiles:
+        return VoteResult()
+    detector = DiurnalProfileDetector()
+    hour = context.sequence_timestamp.hour
+    alarmed: List[str] = []
+    for idx, sensor in enumerate(_sensors(window)):
+        if sensor == LIGHT_SENSOR:
+            continue
+        hourly = st.diurnal_profiles.get(sensor)
+        if hourly and detector.detect(
+            float(window[-1, idx]), hour, dict(hourly), sensor_name=sensor
+        ):
+            alarmed.append(sensor)
+    return _single(DIURNAL_VOTE, alarmed)
+
+
+# --- Change point (BOCPD), §1 row 13 ----------------------------------------
+
+
+def change_point_vote(
+    window: np.ndarray,
+    context: ScoringContext,
+    profile: ScoringProfile,
+    state: Optional[WindowState] = None,
+) -> VoteResult:
+    """BOCPD change point anywhere in the window on ``BOCPD_MIN_SENSORS``+ sensors.
+
+    Light excluded so nightfall is not a second channel (pipeline step 0h).
+    """
+    del context, state
+    if not profile.legacy_window_rules_enabled:
+        return VoteResult()
+    detector = BOCPDDetector()
+    sensors = [
+        sensor
+        for idx, sensor in enumerate(_sensors(window))
+        if sensor != LIGHT_SENSOR and detector.any_in_window(window[:, idx])
+    ]
+    if len(sensors) < BOCPD_MIN_SENSORS:
+        return VoteResult()
+    return _single(CHANGE_POINT_VOTE, sensors)
