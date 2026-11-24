@@ -17,6 +17,9 @@ remove anomalies.  It does move the ADR-005 canonical anchor for the file
 
 from __future__ import annotations
 
+from enum import Enum
+from typing import Optional, Union
+
 import numpy as np
 
 from src.config import (
@@ -37,10 +40,18 @@ _MAD_TO_SIGMA: float = 1.4826
 _ROBUST_GATE_SUFFIX: str = "+robust_gate"
 
 
+class _FromConfig(Enum):
+    """Sentinel: read the robust-gate setting from ``src.config`` at call time."""
+
+    FROM_CONFIG = "from_config"
+
+
 def calibrate_threshold(
     scores: np.ndarray,
     *,
     method: str | None = None,
+    percentile: Optional[float] = None,
+    robust_gate_z: Union[float, None, _FromConfig] = _FromConfig.FROM_CONFIG,
 ) -> tuple[float, str]:
     """Derive a detection threshold from scores observed in one uploaded file.
 
@@ -48,6 +59,11 @@ def calibrate_threshold(
         scores: Every raw anomaly score produced for the file.
         method: Relative criterion — ``"percentile"`` or ``"pot"``.  Defaults
             to ``COLD_RUN_THRESHOLD_METHOD``.
+        percentile: Quantile for the relative criterion. Defaults to
+            ``COLD_RUN_PERCENTILE`` (ADR-014: the batch profile passes its own).
+        robust_gate_z: Robust-gate z, or ``None`` to disable the gate.
+            Defaults to ``COLD_RUN_ROBUST_GATE_Z`` when
+            ``COLD_RUN_ROBUST_GATE_ENABLED``, else disabled.
 
     Returns:
         ``(threshold, method_used)``.  ``method_used`` carries
@@ -59,7 +75,8 @@ def calibrate_threshold(
 
     arr = np.asarray(scores, dtype=np.float64)
     chosen = method or COLD_RUN_THRESHOLD_METHOD
-    percentile_threshold = float(np.percentile(arr, COLD_RUN_PERCENTILE))
+    quantile = COLD_RUN_PERCENTILE if percentile is None else percentile
+    percentile_threshold = float(np.percentile(arr, quantile))
 
     threshold, threshold_method = percentile_threshold, "percentile"
     if chosen == "pot":
@@ -67,22 +84,27 @@ def calibrate_threshold(
         if used == "pot" and pot_threshold >= percentile_threshold:
             threshold, threshold_method = pot_threshold, "pot"
 
-    return _apply_robust_gate(arr, threshold, threshold_method)
+    if robust_gate_z is _FromConfig.FROM_CONFIG:
+        robust_gate_z = COLD_RUN_ROBUST_GATE_Z if COLD_RUN_ROBUST_GATE_ENABLED else None
+    return _apply_robust_gate(arr, threshold, threshold_method, robust_gate_z)
 
 
 def _apply_robust_gate(
-    arr: np.ndarray, threshold: float, threshold_method: str
+    arr: np.ndarray, threshold: float, threshold_method: str, gate_z: Optional[float]
 ) -> tuple[float, str]:
-    """Raise a file-relative threshold to the absolute anomalousness gate."""
-    if not COLD_RUN_ROBUST_GATE_ENABLED:
+    """Raise a file-relative threshold to the absolute anomalousness gate.
+
+    ``gate_z`` ``None`` means the gate is disabled.
+    """
+    if gate_z is None:
         return threshold, threshold_method
-    gate = _robust_score_gate(arr)
+    gate = _robust_score_gate(arr, gate_z)
     if gate is None or gate <= threshold:
         return threshold, threshold_method
     return gate, f"{threshold_method}{_ROBUST_GATE_SUFFIX}"
 
 
-def _robust_score_gate(arr: np.ndarray) -> float | None:
+def _robust_score_gate(arr: np.ndarray, gate_z: float) -> float | None:
     """Score at which a reading is genuinely far from the bulk of the file.
 
     Uses median/MAD rather than mean/std so that the anomalies themselves do
@@ -97,7 +119,7 @@ def _robust_score_gate(arr: np.ndarray) -> float | None:
     mad = float(np.median(np.abs(arr - median)))
     if not np.isfinite(median) or not np.isfinite(mad) or mad <= 0.0:
         return None
-    return median + COLD_RUN_ROBUST_GATE_Z * _MAD_TO_SIGMA * mad
+    return median + gate_z * _MAD_TO_SIGMA * mad
 
 
 def _calibrate_pot(arr: np.ndarray, percentile_floor: float) -> tuple[float, str]:
