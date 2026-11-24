@@ -209,17 +209,19 @@ export function EpisodeTable({
             {isDriftWatchEpisode(episode) ? (
               <DriftAlertCard episode={episode} href={driftWatchHref} />
             ) : null}
-            <ul className="divide-y divide-border border-t border-border">
-              {episode.samples.map((sample) => (
-                <EpisodeSampleRow
-                  key={sample.timestamp}
-                  sample={sample}
-                  fallbackChannel={episode.channel}
-                  episodeSpan={{ start_ts: episode.start_ts, end_ts: episode.end_ts }}
-                  setpoints={setpoints}
-                />
-              ))}
-            </ul>
+            {episode.samples.length > 0 ? (
+              <ul className="divide-y divide-border border-t border-border">
+                {episode.samples.map((sample) => (
+                  <EpisodeSampleRow
+                    key={sample.timestamp}
+                    sample={sample}
+                    fallbackChannel={episode.channel}
+                    episodeSpan={{ start_ts: episode.start_ts, end_ts: episode.end_ts }}
+                    setpoints={setpoints}
+                  />
+                ))}
+              </ul>
+            ) : null}
             {episode.samples.length < episode.sample_count ? (
               <p className="px-4 py-2 text-xs text-text-muted">
                 Showing the {episode.samples.length} highest-scoring of{" "}
