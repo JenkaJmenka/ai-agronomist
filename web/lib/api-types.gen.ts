@@ -2104,6 +2104,25 @@ export interface components {
              * @default false
              */
             is_recovery: boolean;
+            /**
+             * Drift Offset
+             * @description ADR-013 §5 robust offset in the channel's native units, SIGNED: the alert row's trigger_value, i.e. the median of (residual - mu) over the episode. Negative for a '-' episode (channel reads low against its reference), positive for '+'.
+             */
+            drift_offset?: number | null;
+            /** Drift Input Id */
+            drift_input_id?: string | null;
+            /**
+             * Drift First Detected Ts
+             * @description ISO-8601 UTC first_detected_ts: the ADR-013 §4 natural-key time.
+             */
+            drift_first_detected_ts?: string | null;
+            /** Drift Input Kind */
+            drift_input_kind?: ("paired_probes" | "virtual_sensor" | "physics") | null;
+            /**
+             * Drift Message
+             * @description ADR-013 §4 operator wording (build_drift_alert_message).
+             */
+            drift_message?: string | null;
         };
         /**
          * AnomalyEpisodesResponse

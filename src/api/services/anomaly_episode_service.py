@@ -73,6 +73,7 @@ to be tagged either way.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -97,7 +98,16 @@ from src.config import (
     EPISODE_GAP_SECONDS,
     RECOVERY_KNOCKON_WINDOW_HOURS,
 )
-from src.db.models import AnomalyEpisodeRecord
+from src.api.services.drift_watch_alerts import (
+    ALERT_DETECTOR as _DRIFT_WATCH_DETECTOR,
+    build_drift_alert_message,
+)
+from src.db.models import (
+    AnomalyEpisodeRecord,
+    DriftWatchEpisode,
+    DriftWatchInput,
+)
+from src.models.drift_watch import DriftInputSpec, InputKind
 from src.models.episode_grouper import _parse_iso
 from src.models.fault_classifier import FaultType
 
@@ -158,6 +168,9 @@ async def fetch_anomaly_episodes(
     await _augment_stuck_fault_episodes(
         db, episodes, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
         start=start, end=end,
+    )
+    await _augment_drift_watch_episodes(
+        db, episodes, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
     )
 
     # Rank by peak_score and cap AFTER grouping — capping first would
@@ -305,6 +318,111 @@ def _augment_stuck_fault_episode(
     episode["severity"] = record.severity
     episode["frozen_sample_count"] = record.frozen_sample_count
     episode["raw_slot_count"] = record.raw_slot_count
+
+
+async def _augment_drift_watch_episodes(
+    db: AsyncSession,
+    episodes: list[dict[str, Any]],
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+) -> None:
+    """Attach the ADR-013 §4 fields to drift-watch episodes, in place.
+
+    One query per page, however many drift episodes it holds, and none when
+    the page has no drift episode. The query joins the persisted alert row
+    (``anomaly_episodes``, detector ``drift_watch``) to its
+    ``drift_watch_episodes`` row on the natural key the writer uses
+    (tenant, greenhouse, target channel = channel, ``first_detected_ts`` =
+    ``detected_ts``) and to ``drift_watch_inputs`` for the spec. No input id
+    or kind is stored on ``anomaly_episodes`` itself.
+
+    An episode is paired with the alert row of its channel whose span
+    ``[detected_ts, end_ts]`` overlaps the episode's own span, the closest
+    ``detected_ts`` winning. With no matching row every drift field stays
+    None. Non-drift episodes are never touched.
+    """
+    drift = [e for e in episodes if e["detector"] == _DRIFT_WATCH_DETECTOR]
+    if not drift:
+        return
+    channels = {e["channel"] for e in drift}
+    lo = min(_parse_iso(e["start_ts"]) for e in drift)
+    hi = max(_parse_iso(e["end_ts"]) for e in drift)
+    stmt = (
+        select(AnomalyEpisodeRecord, DriftWatchEpisode, DriftWatchInput)
+        .outerjoin(
+            DriftWatchEpisode,
+            (DriftWatchEpisode.tenant_id == AnomalyEpisodeRecord.tenant_id)
+            & (DriftWatchEpisode.greenhouse_id == AnomalyEpisodeRecord.greenhouse_id)
+            & (DriftWatchEpisode.target_channel == AnomalyEpisodeRecord.channel)
+            & (DriftWatchEpisode.first_detected_ts == AnomalyEpisodeRecord.detected_ts),
+        )
+        .outerjoin(
+            DriftWatchInput,
+            (DriftWatchInput.tenant_id == DriftWatchEpisode.tenant_id)
+            & (DriftWatchInput.greenhouse_id == DriftWatchEpisode.greenhouse_id)
+            & (DriftWatchInput.input_id == DriftWatchEpisode.input_id),
+        )
+        .where(
+            AnomalyEpisodeRecord.tenant_id == tenant_id,
+            AnomalyEpisodeRecord.greenhouse_id == greenhouse_id,
+            AnomalyEpisodeRecord.detector == _DRIFT_WATCH_DETECTOR,
+            AnomalyEpisodeRecord.channel.in_(channels),
+            # Index-friendly narrowing only; overlap is re-checked below.
+            AnomalyEpisodeRecord.detected_ts <= hi,
+        )
+        .order_by(AnomalyEpisodeRecord.detected_ts, DriftWatchEpisode.input_id)
+    )
+    rows = (await db.execute(stmt)).all()
+    by_channel: dict[str, list[tuple[Any, Any, Any]]] = {}
+    for record, dw_ep, dw_input in rows:
+        if _as_utc(record.end_ts) < lo:
+            continue
+        by_channel.setdefault(record.channel, []).append((record, dw_ep, dw_input))
+
+    for episode in drift:
+        ep_start = _parse_iso(episode["start_ts"])
+        ep_end = _parse_iso(episode["end_ts"])
+        candidates = [
+            c for c in by_channel.get(episode["channel"], [])
+            if _as_utc(c[0].detected_ts) <= ep_end and _as_utc(c[0].end_ts) >= ep_start
+        ]
+        if not candidates:
+            continue
+        record, dw_ep, dw_input = min(
+            candidates,
+            key=lambda c: abs((_as_utc(c[0].detected_ts) - ep_start).total_seconds()),
+        )
+        _apply_drift_fields(episode, record, dw_ep, dw_input)
+
+
+def _apply_drift_fields(
+    episode: dict[str, Any],
+    record: AnomalyEpisodeRecord,
+    dw_ep: DriftWatchEpisode | None,
+    dw_input: DriftWatchInput | None,
+) -> None:
+    """Fill the drift fields from one matched row triple, in place."""
+    offset = float(record.trigger_value) if record.trigger_value is not None else None
+    episode["drift_offset"] = offset
+    episode["drift_first_detected_ts"] = _iso(_as_utc(record.detected_ts))
+    if dw_ep is None or dw_input is None:
+        return
+    episode["drift_input_id"] = dw_ep.input_id
+    try:
+        sd = json.loads(dw_input.spec_json)
+        spec = DriftInputSpec(
+            input_id=sd["input_id"],
+            kind=InputKind(sd["kind"]),
+            target_channel=sd["target_channel"],
+            channels=list(sd["channels"]),
+            min_shift=float(sd["min_shift"]),
+        )
+    except (KeyError, ValueError, TypeError):
+        return
+    episode["drift_input_kind"] = spec.kind.value
+    if offset is not None:
+        episode["drift_message"] = build_drift_alert_message(spec, dw_ep.direction, offset)
 
 
 async def _fetch_recovery_release_events(
