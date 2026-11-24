@@ -8029,6 +8029,69 @@
             "title": "Is Recovery",
             "description": "True when this episode is on a channel other than a stuck-fault channel and starts no earlier than EPISODE_GAP_SECONDS before, and within RECOVERY_KNOCKON_WINDOW_HOURS after, that fault's release. Informational only; does not suppress or rescore.",
             "default": false
+          },
+          "drift_offset": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Offset",
+            "description": "ADR-013 \u00a75 robust offset in the channel's native units, SIGNED: the alert row's trigger_value, i.e. the median of (residual - mu) over the episode. Negative for a '-' episode (channel reads low against its reference), positive for '+'."
+          },
+          "drift_input_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Input Id"
+          },
+          "drift_first_detected_ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift First Detected Ts",
+            "description": "ISO-8601 UTC first_detected_ts: the ADR-013 \u00a74 natural-key time."
+          },
+          "drift_input_kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "paired_probes",
+                  "virtual_sensor",
+                  "physics"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Input Kind"
+          },
+          "drift_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Message",
+            "description": "ADR-013 \u00a74 operator wording (build_drift_alert_message)."
           }
         },
         "type": "object",

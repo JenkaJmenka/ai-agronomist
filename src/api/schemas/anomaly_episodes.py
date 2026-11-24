@@ -99,6 +99,30 @@ class AnomalyEpisodeSummary(BaseModel):
         ),
     )
 
+    # Drift-watch-only (ADR-013 §4), populated when detector == "drift_watch"
+    # and None for every other detector. Sourced from the persisted
+    # `anomaly_episodes` row plus the `drift_watch_episodes` /
+    # `drift_watch_inputs` rows sharing its natural key.
+    drift_offset: Optional[float] = Field(
+        default=None,
+        description=(
+            "ADR-013 §5 robust offset in the channel's native units, SIGNED: "
+            "the alert row's trigger_value, i.e. the median of (residual - mu) "
+            "over the episode. Negative for a '-' episode (channel reads low "
+            "against its reference), positive for '+'."
+        ),
+    )
+    drift_input_id: Optional[str] = None
+    drift_first_detected_ts: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC first_detected_ts: the ADR-013 §4 natural-key time.",
+    )
+    drift_input_kind: Optional[Literal["paired_probes", "virtual_sensor", "physics"]] = None
+    drift_message: Optional[str] = Field(
+        default=None,
+        description="ADR-013 §4 operator wording (build_drift_alert_message).",
+    )
+
 
 class AnomalyEpisodesResponse(BaseModel):
     """Response body for GET /api/anomalies/episodes."""

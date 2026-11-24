@@ -73,10 +73,11 @@ to be tagged either way.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.anomaly_episode_grouping import (  # noqa: F401
@@ -91,13 +92,23 @@ from src.api.services.sample_enrichment import (
     _row_dict_from_minimal,
 )
 from src.config import (
+    SYNTHETIC_SOURCE_PREFIX,
     ANOMALY_EPISODE_GAP_SECONDS,
     ANOMALY_EPISODE_MAX,
     ANOMALY_TREND_FLAT_DEADBAND,
     EPISODE_GAP_SECONDS,
     RECOVERY_KNOCKON_WINDOW_HOURS,
 )
-from src.db.models import AnomalyEpisodeRecord
+from src.api.services.drift_watch_alerts import (
+    ALERT_DETECTOR as _DRIFT_WATCH_DETECTOR,
+    build_drift_alert_message,
+)
+from src.db.models import (
+    AnomalyEpisodeRecord,
+    DriftWatchEpisode,
+    DriftWatchInput,
+)
+from src.models.drift_watch import DriftInputSpec, InputKind
 from src.models.episode_grouper import _parse_iso
 from src.models.fault_classifier import FaultType
 
@@ -129,6 +140,38 @@ async def fetch_anomaly_episodes(
     clamps the window to "now": readings can be future-dated
     (project_future_dated_readings).
     """
+    reading_episodes = await _build_reading_episodes(
+        db, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        start=start, end=end, threshold=threshold, sample_limit=sample_limit,
+        gap_seconds=gap_seconds, deadband=deadband, episode_max=episode_max,
+        incidents=incidents,
+    )
+    # Drift-watch alerts come straight from ``anomaly_episodes``: no sensor
+    # produced a flagged reading for them, so none is fabricated. They are
+    # appended AFTER the peak_score ranking and cap above (they carry no
+    # score), newest start first, and are not recovery-tagged.
+    drift_episodes = await _fetch_drift_alert_episodes(
+        db, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
+        start=start, end=end, limit=episode_max,
+    )
+    return reading_episodes + drift_episodes
+
+
+async def _build_reading_episodes(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+    threshold: float,
+    sample_limit: int,
+    gap_seconds: int,
+    deadband: float,
+    episode_max: int,
+    incidents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group, rank, cap and enrich the flagged-reading episodes."""
     minimal_rows = await _fetch_minimal_flagged_rows(
         db, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
         start=start, end=end, threshold=threshold,
@@ -305,6 +348,143 @@ def _augment_stuck_fault_episode(
     episode["severity"] = record.severity
     episode["frozen_sample_count"] = record.frozen_sample_count
     episode["raw_slot_count"] = record.raw_slot_count
+
+
+async def _fetch_drift_alert_episodes(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    greenhouse_id: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """One feed episode per persisted drift-watch alert row (ADR-013 §4).
+
+    Exactly one query per page. It reads ``anomaly_episodes`` rows with
+    detector ``drift_watch`` and joins each to its ``drift_watch_episodes``
+    row on the writer's natural key (tenant, greenhouse, target channel =
+    channel, ``first_detected_ts`` = ``detected_ts``) and to
+    ``drift_watch_inputs`` for the spec: ``anomaly_episodes`` stores neither
+    the input id nor its kind.
+
+    Window rule: an alert is in the window when its span
+    ``[detected_ts, end_ts]`` overlaps ``[start, end]``. ``start_ts`` is
+    always ``detected_ts`` (never clipped), so an ongoing alert detected
+    before the window still shows. Synthetic rows (``source`` starting with
+    ``SYNTHETIC_SOURCE_PREFIX``) are excluded.
+    """
+    stmt = (
+        select(AnomalyEpisodeRecord, DriftWatchEpisode, DriftWatchInput)
+        .outerjoin(
+            DriftWatchEpisode,
+            (DriftWatchEpisode.tenant_id == AnomalyEpisodeRecord.tenant_id)
+            & (DriftWatchEpisode.greenhouse_id == AnomalyEpisodeRecord.greenhouse_id)
+            & (DriftWatchEpisode.target_channel == AnomalyEpisodeRecord.channel)
+            & (DriftWatchEpisode.first_detected_ts == AnomalyEpisodeRecord.detected_ts),
+        )
+        .outerjoin(
+            DriftWatchInput,
+            (DriftWatchInput.tenant_id == DriftWatchEpisode.tenant_id)
+            & (DriftWatchInput.greenhouse_id == DriftWatchEpisode.greenhouse_id)
+            & (DriftWatchInput.input_id == DriftWatchEpisode.input_id),
+        )
+        .where(
+            AnomalyEpisodeRecord.tenant_id == tenant_id,
+            AnomalyEpisodeRecord.greenhouse_id == greenhouse_id,
+            AnomalyEpisodeRecord.detector == _DRIFT_WATCH_DETECTOR,
+            AnomalyEpisodeRecord.detected_ts <= end,
+            AnomalyEpisodeRecord.end_ts >= start,
+            or_(
+                AnomalyEpisodeRecord.source.is_(None),
+                ~AnomalyEpisodeRecord.source.like(f"{SYNTHETIC_SOURCE_PREFIX}%"),
+            ),
+        )
+        .order_by(
+            AnomalyEpisodeRecord.detected_ts.desc(),
+            AnomalyEpisodeRecord.id,
+            DriftWatchEpisode.input_id,
+        )
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record, dw_ep, dw_input in (await db.execute(stmt)).all():
+        if record.id in seen:  # same natural key on two inputs: keep the first
+            continue
+        seen.add(record.id)
+        out.append(_drift_episode_dict(record, dw_ep, dw_input))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _drift_episode_dict(
+    record: AnomalyEpisodeRecord,
+    dw_ep: DriftWatchEpisode | None,
+    dw_input: DriftWatchInput | None,
+) -> dict[str, Any]:
+    """Feed-episode dict for one drift alert row; no readings, no score."""
+    first = _as_utc(record.detected_ts)
+    last = max(_as_utc(record.end_ts), first)
+    episode: dict[str, Any] = {
+        "episode_id": f"drift_watch:{record.id}",
+        "channel": record.channel,
+        "detector": _DRIFT_WATCH_DETECTOR,
+        # A drift alert is not a band breach, so no drop/spike direction.
+        "direction": None,
+        "start_ts": _iso(first),
+        "end_ts": _iso(last),
+        "duration_seconds": (last - first).total_seconds(),
+        "sample_count": 0,
+        # No detector score exists for a drift alert; 0.0, not a fabricated one.
+        "peak_score": 0.0,
+        "peak_ts": _iso(first),
+        "severity": record.severity,
+        "first_value": None,
+        "last_value": None,
+        "peak_value": None,
+        "trend": "flat",
+        "movement": "steady",
+        "slope_per_hour": None,
+        "affected_sensors": [record.channel],
+        "headline": f"Calibration drift: {record.channel.replace('_', ' ')}",
+        "is_truncated_start": False,
+        "is_truncated_end": False,
+        "samples": [],
+    }
+    _apply_drift_fields(episode, record, dw_ep, dw_input)
+    if episode.get("drift_message"):
+        episode["headline"] = episode["drift_message"]
+    return episode
+
+
+def _apply_drift_fields(
+    episode: dict[str, Any],
+    record: AnomalyEpisodeRecord,
+    dw_ep: DriftWatchEpisode | None,
+    dw_input: DriftWatchInput | None,
+) -> None:
+    """Fill the drift fields from one matched row triple, in place."""
+    offset = float(record.trigger_value) if record.trigger_value is not None else None
+    episode["drift_offset"] = offset
+    episode["drift_first_detected_ts"] = _iso(_as_utc(record.detected_ts))
+    if dw_ep is None or dw_input is None:
+        return
+    episode["drift_input_id"] = dw_ep.input_id
+    try:
+        sd = json.loads(dw_input.spec_json)
+        spec = DriftInputSpec(
+            input_id=sd["input_id"],
+            kind=InputKind(sd["kind"]),
+            target_channel=sd["target_channel"],
+            channels=list(sd["channels"]),
+            min_shift=float(sd["min_shift"]),
+        )
+    except (KeyError, ValueError, TypeError):
+        return
+    episode["drift_input_kind"] = spec.kind.value
+    if offset is not None:
+        episode["drift_message"] = build_drift_alert_message(spec, dw_ep.direction, offset)
 
 
 async def _fetch_recovery_release_events(
