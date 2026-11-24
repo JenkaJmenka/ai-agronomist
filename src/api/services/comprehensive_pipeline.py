@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 import numpy as np
-from sqlalchemy import distinct, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
@@ -24,7 +24,6 @@ from src.config import (
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     DIURNAL_PROFILE_HISTORY_DAYS,
-    DIURNAL_VOTE_MIN_DAYS,
     DROPOUT_CONSECUTIVE_P,
     EWMA_ALPHA,
     EWMA_K,
@@ -68,7 +67,6 @@ from src.models.scoring import (
     ScoringContext,
     ScoringProfile,
     SpikeConfirmMode,
-    WindowState,
 )
 from src.models.scoring.precedence import (
     RULE_PRECEDENCE,
@@ -85,14 +83,19 @@ from src.models.scoring.votes import (
     diurnal_vote,
     noise_vote,
     oob_vote,
-    season_for_timestamp,
     spike_mad_vote,
+    window_state,
 )
 from src.models.scoring.window_rules import (
     SETPOINT_TYPE_TO_VOTE,
     band_findings as band_findings_vote,
     dual_sensor_votes,
     setpoint_votes,
+)
+from src.api.services.scoring_history import (
+    DbHistoryProvider,
+    load_diurnal_profiles,
+    load_seasonal_scaler,
 )
 from src.models.operational_config_store import get_operational_config_store
 from src.models.pattern_detector import PatternDetector
@@ -107,9 +110,6 @@ from src.models.retraining_orchestrator import RetrainingOrchestrator
 from src.models.root_cause_analyzer import RootCauseAnalyzer
 from src.models.seasonal_scaler import (
     SeasonalScaler,
-    build_scaler_from_baselines,
-    get_cached_seasonal_scaler,
-    put_cached_seasonal_scaler,
 )
 from src.monitoring.anomaly_metrics import AnomalyMetrics
 from src.utils.lru import LRUDict
@@ -766,14 +766,18 @@ class ComprehensiveInferencePipeline:
         # diurnal profiles are DB lookups: they are awaited at the points
         # the pipeline always awaited them (the OOB gate returns before the
         # diurnal query) and swapped in with ``replace``.
-        _season_key = season_for_timestamp(seq_ts, _op_config.get("season_map") or {})
-        _window_state = WindowState(
-            season=_season_key,
-            scaler=SeasonalScaler(),
+        # ``window_state(context)`` is re-derived after each lookup lands:
+        # the provider returns the identity scaler / no profiles until then.
+        _history = DbHistoryProvider(
+            customer_id,
+            greenhouse_id,
             operational_config=_op_config,
-            diurnal_profiles={},
             noise_clean_windows=noise_clean_windows,
+            diurnal_cache=self._diurnal_profiles_cache,
         )
+        _vote_context = replace(_vote_context, history=_history)
+        _window_state = window_state(_vote_context)
+        _season_key = _window_state.season
         band_findings: list[dict[str, Any]] = []
         for _band_finding in band_findings_vote(
             _denormed_for_noise, _vote_context, _profile, _window_state
@@ -789,10 +793,8 @@ class ComprehensiveInferencePipeline:
             )
 
         # Seasonal σ scaler — factor 1.0 when baselines are sparse / absent.
-        _scaler = await self._get_seasonal_scaler(
-            customer_id, greenhouse_id, _season_key, _op_config, db
-        )
-        _window_state = replace(_window_state, scaler=_scaler)
+        await _history.load_seasonal_scaler(db, _season_key)
+        _window_state = window_state(_vote_context)
 
         # 0a. Noise / precision degradation (SCADA spec 1.4): window-level
         # variance ratio, light excluded. Calibrated baselines apply only
@@ -883,10 +885,8 @@ class ComprehensiveInferencePipeline:
         # 0f. Diurnal profile check — hourly Z-score against historical stats.
         # Profiles auto-build from the tenant's stored history on first use.
         # Light is excluded (diurnal ramp and night zeros are natural signal).
-        _diurnal_profiles = await self._ensure_diurnal_profiles(
-            customer_id, greenhouse_id, db, anchor_ts=seq_ts,
-        )
-        _window_state = replace(_window_state, diurnal_profiles=_diurnal_profiles or {})
+        await _history.load_diurnal_profiles(db, seq_ts)
+        _window_state = window_state(_vote_context)
         _diurnal = diurnal_vote(
             _denormed_for_noise, _vote_context, _profile, _window_state
         )
@@ -976,7 +976,7 @@ class ComprehensiveInferencePipeline:
         # Mutate H only (never rebuild) so LearningState round-trips stay valid.
         # Use mean factor across sensors as a single decision interval scale.
         _cusum_factors = [
-            _scaler.factor(_season_key, s) for s in SENSOR_NAMES[: seq_array.shape[1]]
+            _window_state.scaler.factor(_season_key, s) for s in SENSOR_NAMES[: seq_array.shape[1]]
         ]
         _cusum.h = CUSUM_H_SIGMA * (
             sum(_cusum_factors) / len(_cusum_factors) if _cusum_factors else 1.0
@@ -1474,35 +1474,10 @@ class ComprehensiveInferencePipeline:
         op_config: dict[str, Any],
         db: AsyncSession,
     ) -> SeasonalScaler:
-        """Return a cached SeasonalScaler (factor 1.0 when baselines are sparse)."""
-        cached = get_cached_seasonal_scaler(tenant_id, greenhouse_id, season)
-        if cached is not None:
-            return cached
-        try:
-            from src.api.services.seasonal_baseline_service import (
-                compute_seasonal_baselines,
-            )
-
-            baselines = await compute_seasonal_baselines(
-                db,
-                tenant_id=tenant_id,
-                greenhouse_id=greenhouse_id,
-                season_map=op_config.get("season_map"),
-            )
-            scaler = build_scaler_from_baselines(
-                baselines,
-                overrides=op_config.get("seasonal_overrides"),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Seasonal baseline compute failed for %s/%s: %s — using factor 1.0",
-                tenant_id,
-                greenhouse_id,
-                exc,
-            )
-            scaler = SeasonalScaler()
-        put_cached_seasonal_scaler(tenant_id, greenhouse_id, season, scaler)
-        return scaler
+        """Return a cached SeasonalScaler (see ``scoring_history``)."""
+        return await load_seasonal_scaler(
+            db, tenant_id, greenhouse_id, season, op_config
+        )
 
     async def _load_mahalanobis_history(
         self,
@@ -1551,95 +1526,15 @@ class ComprehensiveInferencePipeline:
         *,
         anchor_ts: Optional[datetime] = None,
     ) -> Dict[str, Dict[int, tuple]]:
-        """Cached diurnal profiles, auto-built from stored history on miss.
-
-        Format: ``{"temperature": {0: (mean, std), ...}, ...}``. An empty
-        dict is cached for tenants without enough history so the build
-        query runs at most once per tenant per process; profiles restored
-        from LearningState by ``_load_trackers`` take the same cache slot.
-        Failures never block the pipeline — the diurnal check is skipped.
-
-        ``anchor_ts`` anchors the trailing window to the reading under
-        evaluation rather than to wall-clock time. Historical uploads
-        would otherwise fall outside the window and lose the vote.
-        """
-        # Include the anchor date in the cache key so profiles built for
-        # historical uploads (anchor = sequence timestamp) are not reused for
-        # a different day's pipeline call within the same instance.
+        """Cached diurnal profiles (see ``scoring_history.load_diurnal_profiles``)."""
         anchor = anchor_ts if anchor_ts is not None else datetime.now(timezone.utc)
-        cache_key = (customer_id, greenhouse_id, anchor.date())
-        cached = self._diurnal_profiles_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        from src.api.services.diurnal_profile_service import (  # noqa: PLC0415
-            build_diurnal_profiles,
-            persist_diurnal_profiles,
+        return await load_diurnal_profiles(
+            db,
+            customer_id,
+            greenhouse_id,
+            anchor,
+            self._diurnal_profiles_cache,
         )
-
-        # Maturity gate: count distinct calendar days (cadence-independent)
-        # in the trailing window, excluding synthetic rows.  Profiles may
-        # build from DIURNAL_PROFILE_MIN_ROWS (288) but the diurnal vote
-        # requires DIURNAL_VOTE_MIN_DAYS (7) to avoid false alarms from
-        # under-estimated inter-day variance.
-        # anchor is already set above (from anchor_ts or now()).
-        since = anchor - timedelta(days=DIURNAL_PROFILE_HISTORY_DAYS)
-        try:
-            days_stmt = (
-                select(func.count(distinct(func.date(SensorReading.timestamp))))
-                .where(
-                    SensorReading.tenant_id == customer_id,
-                    SensorReading.greenhouse_id == greenhouse_id,
-                    SensorReading.timestamp >= since,
-                    SensorReading.timestamp <= anchor,
-                    or_(
-                        SensorReading.source.is_(None),
-                        ~SensorReading.source.startswith("synthetic:"),
-                    ),
-                )
-            )
-            n_days = (await db.execute(days_stmt)).scalar() or 0
-            if n_days < DIURNAL_VOTE_MIN_DAYS:
-                self._diurnal_profiles_cache[cache_key] = {}
-                return {}
-        except Exception:
-            logger.debug(
-                "Diurnal maturity query failed for tenant %s (non-critical)",
-                customer_id,
-                exc_info=True,
-            )
-            self._diurnal_profiles_cache[cache_key] = {}
-            return {}
-
-        profiles: Dict[str, Dict[int, tuple]] = {}
-        try:
-            profiles = await build_diurnal_profiles(
-                db, tenant_id=customer_id, greenhouse_id=greenhouse_id, anchor=anchor
-            )
-        except Exception:
-            logger.warning(
-                "Diurnal profile build failed for tenant %s (non-critical)",
-                customer_id,
-                exc_info=True,
-            )
-        self._diurnal_profiles_cache[cache_key] = profiles
-        if profiles:
-            logger.info(
-                "Auto-built diurnal profiles for tenant %s (%d sensors)",
-                customer_id,
-                len(profiles),
-            )
-            try:
-                await persist_diurnal_profiles(
-                    db, tenant_id=customer_id, profiles=profiles
-                )
-            except Exception:
-                logger.warning(
-                    "Diurnal profile persist failed for tenant %s (non-critical)",
-                    customer_id,
-                    exc_info=True,
-                )
-        return profiles
 
     def _evict_cusum_ema_caches(self, customer_id: str) -> None:
         """Remove all CUSUM and EMA cache entries for the evicted tenant."""
