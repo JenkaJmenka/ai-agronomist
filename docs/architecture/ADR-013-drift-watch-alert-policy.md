@@ -131,6 +131,11 @@ added.
 historical episodes on the page, not twelve alerts at once. `backfill_drift_watch` never writes
 alerts.
 
+**Out-of-sample only.** The writer skips any episode whose `first_detected_ts` is at or before
+the input's `calibration_window_end`, and writes nothing when that boundary is unknown. The gate
+does not count in-sample episodes (§3), so one still confirmed 12+ weeks later must not become an
+alert either. Added 2026-11-23.
+
 **Storage.** Upsert into `anomaly_episodes` with `detector = 'drift_watch'`,
 `fault_type = 'calibration_drift'`, `channel = target_channel`, `onset_ts` = the episode's first
 onset estimate, `detected_ts = first_detected_ts`, `trigger_value` = robust offset,
