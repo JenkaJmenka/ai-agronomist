@@ -49,23 +49,22 @@ def test_batch_profile_matches_upload_path() -> None:
 
 
 def test_stream_and_api_profiles_match_pipeline_paths() -> None:
-    from src.api.services import comprehensive_pipeline as cp
     from src.live import runtime_builder, scoring
 
     expected_pairs = {
-        s: (float(c), float(f)) for s, (c, f) in cp.ENRICHMENT_SPIKE_CONFIRMED_PAIRS.items()
+        s: (float(c), float(f)) for s, (c, f) in config.ENRICHMENT_SPIKE_CONFIRMED_PAIRS.items()
     }
     for profile in (STREAM_PROFILE, API_PROFILE):
         assert profile.spike_confirm.mode is SpikeConfirmMode.LAG
-        assert profile.spike_confirm.steps == max(0, int(cp.ENRICHMENT_SPIKE_CONFIRM_LAG))
+        assert profile.spike_confirm.steps == max(0, int(config.ENRICHMENT_SPIKE_CONFIRM_LAG))
         assert _pairs(profile) == expected_pairs
-        assert profile.humidity_spike_enabled is ("humidity" in cp.ENRICHMENT_SPIKE_CONFIRMED_PAIRS)
+        assert profile.humidity_spike_enabled is ("humidity" in config.ENRICHMENT_SPIKE_CONFIRMED_PAIRS)
 
     assert STREAM_PROFILE.lstm_decision.rule is LstmDecisionRule.FIXED
     assert STREAM_PROFILE.lstm_decision.threshold == runtime_builder.LIVE_ANOMALY_THRESHOLD
     assert STREAM_PROFILE.lstm_decision.threshold == scoring.LIVE_ANOMALY_THRESHOLD
     assert API_PROFILE.lstm_decision.rule is LstmDecisionRule.ADAPTIVE_EWMA_POT
-    assert API_PROFILE.lstm_decision.threshold == cp.ANOMALY_THRESHOLD
+    assert API_PROFILE.lstm_decision.threshold == config.ANOMALY_THRESHOLD
 
 
 def test_legacy_fields_mirror_config_one_to_one() -> None:
