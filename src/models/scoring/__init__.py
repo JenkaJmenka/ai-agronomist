@@ -1,10 +1,15 @@
 """ADR-014 scoring core (``src/models/scoring/``, owner ml-engineer, OQ1).
 
 Step A2 added the types: ``ScoringContext``, ``HistoryProvider``,
-``ScoringProfile`` and the three production profiles. Step A3 adds the pure
+``ScoringProfile`` and the three production profiles. Step A3 added the pure
 detector votes (``votes``, ``window_rules``) and the LSTM policies
-(``lstm``; the forward pass is ``src.models.inference.ModelScorer``). No
-production path calls them yet (A4 / A6 / A7). The package must stay free of
+(``lstm``; the forward pass is ``src.models.inference.ModelScorer``). Since
+A4a (#154) ``ComprehensiveInferencePipeline._run_with_components``
+(live enrichment and the inference API) gets its window votes and LSTM
+cutoff from the core; its inline vote copies are gone. Step A4b adds
+``precedence`` (OQ1(a)): the precedence and label table, vote ordering,
+rule reasoning and band promotion, which the pipeline switches to next. The
+upload path does not call the core yet (A6 / A7). The package must stay free of
 ``src.api`` / ``src.db`` / ``src.live`` imports and of wall-clock reads
 (ADR-014 §2.1, §3 invariant 2).
 """

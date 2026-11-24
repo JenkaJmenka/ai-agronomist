@@ -1,0 +1,238 @@
+{
+  "_source": "src/api/services/comprehensive_pipeline.py at 6c10401 (after A4a, #154); frozen for ADR-014 A4b. Change only with a measured, intended behaviour change.",
+  "rule_precedence": [
+    "change_point",
+    "spike_mad",
+    "noise",
+    "bias_dual",
+    "correlation_breakdown",
+    "diurnal",
+    "multivariate",
+    "sensor_flatline",
+    "under_heating",
+    "over_heating",
+    "dehumidification_failure",
+    "humidity_saturation_risk",
+    "thermal_divergence"
+  ],
+  "rule_vote_profiles": [
+    [
+      "noise",
+      {
+        "fault_type": "accuracy_decline",
+        "root_cause": "sensor_noise_floor_exceeded",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Precision degradation: rolling variance on {sensors} exceeded the calibrated noise-floor ratio"
+      }
+    ],
+    [
+      "spike_mad",
+      {
+        "fault_type": "spike_fault",
+        "root_cause": "transient_spike",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Transient spike: {sensors} deviated beyond the rolling median-absolute-deviation (MAD) threshold"
+      }
+    ],
+    [
+      "bias_dual",
+      {
+        "fault_type": "bias_offset",
+        "root_cause": "redundant_sensor_bias_offset",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Dual-sensor bias: cross-difference between redundant {sensors} sensors exceeded the calibration tolerance"
+      }
+    ],
+    [
+      "correlation_breakdown",
+      {
+        "fault_type": "correlation_breakdown",
+        "root_cause": "spatial_correlation_breakdown",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Spatial correlation breakdown: rolling Pearson correlation on {sensors} fell below the expected floor"
+      }
+    ],
+    [
+      "diurnal",
+      {
+        "fault_type": "diurnal_deviation",
+        "root_cause": "diurnal_profile_violation",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "Diurnal profile deviation: {sensors} exceeded the historical hourly Z-score for this hour of day"
+      }
+    ],
+    [
+      "multivariate",
+      {
+        "fault_type": "accuracy_decline",
+        "root_cause": "multivariate_implausibility",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Multivariate implausibility: the joint {sensors} reading exceeded the Mahalanobis distance cutoff — each channel is in range but the combination is inconsistent"
+      }
+    ],
+    [
+      "change_point",
+      {
+        "fault_type": "calibration_drift",
+        "root_cause": "level_shift_change_point",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "Change-point: Bayesian online change-point detection (BOCPD) flagged a level shift on {sensors}"
+      }
+    ],
+    [
+      "under_heating",
+      {
+        "fault_type": "under_heating",
+        "root_cause": "heating_setpoint_deficit",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Under-heating: {sensors} below climate-computer heating setpoint by more than the configured margin"
+      }
+    ],
+    [
+      "over_heating",
+      {
+        "fault_type": "over_heating",
+        "root_cause": "cooling_or_ventilation_shortfall",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Over-heating: {sensors} above heating setpoint without solar-driven outdoor conditions to explain the excess"
+      }
+    ],
+    [
+      "dehumidification_failure",
+      {
+        "fault_type": "dehumidification_failure",
+        "root_cause": "dehumidification_capacity_failure",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Dehumidification failure: {sensors} at critical RH with near-zero humidity deficit"
+      }
+    ],
+    [
+      "humidity_saturation_risk",
+      {
+        "fault_type": "humidity_saturation_risk",
+        "root_cause": "moisture_saturation_near_dewpoint",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "Humidity saturation risk: {sensors} at or above the critical RH threshold near dew point"
+      }
+    ],
+    [
+      "thermal_divergence",
+      {
+        "fault_type": "thermal_divergence",
+        "root_cause": "crop_air_thermal_disconnect",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Thermal divergence: canopy vs greenhouse air on {sensors} exceeds the microclimate critical delta"
+      }
+    ],
+    [
+      "sensor_flatline",
+      {
+        "fault_type": "stuck_fault",
+        "root_cause": "sensor_flatline_frozen_telemetry",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Sensor flatline: {sensors} frozen (variance ≤ FLATLINE_VARIANCE_EPS²) for the configured multi-hour window"
+      }
+    ],
+    [
+      "temp_band_high",
+      {
+        "fault_type": "temp_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Temperature above configured crop day/night max on {sensors}"
+      }
+    ],
+    [
+      "temp_band_low",
+      {
+        "fault_type": "temp_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Temperature below configured crop day/night min on {sensors}"
+      }
+    ],
+    [
+      "vpd_band_high",
+      {
+        "fault_type": "vpd_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "VPD above configured crop day/night max (from {sensors})"
+      }
+    ],
+    [
+      "vpd_band_low",
+      {
+        "fault_type": "vpd_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "VPD below configured crop day/night min (from {sensors})"
+      }
+    ],
+    [
+      "humidity_band_high",
+      {
+        "fault_type": "humidity_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "high",
+        "urgency": "urgent",
+        "reasoning": "Humidity above configured crop day/night max on {sensors}"
+      }
+    ],
+    [
+      "humidity_band_low",
+      {
+        "fault_type": "humidity_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "Humidity below configured crop day/night min on {sensors}"
+      }
+    ],
+    [
+      "co2_band_high",
+      {
+        "fault_type": "co2_band_high",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "CO₂ above configured crop day/night max on {sensors}"
+      }
+    ],
+    [
+      "co2_band_low",
+      {
+        "fault_type": "co2_band_low",
+        "root_cause": "crop_setpoint_band_breach",
+        "severity": "medium",
+        "urgency": "scheduled",
+        "reasoning": "CO₂ below configured crop day/night min on {sensors}"
+      }
+    ]
+  ],
+  "scada_vote_keys": [
+    "dehumidification_failure",
+    "humidity_saturation_risk",
+    "over_heating",
+    "sensor_flatline",
+    "thermal_divergence",
+    "under_heating"
+  ]
+}

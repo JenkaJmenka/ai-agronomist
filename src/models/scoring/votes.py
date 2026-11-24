@@ -6,9 +6,11 @@ Each vote is copied, unchanged in behaviour, from
 0c spike, 0f diurnal, 0h BOCPD) or, for the batch look-ahead spike, from
 ``upload_portions._detect_upload_mad_spikes``. Setpoint / flatline, band and
 dual-sensor votes are in ``window_rules``.
-The originals stay where they are until A4 / A7 switch their callers;
-``tests/models/test_scoring_core_a3.py`` proves the copies equal on the
-parity corpus and on seeded random windows.
+Since A4a (#154) the pipeline calls these votes and its inline copies are
+deleted; the upload look-ahead spike original stays in ``upload_portions``
+until A7 switches that caller. ``tests/models/test_scoring_core_a3.py``
+proves the core equal to the pre-A4 pipeline (frozen fixture) and to
+``_detect_upload_mad_spikes`` on the parity corpus and seeded random windows.
 
 Every vote has the signature ``(window, context, profile, state)``:
 
@@ -20,7 +22,7 @@ Every vote has the signature ``(window, context, profile, state)``:
   (``window_state``); ``None`` derives it on the spot.
 
 No I/O, no wall clock, no module-level caches: detectors are built per call.
-Precedence between votes is NOT here (A4).
+Precedence between votes is NOT here: see ``precedence`` (A4b).
 """
 
 from __future__ import annotations
@@ -392,7 +394,8 @@ def oob_vote(
     """Sensors with any reading outside ``OOB_LIMITS`` (pipeline step 0b).
 
     Only the detection. What a hit does (gate the window, or clamp and
-    continue on batch) is ``profile.oob_policy``, applied by A4 / A7.
+    continue on batch) is ``profile.oob_policy``; the pipeline applies the
+    gate since A4a, the batch clamp moves in A7.
     """
     del context, profile, state  # the limits are the same on every path
     detector = OutOfBoundsDetector()

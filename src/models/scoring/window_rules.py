@@ -7,7 +7,7 @@ is ``context.sequence_timestamp``; nothing reads the wall clock.
 
 Band findings are returned as findings only: whether a breach is promoted
 to an anomaly (configured overrides, nothing else fired, LSTM quiet) is
-precedence, which moves in A4.
+precedence: ``precedence.band_promotion`` (A4b).
 """
 
 from __future__ import annotations
