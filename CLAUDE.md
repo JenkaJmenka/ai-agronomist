@@ -53,7 +53,36 @@ Never a subset: `tests/api tests/models tests/dashboard tests/unit` silently exc
 `tests/workers/`, where a real failing assertion once hid for four commits while three
 separate reports called the branch green.
 
-### Current baseline — 3997 passed, 35 skipped, 3 xfailed, 0 failed
+### Current baseline — 4203 passed, 48 skipped, 3 xfailed, 0 failed
+
+Measured 2026-11-24 by the orchestrator on `main` at `5aecf54` — the merge of
+#143 (CSV optional-column gap fill) — full suite, detached with an exit marker
+and waited on in the foreground, 1458.09s:
+`./venv/bin/python -m pytest tests/ -q`. The run is slower than the 380s
+figures below because the suite roughly doubled in drift-watch and accuracy
+work, not because of load: no other suite ran at the time.
+
+**The skipped count moved 35 → 48, and that is expected.** `+12` from
+`tests/models/test_detection_accuracy_tenant.py` (#133): 8 functions, two of
+them parametrized over three seasons, gated on `PASS1_TENANT_CSV` like
+`test_pass1_tenant_corpus.py`, so they skip on every run without the customer
+corpus. `+1` from `test_seeded_database_records_composite` in
+`tests/models/test_detection_accuracy.py`, which skips unless
+`ACCURACY_SEEDED=1`; CI sets that variable since #126, so CI runs it. 35 + 12
++ 1 = 48.
+
+The passed count moved 3997 → 4203 (+206) across PRs #106–#143, which mostly
+landed in one session on 2026-11-23 and each recorded its own full-suite figure
+in its PR body. The figure was not reconciled PR by PR here; it was measured on
+`main` after the last of them, which is the cross-check this file asks for.
+Agents' branch figures that day (4153 → 4165 → 4181 → 4188 → 4197 → 4203)
+climb monotonically to this number.
+
+Note `ADR-013` is taken by the drift-watch alert policy (#134) and `ADR-014`
+by the scoring-path design (#144). `AGENT_MEMORY.md` reserved "ADR-013" for the
+BACKLOG-33 → ADR → BACKLOG-12 chain before that; that ADR needs a new number.
+
+### Previous baseline — 3997 passed, 35 skipped, 3 xfailed, 0 failed
 
 Measured 2026-11-14 by the orchestrator on `main` at `1211d9d` — the merge of
 the Grovsen rebrand — full suite in the foreground, 380.64s:

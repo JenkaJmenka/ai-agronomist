@@ -8061,3 +8061,47 @@ always resolves to a new path and gets a new pipeline. The reachable case is a
 **stable local checkpoint file overwritten in place**. Fix by clearing both
 caches together, or by keying the pipeline cache on something that changes with
 content.
+
+## Anomaly-detection session, 2026-11-23/24 — #122–#144 (Orchestrator, 2026-11-24)
+
+One session merged #122–#144. Full record: `docs/handoff/handover-2026-11-15.md`
+§14 (#122–#130) and the PR bodies; the Whiteboard "Anomaly detection —
+implementation plan" tracks status. Baseline after the last merge: see
+`CLAUDE.md` (4203/48/3/0 on `5aecf54`).
+
+Decisions recorded here because they are not in code comments:
+
+- **Upload LSTM is a score, not an alert source** (#130, reverses P1.2). The
+  robust gate is on by default; tenant year 478 → 346 upload alerts, LSTM 105 → 0.
+  Statistical exclude list is light, rain, screen, vent, heating only; pipe,
+  outdoor, plant and wind stay in because accepted features (pipe_1 recovery
+  tag) depend on them. A broader list broke 16 tests and was rejected.
+- **Humidity and CO₂ upload spikes not shipped** (#132). At the floor that
+  catches +20 %RH, one of the two tenant hits was a screen/vent control action
+  (2026-05-19 21:00), so it is a false alarm. No real CO₂ data exists.
+- **Drift-watch alerts (ADR-013, #134–#142)**: gate on out-of-sample count in
+  13 weeks (≤3 to enable, ≥7 suspends), unlabelled = false alarm, advisory
+  only, writer skips in-sample episodes. Flag `DRIFT_WATCH_ALERTS_ENABLED` off.
+  Admin enable needs an API key with scope `admin` (user decision; #139).
+  tenant_1 dry run (2026-11-23, after a second backfill): temp_paired 7
+  alert-eligible OOS episodes in 36 weeks = 0.84/mo, but 6 in the last 13
+  weeks → stays off until the grower labels the Nov–Dec episodes.
+- **25 vs 26 episodes explained**: production dropped 199 rows that are empty
+  in the CSV (104,921 vs 105,120 timestamps); a local run on the CSV keeps
+  them. Not a drift-watch defect.
+- **Architect and tech-lead on Opus** (#135, user decision): Fable had no
+  credits.
+
+Open findings for the next session:
+
+- **OQ4 in ADR-014, possible live defect**: `forward_pass_sync`
+  (`src/live/attribution.py:49`) returns raw / `ANOMALY_SCALING_FACTOR` (2.0),
+  and `LIVE_ANOMALY_THRESHOLD` 0.05 is compared with that, while the config
+  comment says live scores are raw. Live therefore fires at raw 0.10. Measure
+  before changing either; do not "fix" the comment or the threshold blind.
+- ADR-014 accidental differences, most important: live runs rule detectors only
+  after the LSTM fires; live and `/api/inference/batch` pass no sequence
+  timestamp (wall-clock still used); EWMA/POT cache keyed by tenant only.
+- Agents stopped by the user twice by mistake: a resumed agent cannot be
+  messaged after a restart; brief a new one to continue from the uncommitted
+  tree — it worked every time.
