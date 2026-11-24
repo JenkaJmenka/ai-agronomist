@@ -39,6 +39,12 @@ SENSOR_DEFAULTS: Dict[str, float] = {
 }
 OPTIONAL_SENSOR_COLS: Tuple[str, ...] = tuple(SENSOR_DEFAULTS)
 
+# Longest run of consecutive NaN samples in a present optional column that is
+# forward-filled from the previous reading. Matches UPLOAD_SPIKE_REVERT_HORIZON
+# in src/config.py, so a filled sample can never form a reverting spike. Longer
+# runs, and leading NaN with no previous value, fall back to SENSOR_DEFAULTS.
+OPTIONAL_GAP_FFILL_LIMIT: int = 3
+
 SENSOR_COLS: Tuple[str, ...] = REQUIRED_SENSOR_COLS + OPTIONAL_SENSOR_COLS
 CANONICAL_COLS: Tuple[str, ...] = (TIMESTAMP_COL,) + SENSOR_COLS
 
@@ -309,15 +315,35 @@ def _coerce_sensors(data: pd.DataFrame, normalized: pd.DataFrame) -> pd.DataFram
     return normalized
 
 
+def _fill_optional_gaps(series: pd.Series, default: float) -> pd.Series:
+    """Forward-fill NaN runs of at most OPTIONAL_GAP_FFILL_LIMIT; default the rest.
+
+    The rule is on the whole run length (pandas ``ffill(limit=N)`` would fill
+    the first N samples of a longer gap, leaving a partial step). Runs longer
+    than the limit and leading runs with no previous value take ``default``.
+    """
+    isna = series.isna()
+    if not isna.any():
+        return series
+    run_id = (isna != isna.shift()).cumsum()
+    run_len = isna.groupby(run_id).transform("sum")
+    fillable = isna & (run_len <= OPTIONAL_GAP_FFILL_LIMIT)
+    filled = series.ffill().where(fillable, series)
+    return filled.fillna(default)
+
+
 def _handle_nan(normalized: pd.DataFrame) -> pd.DataFrame:
-    """Fill NaN in optional columns with defaults; drop rows with NaN in required columns.
+    """Fill NaN in optional columns; drop rows with NaN in required columns.
+
+    Short gaps in a present optional column are forward-filled, longer gaps and
+    leading NaN take SENSOR_DEFAULTS (see ``_fill_optional_gaps``).
 
     Order matters: fill optionals first so a row that is only missing optional
     values survives the required-column drop that follows.
     """
     for col in OPTIONAL_SENSOR_COLS:
         if col in normalized.columns:
-            normalized[col] = normalized[col].fillna(SENSOR_DEFAULTS[col])
+            normalized[col] = _fill_optional_gaps(normalized[col], SENSOR_DEFAULTS[col])
     return normalized.dropna(subset=list((TIMESTAMP_COL,) + REQUIRED_SENSOR_COLS))
 
 
