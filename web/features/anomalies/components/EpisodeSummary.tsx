@@ -1,5 +1,6 @@
 import { Chip } from "@/components/ui/Chip";
 import type { AnomalyEpisode } from "@/features/anomalies/api/episodes";
+import { isDriftWatchEpisode } from "@/features/anomalies/components/DriftAlertCard";
 import {
   channelUnit,
   directionArrow,
@@ -38,6 +39,8 @@ export function EpisodeSummary({
   const unit = channelUnit(episode.channel);
   const severity = asSeverity(episode.severity);
   const valueRange = formatValueRange(episode, unit);
+  // Drift rows carry no samples, direction or score (peak_score is a 0 placeholder).
+  const isDrift = isDriftWatchEpisode(episode);
   const isClipped = episode.is_truncated_start || episode.is_truncated_end;
 
   // Map the episode channel through the same display aliases as tiles.
@@ -58,11 +61,13 @@ export function EpisodeSummary({
           {isClipped ? "≥ " : ""}
           {formatDuration(episode.duration_seconds)}
         </span>
-        <span className="text-text-muted tabular-nums">
-          {episode.sample_count.toLocaleString()} sample
-          {episode.sample_count === 1 ? "" : "s"}
-        </span>
-        {severity ? (
+        {isDrift ? null : (
+          <span className="text-text-muted tabular-nums">
+            {episode.sample_count.toLocaleString()} sample
+            {episode.sample_count === 1 ? "" : "s"}
+          </span>
+        )}
+        {isDrift ? null : severity ? (
           <Chip severity={severity}>{episode.peak_score.toFixed(3)}</Chip>
         ) : (
           <span className="tabular-nums text-text-muted">{episode.peak_score.toFixed(3)}</span>
@@ -87,7 +92,7 @@ export function EpisodeSummary({
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
         <span className="font-medium text-text">
-          {formatChannel(episode.channel)} {episode.direction ?? "anomaly"}
+          {formatChannel(episode.channel)} {isDrift ? "drift" : (episode.direction ?? "anomaly")}
         </span>
         {/* Band breach direction when there is one; otherwise which way the
             value travelled, so an unbounded channel still reads as moving. */}

@@ -81,6 +81,37 @@ const episodeSchema = z.object({
     .number()
     .nullish()
     .transform((value) => value ?? null),
+  /**
+   * Drift-watch-only (ADR-013 §4/§5); null for every other detector. `.nullish()`
+   * for the same cache-staleness reason as frozen_sample_count. zod strips
+   * unknown keys, so these must be declared or the card never sees them.
+   */
+  drift_offset: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null)
+    .optional(),
+  drift_input_id: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null)
+    .optional(),
+  drift_first_detected_ts: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null)
+    .optional(),
+  drift_input_kind: z
+    .enum(["paired_probes", "virtual_sensor", "physics"])
+    .nullish()
+    .transform((value) => value ?? null)
+    .optional(),
+  /** Backend-built operator wording; rendered as given, never recomposed. */
+  drift_message: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null)
+    .optional(),
 });
 
 export type AnomalyEpisode = z.infer<typeof episodeSchema>;
