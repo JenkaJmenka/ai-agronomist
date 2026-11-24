@@ -7,9 +7,14 @@ import { RefetchingBlock } from "@/components/ui/RefetchingBlock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { paginateItems, TABLE_PAGE_SIZE, TablePagination } from "@/components/ui/TablePagination";
 import { ANOMALY_EPISODE_MAX, type AnomalyEpisode } from "@/features/anomalies/api/episodes";
+import {
+  DriftAlertCard,
+  isDriftWatchEpisode,
+} from "@/features/anomalies/components/DriftAlertCard";
 import { EpisodeSampleRow } from "@/features/anomalies/components/EpisodeSampleRow";
 import { EpisodeSummary } from "@/features/anomalies/components/EpisodeSummary";
 import { useAnomalyEpisodes } from "@/features/anomalies/hooks/useAnomalyEpisodes";
+import { useDriftWatchHref } from "@/features/anomalies/hooks/useDriftWatchHref";
 import { fetchErrorHint } from "@/features/anomalies/lib/classifyFetchError";
 import type { Setpoints } from "@/features/monitoring/hooks/useSetpoints";
 import { windowFromSelectedTimestamps } from "@/lib/selectionWindow";
@@ -108,6 +113,7 @@ export function EpisodeTable({
     enabled: windowStart !== null && windowEnd !== null,
   });
 
+  const driftWatchHref = useDriftWatchHref();
   const [pageIndex, setPageIndex] = useState(0);
   useEffect(() => {
     setPageIndex(0);
@@ -200,6 +206,9 @@ export function EpisodeTable({
                   : undefined
               }
             />
+            {isDriftWatchEpisode(episode) ? (
+              <DriftAlertCard episode={episode} href={driftWatchHref} />
+            ) : null}
             <ul className="divide-y divide-border border-t border-border">
               {episode.samples.map((sample) => (
                 <EpisodeSampleRow
