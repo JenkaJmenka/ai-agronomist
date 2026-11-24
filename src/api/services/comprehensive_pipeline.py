@@ -10,7 +10,7 @@ import logging
 import math
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 import numpy as np
 from sqlalchemy import distinct, func, or_, select
@@ -69,6 +69,15 @@ from src.models.scoring import (
     ScoringProfile,
     SpikeConfirmMode,
     WindowState,
+)
+from src.models.scoring.precedence import (
+    RULE_PRECEDENCE,
+    RULE_VOTE_PROFILES,
+    apply_rule_votes,
+    band_promotion,
+    order_rule_votes,
+    primary_rule_is_setpoint,
+    rule_reasoning,
 )
 from src.models.scoring.lstm import lstm_flag, lstm_threshold, scaled_scores
 from src.models.scoring.votes import (
@@ -178,252 +187,17 @@ _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
     "temperature_out_of_range": "spike_fault",
 }
 
-# Explicit fault-type precedence. The first key that actually voted wins.
-# Short-circuits (dropout, out-of-bounds) return before this list is
-# consulted. Band breaches are applied later, and only when nothing here
-# fired. Spike is before noise, and BOCPD is before both, so a level
-# shift is not labelled accuracy_decline and a transient is not labelled
-# as precision loss. Setpoint/flatline votes stay after that sensor-fault
-# chain so they cannot steal those labels.
-_RULE_PRECEDENCE: tuple[str, ...] = (
-    "change_point",
-    "spike_mad",
-    "noise",
-    "bias_dual",
-    "correlation_breakdown",
-    "diurnal",
-    "multivariate",
-    "sensor_flatline",
-    "under_heating",
-    "over_heating",
-    "dehumidification_failure",
-    "humidity_saturation_risk",
-    "thermal_divergence",
-)
-
-_SCADA_VOTE_KEYS: frozenset[str] = frozenset({
-    "sensor_flatline",
-    "under_heating",
-    "over_heating",
-    "dehumidification_failure",
-    "humidity_saturation_risk",
-    "thermal_divergence",
-})
+# Rule-vote precedence, vote profiles and band promotion live in the scoring
+# core (src/models/scoring/precedence.py, ADR-014 A4b). These aliases keep the
+# old private names importable from here.
+_RULE_PRECEDENCE = RULE_PRECEDENCE
+_RULE_VOTE_PROFILES = RULE_VOTE_PROFILES
+build_rule_reasoning = rule_reasoning
 
 # Maps SetpointAwareScadaDetector anomaly_type constants to rule-vote keys.
 # The table is the scoring core's (src/models/scoring/window_rules.py); this
 # plain dict stays for callers that import it from here.
 _SCADA_TYPE_TO_VOTE: Dict[Any, str] = dict(SETPOINT_TYPE_TO_VOTE)
-
-# Fault profile per rule detector (fusion, plan P2). Rule detectors vote
-# instead of short-circuiting: the full LSTM/ensemble path still runs, and
-# the highest-precedence fired rule (``_RULE_PRECEDENCE``) takes fault-type
-# precedence over model-derived classification. Values mirror the former
-# short-circuit result builders so alert semantics stay stable.
-# ``reasoning`` names the algorithm that fired ({sensors} is filled with
-# the flagged channels) so the explanation always matches the detection
-# method, not the model's pattern guess.
-_RULE_VOTE_PROFILES: Dict[str, Dict[str, str]] = {
-    "noise": {
-        "fault_type": "accuracy_decline",
-        "root_cause": "sensor_noise_floor_exceeded",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Precision degradation: rolling variance on {sensors} exceeded the "
-            "calibrated noise-floor ratio"
-        ),
-    },
-    "spike_mad": {
-        "fault_type": "spike_fault",
-        "root_cause": "transient_spike",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Transient spike: {sensors} deviated beyond the rolling "
-            "median-absolute-deviation (MAD) threshold"
-        ),
-    },
-    "bias_dual": {
-        "fault_type": "bias_offset",
-        "root_cause": "redundant_sensor_bias_offset",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Dual-sensor bias: cross-difference between redundant {sensors} "
-            "sensors exceeded the calibration tolerance"
-        ),
-    },
-    "correlation_breakdown": {
-        "fault_type": "correlation_breakdown",
-        "root_cause": "spatial_correlation_breakdown",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Spatial correlation breakdown: rolling Pearson correlation on "
-            "{sensors} fell below the expected floor"
-        ),
-    },
-    "diurnal": {
-        "fault_type": "diurnal_deviation",
-        "root_cause": "diurnal_profile_violation",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": (
-            "Diurnal profile deviation: {sensors} exceeded the historical "
-            "hourly Z-score for this hour of day"
-        ),
-    },
-    "multivariate": {
-        "fault_type": "accuracy_decline",
-        "root_cause": "multivariate_implausibility",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Multivariate implausibility: the joint {sensors} reading exceeded "
-            "the Mahalanobis distance cutoff — each channel is in range but "
-            "the combination is inconsistent"
-        ),
-    },
-    "change_point": {
-        "fault_type": "calibration_drift",
-        "root_cause": "level_shift_change_point",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": (
-            "Change-point: Bayesian online change-point detection (BOCPD) "
-            "flagged a level shift on {sensors}"
-        ),
-    },
-    "under_heating": {
-        "fault_type": "under_heating",
-        "root_cause": "heating_setpoint_deficit",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Under-heating: {sensors} below climate-computer heating setpoint "
-            "by more than the configured margin"
-        ),
-    },
-    "over_heating": {
-        "fault_type": "over_heating",
-        "root_cause": "cooling_or_ventilation_shortfall",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Over-heating: {sensors} above heating setpoint without solar-driven "
-            "outdoor conditions to explain the excess"
-        ),
-    },
-    "dehumidification_failure": {
-        "fault_type": "dehumidification_failure",
-        "root_cause": "dehumidification_capacity_failure",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Dehumidification failure: {sensors} at critical RH with near-zero "
-            "humidity deficit"
-        ),
-    },
-    "humidity_saturation_risk": {
-        "fault_type": "humidity_saturation_risk",
-        "root_cause": "moisture_saturation_near_dewpoint",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": (
-            "Humidity saturation risk: {sensors} at or above the critical RH "
-            "threshold near dew point"
-        ),
-    },
-    "thermal_divergence": {
-        "fault_type": "thermal_divergence",
-        "root_cause": "crop_air_thermal_disconnect",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Thermal divergence: canopy vs greenhouse air on {sensors} exceeds "
-            "the microclimate critical delta"
-        ),
-    },
-    "sensor_flatline": {
-        "fault_type": "stuck_fault",
-        "root_cause": "sensor_flatline_frozen_telemetry",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": (
-            "Sensor flatline: {sensors} frozen "
-            "(variance ≤ FLATLINE_VARIANCE_EPS²) for the "
-            "configured multi-hour window"
-        ),
-    },
-    "temp_band_high": {
-        "fault_type": "temp_band_high",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": "Temperature above configured crop day/night max on {sensors}",
-    },
-    "temp_band_low": {
-        "fault_type": "temp_band_low",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": "Temperature below configured crop day/night min on {sensors}",
-    },
-    "vpd_band_high": {
-        "fault_type": "vpd_band_high",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": "VPD above configured crop day/night max (from {sensors})",
-    },
-    "vpd_band_low": {
-        "fault_type": "vpd_band_low",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": "VPD below configured crop day/night min (from {sensors})",
-    },
-    "humidity_band_high": {
-        "fault_type": "humidity_band_high",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "high",
-        "urgency": "urgent",
-        "reasoning": "Humidity above configured crop day/night max on {sensors}",
-    },
-    "humidity_band_low": {
-        "fault_type": "humidity_band_low",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": "Humidity below configured crop day/night min on {sensors}",
-    },
-    "co2_band_high": {
-        "fault_type": "co2_band_high",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": "CO₂ above configured crop day/night max on {sensors}",
-    },
-    "co2_band_low": {
-        "fault_type": "co2_band_low",
-        "root_cause": "crop_setpoint_band_breach",
-        "severity": "medium",
-        "urgency": "scheduled",
-        "reasoning": "CO₂ below configured crop day/night min on {sensors}",
-    },
-}
-
-# Import-time consistency check: every key in _RULE_PRECEDENCE must have a
-# vote profile, so a new precedence entry never silently raises KeyError inside
-# build_rule_reasoning or the rule_profile lookup in _run_with_components.
-_missing_profile_keys = [k for k in _RULE_PRECEDENCE if k not in _RULE_VOTE_PROFILES]
-if _missing_profile_keys:
-    raise ImportError(
-        "comprehensive_pipeline: _RULE_PRECEDENCE keys have no vote profile: "
-        + str(_missing_profile_keys)
-        + " — add entries to _RULE_VOTE_PROFILES."
-    )
 
 # Sensor ranges in physical units for denormalization.
 _DENORM_RANGES = np.array(
@@ -439,25 +213,6 @@ _MAHALANOBIS_HISTORY_VOTE_ENABLED: bool = False
 
 # Minimum number of stored incidents before enabling dynamic thresholds.
 _MIN_INCIDENTS_FOR_DYNAMIC_THRESHOLD: int = 50
-
-
-def _order_rule_votes(
-    rule_votes: Dict[str, List[str]],
-) -> Dict[str, List[str]]:
-    """Return votes in ``_RULE_PRECEDENCE`` order (first key wins).
-
-    Keys that are not in the precedence list keep their relative order
-    and sort after the known rules, so a new vote is not dropped.
-    """
-    ordered: Dict[str, List[str]] = {}
-    for name in _RULE_PRECEDENCE:
-        sensors = rule_votes.get(name)
-        if sensors:
-            ordered[name] = list(sensors)
-    for name, sensors in rule_votes.items():
-        if name not in ordered and sensors:
-            ordered[name] = list(sensors)
-    return ordered
 
 
 async def _load_operational_overrides_if_uncached(
@@ -506,40 +261,6 @@ async def _load_operational_overrides_if_uncached(
             customer_id,
             greenhouse_id,
         )
-
-
-def _humanize_sensors(sensors: List[str]) -> str:
-    """Readable sensor list for reasoning text ('temperature, humidity')."""
-    return ", ".join(s.replace("_", " ") for s in sensors) or "sensor channels"
-
-
-def build_rule_reasoning(rule_votes: Dict[str, List[str]]) -> str:
-    """Human-readable reasoning that names the algorithm(s) that fired.
-
-    Keeps the explanation consistent with the fault type: the primary
-    (highest-precedence) rule leads, and any co-firing rules are appended so the
-    operator sees every algorithm that agreed. Empty when no rule fired
-    (the caller then keeps the model's pattern-based reasoning).
-    """
-    if not rule_votes:
-        return ""
-    items = list(rule_votes.items())
-    primary_name, primary_sensors = items[0]
-    _primary_profile = _RULE_VOTE_PROFILES.get(primary_name)
-    if _primary_profile is not None:
-        template = _primary_profile["reasoning"]
-    else:
-        # Unknown vote key (not in _RULE_VOTE_PROFILES): return generic text
-        # so the caller gets a readable string rather than a KeyError.
-        template = "Anomaly rule '{}' flagged {{sensors}}".format(primary_name)
-    reasoning = template.format(sensors=_humanize_sensors(primary_sensors))
-    if len(items) > 1:
-        others = ", ".join(
-            _RULE_VOTE_PROFILES.get(name, {}).get("root_cause", name).replace("_", " ")
-            for name, _ in items[1:]
-        )
-        reasoning = f"{reasoning}; also flagged by: {others}"
-    return reasoning
 
 
 def _denormalize_sequence(normalized: np.ndarray) -> np.ndarray:
@@ -993,7 +714,7 @@ class ComprehensiveInferencePipeline:
         # (src/models/scoring, step A4). This method hands the core the
         # window, gathers each vote in the order the pipeline always had
         # (setpoint, noise, OOB gate, spike, bias-dual, diurnal, BOCPD) and
-        # applies precedence (_order_rule_votes) afterwards.
+        # applies precedence (order_rule_votes) afterwards.
         rule_votes: dict[str, list[str]] = {}
 
         # The core reads physical units (°C, %, ppm, lux), as
@@ -1229,7 +950,7 @@ class ComprehensiveInferencePipeline:
             )
             rule_votes["change_point"] = list(_change_point.votes["change_point"])
 
-        rule_votes = _order_rule_votes(rule_votes)
+        rule_votes = order_rule_votes(rule_votes)
 
         # 1. LSTM-VAE forward pass.
         _raw_score, anomaly_score, embedding, uncertainty = self._run_lstm_vae(seq_array)
@@ -1364,17 +1085,19 @@ class ComprehensiveInferencePipeline:
             fault_type = "bias_offset"
 
         # 5c. Rule-detector votes confirm the anomaly. The highest-precedence
-        # fired rule (_RULE_PRECEDENCE, applied via _order_rule_votes) takes
+        # fired rule (RULE_PRECEDENCE, applied via order_rule_votes) takes
         # fault-type precedence unless physics already confirmed a fault.
         # Short-circuits (dropout, OOB) returned before this point. Bands
         # are applied later, and only when no rule voted.
-        rule_profile: Optional[Dict[str, str]] = None
-        if rule_votes:
-            is_anomaly = True
-            if not physics_result.confirmed:
-                first_rule = next(iter(rule_votes))
-                rule_profile = _RULE_VOTE_PROFILES.get(first_rule, {})
-                fault_type = rule_profile.get("fault_type", "accuracy_decline")
+        _rule_decision = apply_rule_votes(
+            rule_votes,
+            is_anomaly=is_anomaly,
+            fault_type=fault_type,
+            physics_confirmed=physics_result.confirmed,
+        )
+        is_anomaly = _rule_decision.is_anomaly
+        fault_type = _rule_decision.fault_type
+        rule_profile: Optional[Mapping[str, str]] = _rule_decision.profile
 
         # 5c-gate. Sensor-trust gate: a band value measured by a sensor that a
         # sensor-fault detector flagged is untrustworthy — discard the finding.
@@ -1420,22 +1143,17 @@ class ComprehensiveInferencePipeline:
         # BAND_TYPE_TO_VOTE provides the fault_type lookup; the profile is set
         # on rule_profile so the root-cause block (step 8) picks up the band's
         # severity/urgency and the reasoning is drawn from scada_anomalies.
-        if (
-            band_findings
-            and _band_overrides_configured
-            and not physics_result.suppressed
-            and not rule_votes
-            and not is_anomaly
-        ):
-            _first_band = band_findings[0]
-            _band_vote_key = BAND_TYPE_TO_VOTE.get(
-                str(_first_band.get("anomaly_type", ""))
-            )
-            _band_profile = _RULE_VOTE_PROFILES.get(_band_vote_key or "")
-            if _band_profile:
-                is_anomaly = True
-                fault_type = _band_profile["fault_type"]
-                rule_profile = _band_profile
+        _band_profile = band_promotion(
+            band_findings,
+            overrides_configured=_band_overrides_configured,
+            physics_suppressed=physics_result.suppressed,
+            rule_votes=rule_votes,
+            is_anomaly=is_anomaly,
+        )
+        if _band_profile:
+            is_anomaly = True
+            fault_type = _band_profile["fault_type"]
+            rule_profile = _band_profile
 
         # 5d. Psychrometric consistency suppression — when the measured HD
         # cross-checks cleanly and the ML anomaly's primary implicated
@@ -1503,12 +1221,11 @@ class ComprehensiveInferencePipeline:
                 "root_cause": rule_profile["root_cause"],
                 "severity": rule_profile["severity"],
                 "urgency": rule_profile["urgency"],
-                "reasoning": build_rule_reasoning(rule_votes),
+                "reasoning": rule_reasoning(rule_votes),
             }
             # Setpoint prose only when that rule won precedence. A co-firing
             # flatline must not replace a spike or change-point explanation.
-            primary_rule = next(iter(rule_votes), None)
-            if scada_anomalies and primary_rule in _SCADA_VOTE_KEYS:
+            if scada_anomalies and primary_rule_is_setpoint(rule_votes):
                 root_cause_result["reasoning"] = scada_anomalies[0]["reasoning"]
         # Non-anomalous results carry no fault-specific root cause, severity,
         # urgency, or reasoning. The pattern-based analysis is only meaningful
