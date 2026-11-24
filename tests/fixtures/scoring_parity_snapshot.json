@@ -1,0 +1,574 @@
+{
+ "cases": {
+  "clean_day": {
+   "note": "July 2026-07-02 12:00, untouched",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [],
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.026946,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.026946,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [],
+     "detectors": [],
+     "enrichment": {
+      "ran": false
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.026946,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.041867,
+     "lstm_threshold": 0.188513,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "clean_night": {
+   "note": "July 2026-07-03 02:00, untouched",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [],
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.171471,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.171471,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [
+      "temperature",
+      "light"
+     ],
+     "detectors": [
+      "lstm"
+     ],
+     "enrichment": {
+      "affected_sensors": [
+       "temperature",
+       "humidity",
+       "co2",
+       "light"
+      ],
+      "detectors": [],
+      "fault_type": null,
+      "is_anomaly": false,
+      "lstm_score": 0.171471,
+      "physics": null,
+      "ran": true
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": true,
+     "lstm_score": 0.171471,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.097541,
+     "lstm_threshold": 0.145295,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-03T02:00:00+00:00"
+  },
+  "heat_excursion": {
+   "note": "temperature +30.0 C over the window (only case /api/inference flags)",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [],
+     "fault_type": "spike_fault",
+     "is_anomaly": true,
+     "lstm_score": 1.0,
+     "physics": "temperature_out_of_range",
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [
+      "lstm"
+     ],
+     "fault_type": null,
+     "high_anomaly_timestamp": "2026-11-24T12:00:00Z",
+     "is_anomaly": true,
+     "lstm_score": 1.0,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "lstm"
+     ],
+     "enrichment": {
+      "affected_sensors": [
+       "temperature",
+       "humidity",
+       "co2",
+       "light"
+      ],
+      "detectors": [],
+      "fault_type": "spike_fault",
+      "is_anomaly": true,
+      "lstm_score": 1.0,
+      "physics": "temperature_out_of_range",
+      "ran": true
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": "spike_fault",
+     "is_anomaly": true,
+     "lstm_score": 1.0,
+     "physics": "temperature_out_of_range"
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.04567,
+     "lstm_threshold": 0.184172,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "level_shift": {
+   "note": "+3.0 C / -10.0 %RH from index 8",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [
+      "noise"
+     ],
+     "fault_type": "accuracy_decline",
+     "is_anomaly": true,
+     "lstm_score": 0.035886,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.035886,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [],
+     "detectors": [],
+     "enrichment": {
+      "ran": false
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.035886,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.044651,
+     "lstm_threshold": 0.224812,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "night_light": {
+   "note": "02:00 window with light 300.0 W/m2 (nocturnal-light rule)",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [],
+     "fault_type": "spike_fault",
+     "is_anomaly": true,
+     "lstm_score": 0.139919,
+     "physics": "nocturnal_light",
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.139919,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "lstm"
+     ],
+     "enrichment": {
+      "affected_sensors": [
+       "temperature",
+       "humidity",
+       "co2",
+       "light"
+      ],
+      "detectors": [],
+      "fault_type": null,
+      "is_anomaly": false,
+      "lstm_score": 0.139919,
+      "physics": null,
+      "ran": true
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": true,
+     "lstm_score": 0.139919,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.055392,
+     "lstm_threshold": 0.162425,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-03T02:00:00+00:00"
+  },
+  "noise": {
+   "note": "temperature + N(0, 1.0) over the window",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [
+      "noise"
+     ],
+     "fault_type": "accuracy_decline",
+     "is_anomaly": true,
+     "lstm_score": 0.026404,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.026404,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [],
+     "detectors": [],
+     "enrichment": {
+      "ran": false
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.026404,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "hit_count_whole_frame": 0,
+     "is_anomaly": false,
+     "lstm_score": 0.037399,
+     "lstm_threshold": 0.187134,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "oob": {
+   "note": "temperature 85.0 C on window index 18",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "out_of_bounds"
+     ],
+     "fault_type": "out_of_bounds",
+     "is_anomaly": true,
+     "lstm_score": 1.0,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.271232,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "lstm",
+      "out_of_bounds"
+     ],
+     "enrichment": {
+      "affected_sensors": [
+       "temperature"
+      ],
+      "detectors": [
+       "out_of_bounds"
+      ],
+      "fault_type": "out_of_bounds",
+      "is_anomaly": true,
+      "lstm_score": 1.0,
+      "physics": null,
+      "ran": true
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": "out_of_bounds",
+     "is_anomaly": true,
+     "lstm_score": 0.271232,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "out_of_bounds",
+      "spike_mad"
+     ],
+     "fault_type": "spike_fault",
+     "hit_count_whole_frame": 2,
+     "is_anomaly": true,
+     "lstm_score": 0.055132,
+     "lstm_threshold": 0.190151,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "spike": {
+   "note": "+6.0 C on window index 18 (t-lag)",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "temperature",
+      "humidity",
+      "co2",
+      "light"
+     ],
+     "detectors": [
+      "spike_mad",
+      "noise"
+     ],
+     "fault_type": "spike_fault",
+     "is_anomaly": true,
+     "lstm_score": 0.031218,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.031218,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [],
+     "detectors": [],
+     "enrichment": {
+      "ran": false
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": null,
+     "is_anomaly": false,
+     "lstm_score": 0.031218,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [
+      "temperature"
+     ],
+     "detectors": [
+      "spike_mad"
+     ],
+     "fault_type": "spike_fault",
+     "hit_count_whole_frame": 1,
+     "is_anomaly": true,
+     "lstm_score": 0.034348,
+     "lstm_threshold": 0.210264,
+     "physics": null
+    }
+   },
+   "window_end": "2026-07-02T12:00:00+00:00"
+  },
+  "stuck": {
+   "note": "December humidity frozen at 100.0 from 13:00 (fixture A main fault)",
+   "paths": {
+    "comprehensive": {
+     "affected_sensors": [
+      "humidity",
+      "temperature",
+      "co2",
+      "light"
+     ],
+     "detectors": [
+      "sensor_flatline",
+      "dehumidification_failure",
+      "humidity_saturation_risk"
+     ],
+     "fault_type": "stuck_fault",
+     "is_anomaly": true,
+     "lstm_score": 0.387392,
+     "physics": null,
+     "response_has_fault_type": false
+    },
+    "inference": {
+     "affected_sensors": [],
+     "detectors": [],
+     "fault_type": null,
+     "high_anomaly_timestamp": null,
+     "is_anomaly": false,
+     "lstm_score": 0.387392,
+     "physics": null
+    },
+    "live": {
+     "affected_sensors": [
+      "humidity",
+      "temperature"
+     ],
+     "detectors": [
+      "lstm",
+      "sensor_flatline",
+      "dehumidification_failure",
+      "humidity_saturation_risk"
+     ],
+     "enrichment": {
+      "affected_sensors": [
+       "humidity",
+       "temperature",
+       "co2",
+       "light"
+      ],
+      "detectors": [
+       "sensor_flatline",
+       "dehumidification_failure",
+       "humidity_saturation_risk"
+      ],
+      "fault_type": "stuck_fault",
+      "is_anomaly": true,
+      "lstm_score": 0.387392,
+      "physics": null,
+      "ran": true
+     },
+     "enrichment_got_timestamp": false,
+     "fault_type": "stuck_fault",
+     "is_anomaly": true,
+     "lstm_score": 0.387392,
+     "physics": null
+    },
+    "upload": {
+     "affected_sensors": [
+      "humidity"
+     ],
+     "detectors": [
+      "stuck_fault"
+     ],
+     "fault_type": "stuck_fault",
+     "hit_count_whole_frame": 1,
+     "is_anomaly": true,
+     "lstm_score": 0.141442,
+     "lstm_threshold": 0.324815,
+     "physics": null
+    }
+   },
+   "window_end": "2026-12-18T20:00:00+00:00"
+  }
+ },
+ "frozen_now": "2026-11-24T12:00:00+00:00",
+ "live_threshold": 0.05
+}
