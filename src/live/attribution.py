@@ -3,6 +3,8 @@
 Provides:
 - ``forward_pass_sync``: single LSTM-VAE forward pass returning both the
   scaled anomaly score and per-channel MSE (called via ``asyncio.to_thread``).
+  Since ADR-014 A6 it is ``ModelScorer`` plus the core's ``STREAM_PROFILE``
+  scale; this module holds no loss maths of its own.
 - ``compute_channel_attribution``: derives affected channels and a
   one-sentence reasoning from per-channel reconstruction errors.
 """
@@ -13,7 +15,10 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import numpy as np
 
-from src.config import ANOMALY_SCALING_FACTOR, INPUT_DIM, SENSOR_NAMES
+from src.config import INPUT_DIM, SENSOR_NAMES
+from src.models.inference import ModelScorer
+from src.models.scoring import STREAM_PROFILE
+from src.models.scoring.lstm import scaled_scores
 
 if TYPE_CHECKING:
     from src.models.inference import AnomalyDetector
@@ -31,23 +36,15 @@ def forward_pass_sync(
 ) -> Tuple[float, np.ndarray]:
     """Single synchronous forward pass → ``(scaled_score, per_channel_mse)``.
 
-    Uses the same MSE math as ``AnomalyDetector.predict_batch_enriched``
-    but also returns per-channel reconstruction errors in **one** pass.
-    The ``torch`` import is deferred so callers can mock this function
-    without importing torch.
+    The pass is the core ``ModelScorer`` on a batch of one; the scale is
+    the core's ``STREAM_PROFILE`` policy (``raw / ANOMALY_SCALING_FACTOR``
+    clipped to [0, 1], OQ4 unchanged). Raises ``ValueError`` on a NaN/Inf
+    window (``ModelScorer`` validates); the caller logs and skips the tick.
     """
-    import torch
-
-    batch = normalized_window[np.newaxis, ...].astype(np.float32)
-    with torch.no_grad():
-        tensor = torch.from_numpy(batch).float()
-        reconstructed, _, _, _ = detector.model(tensor)
-        error = (tensor - reconstructed) ** 2
-        raw_score = float(error.mean(dim=[1, 2]).item())
-        per_channel = error.mean(dim=1).squeeze(0).numpy()
-
-    scaled = float(np.clip(raw_score / ANOMALY_SCALING_FACTOR, 0.0, 1.0))
-    return scaled, per_channel
+    scores = ModelScorer.from_detector(detector).predict_with_channel_errors(
+        normalized_window[np.newaxis, ...].astype(np.float32)
+    )
+    return scaled_scores(scores, STREAM_PROFILE)[0], scores.per_channel[0]
 
 
 def compute_channel_attribution(

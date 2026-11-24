@@ -116,12 +116,22 @@ class EnrichmentRunner:
             normalized = normalize_data(window_array, SENSOR_RANGES)
 
             from src.api.services.comprehensive_pipeline import (
+                PIPELINE_PROFILE as LIVE_ENRICHMENT_PROFILE,
                 ComprehensiveInferencePipeline,
             )
             from src.db.session import AsyncSessionLocal
 
             async with AsyncSessionLocal() as session:
-                pipeline = ComprehensiveInferencePipeline(detector=detector)
+                # Phase B (not fixed here): B2 - a pipeline is built per
+                # episode, so its CUSUM/EWMA state restarts every time; B1 -
+                # no sequence_timestamp is passed.
+                # Explicit, not the constructor default: today live runs the
+                # pipeline default (adaptive EWMA/POT decision, ring-calibrated
+                # noise). STREAM_PROFILE is not usable here: the pipeline
+                # rejects its look-ahead/fixed fields (_check_pipeline_profile).
+                pipeline = ComprehensiveInferencePipeline(
+                    detector=detector, profile=LIVE_ENRICHMENT_PROFILE,
+                )
                 # Empty history is omitted so the pipeline keeps the fixed
                 # noise map. A non-empty tuple is physical, not normalized.
                 result = await pipeline.run(

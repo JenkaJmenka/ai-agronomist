@@ -172,7 +172,7 @@ class TestForwardPassSync:
         detector = MagicMock()
         # Model returns identical reconstruction → zero error
         def model_fn(tensor):
-            return tensor.clone(), None, None, None
+            return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         window = np.random.randn(SEQ_LEN, 4).astype(np.float32)
@@ -188,7 +188,7 @@ class TestForwardPassSync:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         # Input with large values → large MSE
@@ -260,7 +260,7 @@ class TestForwardFill:
         # Patch detector
         detector = MagicMock()
         def model_fn(tensor):
-            return tensor.clone(), None, None, None
+            return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -295,7 +295,7 @@ class TestScoreAttached:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return tensor.clone(), None, None, None
+            return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -350,7 +350,7 @@ class TestAnomalyEpisodes:
         # MSE = mean of squared normalized values. With mid-range values ~0.5,
         # MSE ≈ 0.25, scaled = 0.25/2.0 = 0.125 > threshold 0.1
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -382,7 +382,7 @@ class TestAnomalyEpisodes:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -422,10 +422,10 @@ class TestAnomalyEpisodes:
             call_count[0] += 1
             if call_count[0] <= 2:
                 # High error
-                return torch.zeros_like(tensor), None, None, None
+                return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
             else:
                 # Low error — return same as input
-                return tensor.clone(), None, None, None
+                return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
 
         detector = MagicMock()
         detector.model = MagicMock(side_effect=model_fn)
@@ -525,7 +525,7 @@ class TestEnrichment:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         with patch.object(scorer._resolver, 'resolve', new_callable=AsyncMock, return_value=detector):
@@ -556,7 +556,7 @@ class TestEnrichment:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         # Create enrichment that completes quickly
@@ -590,7 +590,7 @@ class TestEnrichment:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         # After warmup, patch hub.publish to fail on anomaly events
@@ -629,7 +629,7 @@ class TestEnrichment:
 
         detector = MagicMock()
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         # Create a slow enrichment that will be in-flight
@@ -680,12 +680,12 @@ class TestEpisodeIdCorrelation:
             # (episode 1), calls 4-6 low error (recovery), calls 7+ high
             # error (episode 2).
             if call_count[0] == 1:
-                return tensor.clone(), None, None, None
+                return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
             if call_count[0] <= 3:
-                return torch.zeros_like(tensor), None, None, None
+                return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
             if call_count[0] <= 6:
-                return tensor.clone(), None, None, None
-            return torch.zeros_like(tensor), None, None, None
+                return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
 
         detector = MagicMock()
         detector.model = MagicMock(side_effect=model_fn)
@@ -776,7 +776,7 @@ class TestEpisodeIdCorrelation:
         detector = MagicMock()
 
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         scorer = LiveScorer(
@@ -831,7 +831,7 @@ class TestEpisodeIdCorrelation:
         detector = MagicMock()
 
         def model_fn(tensor):
-            return torch.zeros_like(tensor), None, None, None
+            return torch.zeros_like(tensor), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         scorer = LiveScorer(
@@ -889,7 +889,7 @@ class TestForwardFillStaleness:
         detector = MagicMock()
 
         def model_fn(tensor):
-            return tensor.clone(), None, None, None
+            return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         # Use a short emit_interval so staleness kicks in quickly
@@ -936,7 +936,7 @@ class TestForwardFillStaleness:
         detector = MagicMock()
 
         def model_fn(tensor):
-            return tensor.clone(), None, None, None
+            return tensor.clone(), torch.zeros(len(tensor), 8), torch.zeros(len(tensor), 8), None
         detector.model = MagicMock(side_effect=model_fn)
 
         emit_interval = 0.05
@@ -966,3 +966,23 @@ class TestForwardFillStaleness:
             )
             result = await scorer.score(full_event)
             assert result.anomaly_score is not None
+
+
+@pytest.mark.asyncio
+async def test_enrichment_passes_explicit_pipeline_profile() -> None:
+    """ADR-014 A6: live enrichment names its profile instead of the default."""
+    from src.api.services import comprehensive_pipeline as cp
+    from src.live.enrichment import EnrichmentRunner
+
+    runner = EnrichmentRunner(
+        tenant_id=TENANT, greenhouse_id=GREENHOUSE, hub=MagicMock(publish=AsyncMock()),
+        resolver=MagicMock(resolve=AsyncMock(return_value=MagicMock())),
+    )
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    with patch("src.db.session.AsyncSessionLocal", return_value=session), \
+            patch.object(cp, "ComprehensiveInferencePipeline") as pipeline_cls:
+        pipeline_cls.return_value.run = AsyncMock(return_value={})
+        await runner._run_enrichment(np.zeros((SEQ_LEN, 4), dtype=np.float32), "seq")
+    assert pipeline_cls.call_args.kwargs["profile"] is cp.PIPELINE_PROFILE
