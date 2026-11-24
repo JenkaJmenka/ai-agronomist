@@ -7,13 +7,12 @@ and on seeded random windows:
 * ``ModelScorer`` vs ``AnomalyDetector.predict_batch_enriched`` (upload,
   API), ``ComprehensiveInferencePipeline._run_lstm_vae`` and the live
   ``forward_pass_sync`` (``src/live/attribution.py``, not edited).
-* The spike and noise votes vs ``_run_with_components``. The pipeline runs
-  unchanged up to ``_order_rule_votes``; a spy records the ``rule_votes`` it
-  receives and stops the run there (everything after is LSTM / DB, not a
-  vote). A window the out-of-bounds gate stops is caught at
-  ``_persist_gate_result`` and skipped (its spike vote never runs). DB-backed
-  inputs (seasonal scaler, diurnal profiles, operational config) are injected
-  into both sides identically. The other votes follow in A3b.
+* The window votes vs ``_run_with_components``. The pipeline runs unchanged
+  up to ``_order_rule_votes``; a spy records the ``rule_votes`` it receives
+  and stops the run there (everything after is LSTM / DB, not a vote). The
+  out-of-bounds gate is caught at ``_persist_gate_result`` the same way.
+  DB-backed inputs (seasonal scaler, diurnal profiles, operational config)
+  are injected into both sides identically.
 * The batch look-ahead spike rows vs ``_detect_upload_mad_spikes``, and the
   upload scaled scores vs ``score_portion``.
 """
@@ -55,7 +54,16 @@ from src.models.scoring.lstm import (
     normalise_window,
     scaled_scores,
 )
-from src.models.scoring.votes import noise_vote, spike_mad_rows, spike_mad_vote, window_state
+from src.models.scoring.votes import (
+    change_point_vote,
+    diurnal_vote,
+    noise_vote,
+    oob_vote,
+    spike_mad_rows,
+    spike_mad_vote,
+    window_state,
+)
+from src.models.scoring.window_rules import band_findings, dual_sensor_votes, setpoint_votes
 from src.models.seasonal_scaler import SeasonalScaler
 from tests.parity._golden_corpus import CHECKPOINT, build_corpus
 
@@ -65,9 +73,9 @@ TENANT = "a3-tenant"
 GREENHOUSE = "a3-gh"
 CORPUS = build_corpus()
 
-# Pipeline order of the A3a votes before _order_rule_votes (steps 0a, 0c).
-_CORE_VOTES = (noise_vote, spike_mad_vote)
-_CORE_KEYS = frozenset({"noise", "spike_mad"})
+# Pipeline order of the votes before _order_rule_votes (steps 0a+ .. 0h).
+_CORE_VOTES = (setpoint_votes, noise_vote, spike_mad_vote, dual_sensor_votes,
+               diurnal_vote, change_point_vote)
 
 
 @pytest.fixture(scope="module")
@@ -191,7 +199,7 @@ class _Stop(Exception):
 
 def _pipeline_votes(seq_array: np.ndarray, case: dict[str, Any], profile_name: str) -> dict[str, Any]:
     pipeline = cp.ComprehensiveInferencePipeline(detector=None)  # type: ignore[arg-type]
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"band": []}
 
     def spy_order(votes: dict[str, list[str]]) -> dict[str, list[str]]:
         captured["votes"] = [(k, list(v)) for k, v in votes.items()]
@@ -201,11 +209,19 @@ def _pipeline_votes(seq_array: np.ndarray, case: dict[str, Any], profile_name: s
         captured["gate"] = list(result["affected_sensors"])
         raise _Stop
 
+    band_detect = pipeline._band_breach_detector.detect
+
+    def spy_band(*args: Any, **kwargs: Any) -> Any:
+        out = band_detect(*args, **kwargs)
+        captured["band"] = [f.to_dict() for f in out]
+        return out
+
     with patch.object(cp, "_order_rule_votes", spy_order), \
             patch.object(cp, "get_operational_config_store", lambda: case["store"]), \
             patch.object(pipeline, "_get_seasonal_scaler", AsyncMock(return_value=case["scaler"])), \
             patch.object(pipeline, "_ensure_diurnal_profiles", AsyncMock(return_value=case["profiles"])), \
-            patch.object(pipeline, "_persist_gate_result", spy_gate):
+            patch.object(pipeline, "_persist_gate_result", spy_gate), \
+            patch.object(pipeline._band_breach_detector, "detect", spy_band):
         with pytest.raises(_Stop):
             asyncio.run(pipeline._run_with_components(
                 customer_id=TENANT, seq_array=seq_array, sequence_raw=seq_array.tolist(),
@@ -373,13 +389,18 @@ def test_window_votes_equal_pipeline(
         window = cp._denormalize_sequence(seq_array)
         ctx = _context(case, profile)
         state = window_state(ctx)
+        oob = oob_vote(window, ctx, profile, state)
+        assert list(oob.votes.get("out_of_bounds", ())) == old.get("gate", [])
         if "gate" in old:
+            fired.add("out_of_bounds")
             continue
         new = [(k, list(v)) for fn in _CORE_VOTES for k, v in fn(window, ctx, profile, state).votes.items()]
-        assert new == [(k, v) for k, v in old["votes"] if k in _CORE_KEYS], case.get("id")
+        assert new == old["votes"], case.get("id")
+        assert list(band_findings(window, ctx, profile, state).findings) == old["band"]
         fired.update(k for k, _ in new)
+        fired.update("band" for _ in old["band"][:1])
     # The corpus and the seeded draw must exercise the votes, or equality is vacuous.
-    assert _CORE_KEYS <= fired
+    assert {"spike_mad", "noise", "change_point", "out_of_bounds", "sensor_flatline", "diurnal"} <= fired
 
 
 def test_votes_honour_profile_gates() -> None:
@@ -387,9 +408,13 @@ def test_votes_honour_profile_gates() -> None:
     window = case["window"]
     with pytest.raises(ValueError):
         spike_mad_vote(window, _context(case, BATCH_PROFILE), BATCH_PROFILE)
-    noisy = _corpus_case(CORPUS[3], "batch")  # fires noise on stream / API
-    assert noise_vote(noisy["window"], _context(noisy, API_PROFILE), API_PROFILE).fired
-    assert not noise_vote(noisy["window"], _context(noisy, BATCH_PROFILE), BATCH_PROFILE).fired
+    for fn in (noise_vote, diurnal_vote, change_point_vote, setpoint_votes, band_findings):
+        assert not fn(window, _context(case, BATCH_PROFILE), BATCH_PROFILE).fired
+        assert fn(window, _context(case, BATCH_PROFILE), BATCH_PROFILE).findings == ()
+    pairs = [{"variable": "temperature", "sensor_a": [1.0] * SEQ_LEN, "sensor_b": [9.0] * SEQ_LEN}]
+    ctx = ScoringContext(tenant_id=TENANT, greenhouse_id=GREENHOUSE, sequence_timestamp=CORPUS[2].window_end,
+                         profile=STREAM_PROFILE, sensor_pairs=tuple(pairs))
+    assert not dual_sensor_votes(window, ctx, STREAM_PROFILE).fired
     # No history: code defaults, identity scaler, still the spike vote of the corpus case.
     bare = ScoringContext(tenant_id=TENANT, greenhouse_id=GREENHOUSE,
                           sequence_timestamp=CORPUS[2].window_end, profile=STREAM_PROFILE)
@@ -418,5 +443,5 @@ def test_core_package_is_pure_and_reads_no_clock(monkeypatch: pytest.MonkeyPatch
         monkeypatch.setattr(f"{module}.datetime", _NoClock)
     case = _corpus_case(CORPUS[1], "api")  # 02:00 night window
     ctx = _context(case, API_PROFILE)
-    for fn in _CORE_VOTES:
+    for fn in _CORE_VOTES + (band_findings, oob_vote):
         fn(case["window"], ctx, API_PROFILE)
