@@ -7,12 +7,16 @@ and on seeded random windows:
 * ``ModelScorer`` vs ``AnomalyDetector.predict_batch_enriched`` (upload,
   API), ``ComprehensiveInferencePipeline._run_lstm_vae`` and the live
   ``forward_pass_sync`` (``src/live/attribution.py``, not edited).
-* The window votes vs ``_run_with_components``. The pipeline runs unchanged
-  up to ``_order_rule_votes``; a spy records the ``rule_votes`` it receives
-  and stops the run there (everything after is LSTM / DB, not a vote). The
-  out-of-bounds gate is caught at ``_persist_gate_result`` the same way.
-  DB-backed inputs (seasonal scaler, diurnal profiles, operational config)
-  are injected into both sides identically.
+* The window votes vs ``tests/fixtures/scoring_core_a3_pipeline_votes.json``.
+  ADR-014 step A4 made ``_run_with_components`` call the core, so comparing
+  the two live would be vacuous. The fixture is the output of the pre-A4
+  pipeline (its private vote code, run unchanged up to ``_order_rule_votes``
+  with a spy that recorded the ``rule_votes`` it received, the out-of-bounds
+  gate caught at ``_persist_gate_result``, and the band findings caught at
+  the detector) on exactly the cases ``_cases`` builds, frozen at A4. DB-backed
+  inputs (seasonal scaler, diurnal profiles, operational config) were injected
+  identically. Regenerating it from the current code proves nothing: change it
+  only with a measured, intended behaviour change (Phase B).
 * The batch look-ahead spike rows vs ``_detect_upload_mad_spikes``, and the
   upload scaled scores vs ``score_portion``.
 """
@@ -20,12 +24,11 @@ and on seeded random windows:
 from __future__ import annotations
 
 import ast
-import asyncio
+import json
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
-from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pandas as pd
@@ -33,6 +36,7 @@ import pytest
 
 from src.api.services import comprehensive_pipeline as cp
 from src.api.services import upload_portions as up
+from src import config
 from src.config import (
     COLD_RUN_PERCENTILE,
     COLD_RUN_ROBUST_GATE_ENABLED,
@@ -45,6 +49,7 @@ from src.config import (
 from src.live.attribution import forward_pass_sync
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import SENSOR_RANGES, normalize_data, preprocess_sequences
+from src.models import inference
 from src.models.inference import AnomalyDetector, ModelScorer
 from src.models.operational_config_store import OperationalConfigStore
 from src.models.scoring import API_PROFILE, BATCH_PROFILE, STREAM_PROFILE, ScoringContext
@@ -72,6 +77,7 @@ N_RANDOM = 64
 TENANT = "a3-tenant"
 GREENHOUSE = "a3-gh"
 CORPUS = build_corpus()
+GOLDEN_VOTES = Path(__file__).resolve().parents[1] / "fixtures" / "scoring_core_a3_pipeline_votes.json"
 
 # Pipeline order of the votes before _order_rule_votes (steps 0a+ .. 0h).
 _CORE_VOTES = (setpoint_votes, noise_vote, spike_mad_vote, dual_sensor_votes,
@@ -189,49 +195,18 @@ def _cases(profile_name: str) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
-# Old side: the pipeline, stopped right after the votes
+# Old side: the pre-A4 pipeline's votes, frozen
 # --------------------------------------------------------------------------
 
 
-class _Stop(Exception):
-    pass
+def _golden(variant: str) -> list[dict[str, Any]]:
+    """The frozen pre-A4 pipeline output for ``variant``, one dict per case.
 
-
-def _pipeline_votes(seq_array: np.ndarray, case: dict[str, Any], profile_name: str) -> dict[str, Any]:
-    pipeline = cp.ComprehensiveInferencePipeline(detector=None)  # type: ignore[arg-type]
-    captured: dict[str, Any] = {"band": []}
-
-    def spy_order(votes: dict[str, list[str]]) -> dict[str, list[str]]:
-        captured["votes"] = [(k, list(v)) for k, v in votes.items()]
-        raise _Stop
-
-    async def spy_gate(result: Any, **_: Any) -> Any:
-        captured["gate"] = list(result["affected_sensors"])
-        raise _Stop
-
-    band_detect = pipeline._band_breach_detector.detect
-
-    def spy_band(*args: Any, **kwargs: Any) -> Any:
-        out = band_detect(*args, **kwargs)
-        captured["band"] = [f.to_dict() for f in out]
-        return out
-
-    with patch.object(cp, "_order_rule_votes", spy_order), \
-            patch.object(cp, "get_operational_config_store", lambda: case["store"]), \
-            patch.object(pipeline, "_get_seasonal_scaler", AsyncMock(return_value=case["scaler"])), \
-            patch.object(pipeline, "_ensure_diurnal_profiles", AsyncMock(return_value=case["profiles"])), \
-            patch.object(pipeline, "_persist_gate_result", spy_gate), \
-            patch.object(pipeline._band_breach_detector, "detect", spy_band):
-        with pytest.raises(_Stop):
-            asyncio.run(pipeline._run_with_components(
-                customer_id=TENANT, seq_array=seq_array, sequence_raw=seq_array.tolist(),
-                db=None, greenhouse_id=GREENHOUSE, baseline=None, attributor=None,  # type: ignore[arg-type]
-                pattern_detector=None, sensor_pairs=case["pairs"],  # type: ignore[arg-type]
-                sequence_timestamp=case["ts"].isoformat(),
-                climate_context=None if profile_name == "stream" else case["climate"],
-                noise_clean_windows=case["clean"] or None,
-            ))
-    return captured
+    Each dict has ``band`` (band findings), and either ``gate`` (out-of-bounds
+    sensors, the window was gated) or ``votes`` (``[key, sensors]`` pairs in
+    the pipeline's order before ``_order_rule_votes``).
+    """
+    return json.loads(GOLDEN_VOTES.read_text())[variant]
 
 
 def _context(case: dict[str, Any], profile: Any) -> ScoringContext:
@@ -248,8 +223,7 @@ def _context(case: dict[str, Any], profile: Any) -> ScoringContext:
 # --------------------------------------------------------------------------
 
 
-_FACTOR_MODULES = ("src.models.inference", "src.live.attribution",
-                   "src.api.services.comprehensive_pipeline", "src.api.services.upload_portions")
+_FACTOR_MODULES = ("src.models.inference", "src.live.attribution", "src.api.services.upload_portions")
 
 
 def _scaling_factor(monkeypatch: pytest.MonkeyPatch, factor: Optional[float]) -> None:
@@ -286,6 +260,8 @@ def test_model_scorer_equals_every_forward_pass_copy(
         raw_score, api_scaled, embedding, uncertainty = pipeline._run_lstm_vae(window)
         assert float(one.raw[0]) == raw_score
         assert scaled_scores(one, API_PROFILE) == [api_scaled]
+        # A4: the pipeline's scale is the core's; pin it to the plain formula too.
+        assert api_scaled == float(np.clip(raw_score / inference.ANOMALY_SCALING_FACTOR, 0.0, 1.0))
         assert one.embeddings[0].tolist() == embedding and float(one.uncertainties[0]) == uncertainty
 
     empty = scorer.predict_with_channel_errors(np.zeros((0, SEQ_LEN, 4), dtype=np.float32))
@@ -360,7 +336,7 @@ def test_lstm_threshold_and_flag_reproduce_each_path() -> None:
     assert live_t == LIVE_ANOMALY_THRESHOLD
     assert lstm_flag(live_t, live_t, STREAM_PROFILE) is True  # live uses '>=' (OQ4 kept)
 
-    fallback = float(cp.ANOMALY_THRESHOLD)
+    fallback = float(config.ANOMALY_THRESHOLD)
     assert lstm_threshold(API_PROFILE).value == fallback
     assert lstm_threshold(API_PROFILE, tracker_thresholds=(0.3, 0.4)).value == 0.4
     assert lstm_threshold(API_PROFILE, tracker_thresholds=(math.inf, 0.1)).value == fallback
@@ -383,9 +359,12 @@ def test_window_votes_equal_pipeline(
         # compare that branch too (both sides build NoiseDetector per call).
         monkeypatch.setattr("src.models.noise_detector.NOISE_BASELINE_VARIANCE", {})
     fired: set[str] = set()
-    for case in _cases(profile.name):
+    variant = "api-fixed-noise-target" if no_noise_baseline else profile.name
+    cases = _cases(profile.name)
+    golden = _golden(variant)
+    assert len(golden) == len(cases)
+    for case, old in zip(cases, golden):
         seq_array = normalize_data(case["window"].astype(np.float32), SENSOR_RANGES)
-        old = _pipeline_votes(seq_array, case, profile.name)
         window = cp._denormalize_sequence(seq_array)
         ctx = _context(case, profile)
         state = window_state(ctx)
@@ -394,7 +373,7 @@ def test_window_votes_equal_pipeline(
         if "gate" in old:
             fired.add("out_of_bounds")
             continue
-        new = [(k, list(v)) for fn in _CORE_VOTES for k, v in fn(window, ctx, profile, state).votes.items()]
+        new = [[k, list(v)] for fn in _CORE_VOTES for k, v in fn(window, ctx, profile, state).votes.items()]
         assert new == old["votes"], case.get("id")
         assert list(band_findings(window, ctx, profile, state).findings) == old["band"]
         fired.update(k for k, _ in new)

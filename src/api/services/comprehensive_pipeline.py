@@ -8,6 +8,7 @@ Recommendations -> Incident Store -> Learning progress -> Metrics.
 import copy
 import logging
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -17,12 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import (
     ACTIVE_LEARNING_MIN_QUALITY_LABELS,
-    ANOMALY_SCALING_FACTOR,
-    ANOMALY_THRESHOLD,
     BIAS_EMA_SPAN,
     BIAS_EMA_THRESHOLD,
     BIAS_EMA_THRESHOLD_BY_SENSOR,
-    BOCPD_MIN_SENSORS,
     CUSUM_H_SIGMA,
     CUSUM_K_SIGMA,
     DIURNAL_PROFILE_HISTORY_DAYS,
@@ -36,16 +34,8 @@ from src.config import (
     POT_FPR,
     POT_Q,
     PSYCHROMETRIC_HD_TOLERANCE,
-    NOISE_CALIBRATED_RATIO_BY_SENSOR,
-    NOISE_CALIBRATED_RATIO_TARGET,
-    SENSOR_NOISE_TARGETS,
     SEQ_LEN,
     SENSOR_NAMES,
-    ENRICHMENT_SPIKE_CONFIRM_LAG,
-    ENRICHMENT_SPIKE_CONFIRMED_PAIRS,
-    SPIKE_MAD_FLOOR,
-    UPLOAD_SPIKE_MAD_FLOOR,
-    UPLOAD_SPIKE_MAD_TUNING_C,
     TEMP_RANGE,
     HUMIDITY_RANGE,
     CO2_RANGE,
@@ -55,29 +45,46 @@ from src.db.incident_memory import IncidentMemory
 from src.db.models import LearningState, SensorReading
 from src.models.anomaly_attributor import AnomalyAttributor
 from src.models.bias_detector import BiasOffsetDetector as BiasEMADetector
-from src.models.bias_dual_sensor_detector import BiasDualSensorDetector
-from src.models.bocpd_detector import BOCPDDetector
 from src.models.multivariate_mahalanobis_detector import (
     MultivariateMahalanobisDetector,
 )
-from src.models.band_breach_detector import BAND_TYPE_TO_VOTE, BandBreachDetector
+from src.models.band_breach_detector import BAND_TYPE_TO_VOTE, BandBreachDetector  # noqa: F401
 from src.models.confidence_scorer import ConfidenceScorer
-from src.models.correlation_breakdown_detector import CorrelationBreakdownDetector
 from src.models.data_utils import SENSOR_RANGES
 from src.models.cusum_drift_detector import CUSUMDriftDetector, EMABaselineEstimator
-from src.models.diurnal_profile_detector import DiurnalProfileDetector
 from src.models.dropout_detector import DropoutDetector
 from src.models.ensemble_detector import EnsembleAnomalyDetector, LstmVaeDetector
-from src.models.noise_detector import (
-    NoiseDetector,
-    calibrate_noise_baseline,
-    resolve_noise_baseline,
-)
-from src.models.out_of_bounds_detector import OutOfBoundsDetector
-from src.models.spike_mad_detector import SpikeMADDetector
+# Kept although unused here: tests patch ``comprehensive_pipeline.NoiseDetector.detect``
+# and ``...BandBreachDetector.detect`` by this module path.
+from src.models.noise_detector import NoiseDetector  # noqa: F401
 from src.models.ewma_tracker import EWMATracker
 from src.models.fault_classifier import FaultClassifier
-from src.models.inference import AnomalyDetector
+from src.models.inference import AnomalyDetector, ModelScores
+from src.models.scoring import (
+    API_PROFILE,
+    LstmDecisionRule,
+    NoiseBaseline,
+    OobPolicy,
+    ScoringContext,
+    ScoringProfile,
+    SpikeConfirmMode,
+    WindowState,
+)
+from src.models.scoring.lstm import lstm_flag, lstm_threshold, scaled_scores
+from src.models.scoring.votes import (
+    change_point_vote,
+    diurnal_vote,
+    noise_vote,
+    oob_vote,
+    season_for_timestamp,
+    spike_mad_vote,
+)
+from src.models.scoring.window_rules import (
+    SETPOINT_TYPE_TO_VOTE,
+    band_findings as band_findings_vote,
+    dual_sensor_votes,
+    setpoint_votes,
+)
 from src.models.operational_config_store import get_operational_config_store
 from src.models.pattern_detector import PatternDetector
 from src.models.physics_validator import PhysicsValidator
@@ -95,22 +102,44 @@ from src.models.seasonal_scaler import (
     get_cached_seasonal_scaler,
     put_cached_seasonal_scaler,
 )
-from src.models.setpoint_scada_detector import (
-    DEHUMIDIFICATION_FAILURE,
-    HUMIDITY_SATURATION_RISK,
-    OVER_HEATING,
-    SENSOR_FLATLINE,
-    THERMAL_DIVERGENCE,
-    UNDER_HEATING,
-    SetpointAwareScadaDetector,
-    climate_context_from_mapping,
-)
 from src.monitoring.anomaly_metrics import AnomalyMetrics
 from src.utils.lru import LRUDict
 
 logger = logging.getLogger(__name__)
 
 PIPELINE_VERSION = "2.0"
+
+# The pipeline's default scoring profile (ADR-014 step A4). The live
+# enrichment (src/live/enrichment.py, which builds a pipeline per episode and
+# passes no profile) and the inference routes run this class identically
+# today: the same votes, and the adaptive max(EWMA, POT) LSTM decision. They
+# differ only in call arguments (live passes noise_clean_windows and no
+# climate or sensor pairs). So the default is API_PROFILE with the noise
+# baseline calibrated from clean windows when the caller passes them, which
+# is what both callers get today. A6 moves live to its own profile.
+PIPELINE_PROFILE: ScoringProfile = replace(
+    API_PROFILE, noise_baseline=NoiseBaseline.RING_CALIBRATED
+)
+
+
+def _check_pipeline_profile(profile: ScoringProfile) -> ScoringProfile:
+    """Reject a profile whose behaviour the pipeline does not implement.
+
+    The pipeline gates a window on an out-of-bounds hit, votes the spike by
+    lag, and takes the LSTM cutoff from trackers or a fixed value. The batch
+    profile's clamp-and-continue, look-ahead spike and per-file percentile
+    are upload stages (A7).
+
+    Raises:
+        ValueError: For such a profile.
+    """
+    if profile.oob_policy is not OobPolicy.GATE:
+        raise ValueError(f"pipeline needs oob_policy=gate, got {profile.oob_policy.value}")
+    if profile.spike_confirm.mode is not SpikeConfirmMode.LAG:
+        raise ValueError("pipeline needs lag spike confirmation, not look-ahead")
+    if profile.lstm_decision.rule is LstmDecisionRule.FILE_PERCENTILE_ROBUST:
+        raise ValueError("pipeline cannot use a per-file LSTM threshold")
+    return profile
 
 
 def _json_safe(value: Any) -> Any:
@@ -135,15 +164,6 @@ def _json_safe(value: Any) -> Any:
         return None
     return value
 
-
-def _season_for_timestamp(
-    ts: datetime,
-    season_map: dict[str, str],
-) -> str:
-    """Map a timestamp's calendar month onto summer|winter via season_map."""
-    month_key = str(int(ts.month))
-    season = str(season_map.get(month_key, "winter")).lower()
-    return season if season in {"summer", "winter"} else "winter"
 
 # Map PhysicsValidator reason strings to fault type values.
 _PHYSICS_REASON_TO_FAULT: Dict[str, str] = {
@@ -191,15 +211,9 @@ _SCADA_VOTE_KEYS: frozenset[str] = frozenset({
 })
 
 # Maps SetpointAwareScadaDetector anomaly_type constants to rule-vote keys.
-# Defined once at module level instead of being rebuilt on every pipeline call.
-_SCADA_TYPE_TO_VOTE: Dict[Any, str] = {
-    UNDER_HEATING: "under_heating",
-    OVER_HEATING: "over_heating",
-    DEHUMIDIFICATION_FAILURE: "dehumidification_failure",
-    HUMIDITY_SATURATION_RISK: "humidity_saturation_risk",
-    THERMAL_DIVERGENCE: "thermal_divergence",
-    SENSOR_FLATLINE: "sensor_flatline",
-}
+# The table is the scoring core's (src/models/scoring/window_rules.py); this
+# plain dict stays for callers that import it from here.
+_SCADA_TYPE_TO_VOTE: Dict[Any, str] = dict(SETPOINT_TYPE_TO_VOTE)
 
 # Fault profile per rule detector (fusion, plan P2). Rule detectors vote
 # instead of short-circuiting: the full LSTM/ensemble path still runs, and
@@ -446,41 +460,6 @@ def _order_rule_votes(
     return ordered
 
 
-def build_noise_detector(
-    detector: NoiseDetector,
-    clean_windows: Any = None,
-) -> NoiseDetector:
-    """Noise detector, calibrated when physical clean windows are supplied.
-
-    ``clean_windows`` is the input ``calibrate_noise_baseline`` accepts:
-    physical units, not the normalized LSTM baseline. None, or a
-    calibration that yields no positive variance, keeps ``detector``
-    (fixed ``NOISE_BASELINE_VARIANCE`` and its cold-start ratio).
-
-    A non-empty calibration uses ``resolve_noise_baseline`` and
-    ``NOISE_CALIBRATED_RATIO_BY_SENSOR`` (scalar ``NOISE_CALIBRATED_RATIO_TARGET``
-    for unlisted sensors). The live scorer passes recent
-    physical windows it did not flag. ``None`` or an empty sequence
-    keeps the fixed map.
-    """
-    if clean_windows is None:
-        return detector
-    calibrated = calibrate_noise_baseline(clean_windows)
-    if not calibrated:
-        return detector
-    return NoiseDetector(
-        hp_cutoff=detector._hp_cutoff,
-        window=detector._window,
-        baseline_variance=resolve_noise_baseline(calibrated),
-        ratio_threshold={
-            name: float(NOISE_CALIBRATED_RATIO_BY_SENSOR.get(name, NOISE_CALIBRATED_RATIO_TARGET))
-            for name in SENSOR_NAMES
-        },
-        use_highpass=detector._use_highpass,
-        default_ratio=float(NOISE_CALIBRATED_RATIO_TARGET),
-    )
-
-
 async def _load_operational_overrides_if_uncached(
     customer_id: str,
     greenhouse_id: str,
@@ -527,39 +506,6 @@ async def _load_operational_overrides_if_uncached(
             customer_id,
             greenhouse_id,
         )
-
-
-def enrichment_spike_mad_floor(sensor: str) -> Optional[float]:
-    """MAD floor for the enrichment spike vote.
-
-    Light is skipped: a lighting step is not a probe spike.
-
-    When ``UPLOAD_SPIKE_MAD_FLOOR`` has an explicit key for the sensor,
-    that value is returned directly. This lets operators tune humidity,
-    CO₂, and future sensors independently of the live-scoring floor.
-
-    For sensors absent from ``UPLOAD_SPIKE_MAD_FLOOR``, the floor is
-    derived by scaling ``SPIKE_MAD_FLOOR`` by the upload/live temperature
-    ratio (5× at shipped defaults). ``None`` means do not vote that channel.
-
-    This is not the live detector pair (``SPIKE_MAD_TUNING_C`` = 3,
-    temperature floor 0.1 °C). Callers pair the returned floor with
-    ``UPLOAD_SPIKE_MAD_TUNING_C``.
-    """
-    if sensor == "light":
-        return None
-    # An explicit entry in the upload floor table is used as-is; the
-    # scaled-fallback rule only applies when the key is absent.
-    if sensor in UPLOAD_SPIKE_MAD_FLOOR:
-        return float(UPLOAD_SPIKE_MAD_FLOOR[sensor])
-    live_floor = SPIKE_MAD_FLOOR.get(sensor)
-    if live_floor is None:
-        return None
-    live_temp = float(SPIKE_MAD_FLOOR["temperature"])
-    if live_temp <= 0.0:
-        return None
-    upload_temp = float(UPLOAD_SPIKE_MAD_FLOOR["temperature"])
-    return float(live_floor) * (upload_temp / live_temp)
 
 
 def _humanize_sensors(sensors: List[str]) -> str:
@@ -787,7 +733,19 @@ class ComprehensiveInferencePipeline:
         recommendation_engine: Optional[RecommendationEngine] = None,
         metrics: Optional[AnomalyMetrics] = None,
         orchestrators: Optional[Dict[str, RetrainingOrchestrator]] = None,
+        profile: Optional[ScoringProfile] = None,
     ) -> None:
+        """Build a pipeline.
+
+        Args:
+            profile: The scoring profile whose votes and LSTM decision the
+                pipeline runs. Defaults to ``PIPELINE_PROFILE``: the live
+                enrichment and the inference routes share this class today
+                and score identically, so one default keeps both as they
+                were. A profile the pipeline cannot honour raises
+                ``ValueError``.
+        """
+        self._profile = _check_pipeline_profile(profile or PIPELINE_PROFILE)
         self.detector = detector
         self.confidence_scorer = confidence_scorer or ConfidenceScorer()
         self.root_cause_analyzer = root_cause_analyzer or RootCauseAnalyzer()
@@ -806,8 +764,6 @@ class ComprehensiveInferencePipeline:
         )
         # Polling dropout detector (shared across tenants — stateless).
         self._dropout_detector = DropoutDetector()
-        # Noise / precision degradation detector (stateless, shared).
-        self._noise_detector = NoiseDetector()
         # Per-(tenant, greenhouse) CUSUM drift detectors (stateful, persisted in LearningState).
         # Keyed by (customer_id, greenhouse_id) so each greenhouse has an independent
         # drift accumulator; LearningState persistence remains at tenant level.
@@ -815,17 +771,9 @@ class ComprehensiveInferencePipeline:
         # Per-(tenant, greenhouse) EMA baseline estimators for CUSUM standardized residuals.
         self._ema_cache: dict[tuple[str, str], EMABaselineEstimator] = {}
         # Phase B SCADA detectors (stateless, shared).
-        self._spike_mad_detector = SpikeMADDetector()
-        self._oob_detector = OutOfBoundsDetector()
-        self._diurnal_detector = DiurnalProfileDetector()
-        self._bias_dual_detector = BiasDualSensorDetector()
-        self._corr_breakdown_detector = CorrelationBreakdownDetector()
         # Sensitivity layer (plan P3): joint-implausibility + change-point,
         # both stateless and shared. They run on the physical-unit window.
         self._mahalanobis_detector = MultivariateMahalanobisDetector()
-        self._bocpd_detector = BOCPDDetector()
-        self._setpoint_scada_detector = SetpointAwareScadaDetector()
-        self._band_breach_detector = BandBreachDetector()
         # Per-(tenant, greenhouse, anchor_date) cached diurnal profiles:
         # {(customer_id, greenhouse_id, date): {sensor: {hour: (mean, std)}}}
         self._diurnal_profiles_cache: dict[tuple, Dict[str, Dict[int, tuple]]] = {}
@@ -1040,49 +988,41 @@ class ComprehensiveInferencePipeline:
         # while the LSTM/ensemble path still runs, so multi-fault sequences
         # keep full attribution, pattern scores, and recommendations.
         # Keyed by _RULE_VOTE_PROFILES name → affected sensors/variables.
+        #
+        # The detector votes themselves are the ADR-014 scoring core
+        # (src/models/scoring, step A4). This method hands the core the
+        # window, gathers each vote in the order the pipeline always had
+        # (setpoint, noise, OOB gate, spike, bias-dual, diurnal, BOCPD) and
+        # applies precedence (_order_rule_votes) afterwards.
         rule_votes: dict[str, list[str]] = {}
 
-        # 0a. Noise / precision degradation check (SCADA spec 1.4).
-        # Denormalize so per-sensor detection uses physical units (°C, %, ppm,
-        # lux) consistent with SENSOR_NOISE_TARGETS in src/config.py.
+        # The core reads physical units (°C, %, ppm, lux), as
+        # SENSOR_NOISE_TARGETS in src/config.py does.
         _denormed_for_noise = _denormalize_sequence(seq_array)
+        _profile = self._profile
+        _vote_context = ScoringContext(
+            tenant_id=customer_id,
+            greenhouse_id=greenhouse_id,
+            sequence_timestamp=seq_ts,
+            profile=_profile,
+            climate=climate_context,
+            sensor_pairs=tuple(sensor_pairs or ()),
+        )
 
         # 0a+. Setpoint-aware climate / RH / microclimate / flatline rules.
-        scada_anomalies: list[dict[str, Any]] = []
-        _climate_ctx = climate_context_from_mapping(climate_context)
-        _scada_findings = self._setpoint_scada_detector.detect(
-            _denormed_for_noise,
-            context=_climate_ctx,
-            timestamp=seq_ts,
-        )
-        # _SCADA_TYPE_TO_VOTE is a module-level constant (defined near _SCADA_VOTE_KEYS).
-        for finding in _scada_findings:
-            # Night light sits at zero for hours. That is not a frozen probe,
-            # so a light-only flatline neither votes nor lands in scada_anomalies.
-            affected = [
-                sensor
-                for sensor in finding.affected_sensors
-                if not (
-                    finding.anomaly_type == SENSOR_FLATLINE and sensor == "light"
-                )
-            ]
-            if finding.anomaly_type == SENSOR_FLATLINE and not affected:
-                continue
-            finding_dict = finding.to_dict()
-            if finding.anomaly_type == SENSOR_FLATLINE:
-                finding_dict["affected_sensors"] = affected
-            scada_anomalies.append(finding_dict)
-            vote_key = _SCADA_TYPE_TO_VOTE.get(finding.anomaly_type)
-            if vote_key:
-                rule_votes.setdefault(vote_key, [])
-                for sensor in affected:
-                    if sensor not in rule_votes[vote_key]:
-                        rule_votes[vote_key].append(sensor)
+        # Night light sits at zero for hours: a light-only flatline neither
+        # votes nor lands in scada_anomalies (handled inside the core).
+        _setpoint = setpoint_votes(_denormed_for_noise, _vote_context, _profile)
+        scada_anomalies: list[dict[str, Any]] = [dict(f) for f in _setpoint.findings]
+        for _setpoint_key, _setpoint_sensors in _setpoint.votes.items():
+            rule_votes[_setpoint_key] = list(_setpoint_sensors)
+        for _setpoint_finding in scada_anomalies:
+            if SETPOINT_TYPE_TO_VOTE.get(_setpoint_finding["anomaly_type"]):
                 logger.warning(
                     "Setpoint SCADA %s for tenant %s: %s",
-                    finding.anomaly_type,
+                    _setpoint_finding["anomaly_type"],
                     customer_id,
-                    finding.reasoning,
+                    _setpoint_finding["reasoning"],
                 )
 
         # 0a++. Operator crop band breaches (day/night min–max from OperationalConfig).
@@ -1101,67 +1041,56 @@ class ComprehensiveInferencePipeline:
         _band_overrides_configured = bool(
             _op_store.get_raw_overrides(customer_id, greenhouse_id)
         )
-        _band_findings = self._band_breach_detector.detect(
-            _denormed_for_noise,
-            _op_config,
-            timestamp=seq_ts,
+        # What every vote of this window reads. The seasonal scaler and the
+        # diurnal profiles are DB lookups: they are awaited at the points
+        # the pipeline always awaited them (the OOB gate returns before the
+        # diurnal query) and swapped in with ``replace``.
+        _season_key = season_for_timestamp(seq_ts, _op_config.get("season_map") or {})
+        _window_state = WindowState(
+            season=_season_key,
+            scaler=SeasonalScaler(),
+            operational_config=_op_config,
+            diurnal_profiles={},
+            noise_clean_windows=noise_clean_windows,
         )
         band_findings: list[dict[str, Any]] = []
-        for finding in _band_findings:
-            finding_dict = finding.to_dict()
+        for _band_finding in band_findings_vote(
+            _denormed_for_noise, _vote_context, _profile, _window_state
+        ).findings:
+            finding_dict = dict(_band_finding)
             scada_anomalies.append(finding_dict)
             band_findings.append(finding_dict)
             logger.warning(
                 "Band breach %s for tenant %s: %s",
-                finding.anomaly_type,
+                finding_dict["anomaly_type"],
                 customer_id,
-                finding.reasoning,
+                finding_dict["reasoning"],
             )
 
         # Seasonal σ scaler — factor 1.0 when baselines are sparse / absent.
-        _season_key = _season_for_timestamp(seq_ts, _op_config.get("season_map") or {})
         _scaler = await self._get_seasonal_scaler(
             customer_id, greenhouse_id, _season_key, _op_config, db
         )
+        _window_state = replace(_window_state, scaler=_scaler)
 
-        # Noise stays a window-level variance ratio (NoiseDetector.detect).
-        # Light is excluded: the diurnal ramp and night zeros are not a
-        # precision fault, and the calibrated prototype omitted the channel.
-        # Calibrated baselines apply only when the caller passed physical
-        # clean windows (build_noise_detector).
-        _noise_detector = build_noise_detector(
-            self._noise_detector, noise_clean_windows
-        )
-        noise_alarmed: list[str] = []
-        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if s_name == "light":
-                continue
-            base_target = SENSOR_NOISE_TARGETS.get(s_name)
-            target_override = (
-                None
-                if base_target is None
-                else base_target * _scaler.factor(_season_key, s_name)
-            )
-            if _noise_detector.detect(
-                _denormed_for_noise[:, s_idx],
-                s_name,
-                target_override=target_override,
-            ):
-                noise_alarmed.append(s_name)
-        if noise_alarmed:
+        # 0a. Noise / precision degradation (SCADA spec 1.4): window-level
+        # variance ratio, light excluded. Calibrated baselines apply only
+        # when the caller passed physical clean windows and the profile
+        # calibrates (NoiseBaseline.RING_CALIBRATED).
+        _noise = noise_vote(_denormed_for_noise, _vote_context, _profile, _window_state)
+        if _noise.fired:
             logger.warning(
                 "Noise/precision degradation detected for tenant %s — sensors: %s",
                 customer_id,
-                noise_alarmed,
+                list(_noise.votes["noise"]),
             )
-            rule_votes["noise"] = noise_alarmed
+            rule_votes["noise"] = list(_noise.votes["noise"])
 
-        # 0b. Out-of-bounds check — short-circuit on hard physical limits.
-        oob_alarmed: list[str] = []
-        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if any(self._oob_detector.detect_series(_denormed_for_noise[:, s_idx], s_name)):
-                oob_alarmed.append(s_name)
-        if oob_alarmed:
+        # 0b. Out-of-bounds check — short-circuit on hard physical limits
+        # (OobPolicy.GATE; the pipeline accepts no other policy).
+        _oob = oob_vote(_denormed_for_noise, _vote_context, _profile, _window_state)
+        if _oob.fired:
+            oob_alarmed = list(_oob.votes["out_of_bounds"])
             logger.warning(
                 "Out-of-bounds readings for tenant %s — sensors: %s",
                 customer_id,
@@ -1176,60 +1105,17 @@ class ComprehensiveInferencePipeline:
                 db=db,
             )
 
-        # 0c. Spike (MAD). any(flags) over the whole window was the main
-        # clean-file FPR driver: a spike earlier in the window labelled the
-        # current (clean) sample. So exactly one timestep votes.
-        # ENRICHMENT_SPIKE_CONFIRM_LAG = d > 0 (default 1): timestep t-d
-        # votes, and only if one of the d samples after it is back at the
-        # pre-event level (a step that stays is not a spike). That vote uses
-        # ENRICHMENT_SPIKE_CONFIRMED_PAIRS where a sensor has an entry and
-        # arrives d samples late.
-        # Lag 0: the last timestep votes, unconfirmed, with the upload pair
-        # (UPLOAD_SPIKE_MAD_TUNING_C, enrichment_spike_mad_floor).
-        # Light is excluded. Neither mode is the live detector's c=3 /
-        # 0.1 °C floor; the shared instance stays on the live defaults for
-        # any caller that still wants them.
-        spike_alarmed: list[str] = []
-        _spike_lag = max(0, int(ENRICHMENT_SPIKE_CONFIRM_LAG))
-        # Build one SpikeMADDetector per distinct tuning_c so a new instance is
-        # not allocated for every sensor on every pipeline call (Finding 6).
-        _spike_detector_cache: dict[float, SpikeMADDetector] = {}
-        def _get_spike_detector(c: float) -> SpikeMADDetector:
-            if c not in _spike_detector_cache:
-                _spike_detector_cache[c] = SpikeMADDetector(tuning_c=c)
-            return _spike_detector_cache[c]
-        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            base_floor = enrichment_spike_mad_floor(s_name)
-            if base_floor is None:
-                continue
-            spike_c = float(UPLOAD_SPIKE_MAD_TUNING_C)
-            if _spike_lag > 0 and s_name in ENRICHMENT_SPIKE_CONFIRMED_PAIRS:
-                spike_c, base_floor = (
-                    float(value) for value in ENRICHMENT_SPIKE_CONFIRMED_PAIRS[s_name]
-                )
-            _enrichment_spike = _get_spike_detector(spike_c)
-            spike_floor = base_floor * _scaler.factor(_season_key, s_name)
-            spike_series = _denormed_for_noise[:, s_idx]
-            if _spike_lag > 0:
-                spike_offsets = _enrichment_spike.reversion_offsets(
-                    spike_series, mad_floor=spike_floor, horizon=_spike_lag
-                )
-                voted = (
-                    len(spike_offsets) > _spike_lag
-                    and spike_offsets[-1 - _spike_lag] is not None
-                )
-            else:
-                spike_flags = _enrichment_spike.detect(spike_series, mad_floor=spike_floor)
-                voted = bool(spike_flags and spike_flags[-1])
-            if voted:
-                spike_alarmed.append(s_name)
-        if spike_alarmed:
+        # 0c. Spike (MAD): exactly one timestep votes (t - lag, confirmed by
+        # a revert within the lag; lag 0 votes the last step unconfirmed).
+        # Pairs, floors and the seasonal scaling come from the profile.
+        _spike = spike_mad_vote(_denormed_for_noise, _vote_context, _profile, _window_state)
+        if _spike.fired:
             logger.warning(
                 "MAD spike detected for tenant %s — sensors: %s",
                 customer_id,
-                spike_alarmed,
+                list(_spike.votes["spike_mad"]),
             )
-            rule_votes["spike_mad"] = spike_alarmed
+            rule_votes["spike_mad"] = list(_spike.votes["spike_mad"])
 
         # 0d. Bias (EMA) check — detect sudden persistent offsets per sensor.
         # Thresholds are per sensor: the physical scales differ by orders of
@@ -1258,55 +1144,37 @@ class ComprehensiveInferencePipeline:
             )
 
         # 0e. Dual-sensor checks — bias cross-difference + correlation breakdown.
-        if sensor_pairs:
-            for pair in sensor_pairs:
-                a = np.asarray(pair["sensor_a"], dtype=float)
-                b = np.asarray(pair["sensor_b"], dtype=float)
-                if len(a) != len(b) or len(a) < 2:
-                    continue
-                var_name = pair.get("variable", "unknown")
-
-                bias_flags = self._bias_dual_detector.detect(a, b)
-                if any(bias_flags):
-                    logger.warning(
-                        "Dual-sensor bias on %s for tenant %s",
-                        var_name, customer_id,
-                    )
-                    rule_votes.setdefault("bias_dual", []).append(var_name)
-
-                corr_flags = self._corr_breakdown_detector.detect(a, b)
-                if any(corr_flags):
-                    logger.warning(
-                        "Correlation breakdown on %s for tenant %s",
-                        var_name, customer_id,
-                    )
-                    rule_votes.setdefault("correlation_breakdown", []).append(var_name)
+        _dual = dual_sensor_votes(
+            _denormed_for_noise, _vote_context, _profile, _window_state
+        )
+        for _dual_key, _dual_variables in _dual.votes.items():
+            for _dual_variable in _dual_variables:
+                logger.warning(
+                    "%s on %s for tenant %s",
+                    "Dual-sensor bias"
+                    if _dual_key == "bias_dual"
+                    else "Correlation breakdown",
+                    _dual_variable,
+                    customer_id,
+                )
+            rule_votes[_dual_key] = list(_dual_variables)
 
         # 0f. Diurnal profile check — hourly Z-score against historical stats.
         # Profiles auto-build from the tenant's stored history on first use.
-        # Light is excluded: the diurnal ramp and night zeros are the natural
-        # signal, not a fault signature (same rationale as the noise check).
+        # Light is excluded (diurnal ramp and night zeros are natural signal).
         _diurnal_profiles = await self._ensure_diurnal_profiles(
             customer_id, greenhouse_id, db, anchor_ts=seq_ts,
         )
-        if _diurnal_profiles:
-            hour = seq_ts.hour
-            diurnal_alarmed: list[str] = []
-            for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-                if s_name == "light":
-                    continue
-                profile = _diurnal_profiles.get(s_name)
-                if profile and self._diurnal_detector.detect(
-                    float(_denormed_for_noise[-1, s_idx]), hour, profile,
-                    sensor_name=s_name,
-                ):
-                    diurnal_alarmed.append(s_name)
-            if diurnal_alarmed:
-                logger.warning(
-                    "Diurnal profile deviation for tenant %s — sensors: %s",
-                    customer_id, diurnal_alarmed,
-                )
-                rule_votes["diurnal"] = diurnal_alarmed
+        _window_state = replace(_window_state, diurnal_profiles=_diurnal_profiles or {})
+        _diurnal = diurnal_vote(
+            _denormed_for_noise, _vote_context, _profile, _window_state
+        )
+        if _diurnal.fired:
+            logger.warning(
+                "Diurnal profile deviation for tenant %s — sensors: %s",
+                customer_id, list(_diurnal.votes["diurnal"]),
+            )
+            rule_votes["diurnal"] = list(_diurnal.votes["diurnal"])
 
         # 0g. Multivariate joint-implausibility (rolling Mahalanobis) — catches
         # in-range readings that are jointly impossible (plan P3). The last
@@ -1349,26 +1217,17 @@ class ComprehensiveInferencePipeline:
                 # rule_votes["multivariate"] intentionally omitted — non-voting.
 
         # 0h. Change-point (BOCPD) — level shifts CUSUM's fixed K/H may miss.
-        # A shift is only credible on multiple channels at once; a single
-        # channel's step is usually a control action, not a fault.
-        # Vote when a change-point is confirmed anywhere in the window, not
-        # only on the last step. A level shift that landed earlier in the
-        # window was otherwise labelled noise (accuracy_decline).
-        # Light is excluded so nightfall is not a second channel.
-        # BOCPD_MIN_SENSORS still applies across the remaining channels.
-        cp_sensors: list[str] = []
-        for s_idx, s_name in enumerate(SENSOR_NAMES[: seq_array.shape[1]]):
-            if s_name == "light":
-                continue
-            series = _denormed_for_noise[:, s_idx]
-            if self._bocpd_detector.any_in_window(series):
-                cp_sensors.append(s_name)
-        if len(cp_sensors) >= BOCPD_MIN_SENSORS:
+        # Confirmed anywhere in the window on BOCPD_MIN_SENSORS+ channels,
+        # light excluded (the core owns the rule).
+        _change_point = change_point_vote(
+            _denormed_for_noise, _vote_context, _profile, _window_state
+        )
+        if _change_point.fired:
             logger.warning(
                 "Change-point detected for tenant %s — sensors: %s",
-                customer_id, cp_sensors,
+                customer_id, list(_change_point.votes["change_point"]),
             )
-            rule_votes["change_point"] = cp_sensors
+            rule_votes["change_point"] = list(_change_point.votes["change_point"])
 
         rule_votes = _order_rule_votes(rule_votes)
 
@@ -1457,15 +1316,22 @@ class ComprehensiveInferencePipeline:
         pattern_type = str(pattern_result["primary_pattern"])
 
         # 4. EWMA/POT: load adaptive threshold from DB; update after scoring.
-        _effective_threshold = ANOMALY_THRESHOLD
+        # The core resolves the cutoff: max(EWMA, POT) when finite, else the
+        # profile's fallback (a failed tracker load keeps the fallback).
+        _lstm_cutoff = lstm_threshold(_profile)
         _ewma_tracker = _pot_fitter = None
         try:
             _ewma_tracker, _pot_fitter = await self._load_trackers(customer_id, greenhouse_id, db)
-            _dynamic = max(_ewma_tracker.get_threshold(), _pot_fitter.get_threshold())
-            if math.isfinite(_dynamic):
-                _effective_threshold = _dynamic
+            _lstm_cutoff = lstm_threshold(
+                _profile,
+                tracker_thresholds=(
+                    _ewma_tracker.get_threshold(),
+                    _pot_fitter.get_threshold(),
+                ),
+            )
         except Exception:
             logger.warning("EWMA/POT tracker load skipped (non-critical)", exc_info=True)
+        _effective_threshold = _lstm_cutoff.value
 
         # 5. Ensemble scores (non-voting, 2026-11-16) + fault classification.
         # detect() still runs; is_anomaly / fault_type do not come from it.
@@ -2087,8 +1953,17 @@ class ComprehensiveInferencePipeline:
         raw_scores, embeddings, uncertainties = (
             self.detector.predict_batch_enriched([seq_array])
         )
+        # Same forward pass as ``ModelScorer`` (A3 proves them bit-equal);
+        # it stays behind ``detector.predict_batch_enriched`` because that is
+        # the seam the pipeline tests substitute. The scale is the core's.
+        scores = ModelScores(
+            raw=raw_scores,
+            per_channel=np.empty((len(raw_scores), 0), dtype=np.float32),
+            embeddings=embeddings,
+            uncertainties=uncertainties,
+        )
         raw_score = float(raw_scores[0])
-        anomaly_score = float(np.clip(raw_score / ANOMALY_SCALING_FACTOR, 0.0, 1.0))
+        anomaly_score = scaled_scores(scores, self._profile)[0]
         embedding: list = embeddings[0].tolist()
         uncertainty = float(uncertainties[0])
         return raw_score, anomaly_score, embedding, uncertainty
@@ -2183,7 +2058,7 @@ class ComprehensiveInferencePipeline:
         """
         ensemble = self._get_ensemble()
         ensemble_result = ensemble.detect(seq_array, baseline)
-        is_lstm_anomaly = anomaly_score > effective_threshold
+        is_lstm_anomaly = lstm_flag(anomaly_score, effective_threshold, self._profile)
         physics_confirmed = physics_result.confirmed
 
         # NON-VOTING (2026-11-16): measured with a real tenant baseline, the
