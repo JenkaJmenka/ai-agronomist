@@ -115,6 +115,14 @@ class SensorReading(Base):
         doc="Detector name (statistical, lstm, lstm+statistical) for the trigger_channel hit. "
             "NULL until migration 024.",
     )
+    fault_type: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="Upload-path fault label written with the flag (ADR-014 A8): "
+            "legacy_upload_fault_label(trigger_detector). NULL for rows written "
+            "before migration 032 and where the detector has no label; readers "
+            "then fall through to the trigger_detector map and value inference.",
+    )
     detected_severity: Mapped[Optional[str]] = mapped_column(
         String(16),
         nullable=True,

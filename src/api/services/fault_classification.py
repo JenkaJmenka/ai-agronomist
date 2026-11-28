@@ -204,6 +204,21 @@ def _fault_type_from_detector(trigger_detector: str | None) -> str | None:
     return _DETECTOR_TO_FAULT_TYPE.get(trigger_detector)
 
 
+def _fault_type_from_stored_or_detector(
+    stored_fault_type: str | None, trigger_detector: str | None
+) -> str | None:
+    """Return the persisted ``fault_type`` when set, else the detector map.
+
+    ``stored_fault_type`` is ``SensorReading.fault_type`` (migration 032),
+    written by the upload path as ``legacy_upload_fault_label(detector)``.
+    NULL (rows written earlier) falls through to ``_fault_type_from_detector``,
+    so both give the same label.
+    """
+    if stored_fault_type is not None:
+        return stored_fault_type
+    return _fault_type_from_detector(trigger_detector)
+
+
 def _infer_fault_type_from_values(
     temperature: float | None,
     humidity: float | None,
