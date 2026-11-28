@@ -32,7 +32,6 @@ from src.api.services.upload_portions import (
     StatCarry,
     finalize_scores,
     score_portion,
-    _exclude_faults_from_baseline,
 )
 from src.api.services.upload_producer import produce_upload_portions
 from src.config import (
@@ -96,8 +95,8 @@ async def _run_sync(
     adapter.connect()
     if disable_exclusion:
         ctx = patch(
-            "src.api.services.upload_portions._exclude_faults_from_baseline",
-            lambda raw_rows, stat_carry, stuck_carry: raw_rows,
+            "src.models.scoring.stream_stages.exclude_frozen_readings",
+            lambda rows, carry: [dict(r) for r in rows],
         )
     else:
         from contextlib import nullcontext
@@ -238,8 +237,8 @@ async def _run_async_pipeline(
         if disable_exclusion:
             patches.append(
                 patch(
-                    "src.api.services.upload_portions._exclude_faults_from_baseline",
-                    lambda raw_rows, stat_carry, stuck_carry: raw_rows,
+                    "src.models.scoring.stream_stages.exclude_frozen_readings",
+                    lambda rows, carry: [dict(r) for r in rows],
                 )
             )
 
@@ -389,7 +388,7 @@ class TestExclusionOff:
 
     @pytest.mark.asyncio
     async def test_humidity_hits_appear_when_exclusion_off(self):
-        """With _exclude_faults_from_baseline patched to no-op, humidity
+        """With exclude_frozen_readings patched to no-op, humidity
         statistical hits MUST appear after release + 6h."""
         resp = await _run_sync(SYNTH_FIXTURE, 288, disable_exclusion=True)
         hum_hits = _stat_hits_on(resp, "humidity")

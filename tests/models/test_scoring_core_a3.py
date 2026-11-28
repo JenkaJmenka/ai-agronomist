@@ -17,7 +17,8 @@ and on seeded random windows:
   inputs (seasonal scaler, diurnal profiles, operational config) were injected
   identically. Regenerating it from the current code proves nothing: change it
   only with a measured, intended behaviour change (Phase B).
-* The batch look-ahead spike rows vs ``_detect_upload_mad_spikes``, and the
+* The batch look-ahead spike rows vs a golden frozen from the pre-A7
+  ``_detect_upload_mad_spikes`` (``upload_spike_a3_golden.json``), and the
   upload scaled scores vs ``score_portion``.
 """
 
@@ -70,9 +71,13 @@ from src.models.scoring.votes import (
 )
 from src.models.scoring.window_rules import band_findings, dual_sensor_votes, setpoint_votes
 from src.models.seasonal_scaler import SeasonalScaler
+from src.models.scoring.stream_stages import UploadStreamState, clamp_frame
 from tests.parity._golden_corpus import CHECKPOINT, build_corpus
 
 SEED = 20261124
+_SPIKE_GOLDEN = json.loads(
+    (Path(__file__).resolve().parents[1] / "fixtures" / "upload_spike_a3_golden.json").read_text()
+)
 N_RANDOM = 64
 TENANT = "a3-tenant"
 GREENHOUSE = "a3-gh"
@@ -299,13 +304,12 @@ def test_upload_scores_and_spike_rows_equal_score_portion(
                          sequence_timestamp=CORPUS[0].window_end, profile=BATCH_PROFILE)
     for n, frame in enumerate(frames):
         ranges = [(float(frame[s].min()) - 1.0, float(frame[s].max()) + 1.0) for s in SENSOR_NAMES]
-        result, _ = up.score_portion(
+        result, _, _ = up.score_portion(
             normalized_df=frame.copy(), prev_overlap_df=pd.DataFrame(), raw_rows=[],
-            stat_carry=up.StatCarry(), adaptive_ranges=ranges, detector=detector,
+            state=UploadStreamState.initial(SEQ_LEN), adaptive_ranges=ranges, detector=detector,
         )
-        # OOB clamp-and-continue is an upload stage that moves in A7, so the
-        # model input is the clamped frame, as score_portion builds it.
-        clamped = up._clamp_df_for_scoring(frame)
+        # The model input is the clamped frame, as score_portion builds it.
+        clamped = clamp_frame(frame)
         model_in = preprocess_sequences(normalise_window(clamped[SENSOR_NAMES].to_numpy(), BATCH_PROFILE, ranges))
         assert scaled_scores(scorer.predict_with_channel_errors(model_in), BATCH_PROFILE) == result.scores
         labels = frame["timestamp"].tolist()
@@ -315,8 +319,9 @@ def test_upload_scores_and_spike_rows_equal_score_portion(
             frame.loc[SEQ_LEN + 3, "temperature"] = np.inf
             columns = {s: frame[s].to_numpy(dtype=float) for s in SENSOR_NAMES}
         for start in (0, 5, SEQ_LEN - 1):
-            old = [(h.column, h.timestamp, h.value)
-                   for h in up._detect_upload_mad_spikes(frame, new_row_start=start)]
+            # Frozen from the pre-A7 ``_detect_upload_mad_spikes`` (generated on
+            # the unmodified code, same frames, tests/fixtures/upload_spike_a3_golden.json).
+            old = [tuple(h) for h in _SPIKE_GOLDEN[f"{n}:{start}"]]
             new = [(r.column, up._timestamp_label(labels[r.index]), r.value)
                    for r in spike_mad_rows(columns, ctx, BATCH_PROFILE, start)]
             assert new == old

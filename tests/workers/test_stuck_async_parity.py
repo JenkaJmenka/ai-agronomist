@@ -42,6 +42,12 @@ from src.api.services.upload_producer import produce_upload_portions
 from src.config import STUCK_WALLCLOCK_MIN_HOURS
 from src.db.jobs import get_job
 from src.db.models import Base, SensorReading
+from src.models.scoring.stream_stages import (
+    RollingZState,
+    SpikeTailState,
+    StuckStageState,
+    UploadStreamState,
+)
 from src.models.stuck_fault_detector import StuckCarry, WallclockStuckDetector
 from src.mq.schemas import UploadFinalizeMessage, UploadPortionMessage
 from src.vendors.csv_adapter import CSVAdapter
@@ -518,11 +524,15 @@ class TestConcurrentConsumption:
         portion_msgs = [m for k, m in published if k == "upload.portions"]
 
         def _score_one(msg: UploadPortionMessage) -> tuple[int, list[dict]]:
-            stat_carry = StatCarry(rows=list(msg.stat_carry_rows))
-            stuck_carry = (
-                StuckCarry.from_dict(msg.stuck_carry_state)
-                if msg.stuck_carry_state
-                else None
+            overlap_rows = pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame()
+            state = UploadStreamState(
+                rolling_z=RollingZState.from_parts(rows=msg.stat_carry_rows),
+                spike_tail=SpikeTailState.from_frame(overlap_rows, msg.seq_len - 1),
+                stuck=(
+                    StuckStageState.from_dict(msg.stuck_carry_state)
+                    if msg.stuck_carry_state
+                    else None
+                ),
             )
             detector = _mock_detector()
             normalized_df = pd.DataFrame(msg.rows) if msg.rows else None
@@ -531,16 +541,15 @@ class TestConcurrentConsumption:
                 if msg.overlap_rows
                 else pd.DataFrame()
             )
-            result, _ = score_portion(
+            result, _, _ = score_portion(
                 normalized_df=normalized_df,
                 prev_overlap_df=overlap_df,
                 raw_rows=msg.raw_rows,
-                stat_carry=stat_carry,
+                state=state,
                 adaptive_ranges=[tuple(r) for r in msg.adaptive_ranges],
                 detector=detector,
                 seq_len=msg.seq_len,
                 include_embeddings=False,
-                stuck_carry=stuck_carry,
             )
             return msg.portion_idx, [h.model_dump(mode="json") for h in result.stuck_hits]
 
@@ -989,57 +998,44 @@ class TestConfigParity:
     """Shared detector singleton and consistent parameters."""
 
     def test_detector_construction_count(self):
-        """Exactly ONE WallclockStuckDetector() construction across all source files."""
-        source_files = [
+        """No backend file builds its own WallclockStuckDetector.
+
+        The detector is built only inside the core stuck stages
+        (``stream_stages``), always with no arguments, so the producer, the
+        worker and the sync path cannot disagree on config.
+        """
+        backend_files = [
             Path("src/api/services/upload_producer.py"),
             Path("src/api/services/upload_portions.py"),
             Path("src/workers/upload_consumer.py"),
             Path("src/api/services/cold_run_upload.py"),
         ]
-        total_constructions = 0
-        for src_file in source_files:
+        for src_file in backend_files:
             text = src_file.read_text(encoding="utf-8")
-            count = text.count("WallclockStuckDetector(")
-            total_constructions += count
+            assert "WallclockStuckDetector(" not in text, src_file
+        core = Path("src/models/scoring/stream_stages.py").read_text(encoding="utf-8")
+        assert core.count("WallclockStuckDetector(") == core.count("WallclockStuckDetector()")
+        assert core.count("WallclockStuckDetector()") == 2  # detect_chunk, flush
 
-        assert total_constructions == 1, (
-            f"Expected exactly 1 WallclockStuckDetector() construction, "
-            f"found {total_constructions}"
-        )
-
-    def test_shared_detector_identity(self):
-        """upload_producer and upload_portions must share the same detector object."""
-        import src.api.services.upload_producer as prod_mod
+    def test_shared_stage_identity(self):
+        """Producer and worker path advance stuck through the same core stage."""
         import src.api.services.upload_portions as port_mod
+        import src.api.services.upload_producer as prod_mod
+        import src.models.scoring.stream_stages as core
 
-        # The backend-engineer may have renamed the producer's detector
-        # to import from upload_portions. Check both possible names.
-        prod_det = getattr(prod_mod, "_WALLCLOCK_DETECTOR", None)
-        if prod_det is None:
-            prod_det = getattr(prod_mod, "_WALLCLOCK_DETECTOR_PRODUCER", None)
-
-        port_det = port_mod._WALLCLOCK_DETECTOR
-
-        assert prod_det is port_det, (
-            f"Producer detector id={id(prod_det)} is not portions detector id={id(port_det)}. "
-            "Backend-engineer's change to share the singleton may not have landed yet."
-        )
+        assert prod_mod.duration_stuck_stage is core.duration_stuck_stage
+        assert port_mod.score_upload_stream is core.score_upload_stream
+        assert port_mod.flush_duration_stuck is core.flush_duration_stuck
 
     def test_detector_parameters_match(self):
-        """Producer and worker-side detector have identical config parameters."""
-        import src.api.services.upload_producer as prod_mod
-        import src.api.services.upload_portions as port_mod
+        """Every stage call builds a detector with identical config parameters."""
+        from src.models.stuck_fault_detector import WallclockStuckDetector
 
-        prod_det = getattr(prod_mod, "_WALLCLOCK_DETECTOR", None)
-        if prod_det is None:
-            prod_det = getattr(prod_mod, "_WALLCLOCK_DETECTOR_PRODUCER", None)
-
-        port_det = port_mod._WALLCLOCK_DETECTOR
-
-        assert prod_det._min_hours == port_det._min_hours
-        assert prod_det._min_samples == port_det._min_samples
-        assert prod_det._epsilon == port_det._epsilon
-        assert prod_det._channels == port_det._channels
+        first, second = WallclockStuckDetector(), WallclockStuckDetector()
+        assert first._min_hours == second._min_hours == STUCK_WALLCLOCK_MIN_HOURS
+        assert first._min_samples == second._min_samples
+        assert first._epsilon == second._epsilon
+        assert first._channels == second._channels
 
 
 # =========================================================================

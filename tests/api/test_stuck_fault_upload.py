@@ -152,9 +152,12 @@ def _run_fixture_through_upload(fixture_path: Path) -> tuple[object, StuckCarry]
         original_finalize = finalize_scores
 
         def _capturing_finalize(portions, **kwargs):
-            if "stuck_carry" in kwargs and kwargs["stuck_carry"] is not None:
-                captured_carry.append(kwargs["stuck_carry"])
-            return original_finalize(portions, **kwargs)
+            # The carry after the end-of-file flush (what the in-place
+            # mutation of the old StuckCarry used to expose).
+            result = original_finalize(portions, **kwargs)
+            if result[2].stuck is not None:
+                captured_carry.append(result[2].stuck.to_carry())
+            return result
 
         with patch(
             "src.api.services.cold_run_upload.finalize_scores",

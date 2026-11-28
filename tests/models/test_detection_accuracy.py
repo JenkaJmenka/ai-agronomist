@@ -14,7 +14,7 @@ set. ``datetime.now`` inside the pipeline is pinned to the window's end
 time because physics reads the clock, and on the live path that clock is
 the sample time.
 
-Upload spikes go through ``_detect_upload_mad_spikes`` (the helper
+Upload spikes go through the core ``spike_lookahead_stage`` (the helper
 ``run_cold_run_upload`` already calls). The cold-run entry point also
 runs the LSTM on every row, which this gate does not need.
 
@@ -53,9 +53,9 @@ from src.api.services.comprehensive_pipeline import (
 )
 from src.api.services.diurnal_profile_service import build_diurnal_profiles
 from src.api.services.upload_portions import (
-    _detect_upload_mad_spikes,
     _timestamp_label,
 )
+from tests.models._upload_stream_helpers import upload_spike_hits
 from src.config import (
     DIURNAL_VOTE_MIN_DAYS,
     ENRICHMENT_SPIKE_CONFIRM_LAG,
@@ -534,7 +534,7 @@ def _upload_spike_indices(n_rows: int) -> list[int]:
 
 
 def _hit_indices(frame: pd.DataFrame, *, column: str | None) -> tuple[list[int], Counter]:
-    hits = _detect_upload_mad_spikes(frame, new_row_start=0)
+    hits, _ = upload_spike_hits(frame)
     labels = [_timestamp_label(value) for value in frame["timestamp"].tolist()]
     index_of = {label: index for index, label in enumerate(labels)}
     by_column: Counter = Counter()

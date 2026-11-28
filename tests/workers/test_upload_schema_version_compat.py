@@ -398,8 +398,8 @@ class TestOldWorkerV2Tolerance:
         contains a real freeze. This test proves the degradation is real:
         the same data produces alerts WITH a carry and zero alerts WITHOUT.
         """
-        from src.api.services.upload_portions import score_portion, StatCarry
-        from src.models.stuck_fault_detector import StuckCarry
+        from src.api.services.upload_portions import score_portion
+        from src.models.scoring.stream_stages import UploadStreamState
 
         # Build a small synthetic freeze: 40 rows of constant humidity
         # (a real freeze that the stuck detector would catch with carry)
@@ -431,21 +431,23 @@ class TestOldWorkerV2Tolerance:
             np.zeros(len(seqs), dtype=np.float32),
         )
         prev_overlap_df = pd.DataFrame()
-        stat_carry = StatCarry()
-
-        # "Old worker" path: no stuck_carry → zero stuck alerts
-        result_no_carry, _ = score_portion(
+        # "Old worker" path: no stuck state → zero stuck alerts
+        no_stuck_state = UploadStreamState(
+            rolling_z=UploadStreamState.initial(20).rolling_z,
+            spike_tail=UploadStreamState.initial(20).spike_tail,
+            stuck=None,  # old worker has no carry
+        )
+        result_no_carry, _, _ = score_portion(
             normalized_df=normalized_df,
             prev_overlap_df=prev_overlap_df,
             raw_rows=raw_rows,
-            stat_carry=StatCarry(),
+            state=no_stuck_state,
             adaptive_ranges=[
                 (0.0, 50.0), (0.0, 100.0), (0.0, 1000.0), (0.0, 2000.0)
             ],
             detector=mock_detector,
             seq_len=20,
             include_embeddings=False,
-            stuck_carry=None,  # old worker has no carry
         )
         assert len(result_no_carry.stuck_hits) == 0, (
             "Without stuck_carry, stuck detection must be skipped entirely — "
@@ -463,8 +465,8 @@ class TestOldWorkerV2Tolerance:
         But detect_chunk DOES track the freeze in carry.channels, proving
         detection machinery was engaged (vs entirely skipped without carry).
         """
-        from src.api.services.upload_portions import score_portion, StatCarry
-        from src.models.stuck_fault_detector import StuckCarry
+        from src.api.services.upload_portions import score_portion
+        from src.models.scoring.stream_stages import UploadStreamState
 
         n_rows = 40
         timestamps = pd.date_range("2026-09-22T10:00:00Z", periods=n_rows, freq="5min")
@@ -494,20 +496,19 @@ class TestOldWorkerV2Tolerance:
             np.zeros(len(seqs), dtype=np.float32),
         )
 
-        carry = StuckCarry()
-        result_with_carry, _ = score_portion(
+        result_with_carry, _, state_after = score_portion(
             normalized_df=normalized_df,
             prev_overlap_df=pd.DataFrame(),
             raw_rows=raw_rows,
-            stat_carry=StatCarry(),
+            state=UploadStreamState.initial(20),
             adaptive_ranges=[
                 (0.0, 50.0), (0.0, 100.0), (0.0, 1000.0), (0.0, 2000.0)
             ],
             detector=mock_detector,
             seq_len=20,
             include_embeddings=False,
-            stuck_carry=carry,
         )
+        carry = state_after.stuck.to_carry()
         # After running detect_chunk with a carry, the carry tracks the
         # freeze even if no onset is emitted yet (window not reached).
         # The key point: the carry is now non-empty, proving the detector

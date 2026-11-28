@@ -9,6 +9,7 @@ statistical hits survive a portion; full raw rows and embeddings do not
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -28,33 +29,26 @@ from src.api.schemas.sensor_data import (
 from src.api.services.score_transform import canonical as _canonical_transform
 from src.config import (
     ANOMALY_SCALING_FACTOR,
-    COLD_RUN_STAT_MIN_CONSECUTIVE,
     COLD_RUN_STAT_POST_RELEASE_SUPPRESS_HOURS,
     COLD_RUN_STAT_ROLLING_WINDOW,
     COLD_RUN_STAT_Z_MIN,
     LATENT_DIM,
-    OOB_LIMITS,
-    UPLOAD_SPIKE_CONFIRMED_FLOOR,
-    UPLOAD_SPIKE_CONFIRMED_TUNING_C,
-    UPLOAD_SPIKE_MAD_FLOOR,
-    UPLOAD_SPIKE_MAD_TUNING_C,
-    UPLOAD_SPIKE_REVERT_HORIZON,
 )
 from src.models.psychrometric_validator import validate_row as _psychro_validate_row
-from src.models.cold_run_detector import (
-    ColdRunStatisticalDetector,
-    _effective_rolling_window,
-)
+from src.models.cold_run_detector import RollingAnomaly, _effective_rolling_window
 from src.models.cold_run_threshold import calibrate_threshold
 from src.models.data_utils import normalize_data, preprocess_sequences
 from src.models.inference import AnomalyDetector
 from src.models.episode_grouper import group_alerts_into_episodes
-from src.models.spike_mad_detector import SpikeMADDetector
-from src.models.stuck_fault_detector import (
-    FaultWindow,
-    StuckCarry,
-    WallclockStuckDetector,
+from src.models.scoring import BATCH_PROFILE, ScoringContext
+from src.models.scoring.stream_stages import (
+    RowHit,
+    UploadStreamState,
+    clamp_frame,
+    flush_duration_stuck,
+    score_upload_stream,
 )
+from src.models.stuck_fault_detector import StuckCarry
 
 # ---------------------------------------------------------------------------
 # Exact canonical column names for the air-temperature and relative-humidity
@@ -65,7 +59,7 @@ from src.models.stuck_fault_detector import (
 # These are the ONLY columns that participate in:
 #   - Psychrometric pair suppression (_suppress_psychrometric_pairs)
 #   - Alert suppression window matching (_suppress_fault_window_hits)
-#   - Baseline exclusion matching (_exclude_faults_from_baseline)
+#   - Baseline exclusion matching (stream_stages.exclude_frozen_readings)
 #
 # Other temperature-like columns (measured_plant_temp, outdoor_temp, pipe
 # temps) are NOT air-temperature partners and are never matched by these
@@ -105,6 +99,15 @@ def _lstm_score_to_canonical(score: float, threshold_used: float) -> float:
     return can if can is not None else 0.5
 
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
+
+# The batch stream stages read no tenant, clock or history (ADR-014 A7), so the
+# upload path passes one fixed context rather than building one per portion.
+_UPLOAD_CONTEXT = ScoringContext(
+    tenant_id="upload",
+    greenhouse_id="upload",
+    sequence_timestamp=datetime(1970, 1, 1),
+    profile=BATCH_PROFILE,
+)
 
 
 @dataclass
@@ -147,88 +150,6 @@ def _timestamp_label(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return str(value.isoformat())
     return str(value)
-
-
-def _upload_mad_settings() -> tuple[float, dict[str, float]]:
-    """Upload MAD constant and floors from config.
-
-    With reversion confirmation on (``UPLOAD_SPIKE_REVERT_HORIZON`` > 0, the
-    default) this is the confirmed pair: temperature, c=5, 0.5 °C. With it
-    off, the unconfirmed pair (c=8, 0.5 °C). Only keys of the floor table
-    are scored; the helper skips a sensor with no floor key, it does not
-    supply ``mad_floor`` 0.
-    """
-    if UPLOAD_SPIKE_REVERT_HORIZON > 0:
-        table, tuning_c = UPLOAD_SPIKE_CONFIRMED_FLOOR, UPLOAD_SPIKE_CONFIRMED_TUNING_C
-    else:
-        table, tuning_c = UPLOAD_SPIKE_MAD_FLOOR, UPLOAD_SPIKE_MAD_TUNING_C
-    floors = {str(name): float(floor) for name, floor in table.items()}
-    return float(tuning_c), floors
-
-
-def _detect_upload_mad_spikes(
-    combined_df: pd.DataFrame,
-    *,
-    new_row_start: int,
-) -> list[UploadHighAnomalyDetail]:
-    """MAD spikes on canonical physical units, new rows of this portion only.
-
-    ``combined_df`` is the overlap tail plus the current chunk (the same
-    frame LSTM sequences are cut from), still in °C / % / ppm / W/m².
-    Flags inside the overlap were emitted with the previous portion.
-    The overlap is ``seq_len - 1`` rows, which covers ``SPIKE_MAD_WINDOW_K``
-    when ``seq_len`` is the production default (20) and the window is 10.
-
-    A flagged row is reported only if the series comes back within
-    ``UPLOAD_SPIKE_REVERT_HORIZON`` rows (see ``SPIKE_REVERT_FRACTION`` in
-    config): a step that stays is not a spike. A flagged row at the end of a
-    portion whose confirming row arrives with the next portion is reported
-    then, once: an overlap row is emitted only when its first reverting row
-    is a new row. The last rows of the final portion cannot be confirmed and
-    are not reported.
-    """
-    if combined_df.empty or "timestamp" not in combined_df.columns:
-        return []
-    tuning_c, floors = _upload_mad_settings()
-    horizon = int(UPLOAD_SPIKE_REVERT_HORIZON)
-    detector = SpikeMADDetector(tuning_c=tuning_c)
-    timestamps = combined_df["timestamp"].tolist()
-    hits: list[UploadHighAnomalyDetail] = []
-    start = max(0, new_row_start)
-    for column, floor in floors.items():
-        if column not in combined_df.columns:
-            continue
-        values = combined_df[column].to_numpy(dtype=float)
-        if horizon > 0:
-            offsets = detector.reversion_offsets(
-                values, mad_floor=float(floor), horizon=horizon
-            )
-            first = max(0, start - horizon)
-            emit = [
-                idx
-                for idx in range(first, len(offsets))
-                if offsets[idx] is not None
-                and (idx >= start or idx + int(offsets[idx] or 0) >= start)
-            ]
-        else:
-            flags = detector.detect(values, mad_floor=float(floor))
-            emit = [idx for idx in range(start, len(flags)) if flags[idx]]
-        for idx in emit:
-            value = float(values[idx])
-            if not math.isfinite(value):
-                continue
-            hits.append(
-                UploadHighAnomalyDetail(
-                    score=1.0,
-                    timestamp=_timestamp_label(timestamps[idx]),
-                    detector="spike_mad",
-                    column=column,
-                    severity="high",
-                    method="mad",
-                    value=value,
-                )
-            )
-    return hits
 
 
 def _calibrate_upload_threshold(scores: np.ndarray) -> tuple[float, str]:
@@ -277,206 +198,6 @@ def _stuck_dict_to_high_detail(
         frozen_hours_at_detection=alert["duration_hours"],
         value=alert["value"],
     )
-
-
-# Singleton: reused across score_portion calls (stateless — state is in StuckCarry).
-_WALLCLOCK_DETECTOR = WallclockStuckDetector()
-
-
-# ---------------------------------------------------------------------------
-# Out-of-bounds detection and clamping helpers (upload path only)
-# ---------------------------------------------------------------------------
-
-def _detect_oob_hits(
-    normalized_df: pd.DataFrame,
-) -> list[UploadHighAnomalyDetail]:
-    """Detect OOB sensor readings in new-row DataFrame.
-
-    Reports one UploadHighAnomalyDetail per (row, column) pair where a
-    finite numeric value is outside OOB_LIMITS.  Called on normalized_df
-    (the new rows of the current portion) BEFORE clamping, so the alert carries
-    the raw value.  The overlap tail from the previous portion is NOT passed
-    here — those rows were already reported with their own portion.
-    """
-    if normalized_df is None or normalized_df.empty:
-        return []
-    hits: list[UploadHighAnomalyDetail] = []
-    timestamps = normalized_df["timestamp"] if "timestamp" in normalized_df.columns else None
-    for col, (lo, hi) in OOB_LIMITS.items():
-        if col not in normalized_df.columns:
-            continue
-        series = normalized_df[col]
-        for idx in range(len(series)):
-            val = series.iloc[idx]
-            try:
-                fval = float(val)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(fval):
-                continue
-            if fval < lo or fval > hi:
-                ts: str = "unknown"
-                if timestamps is not None:
-                    ts_raw = timestamps.iloc[idx]
-                    ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
-                hits.append(
-                    UploadHighAnomalyDetail(
-                        score=1.0,
-                        timestamp=ts,
-                        detector="out_of_bounds",
-                        column=col,
-                        severity="high",
-                        method="oob",
-                        value=fval,
-                    )
-                )
-    return hits
-
-
-def _clamp_df_for_scoring(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of df with canonical sensor values clamped to OOB_LIMITS.
-
-    Only the four canonical sensor columns (temperature, humidity, co2, light)
-    are modified.  Used to prevent one hardware-fault reading from distorting
-    LSTM sequences, rolling-z, MAD and stuck detection.  Rows and timestamp
-    are never modified.
-    """
-    result = df.copy()
-    for col, (lo, hi) in OOB_LIMITS.items():
-        if col in result.columns:
-            result[col] = result[col].clip(lower=lo, upper=hi)
-    return result
-
-
-def _clamp_raw_rows_for_scoring(
-    raw_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Return copies of raw_rows with canonical sensor values clamped to OOB_LIMITS.
-
-    Does NOT modify the originals — the caller persists the originals.
-    Only the four canonical sensor channels (temperature, humidity, co2, light)
-    are clamped; all other columns are passed through unchanged.
-    """
-    if not raw_rows:
-        return raw_rows
-    result: list[dict[str, Any]] = []
-    for row in raw_rows:
-        clamped = dict(row)
-        for col, (lo, hi) in OOB_LIMITS.items():
-            val = clamped.get(col)
-            if val is None:
-                continue
-            try:
-                fval = float(val)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(fval) and (fval < lo or fval > hi):
-                clamped[col] = max(lo, min(hi, fval))
-        result.append(clamped)
-    return result
-
-
-def _detect_stats_incremental(
-    raw_rows: list[dict[str, Any]],
-    stat_carry: StatCarry,
-) -> list[StatisticalAnomalyDetail]:
-    """Rolling statistical detection over carry+portion, deduped across portions.
-
-    The carry keeps the last ``COLD_RUN_STAT_ROLLING_WINDOW +
-    COLD_RUN_STAT_MIN_CONSECUTIVE - 1`` raw rows so that:
-
-    * the rolling baseline has enough history (``window`` rows), and
-    * a streak of ``min_consecutive`` candidates straddling a chunk
-      boundary is not severed (the extra ``min_consecutive - 1`` rows
-      preserve the tail of a streak started in the prior portion).
-
-    In incremental mode the configured ``COLD_RUN_STAT_ROLLING_WINDOW``
-    is always used as-is (no short-file scaling) and positions are
-    masked by **global** row index (rows with global index < window
-    can never fire), matching the reference single-chunk computation.
-
-    Hits already reported for a ``(timestamp, column)`` pair are dropped
-    via ``stat_carry.seen`` as a safety-net dedup.
-    """
-    if not raw_rows:
-        return []
-    detector = ColdRunStatisticalDetector()
-    if stat_carry.columns is None:
-        stat_carry.columns = detector._discover_columns(raw_rows)
-
-    carry_rows = stat_carry.rows
-    rows = carry_rows + raw_rows
-
-    # Global row index of carry_rows[0] (or raw_rows[0] when no carry).
-    n_prior = max(0, stat_carry.total_rows - len(carry_rows))
-    scored_prefix = len(carry_rows)
-
-    hits = detector.detect_rolling(
-        rows,
-        columns=stat_carry.columns,
-        n_prior_rows=n_prior,
-        scored_prefix=scored_prefix,
-    )
-
-    fresh: list[StatisticalAnomalyDetail] = []
-    for hit in hits:
-        key = (hit.timestamp, hit.column)
-        if key in stat_carry.seen:
-            continue
-        stat_carry.seen.add(key)
-        fresh.append(
-            StatisticalAnomalyDetail(
-                timestamp=hit.timestamp,
-                column=hit.column,
-                value=hit.value,
-                z_score=float(hit.z_score),
-                severity=hit.severity,
-                method=hit.method,
-            )
-        )
-
-    # Extract psychrometric context (T_air, RH, measured_hd) for timestamps
-    # with fresh anomalies, so finalize_scores can suppress physically-expected
-    # paired temperature + humidity alerts.
-    hit_timestamps = {h.timestamp for h in fresh}
-    if hit_timestamps:
-        _extract_psychro_context(rows, hit_timestamps, stat_carry)
-
-    # Carry length: window (for rolling baseline) + min_consecutive - 1
-    # (for streak continuity across chunk boundaries).
-    carry_len = COLD_RUN_STAT_ROLLING_WINDOW + COLD_RUN_STAT_MIN_CONSECUTIVE - 1
-    stat_carry.rows = rows[-carry_len:]
-    stat_carry.total_rows += len(raw_rows)
-    return fresh
-
-
-def _extract_psychro_context(
-    rows: list[dict[str, Any]],
-    timestamps: set[str],
-    stat_carry: StatCarry,
-) -> None:
-    """Store (T_air, RH, measured_hd) for anomaly timestamps when all three present.
-
-    Only records context for timestamps not already stored, so the carry
-    accumulates across portions without duplicating work.
-    """
-    for row in rows:
-        ts = row.get("timestamp", "")
-        if ts not in timestamps or ts in stat_carry.psychro_context:
-            continue
-        t_val = row.get("temperature")
-        rh_val = row.get("humidity")
-        hd_val = row.get("measured_hd")
-        if t_val is None or rh_val is None or hd_val is None:
-            continue
-        try:
-            t_f = float(t_val)
-            rh_f = float(rh_val)
-            hd_f = float(hd_val)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(t_f) and math.isfinite(rh_f) and math.isfinite(hd_f):
-            stat_carry.psychro_context[ts] = (t_f, rh_f, hd_f)
 
 
 def _is_air_temp_stat_column(col: str) -> bool:
@@ -608,7 +329,8 @@ def _suppress_fault_window_hits(
         the window is ``[onset_ts, +inf)``.
         Applied BEFORE pair suppression.
 
-    **Baseline exclusion** (separate, applied per-portion in score_portion):
+    **Baseline exclusion** (separate, applied per-portion in the
+    ``stream_stages.rolling_z_stage``):
         Window ``[onset_ts, last_frozen_ts]``.
         Frozen values on the faulted channel are NaN-ed before rolling
         statistics are computed.  The release sample is a genuine reading
@@ -678,87 +400,30 @@ def _suppress_fault_window_hits(
     return result
 
 
-def _exclude_faults_from_baseline(
-    raw_rows: list[dict[str, Any]],
-    stat_carry: StatCarry,
-    stuck_carry: StuckCarry,
-) -> list[dict[str, Any]]:
-    """NaN-out faulted-channel values in the baseline window for statistical detection.
 
-    **Baseline exclusion rule** (timestamp-driven, per Addendum 2):
-        For any freeze that CROSSED THE GATE (its ``(channel, onset_ts)``
-        is in ``stuck_carry.emitted_onsets``), set the faulted channel's
-        values to NaN inside ``[onset_ts, last_frozen_ts]``.
+def _row_hit_detail(hit: RowHit) -> UploadHighAnomalyDetail:
+    """A core ``RowHit`` (OOB or look-ahead spike) as the upload schema."""
+    return UploadHighAnomalyDetail(
+        score=1.0,
+        timestamp=hit.timestamp,
+        detector=hit.detector,
+        column=hit.column,
+        severity=hit.severity,
+        method=hit.method,
+        value=hit.value,
+    )
 
-        For a still-open freeze that crossed the gate:
-        ``[onset_ts, +inf)``.
 
-        A freeze that never crossed the gate creates NO exclusion.
-
-    Both the current portion's rows AND the carried rows
-    (``stat_carry.rows``) are cleaned.  The stat carry is cleaned
-    in-place (internal state), but raw_rows are COPIED so persisted
-    raw readings are never corrupted.
-
-    Channel matching is by **exact column name** — only the specific
-    column flagged by the stuck detector is NaN-ed, not other columns
-    in the same sensor slot.
-
-    Returns cleaned copies of raw_rows.
-    """
-    from datetime import datetime as _dt, timezone as _tz
-
-    # Build exclusion windows: (exact_column_name, onset_dt, end_dt_or_None)
-    windows: list[tuple[str, datetime, datetime | None]] = []
-
-    # Completed faults that crossed the gate
-    for fw in stuck_carry.completed_faults:
-        windows.append((fw.channel, fw.onset_dt, fw.last_frozen_dt))
-
-    # Open emitted faults that crossed the gate
-    for ch, state in stuck_carry.channels.items():
-        # Matched by instant via has_onset_fired, not by spelling against
-        # emitted_onsets directly -- see StuckCarry.has_onset_fired.
-        if stuck_carry.has_onset_fired(ch, state.onset_ts):
-            already_completed = any(
-                fw.channel == ch and fw.onset_ts == state.onset_ts
-                for fw in stuck_carry.completed_faults
-            )
-            if not already_completed:
-                windows.append((ch, state.onset_dt, None))  # +inf
-
-    if not windows:
-        return raw_rows
-
-    def _clean_rows(rows: list[dict[str, Any]], *, copy: bool) -> list[dict[str, Any]]:
-        """Apply exclusion windows to a list of rows.
-
-        Each row's timestamp is parsed ONCE.  For each window, the
-        exact faulted column is checked directly (no slot lookup).
-        """
-        out = [dict(r) for r in rows] if copy else rows
-        for row in out:
-            ts_str = row.get("timestamp", "")
-            try:
-                row_dt = _parse_iso_utc(ts_str)
-            except (ValueError, AttributeError):
-                continue
-            for fault_ch, onset_dt, end_dt in windows:
-                # Exact column match — only the specific faulted column
-                if fault_ch not in row:
-                    continue
-                if row_dt < onset_dt:
-                    continue
-                if end_dt is None or row_dt <= end_dt:
-                    row[fault_ch] = float("nan")
-        return out
-
-    # Clean stat_carry.rows IN PLACE (internal state, not persisted)
-    if stat_carry.rows:
-        _clean_rows(stat_carry.rows, copy=False)
-
-    # Clean raw_rows as COPIES (persisted after scoring in async path)
-    return _clean_rows(raw_rows, copy=True)
+def _rolling_hit_detail(hit: RollingAnomaly) -> StatisticalAnomalyDetail:
+    """A core rolling-z hit as the upload schema."""
+    return StatisticalAnomalyDetail(
+        timestamp=hit.timestamp,
+        column=hit.column,
+        value=hit.value,
+        z_score=float(hit.z_score),
+        severity=hit.severity,
+        method=hit.method,
+    )
 
 
 def score_portion(
@@ -766,64 +431,45 @@ def score_portion(
     normalized_df: pd.DataFrame | None,
     prev_overlap_df: pd.DataFrame,
     raw_rows: list[dict[str, Any]],
-    stat_carry: StatCarry,
+    state: UploadStreamState,
     adaptive_ranges: list[tuple[float, float]],
     detector: AnomalyDetector,
     seq_len: int = 20,
     include_embeddings: bool = False,
-    stuck_carry: StuckCarry | None = None,
-) -> tuple[PortionScores, pd.DataFrame]:
-    """Score one portion (LSTM + statistical + stuck). Returns (result, next_overlap_df).
+) -> tuple[PortionScores, pd.DataFrame, UploadStreamState]:
+    """Score one portion (stream stages + LSTM).
+
+    Returns ``(result, next_overlap_df, state_after)``. ``state`` is not
+    modified. The OOB / duration-stuck / rolling-z / look-ahead spike
+    detectors are the core stages in ``score_upload_stream`` (ADR-014 A7);
+    this function maps their outputs to the upload schema and runs the LSTM.
 
     `prev_overlap_df` must hold the last seq_len-1 normalized rows of the
     previous portion so sequences spanning the boundary are not lost.
-
-    When ``stuck_carry`` is provided, wall-clock stuck-fault detection runs
-    FIRST so recovery channels can be identified before statistical detection.
-    The carry threads per-channel freeze state across portions.
+    ``state.stuck`` is ``None`` when duration-stuck is not run; baseline
+    exclusion is then skipped too.
     """
     result = PortionScores(rows_processed=len(raw_rows))
 
-    # --- OOB detection + clamping (upload path only) ---
-    # Detect before stuck/MAD/LSTM to report raw values, then clamp for all
-    # downstream scoring (LSTM sequences, rolling-z, MAD, stuck).
-    # Detection is on normalized_df only (all of it = new rows of this portion);
-    # overlap rows from prev_overlap_df were already reported with their portion.
-    if normalized_df is not None and not normalized_df.empty:
-        result.oob_hits = _detect_oob_hits(normalized_df)
-        if result.oob_hits:
-            normalized_df = _clamp_df_for_scoring(normalized_df)
+    output, state_after = score_upload_stream(
+        normalized_df, raw_rows, state, _UPLOAD_CONTEXT, BATCH_PROFILE
+    )
+    result.oob_hits = [_row_hit_detail(h) for h in output.oob_hits]
+    result.stuck_hits = [_stuck_dict_to_high_detail(a.as_dict()) for a in output.stuck_alerts]
+    result.stat_hits = [_rolling_hit_detail(h) for h in output.rolling_z_hits]
+    result.mad_hits = [_row_hit_detail(h) for h in output.spike_hits]
 
-    # Clamp raw_rows for stat detection (copy, originals are persisted as-is).
-    scoring_raw_rows = _clamp_raw_rows_for_scoring(raw_rows)
-
-    # Run stuck detection FIRST (load-bearing order: stuck windows must
-    # be known before baseline exclusion and statistical detection).
-    # Uses the clamped normalized_df so one OOB reading does not distort
-    # the freeze-duration computation.
-    if stuck_carry is not None and normalized_df is not None and not normalized_df.empty:
-        raw_alerts = _WALLCLOCK_DETECTOR.detect_chunk(normalized_df, stuck_carry)
-        result.stuck_hits = [_stuck_dict_to_high_detail(a) for a in raw_alerts]
-
-    # Baseline exclusion: NaN-out faulted-channel values in [onset, last_frozen]
-    # (or [onset, +inf) for open emitted faults) so the rolling baseline is
-    # not contaminated by frozen readings.  Applied to both stat_carry.rows
-    # (internal) and scoring_raw_rows (copied, not in-place).
-    stat_raw_rows = scoring_raw_rows
-    if stuck_carry is not None:
-        stat_raw_rows = _exclude_faults_from_baseline(scoring_raw_rows, stat_carry, stuck_carry)
-
-    result.stat_hits = _detect_stats_incremental(stat_raw_rows, stat_carry)
-
+    # The clamped new rows every later stage scored (the input when no OOB hit).
+    normalized_df = output.scoring_frame
     if normalized_df is None or normalized_df.empty:
-        return result, prev_overlap_df
+        return result, prev_overlap_df, state_after
 
     # Clamp the overlap tail too — in the async path the producer serialises
     # unclamped rows, so prev_overlap_df may carry OOB values from an earlier
     # portion.  In the sync path the tail was already clamped at the previous
     # call, so this is a no-op for in-range values.
     if not prev_overlap_df.empty:
-        prev_overlap_clamped = _clamp_df_for_scoring(prev_overlap_df)
+        prev_overlap_clamped = clamp_frame(prev_overlap_df)
         combined_df = pd.concat([prev_overlap_clamped, normalized_df], ignore_index=True)
     else:
         combined_df = normalized_df
@@ -837,13 +483,8 @@ def score_portion(
     else:
         next_overlap = combined_df.copy()
 
-    result.mad_hits = _detect_upload_mad_spikes(
-        combined_df,
-        new_row_start=len(prev_overlap_df),
-    )
-
     if len(combined_df) < seq_len:
-        return result, next_overlap
+        return result, next_overlap, state_after
 
     raw_data = combined_df[SENSOR_COLS].to_numpy(dtype=np.float32)
     norm_data = normalize_data(raw_data, adaptive_ranges)
@@ -860,7 +501,7 @@ def score_portion(
     if include_embeddings:
         result.embeddings = np.asarray(chunk_embeddings).tolist()
         result.uncertainties = np.asarray(chunk_uncertainties).tolist()
-    return result, next_overlap
+    return result, next_overlap, state_after
 
 
 def finalize_scores(
@@ -869,19 +510,21 @@ def finalize_scores(
     tenant_id: str,
     greenhouse_id: str,
     imputed_channels: list[str],
-    stat_carry: StatCarry,
+    state: UploadStreamState,
     include_embeddings: bool = False,
-    stuck_carry: StuckCarry | None = None,
-) -> tuple[UploadInferenceResponse, list[str]]:
+) -> tuple[UploadInferenceResponse, list[str], UploadStreamState]:
     """Calibrate the file-level threshold over all portions and build the response.
 
     calibrate_threshold needs the whole score distribution, so this is the one
     step that must see every portion — the inputs are compact (floats, ISO
     strings, sparse hits), not raw rows.
 
-    When ``stuck_carry`` is provided, still-open freezes are flushed and the
-    cadence check is finalised.  All stuck_fault alerts (from portions + flush)
-    are merged into ``high_anomalies``.
+    ``state`` is the stream state after the last portion (the async path
+    rebuilds it from the stored portion results). When ``state.stuck`` is not
+    ``None``, still-open freezes are flushed and the cadence check is
+    finalised.  All stuck_fault alerts (from portions + flush) are merged into
+    ``high_anomalies``. The third return value is ``state`` after the flush,
+    for callers that persist the final stuck carry.
     """
     # Local import: cold_run_upload also imports this module.
     from src.api.services.cold_run_upload import _merge_by_timestamp
@@ -909,7 +552,9 @@ def finalize_scores(
     # channels inside [onset, release + N].  Applied BEFORE pair
     # suppression so that a suppressed humidity hit does not prevent
     # a paired temperature hit from being cancelled.
-    stat_details = _suppress_fault_window_hits(stat_details, stuck_carry)
+    stat_details = _suppress_fault_window_hits(
+        stat_details, state.stuck.to_carry() if state.stuck is not None else None
+    )
 
     # Psychrometric suppression: suppress paired air-temperature +
     # humidity statistical alerts when measured HD confirms the pairing
@@ -917,13 +562,14 @@ def finalize_scores(
     # is flagged.  Restricted to the canonical "temperature" slot
     # (air temperature only; pipe/heating temps are excluded).
     stat_details = _suppress_psychrometric_pairs(
-        stat_details, stat_carry.psychro_context,
+        stat_details, state.rolling_z.psychro_context,
     )
 
     # Flush open freezes and finalise cadence check.
-    if stuck_carry is not None:
-        flush_alerts = _WALLCLOCK_DETECTOR.flush(stuck_carry)
-        stuck_details.extend(_stuck_dict_to_high_detail(a) for a in flush_alerts)
+    if state.stuck is not None:
+        flush_alerts, flushed = flush_duration_stuck(state.stuck, BATCH_PROFILE)
+        stuck_details.extend(_stuck_dict_to_high_detail(a.as_dict()) for a in flush_alerts)
+        state = dataclasses.replace(state, stuck=flushed)
 
     scores_arr = np.asarray(anomaly_scores, dtype=np.float64)
     threshold_used, threshold_method = _calibrate_upload_threshold(scores_arr)
@@ -950,11 +596,11 @@ def finalize_scores(
 
     statistical_summary = StatisticalColdRunSummary(
         anomalies=stat_details,
-        baseline_columns=stat_carry.columns or [],
+        baseline_columns=list(state.rolling_z.columns or ()),
         total_scored=max(
             0,
-            stat_carry.total_rows
-            - _effective_rolling_window(stat_carry.total_rows, COLD_RUN_STAT_ROLLING_WINDOW),
+            state.rolling_z.total_rows
+            - _effective_rolling_window(state.rolling_z.total_rows, COLD_RUN_STAT_ROLLING_WINDOW),
         ),
     )
     stat_high = [
@@ -992,8 +638,9 @@ def finalize_scores(
     # recovery tagging is query-time only (docs/handoff/task5_spec.md),
     # since stuck_carry is per-upload and cannot see a fault released in an
     # earlier upload.
-    done_faults = stuck_carry.completed_faults if stuck_carry else []
-    open_freezes = stuck_carry.channels if stuck_carry else {}
+    final_carry = state.stuck.to_carry() if state.stuck is not None else None
+    done_faults = final_carry.completed_faults if final_carry else []
+    open_freezes = final_carry.channels if final_carry else {}
     raw_episodes = group_alerts_into_episodes(
         high_anomalies,
         completed_faults=done_faults,
@@ -1020,4 +667,4 @@ def finalize_scores(
         embedding_dim=LATENT_DIM,
         sequence_timestamps=sequence_timestamps,
     )
-    return response, sequence_timestamps
+    return response, sequence_timestamps, state

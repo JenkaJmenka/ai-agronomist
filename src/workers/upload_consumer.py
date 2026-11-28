@@ -28,11 +28,15 @@ from src.api.services.cold_run_upload import (
 from src.api.services.csv_persist import apply_anomaly_scores, persist_readings_chunk
 from src.api.services.upload_portions import (
     PortionScores,
-    StatCarry,
     finalize_scores,
     score_portion,
 )
-from src.models.stuck_fault_detector import StuckCarry
+from src.models.scoring.stream_stages import (
+    RollingZState,
+    SpikeTailState,
+    StuckStageState,
+    UploadStreamState,
+)
 from src.db.jobs import (
     get_job,
     increment_progress,
@@ -164,8 +168,7 @@ def _portion_result_payload(
     portion: PortionScores,
     sensor_rows: int,
     raw_rows: int,
-    stuck_carry: StuckCarry | None = None,
-    stat_carry: StatCarry | None = None,
+    state: UploadStreamState | None = None,
 ) -> dict[str, Any]:
     """Build the result payload stored by ``record_portion_result``.
 
@@ -182,8 +185,8 @@ def _portion_result_payload(
     # Only include entries with all-finite floats (guard against NaN/Inf
     # that could survive from malformed rows or carry initialisation).
     psychro_payload: dict[str, list[float]] = {}
-    if stat_carry is not None:
-        for ts, (t_air, rh, hd) in stat_carry.psychro_context.items():
+    if state is not None:
+        for ts, (t_air, rh, hd) in state.rolling_z.psychro_context.items():
             if math.isfinite(t_air) and math.isfinite(rh) and math.isfinite(hd):
                 psychro_payload[ts] = [t_air, rh, hd]
 
@@ -201,8 +204,8 @@ def _portion_result_payload(
         "raw_rows": raw_rows,
         "psychro_context": psychro_payload,
     }
-    if stuck_carry is not None:
-        payload["stuck_carry_state"] = stuck_carry.to_dict()
+    if state is not None and state.stuck is not None:
+        payload["stuck_carry_state"] = state.stuck.to_dict()
     return payload
 
 
@@ -264,22 +267,32 @@ async def handle_upload_portion(
         )
         return
 
-    stat_carry = StatCarry(
-        rows=list(msg.stat_carry_rows),
-        total_rows=msg.stat_carry_prior_rows,
-    )
-
     # Deserialise the wall-clock stuck-fault carry state embedded by the producer.
-    # The producer ran detect_chunk sequentially for each portion before publishing,
+    # The producer ran the stuck stage sequentially for each portion before publishing,
     # so each message carries the exact carry state that precedes this portion —
     # safe to use even when portions arrive out of order or are retried.
-    stuck_carry: StuckCarry | None = (
-        StuckCarry.from_dict(msg.stuck_carry_state)
-        if msg.stuck_carry_state
-        else None
+    #
+    # Known sync/async difference, kept as is (ADR-014 A7): the rolling-z carry
+    # rows in the message are the producer's raw rows and are NOT clamped to
+    # OOB_LIMITS, whereas the sync path carries clamped rows. Only this
+    # portion's new rows are clamped here.
+    state_before = UploadStreamState(
+        rolling_z=RollingZState.from_parts(
+            rows=msg.stat_carry_rows,
+            total_rows=msg.stat_carry_prior_rows,
+        ),
+        spike_tail=SpikeTailState.from_frame(
+            pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame(),
+            msg.seq_len - 1,
+        ),
+        stuck=(
+            StuckStageState.from_dict(msg.stuck_carry_state)
+            if msg.stuck_carry_state
+            else None
+        ),
     )
 
-    def _score() -> tuple[PortionScores, StuckCarry | None]:
+    def _score() -> tuple[PortionScores, UploadStreamState]:
         # Torch model load + inference are CPU-bound for minutes on large
         # portions. Run OFF the event loop: a blocked loop cannot answer AMQP
         # heartbeats, and the broker then resets the connection mid-handling
@@ -287,18 +300,17 @@ async def handle_upload_portion(
         detector = get_cached_detector(checkpoint_path)
         normalized_df = pd.DataFrame(msg.rows) if msg.rows else None
         overlap_df = pd.DataFrame(msg.overlap_rows) if msg.overlap_rows else pd.DataFrame()
-        result, _ = score_portion(
+        result, _, after = score_portion(
             normalized_df=normalized_df,
             prev_overlap_df=overlap_df,
             raw_rows=msg.raw_rows,
-            stat_carry=stat_carry,
+            state=state_before,
             adaptive_ranges=[tuple(r) for r in msg.adaptive_ranges],
             detector=detector,
             seq_len=msg.seq_len,
             include_embeddings=False,
-            stuck_carry=stuck_carry,
         )
-        return result, stuck_carry
+        return result, after
 
     async with atimed(
         logger,
@@ -307,7 +319,7 @@ async def handle_upload_portion(
         portion=msg.portion_idx,
         rows=len(msg.rows or []),
     ):
-        portion, updated_stuck_carry = await asyncio.to_thread(_score)
+        portion, state_after = await asyncio.to_thread(_score)
 
     sensor_rows = raw_rows = 0
     if msg.persist_data:
@@ -338,10 +350,9 @@ async def handle_upload_portion(
             sensor_rows = s_ins + s_upd
             raw_rows = r_ins + r_upd
 
-    payload = _portion_result_payload(
-        portion, sensor_rows, raw_rows, updated_stuck_carry, stat_carry
-    )
-    payload["stat_columns"] = stat_carry.columns
+    payload = _portion_result_payload(portion, sensor_rows, raw_rows, state_after)
+    columns = state_after.rolling_z.columns
+    payload["stat_columns"] = None if columns is None else list(columns)
     recorded = await record_portion_result(
         db,
         job_id=msg.job_id,
@@ -421,7 +432,8 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
         )
         return
     portions: list[PortionScores] = []
-    stat_carry = StatCarry()
+    total_rows = 0
+    stat_columns: list[str] | None = None
     sensor_rows_total = 0
     raw_rows_total = 0
     seen_hits: set[tuple[str, str]] = set()
@@ -490,9 +502,9 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
                 rows_processed=stored.get("rows_processed", 0),
             )
         )
-        stat_carry.total_rows += stored.get("rows_processed", 0)
-        if stat_carry.columns is None and stored.get("stat_columns"):
-            stat_carry.columns = stored["stat_columns"]
+        total_rows += stored.get("rows_processed", 0)
+        if stat_columns is None and stored.get("stat_columns"):
+            stat_columns = stored["stat_columns"]
         sensor_rows_total += stored.get("sensor_rows", 0)
         raw_rows_total += stored.get("raw_rows", 0)
 
@@ -507,34 +519,41 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     # stored a carry state — e.g. older job rows or all portions failed.
     payload = job.payload or {}
     if last_stuck_carry_state is not None:
-        finalize_stuck_carry: StuckCarry | None = StuckCarry.from_dict(
+        finalize_stuck: StuckStageState | None = StuckStageState.from_dict(
             last_stuck_carry_state
         )
     elif payload.get("imputed_channels"):
         # No portions stored a carry state (legacy job or all portions failed),
         # but we still need to pass imputed_channels to avoid false stuck alerts.
-        finalize_stuck_carry = StuckCarry(
-            skip_channels=frozenset(payload["imputed_channels"])
-        )
+        finalize_stuck = StuckStageState.initial(payload["imputed_channels"])
     else:
-        finalize_stuck_carry = None
+        finalize_stuck = None
 
     # Restore and merge per-portion psychrometric contexts (2b).
     # psychro_portions is already in ascending portion_idx order (guaranteed
     # by load_portions_in_order ORDER BY portion_idx).  Lowest portion_idx
     # wins on duplicate timestamps — matches the sync path's first-seen rule.
-    stat_carry.psychro_context = _merge_psychro_contexts(
-        psychro_portions, job_id=msg.job_id
+    merged_psychro = _merge_psychro_contexts(psychro_portions, job_id=msg.job_id)
+
+    # Only the fields finalize_scores reads are meaningful here: the rolling-z
+    # carry rows and the spike tail were consumed by the portion workers.
+    finalize_state = UploadStreamState(
+        rolling_z=RollingZState.from_parts(
+            total_rows=total_rows,
+            columns=stat_columns,
+            psychro_context=merged_psychro,
+        ),
+        spike_tail=SpikeTailState(tail_rows=0),
+        stuck=finalize_stuck,
     )
 
-    response, _ = finalize_scores(
+    response, _, flushed_state = finalize_scores(
         portions,
         tenant_id=job.tenant_id,
         greenhouse_id=job.greenhouse_id or "default",
         imputed_channels=payload.get("imputed_channels", []),
-        stat_carry=stat_carry,
+        state=finalize_state,
         include_embeddings=False,
-        stuck_carry=finalize_stuck_carry,
     )
 
     if payload.get("persist_data"):
@@ -545,7 +564,9 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
             db,
             tenant_id=job.tenant_id,
             greenhouse_id=job.greenhouse_id or "default",
-            stuck_carry=finalize_stuck_carry,
+            stuck_carry=(
+                flushed_state.stuck.to_carry() if flushed_state.stuck is not None else None
+            ),
             high_anomalies=response.high_anomalies,
         )
         # ADR-005: canonical scores + producer-native scores keyed by timestamp.
@@ -596,20 +617,20 @@ async def _finalize(msg: UploadFinalizeMessage, db: AsyncSession) -> None:
     finalize_error = None
     if (
         payload.get("persist_data")
-        and stat_carry.total_rows > 0
+        and total_rows > 0
         and sensor_rows_total == 0
         and raw_rows_total == 0
     ):
         final_status = "partially_failed"
         finalize_error = (
             "Persistence was requested but 0 rows were written to "
-            f"sensor_readings/raw_readings (processed {stat_carry.total_rows} data rows). "
+            f"sensor_readings/raw_readings (processed {total_rows} data rows). "
             "Check the worker service logs."
         )
         logger.error(
             "Job %s: persist_data requested but 0 rows persisted (processed %s rows)",
             msg.job_id,
-            stat_carry.total_rows,
+            total_rows,
         )
 
     await set_job_result(

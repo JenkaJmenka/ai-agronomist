@@ -24,13 +24,11 @@ import pytest
 from src.api.schemas.sensor_data import UploadHighAnomalyDetail
 from src.api.services.upload_portions import (
     PortionScores,
-    StatCarry,
-    _detect_oob_hits,
     finalize_scores,
     score_portion,
 )
 from src.config import OOB_LIMITS
-from src.models.stuck_fault_detector import StuckCarry
+from src.models.scoring.stream_stages import UploadStreamState, RollingZState, StuckStageState
 from src.vendors.base import DataSourceAdapter, DataValidationError
 
 
@@ -108,7 +106,7 @@ class TestScorePortionOOB:
         n = 5
         df = _make_df(n, humidity_override=104.0)
         raw_rows = df.to_dict(orient="records")
-        stat_carry = StatCarry()
+        state = UploadStreamState.initial(20)
         # Adaptive ranges for the four sensors (min, max)
         adaptive_ranges = [
             (20.0, 30.0),   # temperature
@@ -116,15 +114,14 @@ class TestScorePortionOOB:
             (300.0, 500.0),  # co2
             (0.0, 1000.0),  # light
         ]
-        result, _ = score_portion(
+        result, _, _ = score_portion(
             normalized_df=df,
             prev_overlap_df=pd.DataFrame(),
             raw_rows=raw_rows,
-            stat_carry=stat_carry,
+            state=state,
             adaptive_ranges=adaptive_ranges,
             detector=_mock_detector(),
             seq_len=20,
-            stuck_carry=StuckCarry(),
         )
         assert result.rows_processed == n
         # Exactly one OOB hit
@@ -151,21 +148,20 @@ class TestOOBOverlapDedup:
         n1 = 25
         df1 = _make_df(n1, humidity_override=104.0)
         raw1 = df1.to_dict(orient="records")
-        stat_carry = StatCarry()
+        state = UploadStreamState.initial(20)
         adaptive_ranges = [
             (20.0, 30.0), (0.0, 100.0), (300.0, 500.0), (0.0, 1000.0),
         ]
         seq_len = 20
 
-        result1, overlap = score_portion(
+        result1, overlap, state = score_portion(
             normalized_df=df1,
             prev_overlap_df=pd.DataFrame(),
             raw_rows=raw1,
-            stat_carry=stat_carry,
+            state=state,
             adaptive_ranges=adaptive_ranges,
             detector=_mock_detector(),
             seq_len=seq_len,
-            stuck_carry=StuckCarry(),
         )
 
         # Portion 1 should report the OOB hit.
@@ -188,15 +184,14 @@ class TestOOBOverlapDedup:
         df2["timestamp"] = pd.to_datetime(df2["timestamp"], utc=True)
         raw2 = df2.to_dict(orient="records")
 
-        result2, _ = score_portion(
+        result2, _, _ = score_portion(
             normalized_df=df2,
             prev_overlap_df=overlap,
             raw_rows=raw2,
-            stat_carry=stat_carry,
+            state=state,
             adaptive_ranges=adaptive_ranges,
             detector=_mock_detector(),
             seq_len=seq_len,
-            stuck_carry=StuckCarry(),
         )
 
         # Portion 2 should NOT re-report the OOB (its normalized_df is clean).
@@ -233,14 +228,17 @@ class TestFinalizeIncludesOOB:
             oob_hits=[oob_hit],
             rows_processed=25,
         )
-        stat_carry = StatCarry(total_rows=25, columns=["temperature", "humidity"])
-        response, _ = finalize_scores(
+        state = UploadStreamState(
+            rolling_z=RollingZState.from_parts(total_rows=25, columns=["temperature", "humidity"]),
+            spike_tail=UploadStreamState.initial(20).spike_tail,
+            stuck=StuckStageState.initial(),
+        )
+        response, _, _ = finalize_scores(
             [portion],
             tenant_id="t1",
             greenhouse_id="g1",
             imputed_channels=[],
-            stat_carry=stat_carry,
-            stuck_carry=StuckCarry(),
+            state=state,
         )
         oob_in_high = [
             h for h in response.high_anomalies if h.detector == "out_of_bounds"
