@@ -2,6 +2,7 @@
 
 import { Chip } from "@/components/ui/Chip";
 import type { DriftWatchInput } from "@/features/drift-watch/api/driftWatch";
+import { DriftInputChartPanel } from "@/features/drift-watch/components/DriftInputChartPanel";
 import type { Severity } from "@/lib/severity";
 
 const KIND_LABELS: Record<string, string> = {
@@ -88,6 +89,7 @@ export function DriftInputRow({ input }: { readonly input: DriftWatchInput }) {
           {dr ? <div>{dr}</div> : null}
         </div>
       ) : null}
+      <DriftInputChartPanel inputId={input.input_id} />
     </div>
   );
 }
