@@ -31,16 +31,15 @@ def _pairs(profile: ScoringProfile) -> dict[str, tuple[float, float]]:
 
 
 def test_batch_profile_matches_upload_path() -> None:
-    from src.api.services import upload_portions as up
     from src.models import cold_run_threshold as crt
 
     assert BATCH_PROFILE.spike_confirm.mode is SpikeConfirmMode.LOOK_AHEAD
-    assert BATCH_PROFILE.spike_confirm.steps == up.UPLOAD_SPIKE_REVERT_HORIZON
+    assert BATCH_PROFILE.spike_confirm.steps == config.UPLOAD_SPIKE_REVERT_HORIZON
     assert _pairs(BATCH_PROFILE) == {
-        s: (float(up.UPLOAD_SPIKE_CONFIRMED_TUNING_C), float(f))
-        for s, f in up.UPLOAD_SPIKE_CONFIRMED_FLOOR.items()
+        s: (float(config.UPLOAD_SPIKE_CONFIRMED_TUNING_C), float(f))
+        for s, f in config.UPLOAD_SPIKE_CONFIRMED_FLOOR.items()
     }
-    assert BATCH_PROFILE.humidity_spike_enabled is ("humidity" in up.UPLOAD_SPIKE_CONFIRMED_FLOOR)
+    assert BATCH_PROFILE.humidity_spike_enabled is ("humidity" in config.UPLOAD_SPIKE_CONFIRMED_FLOOR)
     decision = BATCH_PROFILE.lstm_decision
     assert decision.rule is LstmDecisionRule.FILE_PERCENTILE_ROBUST
     assert decision.percentile == crt.COLD_RUN_PERCENTILE

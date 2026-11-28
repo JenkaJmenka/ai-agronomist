@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.api.services.upload_portions import _detect_upload_mad_spikes
+from tests.models._upload_stream_helpers import upload_spike_hits
 from src.config import (
     SPIKE_MAD_WINDOW_K,
     UPLOAD_SPIKE_CONFIRMED_FLOOR,
@@ -130,14 +130,11 @@ def test_upload_drops_step_and_unconfirmable_tail_and_reports_boundary_spike_onc
     frame = _frame(values)
     labels = frame["timestamp"].tolist()
 
-    whole = [hit.timestamp for hit in _detect_upload_mad_spikes(frame, new_row_start=0)]
+    whole = [hit.timestamp for hit in upload_spike_hits(frame)[0]]
     assert whole == [labels[30].isoformat(), labels[59].isoformat()]
 
-    first = _detect_upload_mad_spikes(frame.iloc[:60].reset_index(drop=True), new_row_start=0)
-    overlap = 19
-    second = _detect_upload_mad_spikes(
-        frame.iloc[60 - overlap :].reset_index(drop=True), new_row_start=overlap
-    )
+    first, tail = upload_spike_hits(frame.iloc[:60].reset_index(drop=True))
+    second, _ = upload_spike_hits(frame.iloc[60:].reset_index(drop=True), tail)
     assert [hit.timestamp for hit in first] == [labels[30].isoformat()]
     assert [hit.timestamp for hit in second] == [labels[59].isoformat()]
 
@@ -158,6 +155,6 @@ def test_upload_scores_neither_humidity_nor_co2() -> None:
     frame["humidity"] = humidity
     frame["co2"] = co2
 
-    hits = _detect_upload_mad_spikes(frame, new_row_start=0)
+    hits, _ = upload_spike_hits(frame)
 
     assert hits == []

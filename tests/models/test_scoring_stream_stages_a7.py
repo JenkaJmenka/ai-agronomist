@@ -1,26 +1,31 @@
-"""ADR-014 step A7 (ml half): upload stream stages equal ``score_portion``.
+"""ADR-014 step A7: the upload stream stages reproduce the pre-A7 upload path.
 
 The parity corpus frames and the two committed native fixtures are read the
 way ``run_cold_run_upload`` reads them (``_read_chunks``, adapter normalise,
 ``parse_raw_rows`` / ``_strip_raw_records``), split into portions of several
-sizes, and scored twice: through today's ``score_portion`` and through
-``score_upload_stream`` with its carried state. OOB, duration-stuck,
-rolling-z and look-ahead spike outputs and every carried state must be equal
-after every portion, and the end-of-file stuck flush too.
+sizes, and run through ``score_upload_stream`` with its carried state. OOB,
+duration-stuck, rolling-z and look-ahead spike outputs and every carried
+state must equal ``tests/fixtures/upload_stream_a7_golden.json`` after every
+portion, and the end-of-file stuck flush too.
 
-The LSTM is not under test here (A3 covers ``ModelScorer``); a zero-score
-stub stands in so ``score_portion`` runs its full body.
+The golden was generated on the unmodified pre-A7-backend code (``main`` at
+``1a5061b``), by running today's ``score_portion`` / ``StatCarry`` /
+``StuckCarry`` / ``_WALLCLOCK_DETECTOR.flush`` over the same inputs, and
+stores a SHA-256 of each portion's outputs and of each carried state (plus
+hit counts). Until A7 backend this test compared the stages against those
+functions live; they are deleted, so the golden is what is left of that
+comparison.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any, Iterator
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -28,7 +33,7 @@ from src.api.schemas.sensor_data import StatisticalAnomalyDetail, UploadHighAnom
 from src.api.services import upload_portions as up
 from src.api.services.cold_run_upload import _read_chunks, _strip_raw_records
 from src.api.services.upload_producer import _normalized_records, _raw_records
-from src.config import COLD_RUN_STAT_MIN_CONSECUTIVE, COLD_RUN_STAT_ROLLING_WINDOW, LATENT_DIM, SEQ_LEN
+from src.config import COLD_RUN_STAT_MIN_CONSECUTIVE, COLD_RUN_STAT_ROLLING_WINDOW, SEQ_LEN
 from src.models.scoring import BATCH_PROFILE, STREAM_PROFILE, ScoringContext
 from src.models.scoring.stream_stages import (
     RollingZState,
@@ -46,7 +51,6 @@ from src.models.scoring.stream_stages import (
     spike_lookahead_stage,
     timestamp_label,
 )
-from src.models.stuck_fault_detector import StuckCarry
 from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
 from tests.parity._golden_corpus import (
     DEC_CSV,
@@ -63,14 +67,6 @@ SPIKE_C = 6.0                             # the accuracy gate's spike amplitude
 CTX = ScoringContext(tenant_id="a7", greenhouse_id="gh", sequence_timestamp=pd.Timestamp(
     "2026-07-02T12:00:00Z").to_pydatetime(), profile=BATCH_PROFILE)
 _STAT_CARRY_LEN = COLD_RUN_STAT_ROLLING_WINDOW + COLD_RUN_STAT_MIN_CONSECUTIVE - 1
-
-
-class _ZeroDetector:
-    """``predict_batch_enriched`` stand-in: the LSTM is out of scope here."""
-
-    def predict_batch_enriched(self, sequences: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        n = len(sequences)
-        return np.zeros(n), np.zeros((n, LATENT_DIM)), np.zeros(n)
 
 
 @pytest.fixture(scope="module")
@@ -142,32 +138,61 @@ def _as_portion(out: UploadStreamOutput) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def _of_portion(p: up.PortionScores) -> dict[str, list[dict[str, Any]]]:
-    return {"oob": [h.model_dump() for h in p.oob_hits], "stuck": [h.model_dump() for h in p.stuck_hits],
-            "stat": [h.model_dump() for h in p.stat_hits], "mad": [h.model_dump() for h in p.mad_hits]}
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(type(value))
 
 
-def _assert_state_equal(state: UploadStreamState, stat: up.StatCarry, stuck: StuckCarry,
-                        overlap: pd.DataFrame) -> None:
-    assert state.stuck is not None and state.stuck.to_carry() == stuck
-    assert state.stuck == StuckStageState.from_carry(stuck)
+def _digest(obj: Any) -> str:
+    """Stable hash of a JSON-like value (NaN spelled 'NaN', sets sorted)."""
+    return hashlib.sha256(
+        json.dumps(_nan_safe(obj), sort_keys=True, default=_json_default).encode()
+    ).hexdigest()
+
+
+def _stuck_repr(stuck_dict: dict[str, Any]) -> dict[str, Any]:
+    out = dict(stuck_dict)
+    out["emitted_onsets"] = sorted(out["emitted_onsets"])
+    out["skip_channels"] = sorted(out["skip_channels"])
+    return out
+
+
+def _state_repr(stuck: dict[str, Any], rows: list[Any], total_rows: int, columns: Any,
+                seen: Any, psychro: Any, labels: list[str], tail: dict[str, list[float]]) -> dict[str, Any]:
+    """Carried state in plain values, however it is held (carry objects or stage state)."""
+    return {
+        "stuck": _stuck_repr(stuck),
+        "rolling_z": {"rows": [dict(r) for r in rows], "total_rows": total_rows,
+                      "columns": None if columns is None else list(columns),
+                      "seen": sorted([t, c] for t, c in seen),
+                      "psychro": {ts: list(v) for ts, v in psychro.items()}},
+        "tail": {"labels": list(labels), "values": {s: list(v) for s, v in tail.items()} if labels else {}},
+    }
+
+
+_GOLDEN = json.loads(
+    (Path(__file__).resolve().parents[1] / "fixtures" / "upload_stream_a7_golden.json").read_text()
+)
+
+
+def _tail_values(state: UploadStreamState) -> dict[str, list[float]]:
+    return {s: list(v) for s, v in state.spike_tail.values.items()}
+
+
+def _state_digest(state: UploadStreamState) -> str:
+    assert state.stuck is not None
     z = state.rolling_z
-    assert _nan_safe([dict(r) for r in z.rows]) == _nan_safe(stat.rows)
-    assert (z.total_rows, z.columns, set(z.seen)) == (
-        stat.total_rows, None if stat.columns is None else tuple(stat.columns), stat.seen)
-    assert dict(z.psychro_context) == stat.psychro_context
-    tail = state.spike_tail
-    if overlap.empty:
-        assert tail.labels == ()
-        return
-    assert list(tail.labels) == [timestamp_label(t) for t in overlap["timestamp"].tolist()]
-    for sensor, values in tail.values.items():
-        assert _nan_safe(list(values)) == _nan_safe(overlap[sensor].astype(float).tolist())
+    return _digest(_state_repr(
+        state.stuck.to_dict(), [dict(r) for r in z.rows], z.total_rows, z.columns, z.seen,
+        z.psychro_context, list(state.spike_tail.labels), _tail_values(state)))
 
 
-def _run_both(path: Path, size: int, imputed: list[str], *, json_hop: bool) -> dict[str, int]:
-    """Score ``path`` in ``size`` portions both ways; return coverage counts."""
-    stat, stuck, overlap = up.StatCarry(), StuckCarry(skip_channels=frozenset(imputed)), pd.DataFrame()
+def _run_stream(path: Path, key: str, size: int, imputed: list[str], *, json_hop: bool) -> dict[str, int]:
+    """Run ``path`` in ``size`` portions through the stages; check the golden; return counts."""
+    want_run = _GOLDEN["runs"][f"{key}|{size}"]
     state = UploadStreamState.initial(SEQ_LEN, imputed)
     seen = {"portions": 0, "oob": 0, "stuck": 0, "stat": 0, "mad": 0,
             "mad_on_tail_row": 0, "boundary_in_fired_freeze": 0}
@@ -182,35 +207,37 @@ def _run_both(path: Path, size: int, imputed: list[str], *, json_hop: bool) -> d
         out, state = score_upload_stream(
             None if normalized is None else normalized.copy(), raw_rows, state, CTX, BATCH_PROFILE)
         assert _nan_safe(before.to_dict()) == before_dump  # the input state is never mutated
-        portion, overlap = up.score_portion(
-            normalized_df=normalized, prev_overlap_df=overlap, raw_rows=raw_rows, stat_carry=stat,
-            adaptive_ranges=[(0.0, 1.0)] * 4, detector=_ZeroDetector(), seq_len=SEQ_LEN, stuck_carry=stuck)
-        got, want = _as_portion(out), _of_portion(portion)
-        assert got == want, f"{path.name} size={size} portion={seen['portions']}"
-        _assert_state_equal(state, stat, stuck, overlap)
+        got = _as_portion(out)
+        want = want_run["portions"][seen["portions"]]
+        where = f"{path.name} size={size} portion={seen['portions']}"
+        assert [len(got[k]) for k in ("oob", "stuck", "stat", "mad")] == want["n"], where
+        assert _digest(got) == want["out"], where
+        assert _state_digest(state) == want["state"], where
         if json_hop:
             state = UploadStreamState.from_dict(json.loads(json.dumps(state.to_dict())))
         seen["portions"] += 1
-        for key in ("oob", "stuck", "stat", "mad"):
-            seen[key] += len(want[key])
+        for key_, n in zip(("oob", "stuck", "stat", "mad"), want["n"]):
+            seen[key_] += n
         new_labels = {h.timestamp for h in out.spike_hits} - tail_labels
         seen["mad_on_tail_row"] += len(out.spike_hits) - sum(
             1 for h in out.spike_hits if h.timestamp in new_labels)
-    flushed, state = flush_duration_stuck(state.stuck, BATCH_PROFILE)  # type: ignore[arg-type]
-    want_flush = [up._stuck_dict_to_high_detail(a).model_dump() for a in up._WALLCLOCK_DETECTOR.flush(stuck)]
-    assert [up._stuck_dict_to_high_detail(a.as_dict()).model_dump() for a in flushed] == want_flush
-    assert state.to_carry() == stuck
-    seen["stuck"] += len(want_flush)
+    assert seen["portions"] == len(want_run["portions"])
+    flushed, final_stuck = flush_duration_stuck(state.stuck, BATCH_PROFILE)  # type: ignore[arg-type]
+    flush_dumps = [up._stuck_dict_to_high_detail(a.as_dict()).model_dump() for a in flushed]
+    assert len(flush_dumps) == want_run["n_flush"]
+    assert _digest(flush_dumps) == want_run["flush"]
+    assert _digest(_stuck_repr(final_stuck.to_dict())) == want_run["final_stuck"]
+    seen["stuck"] += len(flush_dumps)
     return seen
 
 
-def test_stages_equal_score_portion_portion_by_portion(sources: list) -> None:
+def test_stages_reproduce_pre_a7_upload_path_portion_by_portion(sources: list) -> None:
     totals: dict[str, int] = {}
     multi_portion_runs = 0
     for name, path, sizes in sources:
         imputed = _imputed(path)
         for size in sizes:
-            seen = _run_both(path, size, imputed, json_hop=False)
+            seen = _run_stream(path, name, size, imputed, json_hop=False)
             multi_portion_runs += seen["portions"] > 1
             for key, n in seen.items():
                 totals[key] = totals.get(key, 0) + n
@@ -225,48 +252,45 @@ def test_state_survives_a_json_hop_at_every_boundary(sources: list) -> None:
     """The carry is serialisable: re-loading it each portion changes nothing."""
     picked = [s for s in sources if s[0] in ("dec", "july_spiked", "spike", "oob")]
     for name, path, sizes in picked:
-        _run_both(path, sizes[0] if name in ("dec", "july_spiked") else 95, _imputed(path), json_hop=True)
+        _run_stream(path, name, sizes[0] if name in ("dec", "july_spiked") else 95, _imputed(path),
+                    json_hop=True)
 
 
 def test_async_message_carries_reproduce_the_worker() -> None:
-    """Producer + worker replay: states built from message fields give the worker's output."""
+    """Producer + worker replay: states built from message fields give the pre-A7 worker's output."""
     imputed = _imputed(DEC_CSV)
-    producer_stuck = StuckCarry(skip_channels=frozenset(imputed))
+    want_portions = _GOLDEN["async_dec_450"]
     stage_stuck = StuckStageState.initial(imputed)
     prev_norm: list[dict[str, Any]] = []
     prev_raw: list[dict[str, Any]] = []
     prior = 0
     portions = 0
     for normalized, raw_df in _portions(DEC_CSV, 450):
+        want = want_portions[portions]
         rows = _normalized_records(normalized) if normalized is not None else []
         raw_rows = _raw_records(raw_df) if not raw_df.empty else []
         message = json.loads(json.dumps({  # what the queue carries
             "rows": rows, "raw_rows": raw_rows, "overlap_rows": prev_norm,
             "stat_carry_rows": prev_raw, "stat_carry_prior_rows": prior,
-            "stuck_carry_state": producer_stuck.to_dict()}))
+            "stuck_carry_state": stage_stuck.to_dict()}))
+        assert _digest(_stuck_repr(message["stuck_carry_state"])) == want["message_stuck"]
         assert StuckStageState.from_dict(message["stuck_carry_state"]) == stage_stuck
         if normalized is not None:
-            up._WALLCLOCK_DETECTOR.detect_chunk(clamp_frame(normalized), producer_stuck)
             _, stage_stuck = duration_stuck_stage(clamp_frame(normalized), stage_stuck, BATCH_PROFILE)
-        # Worker side, today.
-        worker_stuck = StuckCarry.from_dict(message["stuck_carry_state"])
+        assert _digest(_stuck_repr(stage_stuck.to_dict())) == want["producer_stuck_after"]
+        # Worker side, through the stages.
         frame = pd.DataFrame(message["rows"]) if message["rows"] else None
         overlap = pd.DataFrame(message["overlap_rows"]) if message["overlap_rows"] else pd.DataFrame()
-        portion, _ = up.score_portion(
-            normalized_df=frame, prev_overlap_df=overlap, raw_rows=message["raw_rows"],
-            stat_carry=up.StatCarry(rows=list(message["stat_carry_rows"]),
-                                    total_rows=message["stat_carry_prior_rows"]),
-            adaptive_ranges=[(0.0, 1.0)] * 4, detector=_ZeroDetector(), seq_len=SEQ_LEN,
-            stuck_carry=worker_stuck)
-        # Worker side, through the stages.
         state = UploadStreamState(
             rolling_z=RollingZState.from_parts(rows=message["stat_carry_rows"],
                                                total_rows=message["stat_carry_prior_rows"]),
             spike_tail=SpikeTailState.from_frame(overlap, SEQ_LEN - 1),
             stuck=StuckStageState.from_dict(message["stuck_carry_state"]))
         out, after = score_upload_stream(frame, message["raw_rows"], state, CTX, BATCH_PROFILE)
-        assert _as_portion(out) == _of_portion(portion)
-        assert after.stuck == StuckStageState.from_carry(worker_stuck) == stage_stuck
+        assert _digest(_as_portion(out)) == want["out"]
+        assert after.stuck is not None
+        assert _digest(_stuck_repr(after.stuck.to_dict())) == want["worker_stuck_after"]
+        assert after.stuck == stage_stuck
         if rows:
             prev_norm = rows[-(SEQ_LEN - 1):]
         if raw_rows:
@@ -274,6 +298,7 @@ def test_async_message_carries_reproduce_the_worker() -> None:
             prev_raw = (prev_raw + raw_rows)[-_STAT_CARRY_LEN:]
         portions += 1
     assert portions > 3
+    assert portions == len(want_portions)
 
 
 def test_profile_gates_and_purity() -> None:

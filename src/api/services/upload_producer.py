@@ -25,7 +25,8 @@ from src.config import (
     UPLOAD_PORTION_ROWS,
 )
 from src.db.jobs import create_job, get_job, set_total_portions, update_job
-from src.models.stuck_fault_detector import StuckCarry
+from src.models.scoring import BATCH_PROFILE
+from src.models.scoring.stream_stages import StuckStageState, clamp_frame, duration_stuck_stage
 from src.mq.publisher import publish_json
 from src.mq.schemas import (
     UPLOAD_PORTION_SCHEMA_VERSION,
@@ -34,13 +35,6 @@ from src.mq.schemas import (
 )
 from src.mq.topology import UPLOAD_FINALIZE_QUEUE, UPLOAD_PORTIONS_QUEUE
 from src.vendors.csv_adapter import CSVAdapter, parse_raw_rows
-
-# Single shared detector instance — same object used by score_portion/finalize_scores
-# in upload_portions.  Both the producer's sequential produce loop and the worker
-# replay path must use identical detector config so emitted_onsets dedup stays
-# consistent.  Importing the singleton from upload_portions (where it is
-# constructed) guarantees that invariant.
-from src.api.services.upload_portions import _WALLCLOCK_DETECTOR  # noqa: E402
 
 SENSOR_COLS = ["temperature", "humidity", "co2", "light"]
 
@@ -134,7 +128,7 @@ async def produce_upload_portions(
     # Portions may be consumed out of order or concurrently, so the carry state
     # for each portion must be pre-computed here (at publish time) and embedded
     # in the message — the same pattern as stat_carry_rows for statistical detection.
-    stuck_carry = StuckCarry(skip_channels=frozenset(imputed_channels))
+    stuck_state = StuckStageState.initial(imputed_channels)
 
     for raw_chunk in _read_chunks(tmp_path, portion_rows, csv_props):
         if raw_chunk.empty:
@@ -158,16 +152,15 @@ async def produce_upload_portions(
         # Workers receive the pre-portion state, re-run detect_chunk, and store
         # the updated state — allowing finalize to call flush with the last
         # portion's carry regardless of the order portions were processed.
-        carry_state_before = stuck_carry.to_dict()
+        carry_state_before = stuck_state.to_dict()
 
         # Advance the carry for this portion (sequential — producer reads in order).
         # Use clamped values to match the worker's scoring path, so the carry
         # state embedded in the message is consistent with what score_portion
         # will produce on the worker side.
         if normalized_chunk_df is not None and not normalized_chunk_df.empty:
-            from src.vendors.base import DataSourceAdapter as _DSA
-            _WALLCLOCK_DETECTOR.detect_chunk(
-                _DSA.clamp_to_oob_limits(normalized_chunk_df), stuck_carry
+            _, stuck_state = duration_stuck_stage(
+                clamp_frame(normalized_chunk_df), stuck_state, BATCH_PROFILE
             )
 
         message = UploadPortionMessage(

@@ -28,10 +28,13 @@ from typing import Any
 import pytest
 
 from src.api.schemas.sensor_data import StatisticalAnomalyDetail
-from src.api.services.upload_portions import (
-    StatCarry,
-    _exclude_faults_from_baseline,
-    _suppress_fault_window_hits,
+from src.api.services.upload_portions import _suppress_fault_window_hits
+from src.models.scoring import BATCH_PROFILE
+from src.models.scoring.stream_stages import (
+    RollingZState,
+    StuckStageState,
+    exclude_frozen_readings,
+    rolling_z_stage,
 )
 from src.models.stuck_fault_detector import ChannelFreezeState, StuckCarry
 
@@ -154,37 +157,34 @@ class TestBaselineExclusionMatchesByInstant:
     ) -> None:
         """Frozen values inside a fired open window never reach the baseline."""
         rows = [_raw_row(ONSET + timedelta(hours=2))]
-        cleaned = _exclude_faults_from_baseline(
-            rows, StatCarry(), _open_fired_carry(onset_spelling)
-        )
+        cleaned = exclude_frozen_readings(rows, _open_fired_carry(onset_spelling))
         assert cleaned[0][CHANNEL] != cleaned[0][CHANNEL]  # NaN
         assert cleaned[0]["temperature"] == 21.0
 
     def test_rows_are_untouched_when_the_freeze_never_fired(self) -> None:
         """No gate crossing, no exclusion — the companion negative case."""
         rows = [_raw_row(ONSET + timedelta(hours=2))]
-        cleaned = _exclude_faults_from_baseline(
-            rows, StatCarry(), _open_unfired_carry()
-        )
+        cleaned = exclude_frozen_readings(rows, _open_unfired_carry())
         assert cleaned[0][CHANNEL] == FROZEN_VALUE
 
     @pytest.mark.parametrize("onset_spelling", ONSET_SPELLINGS)
     def test_input_rows_are_not_mutated(self, onset_spelling: str) -> None:
         """Persisted raw readings must survive the baseline cleanup intact."""
         rows = [_raw_row(ONSET + timedelta(hours=2))]
-        _exclude_faults_from_baseline(
-            rows, StatCarry(), _open_fired_carry(onset_spelling)
-        )
+        exclude_frozen_readings(rows, _open_fired_carry(onset_spelling))
         assert rows[0][CHANNEL] == FROZEN_VALUE
 
     @pytest.mark.parametrize("onset_spelling", ONSET_SPELLINGS)
-    def test_carried_stat_rows_are_cleaned_in_place(
+    def test_carried_stat_rows_are_cleaned_in_returned_state(
         self, onset_spelling: str
     ) -> None:
         """The rolling carry's own rows are cleaned too, not just this portion's."""
-        stat_carry = StatCarry(rows=[_raw_row(ONSET + timedelta(hours=3))])
-        _exclude_faults_from_baseline(
-            [], stat_carry, _open_fired_carry(onset_spelling)
+        before = RollingZState.from_parts(rows=[_raw_row(ONSET + timedelta(hours=3))])
+        _, after = rolling_z_stage(
+            [],
+            before,
+            BATCH_PROFILE,
+            StuckStageState.from_carry(_open_fired_carry(onset_spelling)),
         )
-        value = stat_carry.rows[0][CHANNEL]
+        value = after.rows[0][CHANNEL]
         assert value != value  # NaN

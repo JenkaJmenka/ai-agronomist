@@ -31,11 +31,10 @@ from src.api.services.anomaly_ranking import anomaly_rank_key
 from src.api.services.upload_portions import (
     SENSOR_COLS,
     PortionScores,
-    StatCarry,
-    StuckCarry,
     finalize_scores,
     score_portion,
 )
+from src.models.scoring.stream_stages import UploadStreamState
 
 
 class EmptyCsvError(ValueError):
@@ -276,8 +275,7 @@ async def run_cold_run_upload(
     )
 
     portions: list[PortionScores] = []
-    stat_carry = StatCarry()
-    stuck_carry = StuckCarry(skip_channels=frozenset(imputed_channels))
+    state = UploadStreamState.initial(seq_len, imputed_channels)
     prev_overlap_df = pd.DataFrame()
     sensor_rows_persisted = 0
     raw_rows_persisted = 0
@@ -296,16 +294,15 @@ async def run_cold_run_upload(
         raw_df, _ = parse_raw_rows(raw_chunk)
         raw_rows = _strip_raw_records(raw_df) if not raw_df.empty else []
 
-        portion, prev_overlap_df = score_portion(
+        portion, prev_overlap_df, state = score_portion(
             normalized_df=normalized_chunk,
             prev_overlap_df=prev_overlap_df,
             raw_rows=raw_rows,
-            stat_carry=stat_carry,
+            state=state,
             adaptive_ranges=adaptive_ranges,
             detector=detector,
             seq_len=seq_len,
             include_embeddings=include_embeddings,
-            stuck_carry=stuck_carry,
         )
         portions.append(portion)
 
@@ -321,14 +318,13 @@ async def run_cold_run_upload(
             sensor_rows_persisted += s_ins + s_upd
             raw_rows_persisted += r_ins + r_upd
 
-    response, sequence_timestamps = finalize_scores(
+    response, sequence_timestamps, state = finalize_scores(
         portions,
         tenant_id=tenant_id,
         greenhouse_id=greenhouse_id,
         imputed_channels=imputed_channels,
-        stat_carry=stat_carry,
+        state=state,
         include_embeddings=include_embeddings,
-        stuck_carry=stuck_carry,
     )
 
     if persist_db is not None:
@@ -345,7 +341,7 @@ async def run_cold_run_upload(
             persist_db,
             tenant_id=tenant_id,
             greenhouse_id=greenhouse_id,
-            stuck_carry=stuck_carry,
+            stuck_carry=state.stuck.to_carry() if state.stuck is not None else None,
             high_anomalies=response.high_anomalies,
         )
         # ADR-005: canonical + native score dicts keyed by timestamp. The
