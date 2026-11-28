@@ -106,3 +106,80 @@ export async function postDriftWatchFeedback(body: DriftWatchFeedbackInput): Pro
     throw new Error(`Drift watch feedback request failed (${res.status})`);
   }
 }
+
+export const driftSeriesPointSchema = z
+  .object({
+    ts: z.string(),
+    target: z.number().nullable().optional(),
+    reference: z.number().nullable().optional(),
+    residual: z.number().nullable().optional(),
+    dev: z.number().nullable().optional(),
+    s_pos: z.number().nullable().optional(),
+    s_neg: z.number().nullable().optional(),
+    alarm_dir: z.string().nullable().optional(),
+  })
+  .loose();
+
+export const driftSeriesEpisodeSchema = z
+  .object({
+    first_detected_ts: z.string(),
+    onset_ts: z.string().nullable().optional(),
+    last_confirmed_ts: z.string().nullable().optional(),
+    direction: z.string(),
+    offset_robust: z.number().nullable().optional(),
+    label: z.string().nullable().optional(),
+    suppressed_by: z.string().nullable().optional(),
+  })
+  .loose();
+
+export const driftSeriesSchema = z
+  .object({
+    input_id: z.string(),
+    kind: z.string(),
+    target_channel: z.string(),
+    unit: z.string(),
+    status: z.string(),
+    alert_state: z.string(),
+    calibration_window_end: z.string().nullable().optional(),
+    min_shift: z.number(),
+    alert_floor: z.number(),
+    h: z.number().nullable().optional(),
+    sigma: z.number().nullable().optional(),
+    window_start: z.string(),
+    window_end: z.string(),
+    points: z.array(driftSeriesPointSchema),
+    episodes: z.array(driftSeriesEpisodeSchema),
+    replay_mismatch: z.number(),
+    reason: z.string().nullable().optional(),
+  })
+  .loose();
+
+export type DriftSeries = z.infer<typeof driftSeriesSchema>;
+export type DriftSeriesPoint = z.infer<typeof driftSeriesPointSchema>;
+export type DriftSeriesEpisode = z.infer<typeof driftSeriesEpisodeSchema>;
+
+export const DRIFT_WINDOW_WEEKS = [13, 26, 52] as const;
+export type DriftWindowWeeks = (typeof DRIFT_WINDOW_WEEKS)[number];
+
+const MS_PER_WEEK = 7 * 24 * 3600 * 1000;
+const MS_PER_HOUR = 3600 * 1000;
+
+/** Replayed series for one input over the last `weeks` weeks (end floored to the hour). */
+export async function fetchDriftWatchSeries(params: {
+  tenant: string;
+  gh: string;
+  inputId: string;
+  weeks: number;
+}): Promise<DriftSeries> {
+  const endMs = Math.floor(Date.now() / MS_PER_HOUR) * MS_PER_HOUR;
+  const query = new URLSearchParams({
+    start: new Date(endMs - params.weeks * MS_PER_WEEK).toISOString(),
+    end: new Date(endMs).toISOString(),
+  });
+  const path = [params.tenant, params.gh, params.inputId].map(encodeURIComponent).join("/");
+  const res = await fetch(`/api/bff/drift-watch/inputs/${path}/series?${query}`);
+  if (!res.ok) {
+    throw new Error(`Drift watch series request failed (${res.status})`);
+  }
+  return driftSeriesSchema.parse(await res.json());
+}

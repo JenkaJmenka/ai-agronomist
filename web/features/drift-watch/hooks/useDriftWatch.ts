@@ -3,11 +3,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  type DriftSeries,
   type DriftWatchEpisode,
   type DriftWatchFeedbackInput,
   type DriftWatchInput,
   fetchDriftWatchEpisodes,
   fetchDriftWatchInputs,
+  fetchDriftWatchSeries,
   postDriftWatchFeedback,
 } from "@/features/drift-watch/api/driftWatch";
 import { STALE_TIME_MS } from "@/lib/query";
@@ -54,5 +56,25 @@ export function useDriftWatchFeedback() {
   return useMutation<void, Error, DriftWatchFeedbackInput>({
     mutationFn: postDriftWatchFeedback,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["drift-watch"] }),
+  });
+}
+
+/**
+ * Replayed drift series for one input. Lazy: nothing is fetched until
+ * `enabled`. Shares the ["drift-watch"] prefix, so a feedback mutation
+ * refetches an open chart and its band colours follow the new label.
+ */
+export function useDriftWatchSeries(
+  tenant: string,
+  gh: string,
+  inputId: string,
+  weeks: number,
+  enabled: boolean,
+) {
+  return useQuery<DriftSeries, Error>({
+    queryKey: ["drift-watch", "series", tenant, gh, inputId, weeks],
+    queryFn: () => fetchDriftWatchSeries({ tenant, gh, inputId, weeks }),
+    staleTime: STALE_TIME_MS.anomaliesInWindow,
+    enabled,
   });
 }

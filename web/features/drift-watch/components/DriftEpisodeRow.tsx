@@ -3,6 +3,7 @@
 import { Chip } from "@/components/ui/Chip";
 import type { DriftWatchEpisode } from "@/features/drift-watch/api/driftWatch";
 import { DriftFeedbackButtons } from "@/features/drift-watch/components/DriftFeedbackButtons";
+import { episodeKey } from "@/features/drift-watch/lib/driftSeries";
 
 /** Format an ISO datetime to "DD/MM/YY HH:MM" in local time. */
 function formatTs(iso: string): string {
@@ -41,7 +42,12 @@ export function DriftEpisodeRow({ episode }: { readonly episode: DriftWatchEpiso
       <tr
         data-testid="drift-episode-row"
         data-armed={String(episode.armed)}
-        className={`border-b border-border last:border-0 ${rowClass}`}
+        data-episode-key={episodeKey(
+          episode.input_id,
+          episode.direction,
+          episode.first_detected_ts,
+        )}
+        className={`border-b border-border last:border-0 data-[highlighted=true]:bg-accent-soft ${rowClass}`}
       >
         <td className="py-2 pr-4 text-sm tabular-nums text-text-muted">
           {formatTs(episode.first_detected_ts)}
