@@ -7598,6 +7598,133 @@
           }
         }
       }
+    },
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/series": {
+      "get": {
+        "tags": [
+          "drift-watch"
+        ],
+        "summary": "Get Drift Watch Series",
+        "description": "Replayed drift statistics for one input, for the drift chart.\n\nRead-only. Replays the immutable calibration (``calibration_json``) cold\nover hourly means built exactly as drift watch builds them (synthetic\nrows excluded). Episode bands come from stored episodes, not from the\nreplay; ``replay_mismatch`` counts disagreements between the two.\nDefault window: the 13 weeks up to the input's last processed timestamp.",
+        "operationId": "get_drift_watch_series_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__series_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "greenhouse_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Greenhouse Id"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Input Id"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftWatchSeriesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9009,6 +9136,179 @@
         "type": "object",
         "title": "DayWindow"
       },
+      "DriftSeriesEpisode": {
+        "properties": {
+          "first_detected_ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Detected Ts"
+          },
+          "onset_ts": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Onset Ts"
+          },
+          "last_confirmed_ts": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Confirmed Ts"
+          },
+          "direction": {
+            "type": "string",
+            "title": "Direction"
+          },
+          "offset_robust": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset Robust"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "suppressed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppressed By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "first_detected_ts",
+          "direction"
+        ],
+        "title": "DriftSeriesEpisode",
+        "description": "A stored episode inside the series window (the chart's bands)."
+      },
+      "DriftSeriesPoint": {
+        "properties": {
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "residual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residual"
+          },
+          "dev": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dev"
+          },
+          "s_pos": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "S Pos"
+          },
+          "s_neg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "S Neg"
+          },
+          "alarm_dir": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "+",
+                  "-"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alarm Dir"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ts"
+        ],
+        "title": "DriftSeriesPoint",
+        "description": "One replayed hour. Non-finite values are ``None``."
+      },
       "DriftStateResponse": {
         "properties": {
           "tenant_id": {
@@ -9555,6 +9855,133 @@
         ],
         "title": "DriftWatchInputResponse",
         "description": "Public representation of one drift-watch input (monitor spec)."
+      },
+      "DriftWatchSeriesResponse": {
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "target_channel": {
+            "type": "string",
+            "title": "Target Channel"
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "alert_state": {
+            "type": "string",
+            "title": "Alert State"
+          },
+          "calibration_window_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calibration Window End"
+          },
+          "min_shift": {
+            "type": "number",
+            "title": "Min Shift"
+          },
+          "alert_floor": {
+            "type": "number",
+            "title": "Alert Floor"
+          },
+          "h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "H"
+          },
+          "sigma": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sigma"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Start"
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window End"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/DriftSeriesPoint"
+            },
+            "type": "array",
+            "title": "Points"
+          },
+          "episodes": {
+            "items": {
+              "$ref": "#/components/schemas/DriftSeriesEpisode"
+            },
+            "type": "array",
+            "title": "Episodes"
+          },
+          "replay_mismatch": {
+            "type": "integer",
+            "title": "Replay Mismatch"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_id",
+          "kind",
+          "target_channel",
+          "unit",
+          "status",
+          "alert_state",
+          "min_shift",
+          "alert_floor",
+          "window_start",
+          "window_end",
+          "points",
+          "episodes",
+          "replay_mismatch"
+        ],
+        "title": "DriftWatchSeriesResponse",
+        "description": "Read-only drift chart data for one input (cold replay, ADR-013)."
       },
       "FeedbackMarkRequest": {
         "properties": {

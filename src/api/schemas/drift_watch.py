@@ -189,3 +189,58 @@ class DriftWatchAlertStateResponse(BaseModel):
     input_id: str
     alert_state: str
     alert_state_reason: Optional[str] = None
+
+
+class DriftSeriesPoint(BaseModel):
+    """One replayed hour. Non-finite values are ``None``."""
+
+    ts: datetime
+    target: Optional[float] = None
+    reference: Optional[float] = None
+    residual: Optional[float] = None
+    dev: Optional[float] = None
+    """``residual - mu`` in native units."""
+    s_pos: Optional[float] = None
+    s_neg: Optional[float] = None
+    alarm_dir: Optional[Literal["+", "-"]] = None
+
+
+class DriftSeriesEpisode(BaseModel):
+    """A stored episode inside the series window (the chart's bands)."""
+
+    first_detected_ts: datetime
+    onset_ts: Optional[datetime] = None
+    last_confirmed_ts: Optional[datetime] = None
+    direction: str
+    offset_robust: Optional[float] = None
+    label: Optional[str] = None
+    suppressed_by: Optional[str] = None
+
+
+class DriftWatchSeriesResponse(BaseModel):
+    """Read-only drift chart data for one input (cold replay, ADR-013)."""
+
+    input_id: str
+    kind: str
+    target_channel: str
+    unit: str
+    """``°C``, ``%RH`` or ``g/m³``."""
+    status: str
+    alert_state: str
+    calibration_window_end: Optional[datetime] = None
+    min_shift: float
+    alert_floor: float
+    """``DRIFT_WATCH_ALERT_MIN_OFFSET_MULT`` x ``min_shift`` (native units)."""
+    h: Optional[float] = None
+    """CUSUM decision interval from the calibration, in sigma units."""
+    sigma: Optional[float] = None
+    """Residual sigma from the calibration, native units (h x sigma = native)."""
+    window_start: datetime
+    window_end: datetime
+    points: list[DriftSeriesPoint]
+    episodes: list[DriftSeriesEpisode]
+    replay_mismatch: int
+    """Stored episode starts with no replayed alarm onset within 1 h, plus
+    replayed onsets with no stored episode, inside the window."""
+    reason: Optional[str] = None
+    """Why ``points`` is empty, when it is."""

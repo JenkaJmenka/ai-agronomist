@@ -1928,6 +1928,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drift-watch/inputs/{tenant_id}/{greenhouse_id}/{input_id}/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Drift Watch Series
+         * @description Replayed drift statistics for one input, for the drift chart.
+         *
+         *     Read-only. Replays the immutable calibration (``calibration_json``) cold
+         *     over hourly means built exactly as drift watch builds them (synthetic
+         *     rows excluded). Episode bands come from stored episodes, not from the
+         *     replay; ``replay_mismatch`` counts disagreements between the two.
+         *     Default window: the 13 weeks up to the input's last processed timestamp.
+         */
+        get: operations["get_drift_watch_series_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__series_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2574,6 +2600,54 @@ export interface components {
             end_hour: number;
         };
         /**
+         * DriftSeriesEpisode
+         * @description A stored episode inside the series window (the chart's bands).
+         */
+        DriftSeriesEpisode: {
+            /**
+             * First Detected Ts
+             * Format: date-time
+             */
+            first_detected_ts: string;
+            /** Onset Ts */
+            onset_ts?: string | null;
+            /** Last Confirmed Ts */
+            last_confirmed_ts?: string | null;
+            /** Direction */
+            direction: string;
+            /** Offset Robust */
+            offset_robust?: number | null;
+            /** Label */
+            label?: string | null;
+            /** Suppressed By */
+            suppressed_by?: string | null;
+        };
+        /**
+         * DriftSeriesPoint
+         * @description One replayed hour. Non-finite values are ``None``.
+         */
+        DriftSeriesPoint: {
+            /**
+             * Ts
+             * Format: date-time
+             */
+            ts: string;
+            /** Target */
+            target?: number | null;
+            /** Reference */
+            reference?: number | null;
+            /** Residual */
+            residual?: number | null;
+            /** Dev */
+            dev?: number | null;
+            /** S Pos */
+            s_pos?: number | null;
+            /** S Neg */
+            s_neg?: number | null;
+            /** Alarm Dir */
+            alarm_dir?: ("+" | "-") | null;
+        };
+        /**
          * DriftStateResponse
          * @description Latest persisted drift check plus live detector state for a tenant.
          */
@@ -2794,6 +2868,52 @@ export interface components {
             raw_count?: number | null;
             /** Budget */
             budget: number;
+        };
+        /**
+         * DriftWatchSeriesResponse
+         * @description Read-only drift chart data for one input (cold replay, ADR-013).
+         */
+        DriftWatchSeriesResponse: {
+            /** Input Id */
+            input_id: string;
+            /** Kind */
+            kind: string;
+            /** Target Channel */
+            target_channel: string;
+            /** Unit */
+            unit: string;
+            /** Status */
+            status: string;
+            /** Alert State */
+            alert_state: string;
+            /** Calibration Window End */
+            calibration_window_end?: string | null;
+            /** Min Shift */
+            min_shift: number;
+            /** Alert Floor */
+            alert_floor: number;
+            /** H */
+            h?: number | null;
+            /** Sigma */
+            sigma?: number | null;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /** Points */
+            points: components["schemas"]["DriftSeriesPoint"][];
+            /** Episodes */
+            episodes: components["schemas"]["DriftSeriesEpisode"][];
+            /** Replay Mismatch */
+            replay_mismatch: number;
+            /** Reason */
+            reason?: string | null;
         };
         /**
          * FeedbackMarkRequest
@@ -7457,6 +7577,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DriftWatchAlertStateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_drift_watch_series_api_drift_watch_inputs__tenant_id___greenhouse_id___input_id__series_get: {
+        parameters: {
+            query?: {
+                start?: string | null;
+                end?: string | null;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+                "X-Tenant-Id"?: string | null;
+            };
+            path: {
+                tenant_id: string;
+                greenhouse_id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DriftWatchSeriesResponse"];
                 };
             };
             /** @description Validation Error */
