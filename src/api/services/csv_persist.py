@@ -16,6 +16,8 @@ from sqlalchemy.future import select
 
 from src.db.models import RawReading, SensorReading
 from src.db.upsert import bulk_upsert_rows
+from src.models.scoring import BATCH_PROFILE
+from src.models.scoring.labels import legacy_upload_fault_label
 from src.utils.profiling import timed
 from src.vendors.csv_adapter import CSVAdapter, pandas_csv_reader_kwargs, parse_raw_rows
 
@@ -323,7 +325,13 @@ async def apply_anomaly_scores(
                 # param row has the same keys — required for executemany.
                 channel = trigger.get("channel")
                 row["t_channel"] = str(channel) if channel is not None else None
-                row["t_detector"] = str(trigger.get("detector") or "")
+                detector_name = str(trigger.get("detector") or "")
+                row["t_detector"] = detector_name
+                # ADR-014 A8: persist the upload fault label with the flag.
+                # None (no label) stays NULL so readers fall through as before.
+                row["t_fault_type"] = legacy_upload_fault_label(
+                    detector_name, BATCH_PROFILE
+                )
                 severity = trigger.get("severity")
                 row["t_severity"] = str(severity) if severity is not None else None
                 raw_val = trigger.get("value")
@@ -346,6 +354,7 @@ async def apply_anomaly_scores(
             if any("t_channel" in p for p in params):
                 values["trigger_channel"] = bindparam("t_channel")
                 values["trigger_detector"] = bindparam("t_detector")
+                values["fault_type"] = bindparam("t_fault_type")
                 values["detected_severity"] = bindparam("t_severity")
                 values["trigger_value"] = bindparam("t_value")
             stmt = (

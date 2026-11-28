@@ -1,0 +1,2743 @@
+{
+ "enriched": {
+  "anomaly_count": 62,
+  "count": 50,
+  "rows": [
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 1.0,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 0.0,
+    "reasoning": "Unexpected temperature drop: 10.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 10.8,
+    "timestamp": "2026-12-14T00:00:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 1.0,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 186.57,
+    "reasoning": "Unexpected temperature drop: 14.0\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 14.01,
+    "timestamp": "2026-12-15T11:05:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 1.0,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 231.25,
+    "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+    "root_cause": null,
+    "temperature": 20.88,
+    "timestamp": "2026-12-16T11:20:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 1.0,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 321.59,
+    "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+    "root_cause": null,
+    "temperature": 24.93,
+    "timestamp": "2026-12-18T13:00:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.8463609931876449,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 51.33,
+    "reasoning": "Unexpected temperature drop: 18.4\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.38,
+    "timestamp": "2026-12-24T14:00:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.8063950118235775,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 98.0,
+    "incident_id": null,
+    "light": 103.84,
+    "reasoning": "Unexpected temperature drop: 15.5\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 15.53,
+    "timestamp": "2026-12-16T09:30:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.8031680705573419,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 51.0,
+    "reasoning": "Unexpected temperature drop: 18.6\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.57,
+    "timestamp": "2026-12-24T14:05:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7890247891530674,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.16,
+    "incident_id": null,
+    "light": 119.76,
+    "reasoning": "Unexpected temperature drop: 19.3\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.3,
+    "timestamp": "2026-12-25T09:10:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.782577017657072,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 98.18,
+    "incident_id": null,
+    "light": 92.56,
+    "reasoning": "Unexpected temperature drop: 15.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 15.13,
+    "timestamp": "2026-12-16T09:25:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7739522111347128,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 97.18,
+    "incident_id": null,
+    "light": 125.2,
+    "reasoning": "Unexpected temperature drop: 16.3\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 16.33,
+    "timestamp": "2026-12-16T09:40:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 0.7723419421889477,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 99.0,
+    "incident_id": null,
+    "light": 370.92,
+    "reasoning": "Unexpected humidity spike: 99.0% (80% upper bound)",
+    "root_cause": null,
+    "temperature": 23.01,
+    "timestamp": "2026-12-18T12:40:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7638935719692417,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 98.0,
+    "incident_id": null,
+    "light": 115.02,
+    "reasoning": "Unexpected temperature drop: 15.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 15.93,
+    "timestamp": "2026-12-16T09:35:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7444287496664281,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 41.0,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.77,
+    "timestamp": "2026-12-24T14:10:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7412896323119174,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 97.0,
+    "incident_id": null,
+    "light": 142.56,
+    "reasoning": "Unexpected temperature drop: 17.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 17.13,
+    "timestamp": "2026-12-16T09:50:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7380599525051326,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.0,
+    "incident_id": null,
+    "light": 130.71,
+    "reasoning": "Unexpected temperature drop: 19.4\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.4,
+    "timestamp": "2026-12-25T09:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7352100467304303,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 97.0,
+    "incident_id": null,
+    "light": 134.38,
+    "reasoning": "Unexpected temperature drop: 16.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 16.73,
+    "timestamp": "2026-12-16T09:45:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 0.7197479582630091,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 99.0,
+    "incident_id": null,
+    "light": 376.31,
+    "reasoning": "Unexpected humidity spike: 99.0% (80% upper bound)",
+    "root_cause": null,
+    "temperature": 23.6,
+    "timestamp": "2026-12-18T12:45:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.71076894431092,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 96.18,
+    "incident_id": null,
+    "light": 156.92,
+    "reasoning": "Unexpected temperature drop: 18.0\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.01,
+    "timestamp": "2026-12-16T10:00:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7062782598486439,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 97.0,
+    "incident_id": null,
+    "light": 150.56,
+    "reasoning": "Unexpected temperature drop: 17.5\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 17.53,
+    "timestamp": "2026-12-16T09:55:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.7000808044691686,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 55.33,
+    "reasoning": "Unexpected temperature drop: 18.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.12,
+    "timestamp": "2026-12-24T13:40:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6964794418079154,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 37.33,
+    "reasoning": "Unexpected temperature drop: 18.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.88,
+    "timestamp": "2026-12-24T14:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6939792622412408,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.0,
+    "incident_id": null,
+    "light": 145.6,
+    "reasoning": "Unexpected temperature drop: 19.5\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.5,
+    "timestamp": "2026-12-25T09:20:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6930225880435137,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 78.11,
+    "reasoning": "Unexpected temperature drop: 13.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 13.85,
+    "timestamp": "2026-12-16T09:10:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6824662800946998,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 96.0,
+    "incident_id": null,
+    "light": 172.56,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.75,
+    "timestamp": "2026-12-16T10:10:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6787678997395009,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 96.0,
+    "incident_id": null,
+    "light": 164.56,
+    "reasoning": "Unexpected temperature drop: 18.4\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.43,
+    "timestamp": "2026-12-16T10:05:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 0.6752811783552406,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 99.0,
+    "incident_id": null,
+    "light": 359.64,
+    "reasoning": "Unexpected humidity spike: 99.0% (80% upper bound)",
+    "root_cause": null,
+    "temperature": 24.11,
+    "timestamp": "2026-12-18T12:50:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6728241777452987,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 97.81,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.8,
+    "timestamp": "2026-12-21T12:30:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6580469050255995,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 52.5,
+    "reasoning": "Unexpected temperature drop: 18.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.1,
+    "timestamp": "2026-12-24T13:45:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6556121234749241,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.0,
+    "incident_id": null,
+    "light": 158.57,
+    "reasoning": "Unexpected temperature drop: 19.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.69,
+    "timestamp": "2026-12-25T09:25:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6549161162620416,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 32.0,
+    "reasoning": "Unexpected temperature drop: 19.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.07,
+    "timestamp": "2026-12-24T14:20:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.652780896211273,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 55.33,
+    "reasoning": "Unexpected temperature drop: 18.1\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.1,
+    "timestamp": "2026-12-24T13:50:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6515528204891693,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 53.5,
+    "reasoning": "Unexpected temperature drop: 18.3\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.27,
+    "timestamp": "2026-12-24T13:55:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6383536422472507,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 99.91,
+    "reasoning": "Unexpected temperature drop: 18.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.9,
+    "timestamp": "2026-12-21T12:35:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6181785735792933,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.0,
+    "incident_id": null,
+    "light": 165.77,
+    "reasoning": "Unexpected temperature drop: 19.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.89,
+    "timestamp": "2026-12-25T09:30:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6176103275181248,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 27.67,
+    "reasoning": "Unexpected temperature drop: 19.3\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.27,
+    "timestamp": "2026-12-24T14:25:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6155614684654606,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 88.33,
+    "reasoning": "Unexpected temperature drop: 18.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.9,
+    "timestamp": "2026-12-21T12:45:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.60684979964232,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 99.18,
+    "incident_id": null,
+    "light": 83.1,
+    "reasoning": "Unexpected temperature drop: 14.2\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 14.23,
+    "timestamp": "2026-12-16T09:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6068149187342274,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 96.0,
+    "incident_id": null,
+    "light": 178.1,
+    "reasoning": "Unexpected temperature drop: 18.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.72,
+    "timestamp": "2026-12-16T10:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.6024714801912346,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 95.23,
+    "reasoning": "Unexpected temperature drop: 18.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.9,
+    "timestamp": "2026-12-21T12:40:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5973586801796276,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 94.14,
+    "reasoning": "Unexpected temperature drop: 18.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.69,
+    "timestamp": "2026-12-21T12:25:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5966371589629687,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 92.53,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.8,
+    "timestamp": "2026-12-21T13:00:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5955345029691769,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 82.95,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.8,
+    "timestamp": "2026-12-21T12:55:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5897679106730795,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 72.33,
+    "reasoning": "Unexpected temperature drop: 18.6\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.6,
+    "timestamp": "2026-12-21T13:20:00"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "anomaly_score": 0.5874199459121957,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 30.97,
+    "incident_id": null,
+    "light": 167.93,
+    "reasoning": "Unexpected humidity drop: 31.0% (50% lower bound)",
+    "root_cause": null,
+    "temperature": 20.0,
+    "timestamp": "2026-12-25T09:35:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5838113360549291,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 82.28,
+    "reasoning": "Unexpected temperature drop: 18.9\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.9,
+    "timestamp": "2026-12-21T12:50:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5834031227451241,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 22.0,
+    "reasoning": "Unexpected temperature drop: 19.5\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 19.47,
+    "timestamp": "2026-12-24T14:30:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5807506912626214,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 88.44,
+    "reasoning": "Unexpected temperature drop: 18.4\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.39,
+    "timestamp": "2026-12-21T12:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5761584756123704,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 98.72,
+    "reasoning": "Unexpected temperature drop: 18.8\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.8,
+    "timestamp": "2026-12-21T13:05:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5667541312069823,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 100.0,
+    "incident_id": null,
+    "light": 79.65,
+    "reasoning": "Unexpected temperature drop: 18.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 18.7,
+    "timestamp": "2026-12-21T13:15:00"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "anomaly_score": 0.5650000879316693,
+    "co2": 400.0,
+    "fault_type": "spike_fault",
+    "humidity": 99.0,
+    "incident_id": null,
+    "light": 85.64,
+    "reasoning": "Unexpected temperature drop: 14.7\u00b0C (20\u00b0C lower bound)",
+    "root_cause": null,
+    "temperature": 14.71,
+    "timestamp": "2026-12-16T09:20:00"
+   }
+  ],
+  "score_scale_version": 2,
+  "threshold": 0.5
+ },
+ "episodes": {
+  "anomaly_count": 62,
+  "episode_count": 14,
+  "episodes": [
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "humidity",
+    "detector": "stuck_fault",
+    "direction": "spike",
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 125400.0,
+    "end_ts": "2026-12-15T10:50:00+00:00",
+    "episode_id": "humidity:stuck_fault:spike:2026-12-14T00:00:00+00:00",
+    "first_value": 100.0,
+    "frozen_sample_count": 419,
+    "headline": "Unexpected humidity spike: 100.0% (80% upper bound) (a single reading)",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 100.0,
+    "movement": "steady",
+    "peak_score": 1.0,
+    "peak_ts": "2026-12-14T00:00:00+00:00",
+    "peak_value": 100.0,
+    "raw_slot_count": 419,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-14T00:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "severity": "urgent",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-14T00:00:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "humidity",
+    "detector": "stuck_fault",
+    "direction": "spike",
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 79500.0,
+    "end_ts": "2026-12-16T09:10:00+00:00",
+    "episode_id": "humidity:stuck_fault:spike:2026-12-15T11:05:00+00:00",
+    "first_value": 100.0,
+    "frozen_sample_count": 266,
+    "headline": "Unexpected humidity spike: 100.0% (80% upper bound) (a single reading)",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 100.0,
+    "movement": "steady",
+    "peak_score": 1.0,
+    "peak_ts": "2026-12-15T11:05:00+00:00",
+    "peak_value": 100.0,
+    "raw_slot_count": 266,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-15T11:05:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "severity": "urgent",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-15T11:05:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "channel": "humidity",
+    "detector": "stuck_fault",
+    "direction": "spike",
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 172500.0,
+    "end_ts": "2026-12-18T11:15:00+00:00",
+    "episode_id": "humidity:stuck_fault:spike:2026-12-16T11:20:00+00:00",
+    "first_value": 100.0,
+    "frozen_sample_count": 576,
+    "headline": "Unexpected humidity spike: 100.0% (80% upper bound) (a single reading)",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 100.0,
+    "movement": "steady",
+    "peak_score": 1.0,
+    "peak_ts": "2026-12-16T11:20:00+00:00",
+    "peak_value": 100.0,
+    "raw_slot_count": 576,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-16T11:20:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "severity": "urgent",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-16T11:20:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "channel": "humidity",
+    "detector": "stuck_fault",
+    "direction": "spike",
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 589800.0,
+    "end_ts": "2026-12-25T08:50:00+00:00",
+    "episode_id": "humidity:stuck_fault:spike:2026-12-18T13:00:00+00:00",
+    "first_value": 100.0,
+    "frozen_sample_count": 1897,
+    "headline": "Unexpected humidity spike: 100.0% (80% upper bound) (a single reading)",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 100.0,
+    "movement": "steady",
+    "peak_score": 1.0,
+    "peak_ts": "2026-12-18T13:00:00+00:00",
+    "peak_value": 100.0,
+    "raw_slot_count": 1967,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-18T13:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "severity": "urgent",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-18T13:00:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_2_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 2400.0,
+    "end_ts": "2026-12-24T14:40:00+00:00",
+    "episode_id": "measured_pipe_2_temp:statistical:None:2026-12-24T14:00:00+00:00",
+    "first_value": 53.5,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_2_temp reading: 53.5, steady over 40 min",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 56.0,
+    "movement": "steady",
+    "peak_score": 0.8463609931876449,
+    "peak_ts": "2026-12-24T14:00:00+00:00",
+    "peak_value": 53.5,
+    "raw_slot_count": null,
+    "sample_count": 9,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6549161162620416,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:20:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6964794418079154,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.7444287496664281,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:10:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8031680705573419,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:05:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8463609931876449,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 53.5",
+      "timestamp": "2026-12-24T14:00:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": 2.0,
+    "start_ts": "2026-12-24T14:00:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_hd",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 3000.0,
+    "end_ts": "2026-12-16T10:15:00+00:00",
+    "episode_id": "measured_hd:statistical:None:2026-12-16T09:25:00+00:00",
+    "first_value": 0.2,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_hd reading: 0.3, rising over 50 min",
+    "is_recovery": true,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 0.62,
+    "movement": "rising",
+    "peak_score": 0.8063950118235775,
+    "peak_ts": "2026-12-16T09:30:00+00:00",
+    "peak_value": 0.28,
+    "raw_slot_count": null,
+    "sample_count": 11,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7412896323119174,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.5",
+      "timestamp": "2026-12-16T09:50:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7739522111347128,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.4",
+      "timestamp": "2026-12-16T09:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7638935719692417,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:35:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.8063950118235775,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.782577017657072,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-16T09:25:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": 0.5563636363636363,
+    "start_ts": "2026-12-16T09:25:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_hd",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 2400.0,
+    "end_ts": "2026-12-25T09:50:00+00:00",
+    "episode_id": "measured_hd:statistical:None:2026-12-25T09:10:00+00:00",
+    "first_value": 11.48,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_hd reading: 11.5, rising over 40 min",
+    "is_recovery": true,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 12.1,
+    "movement": "rising",
+    "peak_score": 0.7890247891530674,
+    "peak_ts": "2026-12-25T09:10:00+00:00",
+    "peak_value": 11.48,
+    "raw_slot_count": null,
+    "sample_count": 9,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6181785735792933,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.9",
+      "timestamp": "2026-12-25T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6556121234749241,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.9",
+      "timestamp": "2026-12-25T09:25:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6939792622412408,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.8",
+      "timestamp": "2026-12-25T09:20:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7380599525051326,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.7",
+      "timestamp": "2026-12-25T09:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7890247891530674,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.5",
+      "timestamp": "2026-12-25T09:10:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": 0.841999999999999,
+    "start_ts": "2026-12-25T09:10:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "channel": "measured_hd",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 600.0,
+    "end_ts": "2026-12-18T12:50:00+00:00",
+    "episode_id": "measured_hd:statistical:None:2026-12-18T12:40:00+00:00",
+    "first_value": 0.2,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_hd reading: 0.2, steady over 10 min",
+    "is_recovery": true,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 0.2,
+    "movement": "steady",
+    "peak_score": 0.7723419421889477,
+    "peak_ts": "2026-12-18T12:40:00+00:00",
+    "peak_value": 0.2,
+    "raw_slot_count": null,
+    "sample_count": 3,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6752811783552406,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:50:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7197479582630091,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7723419421889477,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:40:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": 0.0,
+    "start_ts": "2026-12-18T12:40:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_1_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 900.0,
+    "end_ts": "2026-12-24T13:55:00+00:00",
+    "episode_id": "measured_pipe_1_temp:statistical:None:2026-12-24T13:40:00+00:00",
+    "first_value": 44.0,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_1_temp reading: 44.0, rising over 15 min",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 45.83,
+    "movement": "rising",
+    "peak_score": 0.7000808044691686,
+    "peak_ts": "2026-12-24T13:40:00+00:00",
+    "peak_value": 44.0,
+    "raw_slot_count": null,
+    "sample_count": 4,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6515528204891693,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 45.8",
+      "timestamp": "2026-12-24T13:55:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.652780896211273,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.8",
+      "timestamp": "2026-12-24T13:50:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6580469050255995,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.0",
+      "timestamp": "2026-12-24T13:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.7000808044691686,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.0",
+      "timestamp": "2026-12-24T13:40:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": 7.583999999999991,
+    "start_ts": "2026-12-24T13:40:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_1_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 600.0,
+    "end_ts": "2026-12-16T09:20:00+00:00",
+    "episode_id": "measured_pipe_1_temp:statistical:None:2026-12-16T09:10:00+00:00",
+    "first_value": 40.36,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_1_temp reading: 40.4, falling over 10 min",
+    "is_recovery": true,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 39.0,
+    "movement": "falling",
+    "peak_score": 0.6930225880435137,
+    "peak_ts": "2026-12-16T09:10:00+00:00",
+    "peak_value": 40.36,
+    "raw_slot_count": null,
+    "sample_count": 3,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5650000879316693,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 39.0",
+      "timestamp": "2026-12-16T09:20:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.60684979964232,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 39.2",
+      "timestamp": "2026-12-16T09:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6930225880435137,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 40.4",
+      "timestamp": "2026-12-16T09:10:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": -8.159999999999997,
+    "start_ts": "2026-12-16T09:10:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_2_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 3300.0,
+    "end_ts": "2026-12-21T13:10:00+00:00",
+    "episode_id": "measured_pipe_2_temp:statistical:None:2026-12-21T12:15:00+00:00",
+    "first_value": 30.0,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_2_temp reading: 27.1, falling over 55 min",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 24.0,
+    "movement": "falling",
+    "peak_score": 0.6728241777452987,
+    "peak_ts": "2026-12-21T12:30:00+00:00",
+    "peak_value": 27.09,
+    "raw_slot_count": null,
+    "sample_count": 11,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6155614684654606,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 26.1",
+      "timestamp": "2026-12-21T12:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6024714801912346,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.0",
+      "timestamp": "2026-12-21T12:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6383536422472507,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.0",
+      "timestamp": "2026-12-21T12:35:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6728241777452987,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.1",
+      "timestamp": "2026-12-21T12:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.5973586801796276,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 29.1",
+      "timestamp": "2026-12-21T12:25:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": -6.902608695652173,
+    "start_ts": "2026-12-21T12:15:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_1_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 0.0,
+    "end_ts": "2026-12-21T13:00:00+00:00",
+    "episode_id": "measured_pipe_1_temp:statistical:None:2026-12-21T13:00:00+00:00",
+    "first_value": 28.0,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_1_temp reading: 28.0 (a single reading)",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 28.0,
+    "movement": "steady",
+    "peak_score": 0.5966371589629687,
+    "peak_ts": "2026-12-21T13:00:00+00:00",
+    "peak_value": 28.0,
+    "raw_slot_count": null,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5966371589629687,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 28.0",
+      "timestamp": "2026-12-21T13:00:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-21T13:00:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "temperature",
+     "humidity"
+    ],
+    "channel": "measured_pipe_1_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 1500.0,
+    "end_ts": "2026-12-21T13:40:00+00:00",
+    "episode_id": "measured_pipe_1_temp:statistical:None:2026-12-21T13:15:00+00:00",
+    "first_value": 27.05,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_pipe_1_temp reading: 26.1, falling over 25 min",
+    "is_recovery": false,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 25.05,
+    "movement": "falling",
+    "peak_score": 0.5897679106730795,
+    "peak_ts": "2026-12-21T13:20:00+00:00",
+    "peak_value": 26.05,
+    "raw_slot_count": null,
+    "sample_count": 6,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5257342514135517,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 25.1",
+      "timestamp": "2026-12-21T13:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5296384127575761,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 26.0",
+      "timestamp": "2026-12-21T13:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5600873011220773,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 26.0",
+      "timestamp": "2026-12-21T13:25:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5897679106730795,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 26.1",
+      "timestamp": "2026-12-21T13:20:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.5667541312069823,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 27.1",
+      "timestamp": "2026-12-21T13:15:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": -3.4800000000000004,
+    "start_ts": "2026-12-21T13:15:00+00:00",
+    "trend": "flat"
+   },
+   {
+    "affected_sensors": [
+     "humidity"
+    ],
+    "channel": "measured_plant_temp",
+    "detector": "statistical",
+    "direction": null,
+    "drift_first_detected_ts": null,
+    "drift_input_id": null,
+    "drift_input_kind": null,
+    "drift_message": null,
+    "drift_offset": null,
+    "duration_seconds": 0.0,
+    "end_ts": "2026-12-18T12:55:00+00:00",
+    "episode_id": "measured_plant_temp:statistical:None:2026-12-18T12:55:00+00:00",
+    "first_value": 25.57,
+    "frozen_sample_count": null,
+    "headline": "Unusual measured_plant_temp reading: 25.6 (a single reading)",
+    "is_recovery": true,
+    "is_truncated_end": false,
+    "is_truncated_start": false,
+    "last_value": 25.57,
+    "movement": "steady",
+    "peak_score": 0.5348400955985614,
+    "peak_ts": "2026-12-18T12:55:00+00:00",
+    "peak_value": 25.57,
+    "raw_slot_count": null,
+    "sample_count": 1,
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_plant_temp"
+      ],
+      "anomaly_score": 0.5348400955985614,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_plant_temp reading: 25.6",
+      "timestamp": "2026-12-18T12:55:00",
+      "values": {}
+     }
+    ],
+    "severity": "critical",
+    "slope_per_hour": null,
+    "start_ts": "2026-12-18T12:55:00+00:00",
+    "trend": "flat"
+   }
+  ],
+  "score_scale_version": 2,
+  "threshold": 0.5
+ },
+ "groups_date": {
+  "anomaly_count": 62,
+  "group_by": "date",
+  "groups": [
+   {
+    "count": 9,
+    "key": "2026-12-25",
+    "sample_ids": [
+     "2026-12-25T09:30:00",
+     "2026-12-25T09:25:00",
+     "2026-12-25T09:20:00",
+     "2026-12-25T09:15:00",
+     "2026-12-25T09:10:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6181785735792933,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.9",
+      "timestamp": "2026-12-25T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6556121234749241,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.9",
+      "timestamp": "2026-12-25T09:25:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6939792622412408,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.8",
+      "timestamp": "2026-12-25T09:20:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7380599525051326,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.7",
+      "timestamp": "2026-12-25T09:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7890247891530674,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.5",
+      "timestamp": "2026-12-25T09:10:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.7890247891530674
+   },
+   {
+    "count": 13,
+    "key": "2026-12-24",
+    "sample_ids": [
+     "2026-12-24T14:15:00",
+     "2026-12-24T14:10:00",
+     "2026-12-24T14:05:00",
+     "2026-12-24T14:00:00",
+     "2026-12-24T13:40:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6964794418079154,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.7444287496664281,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:10:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8031680705573419,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:05:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8463609931876449,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 53.5",
+      "timestamp": "2026-12-24T14:00:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.7000808044691686,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.0",
+      "timestamp": "2026-12-24T13:40:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.8463609931876449
+   },
+   {
+    "count": 18,
+    "key": "2026-12-21",
+    "sample_ids": [
+     "2026-12-21T12:45:00",
+     "2026-12-21T12:40:00",
+     "2026-12-21T12:35:00",
+     "2026-12-21T12:30:00",
+     "2026-12-21T12:25:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6155614684654606,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 26.1",
+      "timestamp": "2026-12-21T12:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6024714801912346,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.0",
+      "timestamp": "2026-12-21T12:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6383536422472507,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.0",
+      "timestamp": "2026-12-21T12:35:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6728241777452987,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.1",
+      "timestamp": "2026-12-21T12:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.5973586801796276,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 29.1",
+      "timestamp": "2026-12-21T12:25:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.6728241777452987
+   },
+   {
+    "count": 5,
+    "key": "2026-12-18",
+    "sample_ids": [
+     "2026-12-18T13:00:00",
+     "2026-12-18T12:55:00",
+     "2026-12-18T12:50:00",
+     "2026-12-18T12:45:00",
+     "2026-12-18T12:40:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-18T13:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "measured_plant_temp"
+      ],
+      "anomaly_score": 0.5348400955985614,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_plant_temp reading: 25.6",
+      "timestamp": "2026-12-18T12:55:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.6752811783552406,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:50:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7197479582630091,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7723419421889477,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:40:00",
+      "values": {}
+     }
+    ],
+    "top_score": 1.0
+   },
+   {
+    "count": 15,
+    "key": "2026-12-16",
+    "sample_ids": [
+     "2026-12-16T11:20:00",
+     "2026-12-16T09:40:00",
+     "2026-12-16T09:35:00",
+     "2026-12-16T09:30:00",
+     "2026-12-16T09:25:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-16T11:20:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7739522111347128,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.4",
+      "timestamp": "2026-12-16T09:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7638935719692417,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:35:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.8063950118235775,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.782577017657072,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-16T09:25:00",
+      "values": {}
+     }
+    ],
+    "top_score": 1.0
+   },
+   {
+    "count": 1,
+    "key": "2026-12-15",
+    "sample_ids": [
+     "2026-12-15T11:05:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-15T11:05:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "top_score": 1.0
+   },
+   {
+    "count": 1,
+    "key": "2026-12-14",
+    "sample_ids": [
+     "2026-12-14T00:00:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-14T00:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "top_score": 1.0
+   }
+  ],
+  "score_scale_version": 2,
+  "threshold": 0.5
+ },
+ "groups_sensor": {
+  "anomaly_count": 62,
+  "group_by": "sensor",
+  "groups": [
+   {
+    "count": 23,
+    "key": "measured_hd",
+    "sample_ids": [
+     "2026-12-25T09:10:00",
+     "2026-12-18T12:40:00",
+     "2026-12-16T09:40:00",
+     "2026-12-16T09:30:00",
+     "2026-12-16T09:25:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7890247891530674,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.5",
+      "timestamp": "2026-12-25T09:10:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7723419421889477,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-18T12:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7739522111347128,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.4",
+      "timestamp": "2026-12-16T09:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.8063950118235775,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.782577017657072,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-16T09:25:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.8063950118235775
+   },
+   {
+    "count": 20,
+    "key": "measured_pipe_2_temp",
+    "sample_ids": [
+     "2026-12-24T14:15:00",
+     "2026-12-24T14:10:00",
+     "2026-12-24T14:05:00",
+     "2026-12-24T14:00:00",
+     "2026-12-21T12:30:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6964794418079154,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:15:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.7444287496664281,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:10:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8031680705573419,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:05:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8463609931876449,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 53.5",
+      "timestamp": "2026-12-24T14:00:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.6728241777452987,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 27.1",
+      "timestamp": "2026-12-21T12:30:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.8463609931876449
+   },
+   {
+    "count": 14,
+    "key": "measured_pipe_1_temp",
+    "sample_ids": [
+     "2026-12-24T13:55:00",
+     "2026-12-24T13:50:00",
+     "2026-12-24T13:45:00",
+     "2026-12-24T13:40:00",
+     "2026-12-16T09:10:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6515528204891693,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 45.8",
+      "timestamp": "2026-12-24T13:55:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.652780896211273,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.8",
+      "timestamp": "2026-12-24T13:50:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6580469050255995,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.0",
+      "timestamp": "2026-12-24T13:45:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.7000808044691686,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 44.0",
+      "timestamp": "2026-12-24T13:40:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_1_temp"
+      ],
+      "anomaly_score": 0.6930225880435137,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_1_temp reading: 40.4",
+      "timestamp": "2026-12-16T09:10:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.7000808044691686
+   },
+   {
+    "count": 4,
+    "key": "humidity",
+    "sample_ids": [
+     "2026-12-18T13:00:00",
+     "2026-12-16T11:20:00",
+     "2026-12-15T11:05:00",
+     "2026-12-14T00:00:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-18T13:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-16T11:20:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-15T11:05:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-14T00:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "top_score": 1.0
+   },
+   {
+    "count": 1,
+    "key": "measured_plant_temp",
+    "sample_ids": [
+     "2026-12-18T12:55:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_plant_temp"
+      ],
+      "anomaly_score": 0.5348400955985614,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_plant_temp reading: 25.6",
+      "timestamp": "2026-12-18T12:55:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.5348400955985614
+   }
+  ],
+  "score_scale_version": 2,
+  "threshold": 0.5
+ },
+ "groups_type": {
+  "anomaly_count": 62,
+  "group_by": "type",
+  "groups": [
+   {
+    "count": 58,
+    "key": "unknown",
+    "sample_ids": [
+     "2026-12-25T09:10:00",
+     "2026-12-24T14:05:00",
+     "2026-12-24T14:00:00",
+     "2026-12-16T09:30:00",
+     "2026-12-16T09:25:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.7890247891530674,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 11.5",
+      "timestamp": "2026-12-25T09:10:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8031680705573419,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 56.0",
+      "timestamp": "2026-12-24T14:05:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_pipe_2_temp"
+      ],
+      "anomaly_score": 0.8463609931876449,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_pipe_2_temp reading: 53.5",
+      "timestamp": "2026-12-24T14:00:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.8063950118235775,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.3",
+      "timestamp": "2026-12-16T09:30:00",
+      "values": {}
+     },
+     {
+      "affected_sensors": [
+       "measured_hd"
+      ],
+      "anomaly_score": 0.782577017657072,
+      "detected_severity": "critical",
+      "reasoning": "Unusual measured_hd reading: 0.2",
+      "timestamp": "2026-12-16T09:25:00",
+      "values": {}
+     }
+    ],
+    "top_score": 0.8463609931876449
+   },
+   {
+    "count": 4,
+    "key": "stuck_fault",
+    "sample_ids": [
+     "2026-12-18T13:00:00",
+     "2026-12-16T11:20:00",
+     "2026-12-15T11:05:00",
+     "2026-12-14T00:00:00"
+    ],
+    "samples": [
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-18T13:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-16T11:20:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-15T11:05:00",
+      "values": {
+       "humidity": 100.0
+      }
+     },
+     {
+      "affected_sensors": [
+       "humidity"
+      ],
+      "anomaly_score": 1.0,
+      "detected_severity": "urgent",
+      "reasoning": "Unexpected humidity spike: 100.0% (80% upper bound)",
+      "timestamp": "2026-12-14T00:00:00",
+      "values": {
+       "humidity": 100.0
+      }
+     }
+    ],
+    "top_score": 1.0
+   }
+  ],
+  "score_scale_version": 2,
+  "threshold": 0.5
+ },
+ "upload_response_episodes": [
+  {
+   "channel": "humidity",
+   "detected_ts": "2026-12-14T06:00:00+00:00",
+   "detector": "stuck_fault",
+   "duration_seconds": 125400.0,
+   "end_ts": "2026-12-15T10:50:00+00:00",
+   "frozen_sample_count": 419,
+   "frozen_value": 100.0,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": "2026-12-14T00:00:00+00:00",
+   "peak_score": 1.0,
+   "raw_slot_count": 419,
+   "sample_count": 1,
+   "severity": "urgent",
+   "start_ts": "2026-12-14T00:00:00+00:00"
+  },
+  {
+   "channel": "humidity",
+   "detected_ts": "2026-12-15T17:05:00+00:00",
+   "detector": "stuck_fault",
+   "duration_seconds": 79500.0,
+   "end_ts": "2026-12-16T09:10:00+00:00",
+   "frozen_sample_count": 266,
+   "frozen_value": 100.0,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": "2026-12-15T11:05:00+00:00",
+   "peak_score": 1.0,
+   "raw_slot_count": 266,
+   "sample_count": 1,
+   "severity": "urgent",
+   "start_ts": "2026-12-15T11:05:00+00:00"
+  },
+  {
+   "channel": "measured_pipe_1_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 1800.0,
+   "end_ts": "2026-12-16T09:40:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.6930225880435137,
+   "raw_slot_count": null,
+   "sample_count": 7,
+   "severity": "critical",
+   "start_ts": "2026-12-16T09:10:00+00:00"
+  },
+  {
+   "channel": "measured_hd",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 3000.0,
+   "end_ts": "2026-12-16T10:15:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.8063950118235775,
+   "raw_slot_count": null,
+   "sample_count": 11,
+   "severity": "critical",
+   "start_ts": "2026-12-16T09:25:00+00:00"
+  },
+  {
+   "channel": "humidity",
+   "detected_ts": "2026-12-16T17:20:00+00:00",
+   "detector": "stuck_fault",
+   "duration_seconds": 172500.0,
+   "end_ts": "2026-12-18T11:15:00+00:00",
+   "frozen_sample_count": 576,
+   "frozen_value": 100.0,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": "2026-12-16T11:20:00+00:00",
+   "peak_score": 1.0,
+   "raw_slot_count": 576,
+   "sample_count": 1,
+   "severity": "urgent",
+   "start_ts": "2026-12-16T11:20:00+00:00"
+  },
+  {
+   "channel": "measured_hd",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 600.0,
+   "end_ts": "2026-12-18T12:50:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.7723419421889477,
+   "raw_slot_count": null,
+   "sample_count": 3,
+   "severity": "critical",
+   "start_ts": "2026-12-18T12:40:00+00:00"
+  },
+  {
+   "channel": "measured_plant_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 600.0,
+   "end_ts": "2026-12-18T12:55:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.5445139286814835,
+   "raw_slot_count": null,
+   "sample_count": 3,
+   "severity": "critical",
+   "start_ts": "2026-12-18T12:45:00+00:00"
+  },
+  {
+   "channel": "humidity",
+   "detected_ts": "2026-12-18T19:00:00+00:00",
+   "detector": "stuck_fault",
+   "duration_seconds": 589800.0,
+   "end_ts": "2026-12-25T08:50:00+00:00",
+   "frozen_sample_count": 1897,
+   "frozen_value": 100.0,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": "2026-12-18T13:00:00+00:00",
+   "peak_score": 1.0,
+   "raw_slot_count": 1967,
+   "sample_count": 1,
+   "severity": "urgent",
+   "start_ts": "2026-12-18T13:00:00+00:00"
+  },
+  {
+   "channel": "measured_pipe_2_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 4200.0,
+   "end_ts": "2026-12-21T13:25:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.6728241777452987,
+   "raw_slot_count": null,
+   "sample_count": 15,
+   "severity": "critical",
+   "start_ts": "2026-12-21T12:15:00+00:00"
+  },
+  {
+   "channel": "measured_pipe_1_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 2400.0,
+   "end_ts": "2026-12-21T13:40:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.5966371589629687,
+   "raw_slot_count": null,
+   "sample_count": 9,
+   "severity": "critical",
+   "start_ts": "2026-12-21T13:00:00+00:00"
+  },
+  {
+   "channel": "measured_pipe_1_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 1800.0,
+   "end_ts": "2026-12-24T14:10:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.7000808044691686,
+   "raw_slot_count": null,
+   "sample_count": 7,
+   "severity": "critical",
+   "start_ts": "2026-12-24T13:40:00+00:00"
+  },
+  {
+   "channel": "measured_pipe_2_temp",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 3000.0,
+   "end_ts": "2026-12-24T14:40:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.8463609931876449,
+   "raw_slot_count": null,
+   "sample_count": 11,
+   "severity": "critical",
+   "start_ts": "2026-12-24T13:50:00+00:00"
+  },
+  {
+   "channel": "measured_hd",
+   "detected_ts": null,
+   "detector": "statistical",
+   "duration_seconds": 2400.0,
+   "end_ts": "2026-12-25T09:50:00+00:00",
+   "frozen_sample_count": null,
+   "frozen_value": null,
+   "is_ongoing": false,
+   "is_recovery": false,
+   "onset_ts": null,
+   "peak_score": 0.7890247891530674,
+   "raw_slot_count": null,
+   "sample_count": 9,
+   "severity": "critical",
+   "start_ts": "2026-12-25T09:10:00+00:00"
+  }
+ ]
+}

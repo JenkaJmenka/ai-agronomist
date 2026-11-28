@@ -13,7 +13,7 @@ from src.api.services.fault_classification import (
     _UNKNOWN_KEY,
     _canonical_sensor_value,
     _fault_type_from_anomaly_type,
-    _fault_type_from_detector,
+    _fault_type_from_stored_or_detector,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
     _simple_reasoning_from_values,
@@ -92,6 +92,7 @@ def _row_dict_from_minimal(
     trigger_detector: str | None = None,
     detected_severity: str | None = None,
     trigger_value: float | None = None,
+    stored_fault_type: str | None = None,
 ) -> dict[str, Any]:
     """Build a row dict suitable for enrich_anomaly_rows from column values."""
     return {
@@ -106,6 +107,7 @@ def _row_dict_from_minimal(
         "trigger_detector": trigger_detector,
         "detected_severity": detected_severity,
         "trigger_value": trigger_value,
+        "stored_fault_type": stored_fault_type,
     }
 
 
@@ -256,7 +258,9 @@ def _resolve_fallback_enrichment(
     # Priority 2: trigger_detector (upload path; None when absent or
     # unrecognised → fall through to value-based).
     if mapped_fault is None:
-        mapped_fault = _fault_type_from_detector(trigger_detector)
+        mapped_fault = _fault_type_from_stored_or_detector(
+            row_dict.get("stored_fault_type"), trigger_detector
+        )
 
     # Priority 3: value-based fallback — only reached when no detector info is
     # available (pre-migration rows).  Checks NORMALISATION ranges, not sensor

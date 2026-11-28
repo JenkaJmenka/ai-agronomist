@@ -119,6 +119,7 @@ async def _fetch_minimal_flagged_rows(
             SensorReading.trigger_detector,
             SensorReading.detected_severity,
             SensorReading.trigger_value,
+            SensorReading.fault_type,
         )
         .where(*_base_conditions(tenant_id, greenhouse_id, start, end, threshold))
         .order_by(SensorReading.timestamp)
@@ -160,6 +161,7 @@ def _build_date_sample_subquery(
             SensorReading.trigger_detector,
             SensorReading.detected_severity,
             SensorReading.trigger_value,
+            SensorReading.fault_type,
             utc_date(SensorReading.timestamp).label("day"),
             rn_expr,
         )
@@ -189,6 +191,7 @@ def _assemble_date_groups(
             trigger_detector=getattr(r, "trigger_detector", None),
             detected_severity=getattr(r, "detected_severity", None),
             trigger_value=getattr(r, "trigger_value", None),
+            stored_fault_type=getattr(r, "fault_type", None),
         )
         for r in sample_rows
     ]

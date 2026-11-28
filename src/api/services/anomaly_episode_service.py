@@ -187,6 +187,7 @@ async def _build_reading_episodes(
             trigger_detector=getattr(r, "trigger_detector", None),
             detected_severity=getattr(r, "detected_severity", None),
             trigger_value=getattr(r, "trigger_value", None),
+            stored_fault_type=getattr(r, "fault_type", None),
         )
         for r in minimal_rows
     ]

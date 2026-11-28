@@ -32,7 +32,7 @@ from src.api.services.fault_classification import (  # noqa: F401
     _UNKNOWN_KEY,
     _affected_sensors_from_incident,
     _fault_type_from_anomaly_type as _fault_type_from_anomaly_type,
-    _fault_type_from_detector,
+    _fault_type_from_stored_or_detector,
     _fault_type_from_incident,
     _infer_fault_type_from_values,
     _infer_sensors_from_values,
@@ -101,8 +101,9 @@ def _bucket_rows_by_group(
             #    trigger_detector column is NULL.
             mapped_fault: str | None = _fault_type_from_anomaly_type(r.anomaly_type)
             if mapped_fault is None:
-                mapped_fault = _fault_type_from_detector(
-                    trigger_by_ts[ts_iso].get("trigger_detector")
+                mapped_fault = _fault_type_from_stored_or_detector(
+                    getattr(r, "fault_type", None),
+                    trigger_by_ts[ts_iso].get("trigger_detector"),
                 )
             fault_type = (
                 mapped_fault
