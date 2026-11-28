@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
@@ -36,13 +37,21 @@ from src.api.services.drift_watch_alerts import (
     build_drift_alert_message,
     oos_counts_for_input,
 )
+from src.api.services.drift_watch_service import _spec_columns, load_hourly_frame
 from src.config import (
     DRIFT_WATCH_ALERT_ENABLE_MAX_COUNT,
+    DRIFT_WATCH_ALERT_MIN_OFFSET_MULT,
+    DRIFT_WATCH_BASELINE_WEEKS,
     DRIFT_WATCH_MIN_HISTORY_WEEKS,
     DRIFT_WATCH_QUIET_HOURS,
 )
 from src.db.models import DriftWatchEpisode, DriftWatchFeedback, DriftWatchInput
-from src.models.drift_watch import DriftInputSpec, InputKind
+from src.models.drift_watch import (
+    CalibrationResult,
+    DriftInputSpec,
+    InputKind,
+    replay_series,
+)
 from src.db.session import get_db
 from src.api.schemas.drift_watch import (
     DriftWatchEpisodeResponse,
@@ -50,6 +59,9 @@ from src.api.schemas.drift_watch import (
     DriftWatchFeedbackResponse,
     DriftWatchInputResponse,
     DriftWatchAlertStateResponse,
+    DriftSeriesEpisode,
+    DriftSeriesPoint,
+    DriftWatchSeriesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -445,4 +457,228 @@ async def disable_drift_watch_alerts(
     return await _set_alert_state(
         enable=False, tenant_id=tenant_id, greenhouse_id=greenhouse_id,
         input_id=input_id, db=db, auth_tenant=auth_tenant, caller=caller,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Series (drift chart)
+# ---------------------------------------------------------------------------
+
+_SERIES_DEFAULT_WEEKS = 13
+_SERIES_MAX_WEEKS = 53
+_ONSET_MATCH_TOLERANCE = timedelta(hours=1)
+
+
+def _unit_for(spec: DriftInputSpec) -> str:
+    if spec.kind == InputKind.PHYSICS:
+        return "g/m³"
+    if spec.target_channel == "humidity":
+        return "%RH"
+    return "°C"
+
+
+def _fin(val: Any) -> Optional[float]:
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _replayed_onsets(full: Any) -> List[tuple]:
+    """(ts, direction) of each replayed alarm run start, per direction.
+
+    A run ends after ``DRIFT_WATCH_QUIET_HOURS`` without an alarm of that
+    direction, the same gap the detector uses to close an episode.
+    """
+    out: List[tuple] = []
+    last: dict = {}
+    gap = timedelta(hours=DRIFT_WATCH_QUIET_HOURS)
+    for ts, d in zip(full["ts"], full["alarm_dir"]):
+        if d not in ("+", "-"):
+            continue
+        t = ts.to_pydatetime()
+        if d not in last or t - last[d] > gap:
+            out.append((t, d))
+        last[d] = t
+    return out
+
+
+@router.get(
+    "/inputs/{tenant_id}/{greenhouse_id}/{input_id}/series",
+    response_model=DriftWatchSeriesResponse,
+)
+async def get_drift_watch_series(
+    tenant_id: str,
+    greenhouse_id: str,
+    input_id: str,
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    auth_tenant: str | None = Depends(require_api_key),
+) -> DriftWatchSeriesResponse:
+    """Replayed drift statistics for one input, for the drift chart.
+
+    Read-only. Replays the immutable calibration (``calibration_json``) cold
+    over hourly means built exactly as drift watch builds them (synthetic
+    rows excluded). Episode bands come from stored episodes, not from the
+    replay; ``replay_mismatch`` counts disagreements between the two.
+    Default window: the 13 weeks up to the input's last processed timestamp.
+    """
+    enforce_tenant_access(auth_tenant, tenant_id)
+    row = (
+        await db.execute(
+            select(DriftWatchInput).where(
+                DriftWatchInput.tenant_id == tenant_id,
+                DriftWatchInput.greenhouse_id == greenhouse_id,
+                DriftWatchInput.input_id == input_id,
+            )
+        )
+    ).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Drift-watch input not found")
+
+    sd = json.loads(row.spec_json)
+    spec = DriftInputSpec(
+        input_id=sd["input_id"],
+        kind=InputKind(sd["kind"]),
+        target_channel=sd["target_channel"],
+        channels=list(sd["channels"]),
+        min_shift=float(sd["min_shift"]),
+    )
+    cal: Optional[CalibrationResult] = None
+    if row.calibration_json:
+        cal = CalibrationResult.from_dict(json.loads(row.calibration_json))
+    last_ts: Optional[datetime] = None
+    if row.state_json:
+        lp = json.loads(row.state_json).get("last_processed_ts")
+        if lp:
+            last_ts = _aware(datetime.fromisoformat(lp)).astimezone(timezone.utc)
+
+    win_end = _aware(end).astimezone(timezone.utc) if end else (last_ts or _aware(row.updated_at))
+    win_start = (
+        _aware(start).astimezone(timezone.utc)
+        if start
+        else win_end - timedelta(weeks=_SERIES_DEFAULT_WEEKS)
+    )
+    if win_end <= win_start:
+        raise HTTPException(status_code=422, detail="end must be after start")
+    if win_end - win_start > timedelta(weeks=_SERIES_MAX_WEEKS):
+        raise HTTPException(
+            status_code=422,
+            detail=f"window exceeds {_SERIES_MAX_WEEKS} weeks",
+        )
+
+    cal_end: Optional[datetime] = None
+    if cal is not None and cal.calibration_window_end:
+        cal_end = _aware(datetime.fromisoformat(cal.calibration_window_end))
+
+    points: List[DriftSeriesPoint] = []
+    mismatch = 0
+    onsets: List[tuple] = []
+    reason: Optional[str] = None
+    if cal is None:
+        reason = "input has no calibration yet"
+    else:
+        frame = await load_hourly_frame(
+            db, tenant_id, greenhouse_id,
+            win_start - timedelta(weeks=DRIFT_WATCH_BASELINE_WEEKS + 2),
+            win_end + timedelta(hours=1),
+            _spec_columns(spec),
+        )
+        if frame.empty:
+            reason = "no raw readings in the window"
+        else:
+            full = replay_series(frame, spec, cal)
+            win = full[(full["ts"] >= win_start) & (full["ts"] <= win_end)]
+            for r in win.itertuples(index=False):
+                points.append(
+                    DriftSeriesPoint(
+                        ts=r.ts.to_pydatetime(),
+                        target=_fin(r.target),
+                        reference=_fin(r.reference),
+                        residual=_fin(r.residual),
+                        dev=_fin(r.dev),
+                        s_pos=_fin(r.s_pos),
+                        s_neg=_fin(r.s_neg),
+                        alarm_dir=r.alarm_dir if r.alarm_dir in ("+", "-") else None,
+                    )
+                )
+            if not points:
+                reason = "no scorable hours in the window"
+            onsets = [
+                o for o in _replayed_onsets(full) if win_start <= o[0] <= win_end
+            ]
+
+    ep_rows = (
+        await db.execute(
+            select(DriftWatchEpisode).where(
+                DriftWatchEpisode.tenant_id == tenant_id,
+                DriftWatchEpisode.greenhouse_id == greenhouse_id,
+                DriftWatchEpisode.input_id == input_id,
+                DriftWatchEpisode.first_detected_ts >= win_start,
+                DriftWatchEpisode.first_detected_ts <= win_end,
+            ).order_by(DriftWatchEpisode.first_detected_ts)
+        )
+    ).scalars().all()
+    labels = {
+        (f.direction, _aware(f.first_detected_ts)): f.label
+        for f in (
+            await db.execute(
+                select(DriftWatchFeedback).where(
+                    DriftWatchFeedback.tenant_id == tenant_id,
+                    DriftWatchFeedback.greenhouse_id == greenhouse_id,
+                    DriftWatchFeedback.input_id == input_id,
+                )
+            )
+        ).scalars().all()
+    }
+    episodes = [
+        DriftSeriesEpisode(
+            first_detected_ts=_aware(e.first_detected_ts),
+            onset_ts=_aware(e.onset_estimate_ts) if e.onset_estimate_ts else None,
+            last_confirmed_ts=_aware(e.last_confirmed_ts),
+            direction=e.direction,
+            offset_robust=e.offset_robust,
+            label=labels.get((e.direction, _aware(e.first_detected_ts))),
+            suppressed_by=e.suppressed_by,
+        )
+        for e in ep_rows
+    ]
+    if cal is not None and points:
+        # In-sample hours (<= calibration_window_end) were never scored live
+        # when the state was first built, so they are not compared.
+        stored = [
+            (ep.first_detected_ts, ep.direction)
+            for ep in episodes
+            if cal_end is None or ep.first_detected_ts > cal_end
+        ]
+        onsets = [o for o in onsets if cal_end is None or o[0] > cal_end]
+        tol = _ONSET_MATCH_TOLERANCE
+        mismatch = sum(
+            1 for ts, d in stored
+            if not any(d == od and abs(ts - ot) <= tol for ot, od in onsets)
+        ) + sum(
+            1 for ot, od in onsets
+            if not any(d == od and abs(ts - ot) <= tol for ts, d in stored)
+        )
+
+    return DriftWatchSeriesResponse(
+        input_id=row.input_id,
+        kind=spec.kind.value,
+        target_channel=spec.target_channel,
+        unit=_unit_for(spec),
+        status=row.status,
+        alert_state=row.alert_state,
+        calibration_window_end=cal_end,
+        min_shift=spec.min_shift,
+        alert_floor=DRIFT_WATCH_ALERT_MIN_OFFSET_MULT * spec.min_shift,
+        h=cal.h if cal else None,
+        sigma=cal.scale_sigma if cal else None,
+        window_start=win_start,
+        window_end=win_end,
+        points=points,
+        episodes=episodes,
+        replay_mismatch=mismatch,
+        reason=reason,
     )
